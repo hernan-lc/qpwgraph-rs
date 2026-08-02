@@ -264,6 +264,13 @@ impl GraphCanvas {
         } else {
             Color32::from_rgb(38, 45, 56)
         };
+        // A small, crisp shadow separates cards from the grid without the
+        // heavy glow that would compete with connection lines.
+        painter.rect_filled(
+            node_rect.translate(vec2(0.0, 3.0 * self.zoom)),
+            8.0,
+            Color32::from_black_alpha(70),
+        );
         painter.rect(
             node_rect,
             8.0,
@@ -284,6 +291,10 @@ impl GraphCanvas {
             ),
         );
         painter.rect_filled(header, 8.0, Color32::from_rgb(48, 58, 72));
+        painter.line_segment(
+            [header.left_bottom(), header.right_bottom()],
+            Stroke::new(1.0_f32, Color32::from_rgb(61, 73, 89)),
+        );
         painter.rect_filled(
             Rect::from_min_max(
                 header.min,
@@ -302,7 +313,7 @@ impl GraphCanvas {
                 ),
                 22,
             ),
-            FontId::proportional(12.5 * self.zoom * text_scale),
+            FontId::proportional(13.5 * self.zoom * text_scale),
             Color32::WHITE,
         );
         painter.text(
@@ -325,6 +336,19 @@ impl GraphCanvas {
         );
 
         if visible_audio_controls {
+            painter.line_segment(
+                [
+                    pos2(
+                        node_rect.left() + 10.0 * self.zoom,
+                        header.bottom() + AUDIO_CONTROLS_HEIGHT * self.zoom,
+                    ),
+                    pos2(
+                        node_rect.right() - 10.0 * self.zoom,
+                        header.bottom() + AUDIO_CONTROLS_HEIGHT * self.zoom,
+                    ),
+                ],
+                Stroke::new(1.0_f32, Color32::from_rgb(52, 63, 78)),
+            );
             let monitor_port = ports
                 .iter()
                 .copied()

@@ -1,6 +1,8 @@
 use super::QpwgraphApp;
+use eframe::egui;
 use pw_graph_backend::MeterPolicy;
 use pw_graph_ui::MeterReading;
+use std::collections::BTreeSet;
 
 impl QpwgraphApp {
     /// Push a metering-policy change from the panel down to the driver.
@@ -19,13 +21,19 @@ impl QpwgraphApp {
         }
     }
 
-    /// Tell the driver which nodes the user is actually looking at. Under the
-    /// on-demand policy this is the only thing that opens a metering stream.
-    pub(super) fn request_visible_meters(&mut self) {
+    /// Keep meters live for every audio node represented in a visible window.
+    /// A minimized/tray-hidden window submits an empty request, allowing the
+    /// backend's short linger period to release the helper streams.
+    pub(super) fn request_visible_meters(&mut self, ctx: &egui::Context) {
         if self.meter_policy != MeterPolicy::OnDemand {
             return;
         }
-        let requested = self.canvas.requested_meter_nodes(self.driver.graph());
+        let window_visible = ctx.input(|input| input.viewport().minimized != Some(true));
+        let requested = if window_visible {
+            self.canvas.requested_meter_nodes(self.driver.graph())
+        } else {
+            BTreeSet::new()
+        };
         let _ = self.driver.request_meters(&requested);
     }
 

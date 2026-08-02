@@ -1,10 +1,129 @@
 use crate::{CanvasAction, GraphCanvas, NodeAppearance, PortId};
-use egui::{pos2, vec2, Color32, ProgressBar, Rect, RichText, Ui};
+use egui::{
+    pos2, vec2, Color32, Key, ProgressBar, Rect, Response, RichText, Sense, Stroke, Ui, WidgetInfo,
+};
 use pw_graph_core::Node;
 use pw_graph_i18n::I18n;
 
 use super::super::icons::{self, NodeIcon};
-use super::helpers::level_db;
+use super::helpers::{format_level_db, meter_fraction};
+
+const MAX_VOLUME: f32 = 1.5;
+const UNITY_TRACK_POSITION: f32 = 0.9;
+
+/// Put 0–100% across most of the track and reserve the final 10% for boost.
+/// Unity therefore sits near the right edge like a conventional audio fader,
+/// while the existing 150% range remains available.
+fn volume_track_position(volume: f32) -> f32 {
+    let volume = volume.clamp(0.0, MAX_VOLUME);
+    if volume <= 1.0 {
+        volume * UNITY_TRACK_POSITION
+    } else {
+        UNITY_TRACK_POSITION + (volume - 1.0) / (MAX_VOLUME - 1.0) * (1.0 - UNITY_TRACK_POSITION)
+    }
+}
+
+fn volume_from_track_position(position: f32) -> f32 {
+    let position = position.clamp(0.0, 1.0);
+    if position <= UNITY_TRACK_POSITION {
+        position / UNITY_TRACK_POSITION
+    } else {
+        1.0 + (position - UNITY_TRACK_POSITION) / (1.0 - UNITY_TRACK_POSITION) * (MAX_VOLUME - 1.0)
+    }
+}
+
+fn volume_slider(ui: &mut Ui, volume: &mut f32, size: egui::Vec2, label: &str) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let scale = (size.y / 26.0).max(0.1);
+    let thumb_radius = 6.0 * scale;
+    let track = Rect::from_min_max(
+        pos2(rect.left() + thumb_radius, rect.top()),
+        pos2(rect.right() - thumb_radius, rect.bottom()),
+    );
+
+    if let Some(pointer) = (response.clicked() || response.dragged())
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+    {
+        let position = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        let next = volume_from_track_position(position);
+        if (*volume - next).abs() > f32::EPSILON {
+            *volume = next;
+            response.mark_changed();
+        }
+        response.request_focus();
+    }
+
+    if response.has_focus() {
+        let step = ui.input(|input| {
+            if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::ArrowDown) {
+                -0.01
+            } else if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::ArrowUp) {
+                0.01
+            } else {
+                0.0
+            }
+        });
+        if step != 0.0 {
+            *volume = (*volume + step).clamp(0.0, MAX_VOLUME);
+            response.mark_changed();
+        }
+    }
+
+    let position = volume_track_position(*volume);
+    let track_y = rect.top() + 7.0 * scale;
+    let thumb_x = egui::lerp(track.x_range(), position);
+    let painter = ui.painter();
+    painter.line_segment(
+        [pos2(track.left(), track_y), pos2(track.right(), track_y)],
+        Stroke::new(3.0 * scale, Color32::from_rgb(56, 64, 75)),
+    );
+    painter.line_segment(
+        [pos2(track.left(), track_y), pos2(thumb_x, track_y)],
+        Stroke::new(3.0 * scale, Color32::from_rgb(42, 169, 244)),
+    );
+
+    // The fixed colored scale mirrors the reference: cool levels dominate,
+    // with a short amber/red boost region near the right edge.
+    let tick_top = rect.top() + 18.0 * scale;
+    let tick_bottom = rect.top() + 22.0 * scale;
+    for index in 0..=30 {
+        let tick_position = index as f32 / 30.0;
+        let x = egui::lerp(track.x_range(), tick_position);
+        let color = if tick_position < 0.72 {
+            Color32::from_rgb(57, 166, 224)
+        } else if tick_position < 0.9 {
+            Color32::from_rgb(220, 164, 76)
+        } else {
+            Color32::from_rgb(221, 75, 72)
+        };
+        painter.line_segment(
+            [pos2(x, tick_top), pos2(x, tick_bottom)],
+            Stroke::new(1.35 * scale, color),
+        );
+    }
+
+    painter.circle_filled(
+        pos2(thumb_x, track_y),
+        thumb_radius,
+        Color32::from_rgb(244, 247, 250),
+    );
+    painter.circle_stroke(
+        pos2(thumb_x, track_y),
+        thumb_radius,
+        Stroke::new(1.0_f32, Color32::from_rgb(21, 27, 34)),
+    );
+    if response.hovered() || response.has_focus() {
+        painter.circle_stroke(
+            pos2(thumb_x, track_y),
+            thumb_radius + 2.0 * scale,
+            Stroke::new(1.0_f32, Color32::from_white_alpha(80)),
+        );
+    }
+
+    response.widget_info(|| WidgetInfo::slider(ui.is_enabled(), f64::from(*volume), label));
+    response
+}
 
 impl GraphCanvas {
     #[allow(clippy::too_many_arguments)]
@@ -98,9 +217,8 @@ impl GraphCanvas {
                             && ui.input(|input| input.key_pressed(egui::Key::Enter));
                         if ui.button(i18n.text("canvas.apply_name")).clicked() || submit_name {
                             let name = name_draft.trim();
-                            working_appearance.custom_name = if name.is_empty() {
-                                None
-                            } else if name == node.name {
+                            working_appearance.custom_name = if name.is_empty() || name == node.name
+                            {
                                 None
                             } else {
                                 Some(name.to_owned())
@@ -161,23 +279,19 @@ impl GraphCanvas {
     ) {
         let control_rect = Rect::from_min_size(
             pos2(
-                node_rect.left() + 8.0 * self.zoom,
-                header.bottom() + 5.0 * self.zoom,
+                node_rect.left() + 10.0 * self.zoom,
+                header.bottom() + 6.0 * self.zoom,
             ),
             vec2(
-                node_rect.width() - 16.0 * self.zoom,
-                (super::AUDIO_CONTROLS_HEIGHT - 8.0) * self.zoom,
+                node_rect.width() - 20.0 * self.zoom,
+                (super::AUDIO_CONTROLS_HEIGHT - 12.0) * self.zoom,
             ),
         );
         let previous = self.node_audio_state(node.id);
         let mut state = previous;
-        let control_scale = self.zoom.max(0.75);
-        let pointer_over_controls = ui
-            .input(|input| input.pointer.hover_pos())
-            .is_some_and(|pointer| control_rect.contains(pointer));
-        if pointer_over_controls {
-            self.hovered_meter_node = Some(node.id);
-        }
+        // Controls must scale with their card. A separate minimum scale makes
+        // them overlap the port rows when the canvas is zoomed out.
+        let control_scale = self.zoom;
         let meter = monitor_port
             .and_then(|port| self.port_meters.get(&port).copied())
             .or_else(|| self.meters.get(&node.id).copied());
@@ -190,57 +304,66 @@ impl GraphCanvas {
             |ui| {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0 * control_scale;
-                    let mute_button_size = vec2(28.0, 28.0) * control_scale;
-                    let value_width = 36.0 * control_scale;
-                    let slider_width = (ui.available_width()
-                        - mute_button_size.x
-                        - value_width
-                        - 10.0 * control_scale)
-                        .max(28.0 * control_scale);
-                    ui.add_sized(
-                        vec2(slider_width, 20.0 * control_scale),
-                        egui::Slider::new(&mut state.volume, 0.0..=1.5).show_value(false),
-                    );
-                    ui.add_sized(
-                        vec2(value_width, 20.0 * control_scale),
-                        egui::Label::new(
-                            RichText::new(format!("{:.0}%", state.volume * 100.0))
-                                .size(10.0 * control_scale)
-                                .color(accent),
-                        ),
-                    );
-                    let icon = if state.muted {
-                        NodeIcon::VolumeMuted
-                    } else {
-                        NodeIcon::Volume
-                    };
-                    let tooltip = i18n.text(if state.muted {
-                        "canvas.unmute_node"
-                    } else {
-                        "canvas.mute_node"
+                    ui.spacing_mut().item_spacing.y = 3.0 * control_scale;
+                    ui.horizontal(|ui| {
+                        let mute_button_size = vec2(28.0, 26.0) * control_scale;
+                        let slider_width =
+                            (ui.available_width() - mute_button_size.x - 5.0 * control_scale)
+                                .max(28.0 * control_scale);
+                        let volume_label = i18n.text("canvas.volume");
+                        let volume_response = volume_slider(
+                            ui,
+                            &mut state.volume,
+                            vec2(slider_width, 26.0 * control_scale),
+                            &volume_label,
+                        );
+                        volume_response
+                            .on_hover_text(format!("{volume_label}: {:.0}%", state.volume * 100.0));
+                        let icon = if state.muted {
+                            NodeIcon::VolumeMuted
+                        } else {
+                            NodeIcon::Volume
+                        };
+                        let tooltip = i18n.text(if state.muted {
+                            "canvas.unmute_node"
+                        } else {
+                            "canvas.mute_node"
+                        });
+                        let mute_response = ui
+                            .add_sized(
+                                mute_button_size,
+                                egui::Button::image(icons::image(
+                                    icon,
+                                    vec2(15.0, 15.0) * control_scale,
+                                    if state.muted {
+                                        accent
+                                    } else {
+                                        Color32::from_rgb(224, 231, 239)
+                                    },
+                                ))
+                                .fill(Color32::from_rgb(31, 37, 46))
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    if state.muted {
+                                        accent
+                                    } else {
+                                        Color32::from_rgb(69, 81, 98)
+                                    },
+                                ))
+                                .rounding(6.0 * control_scale),
+                            )
+                            .on_hover_text(tooltip);
+                        if mute_response.clicked() {
+                            state.muted = !state.muted;
+                        }
                     });
-                    let mute_response = ui
-                        .add_sized(
-                            mute_button_size,
-                            egui::Button::image(icons::image(
-                                icon,
-                                vec2(16.0, 16.0) * control_scale,
-                                ui.visuals().text_color(),
-                            ))
-                            .frame(false),
-                        )
-                        .on_hover_text(tooltip);
-                    if mute_response.clicked() {
-                        state.muted = !state.muted;
-                    }
 
-                    ui.add_space(2.0 * control_scale);
                     ui.horizontal(|ui| {
                         let (level, level_text, fill) = match meter {
                             Some(reading) if reading.available => {
                                 let stale = reading.age_ms > 750;
-                                let value = reading.peak.clamp(0.0, 1.0);
-                                let text = format!("{:.0} dB", level_db(reading.rms));
+                                let value = meter_fraction(reading.peak);
+                                let text = format_level_db(reading.peak);
                                 let color = if stale {
                                     Color32::from_rgb(204, 163, 90)
                                 } else {
@@ -256,35 +379,19 @@ impl GraphCanvas {
                         } else {
                             Color32::from_rgb(158, 172, 189)
                         };
-                        ui.label(
-                            RichText::new(i18n.text("canvas.audio_monitor"))
-                                .size(9.0 * control_scale)
-                                .color(label_color),
-                        );
                         let pin_size = vec2(22.0, 20.0) * control_scale;
-                        let text_width = 38.0 * control_scale;
-                        let meter_width = (ui.available_width() - pin_size.x - text_width)
-                            .max(34.0 * control_scale);
-                        ui.add_sized(
-                            vec2(meter_width, 12.0 * control_scale),
-                            ProgressBar::new(level).fill(fill),
-                        );
-                        ui.add_sized(
-                            vec2(text_width, 16.0 * control_scale),
-                            egui::Label::new(
-                                RichText::new(level_text)
-                                    .size(9.0 * control_scale)
-                                    .color(label_color),
-                            ),
-                        );
+                        let text_width = 44.0 * control_scale;
+                        let meter_width =
+                            (ui.available_width() - pin_size.x - text_width - 10.0 * control_scale)
+                                .max(24.0 * control_scale);
                         let monitor_tooltip = i18n.text(if monitor_pinned {
                             "canvas.audio_meter_unpin"
                         } else {
                             "canvas.audio_meter_pin"
                         });
                         let monitor_response = ui
-                            .add_sized(
-                                pin_size,
+                            .add_enabled(
+                                monitor_port.is_some(),
                                 egui::Button::image(icons::image(
                                     NodeIcon::Monitor,
                                     vec2(13.0, 13.0) * control_scale,
@@ -294,7 +401,6 @@ impl GraphCanvas {
                                         Color32::from_rgb(183, 196, 212)
                                     },
                                 ))
-                                .frame(false)
                                 .fill(if monitor_pinned {
                                     Color32::from_rgba_unmultiplied(
                                         accent.r(),
@@ -303,8 +409,11 @@ impl GraphCanvas {
                                         38,
                                     )
                                 } else {
-                                    Color32::TRANSPARENT
-                                }),
+                                    Color32::from_rgb(31, 37, 46)
+                                })
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(69, 81, 98)))
+                                .rounding(5.0 * control_scale)
+                                .min_size(pin_size),
                             )
                             .on_hover_text(monitor_tooltip);
                         if monitor_response.clicked() {
@@ -312,6 +421,19 @@ impl GraphCanvas {
                                 self.pinned_meter = if monitor_pinned { None } else { Some(port) };
                             }
                         }
+                        ui.add_sized(
+                            vec2(meter_width, 12.0 * control_scale),
+                            ProgressBar::new(level).fill(fill),
+                        )
+                        .on_hover_text(i18n.text("canvas.audio_monitor"));
+                        ui.add_sized(
+                            vec2(text_width, 16.0 * control_scale),
+                            egui::Label::new(
+                                RichText::new(level_text)
+                                    .size(9.0 * control_scale)
+                                    .color(label_color),
+                            ),
+                        );
                     });
                 });
             },
@@ -328,6 +450,24 @@ impl GraphCanvas {
                 node: node.id,
                 volume: state.volume,
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{volume_from_track_position, volume_track_position, UNITY_TRACK_POSITION};
+
+    #[test]
+    fn unity_volume_sits_near_the_end_of_the_track() {
+        assert!((volume_track_position(1.0) - UNITY_TRACK_POSITION).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn custom_volume_track_mapping_round_trips() {
+        for volume in [0.0, 0.25, 0.5, 1.0, 1.25, 1.5] {
+            let round_trip = volume_from_track_position(volume_track_position(volume));
+            assert!((round_trip - volume).abs() < 0.0001);
         }
     }
 }

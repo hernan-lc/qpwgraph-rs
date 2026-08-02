@@ -35,7 +35,6 @@ impl GraphCanvas {
         keyboard_shortcuts_enabled: bool,
     ) -> Vec<CanvasAction> {
         self.update_peak_holds();
-        self.hovered_meter_node = None;
         let visible_node_ids = self.visible_node_ids(graph);
         self.prune_hidden_state(graph, &visible_node_ids);
         let rect = ui.available_rect_before_wrap();
@@ -491,16 +490,27 @@ impl GraphCanvas {
         self.peak_hold.get(&node_id).copied().unwrap_or(fallback)
     }
 
-    /// Nodes the user is currently looking at a meter for: the pinned monitor
-    /// and whatever audio port the pointer is revealing. On-demand metering
-    /// attaches a helper stream only for these, so an idle window measures
-    /// nothing and leaves the daemon's audio configuration alone.
+    /// Audio nodes represented by the current filtered canvas, plus a pinned
+    /// monitor that may sit outside the active filter. The application only
+    /// submits this set while its native window is visible.
     pub fn requested_meter_nodes(&self, graph: &Graph) -> BTreeSet<NodeId> {
         let pinned = self
             .pinned_meter
             .and_then(|port_id| graph.port(port_id))
             .map(|port| port.node_id);
-        pinned.into_iter().chain(self.hovered_meter_node).collect()
+        self.visible_node_ids(graph)
+            .into_iter()
+            .filter(|node_id| {
+                graph.node(*node_id).is_some_and(|node| {
+                    node.ports.iter().any(|port_id| {
+                        graph
+                            .port(*port_id)
+                            .is_some_and(|port| port.port_type == pw_graph_core::PortType::Audio)
+                    })
+                })
+            })
+            .chain(pinned)
+            .collect()
     }
 
     fn update_peak_holds(&mut self) {

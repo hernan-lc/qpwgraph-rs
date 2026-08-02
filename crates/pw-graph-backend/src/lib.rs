@@ -13,14 +13,14 @@ use thiserror::Error;
 /// Measuring a PipeWire node means connecting a real capture stream to it. The
 /// session manager links that stream like any other client, which resumes
 /// suspended devices and can make the daemon renegotiate the graph rate. Doing
-/// that for every audio node the moment the window opens visibly rewrites the
-/// user's audio configuration, so metering defaults to [`MeterPolicy::OnDemand`]
-/// and a plain launch leaves the running graph untouched.
+/// that for every audio node continuously can visibly rewrite the user's audio
+/// configuration, so metering defaults to [`MeterPolicy::OnDemand`], which is
+/// limited to nodes represented by a currently visible application window.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MeterPolicy {
     /// Never open helper streams. Meters report unavailable.
     Disabled,
-    /// Only measure nodes the UI is actively showing a meter for.
+    /// Measure filtered audio nodes while the application window is visible.
     #[default]
     OnDemand,
     /// Measure every audio node continuously.
@@ -218,7 +218,8 @@ pub trait GraphDriver {
     /// Under [`MeterPolicy::OnDemand`] this is the only thing that makes a
     /// backend open a helper stream. Callers are expected to repeat the request
     /// while the meter stays visible; backends may keep a stream alive briefly
-    /// after the last request so pointer movement does not thrash streams.
+    /// after the last request so minimizing/restoring a window does not thrash
+    /// streams.
     fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
         let _ = nodes;
         Ok(())

@@ -38,9 +38,9 @@ const NODE_INTERFACE_VERSION: u32 = 3;
 /// they are filtered back out of the graph the UI renders.
 const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
 
-/// How long a metering stream outlives the last request for it. Hovering a port
-/// asks for a meter every frame; without a grace period, moving the pointer
-/// between two ports would tear down and rebuild streams continuously.
+/// How long a metering stream outlives the last request for it. Without a
+/// grace period, minimizing and immediately restoring the window would tear
+/// down and rebuild every visible stream.
 const METER_LINGER: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default)]
@@ -524,8 +524,8 @@ impl PipewireDriver {
     /// Nodes that should currently own a metering stream.
     ///
     /// Under [`MeterPolicy::OnDemand`] this is driven purely by what the UI
-    /// asked for, so an idle window holds no streams and never nudges the
-    /// daemon into resuming or renegotiating a device.
+    /// asked for, so a minimized window releases streams after the linger
+    /// period and stops nudging the daemon's audio devices.
     fn wanted_meter_nodes(&self) -> BTreeSet<NodeId> {
         let measurable = self.measurable_nodes();
         match self.meter_policy {
@@ -798,7 +798,7 @@ impl PipewireDriver {
         let pod = Pod::from_bytes(&pod_bytes).ok_or_else(|| {
             BackendError::Native("could not serialize PipeWire node properties".into())
         })?;
-        proxy.set_param(ParamType::Props, 0, &pod);
+        proxy.set_param(ParamType::Props, 0, pod);
         drop(proxy);
         self.roundtrip_locked()
     }
@@ -817,11 +817,12 @@ impl PipewireDriver {
 
     fn set_node_volume_locked(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
         let volume = volume.clamp(0.0, 1.5);
+        let spa_volume = ui_volume_to_spa_volume(volume);
         self.set_node_props_locked(
             node,
             vec![pw::spa::pod::Property::new(
                 pw::spa::sys::SPA_PROP_volume,
-                pw::spa::pod::Value::Float(volume),
+                pw::spa::pod::Value::Float(spa_volume),
             )],
         )?;
         self.audio_controls.entry(node).or_default().volume = volume;
@@ -1054,6 +1055,13 @@ fn audio_format_pod() -> BackendResult<Vec<u8>> {
         .map_err(|error| native_error("PipeWire audio format serialization", error))
 }
 
+/// PipeWire's conventional UI volume curve is cubic: a displayed 50% is sent
+/// as 0.5³, which corresponds to roughly −18 dB. Sending the UI percentage
+/// directly made the control much louder than its displayed value implied.
+fn ui_volume_to_spa_volume(volume: f32) -> f32 {
+    volume.clamp(0.0, 1.5).powi(3)
+}
+
 fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut MeterCallbackState) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -1113,7 +1121,7 @@ fn elapsed_ms_since(epoch: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::classify_port_type;
+    use super::{classify_port_type, ui_volume_to_spa_volume};
     use pw_graph_core::PortType;
 
     #[test]
@@ -1140,5 +1148,12 @@ mod tests {
             classify_port_type("", Some("Stream/Output")),
             PortType::Unknown
         );
+    }
+
+    #[test]
+    fn converts_ui_volume_to_pipewire_cubic_scale() {
+        assert!((ui_volume_to_spa_volume(1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((ui_volume_to_spa_volume(0.5) - 0.125).abs() < f32::EPSILON);
+        assert!((ui_volume_to_spa_volume(1.5) - 3.375).abs() < f32::EPSILON);
     }
 }

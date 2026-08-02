@@ -9,10 +9,11 @@ use super::super::names::compact_label;
 use super::super::ports::{
     display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role,
 };
-use super::helpers::level_db;
+use super::helpers::{level_db, meter_fraction};
 use super::{AUDIO_CONTROLS_HEIGHT, PORT_ROW_HEIGHT};
 
 impl GraphCanvas {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_node_ports(
         &mut self,
         ui: &mut Ui,
@@ -97,7 +98,7 @@ impl GraphCanvas {
                             };
                             ui.label(RichText::new(state).weak());
                             ui.add(
-                                ProgressBar::new(reading.rms.clamp(0.0, 1.0))
+                                ProgressBar::new(meter_fraction(reading.rms))
                                     .desired_width(190.0)
                                     .text(format!(
                                         "{}  {:.1} dB",
@@ -106,13 +107,15 @@ impl GraphCanvas {
                                     )),
                             );
                             ui.add(
-                                ProgressBar::new(reading.peak.clamp(0.0, 1.0))
-                                    .desired_width(190.0)
-                                    .text(format!(
-                                        "{}  {:.1} dB",
-                                        i18n.text("canvas.audio_meter_peak_hold"),
-                                        level_db(self.meter_peak_hold(node.id, reading.peak))
-                                    )),
+                                ProgressBar::new(meter_fraction(
+                                    self.meter_peak_hold(node.id, reading.peak),
+                                ))
+                                .desired_width(190.0)
+                                .text(format!(
+                                    "{}  {:.1} dB",
+                                    i18n.text("canvas.audio_meter_peak_hold"),
+                                    level_db(self.meter_peak_hold(node.id, reading.peak))
+                                )),
                             );
                             ui.label(
                                 RichText::new(i18n.format(
@@ -155,9 +158,6 @@ impl GraphCanvas {
             }
             if pin_requested.get() {
                 self.pinned_meter = Some(representative_id);
-            }
-            if group.port_type == pw_graph_core::PortType::Audio && response.hovered() {
-                self.hovered_meter_node = Some(node.id);
             }
             let pending = self
                 .pending_outputs

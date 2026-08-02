@@ -183,9 +183,6 @@ pub struct GraphCanvas {
     pub meters: BTreeMap<NodeId, MeterReading>,
     pub port_meters: BTreeMap<PortId, MeterReading>,
     pub pinned_meter: Option<PortId>,
-    /// Node whose audio meter the pointer is revealing this frame. Recomputed
-    /// by every [`GraphCanvas::show`] call.
-    pub hovered_meter_node: Option<NodeId>,
     /// Set by the application when the backend may not measure levels at all,
     /// so the meter popover can say so instead of claiming no data exists.
     pub metering_disabled: bool,
@@ -227,7 +224,6 @@ impl Default for GraphCanvas {
             meters: BTreeMap::new(),
             port_meters: BTreeMap::new(),
             pinned_meter: None,
-            hovered_meter_node: None,
             metering_disabled: false,
             peak_hold: BTreeMap::new(),
             node_appearances: BTreeMap::new(),
@@ -373,32 +369,37 @@ mod tests {
     }
 
     #[test]
-    fn idle_canvas_requests_no_meters() {
+    fn visible_audio_nodes_request_meters_without_hover() {
         let canvas = GraphCanvas::default();
-        assert!(canvas.requested_meter_nodes(&metering_graph()).is_empty());
-    }
-
-    #[test]
-    fn pinned_and_hovered_ports_request_their_nodes() {
-        let graph = metering_graph();
-        let canvas = GraphCanvas {
-            pinned_meter: Some(PortId(10)),
-            hovered_meter_node: Some(NodeId(4)),
-            ..GraphCanvas::default()
-        };
         assert_eq!(
-            canvas.requested_meter_nodes(&graph),
-            BTreeSet::from([NodeId(1), NodeId(4)])
+            canvas.requested_meter_nodes(&metering_graph()),
+            BTreeSet::from([NodeId(1)])
         );
     }
 
     #[test]
-    fn a_pinned_port_that_left_the_graph_requests_nothing() {
+    fn pinned_ports_and_visible_audio_nodes_are_requested() {
+        let graph = metering_graph();
+        let canvas = GraphCanvas {
+            pinned_meter: Some(PortId(10)),
+            ..GraphCanvas::default()
+        };
+        assert_eq!(
+            canvas.requested_meter_nodes(&graph),
+            BTreeSet::from([NodeId(1)])
+        );
+    }
+
+    #[test]
+    fn a_stale_pin_does_not_add_an_invalid_meter_request() {
         let canvas = GraphCanvas {
             pinned_meter: Some(PortId(999)),
             ..GraphCanvas::default()
         };
-        assert!(canvas.requested_meter_nodes(&metering_graph()).is_empty());
+        assert_eq!(
+            canvas.requested_meter_nodes(&metering_graph()),
+            BTreeSet::from([NodeId(1)])
+        );
     }
 
     fn categorized_graph() -> Graph {

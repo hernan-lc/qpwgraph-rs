@@ -118,7 +118,7 @@ impl eframe::App for QpwgraphApp {
         });
 
         // Runs after the canvas so the request reflects what this frame drew.
-        self.request_visible_meters();
+        self.request_visible_meters(ctx);
         self.show_shortcuts_modal(ctx);
         self.show_history_modal(ctx);
         self.show_preferences_modal(ctx);

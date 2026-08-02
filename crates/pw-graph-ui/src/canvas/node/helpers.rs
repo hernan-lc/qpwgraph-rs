@@ -8,6 +8,21 @@ pub(super) fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
 }
 
+pub(super) fn format_level_db(value: f32) -> String {
+    if !value.is_finite() || value <= 0.000001 {
+        "−∞ dB".into()
+    } else {
+        format!("{:.0} dB", level_db(value))
+    }
+}
+
+/// Convert a linear amplitude to a readable −60..0 dBFS meter position.
+/// Drawing the normalized sample value directly makes nearly every useful
+/// audio level look empty (for example −30 dBFS is only 3.2% linearly).
+pub(super) fn meter_fraction(value: f32) -> f32 {
+    ((level_db(value) + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
 pub(super) fn dominant_port<'a>(ports: &[&'a Port]) -> Option<&'a Port> {
     let mut counts: std::collections::HashMap<PortType, usize> = std::collections::HashMap::new();
     for port in ports {
@@ -66,5 +81,24 @@ pub(super) fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
         NodeType::PipeWire => i18n.text("canvas.node_type_pipewire"),
         NodeType::AlsaMidi => i18n.text("canvas.node_type_alsa_midi"),
         NodeType::Unknown => i18n.text("canvas.node_type_unknown"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_level_db, level_db, meter_fraction};
+
+    #[test]
+    fn converts_linear_amplitude_to_dbfs() {
+        assert!((level_db(1.0) - 0.0).abs() < 0.001);
+        assert!((level_db(0.1) + 20.0).abs() < 0.001);
+        assert_eq!(format_level_db(0.0), "−∞ dB");
+    }
+
+    #[test]
+    fn maps_the_visible_meter_range_logarithmically() {
+        assert_eq!(meter_fraction(0.001), 0.0);
+        assert!((meter_fraction(0.01) - (1.0 / 3.0)).abs() < 0.001);
+        assert_eq!(meter_fraction(1.0), 1.0);
     }
 }
