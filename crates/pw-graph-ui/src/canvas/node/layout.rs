@@ -41,7 +41,7 @@ impl GraphCanvas {
                 0.0
             };
             (NODE_HEADER_HEIGHT + controls_height + 14.0 + port_count as f32 * PORT_ROW_HEIGHT)
-                .max(62.0)
+                .max(COLLAPSED_NODE_HEIGHT)
         };
         vec2(NODE_WIDTH, height)
     }

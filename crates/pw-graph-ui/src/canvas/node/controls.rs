@@ -1,9 +1,10 @@
-use crate::{CanvasAction, GraphCanvas, NodeAppearance};
-use egui::{pos2, vec2, Color32, Rect, RichText, Ui};
+use crate::{CanvasAction, GraphCanvas, NodeAppearance, PortId};
+use egui::{pos2, vec2, Color32, ProgressBar, Rect, RichText, Ui};
 use pw_graph_core::Node;
 use pw_graph_i18n::I18n;
 
 use super::super::icons::{self, NodeIcon};
+use super::helpers::level_db;
 
 impl GraphCanvas {
     #[allow(clippy::too_many_arguments)]
@@ -17,6 +18,7 @@ impl GraphCanvas {
         accent: Color32,
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
+        info: &str,
     ) {
         let mut name_draft = self
             .node_name_drafts
@@ -30,12 +32,37 @@ impl GraphCanvas {
             });
         let mut working_appearance = appearance.clone();
         let mut appearance_changed = false;
+        let info_rect = Rect::from_min_size(
+            pos2(
+                header.right() - 54.0 * self.zoom,
+                header.top() + 9.0 * self.zoom,
+            ),
+            vec2(20.0, 22.0) * self.zoom,
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(info_rect)
+                .id_salt(("node-info", node.id)),
+            |ui| {
+                ui.add_sized(
+                    info_rect.size(),
+                    egui::Button::image(icons::image(
+                        NodeIcon::Info,
+                        vec2(14.0, 14.0) * self.zoom,
+                        Color32::from_rgb(192, 204, 219),
+                    ))
+                    .frame(false),
+                )
+                .on_hover_text(info);
+            },
+        );
+
         let menu_rect = Rect::from_min_size(
             pos2(
-                header.right() - 27.0 * self.zoom,
-                header.top() + 5.0 * self.zoom,
+                header.right() - 28.0 * self.zoom,
+                header.top() + 9.0 * self.zoom,
             ),
-            vec2(22.0, 24.0) * self.zoom,
+            vec2(22.0, 22.0) * self.zoom,
         );
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -127,15 +154,11 @@ impl GraphCanvas {
         node: &Node,
         node_rect: Rect,
         header: Rect,
-        visible: bool,
+        monitor_port: Option<PortId>,
         accent: Color32,
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
     ) {
-        if !visible {
-            return;
-        }
-
         let control_rect = Rect::from_min_size(
             pos2(
                 node_rect.left() + 8.0 * self.zoom,
@@ -149,13 +172,23 @@ impl GraphCanvas {
         let previous = self.node_audio_state(node.id);
         let mut state = previous;
         let control_scale = self.zoom.max(0.75);
+        let pointer_over_controls = ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pointer| control_rect.contains(pointer));
+        if pointer_over_controls {
+            self.hovered_meter_node = Some(node.id);
+        }
+        let meter = monitor_port
+            .and_then(|port| self.port_meters.get(&port).copied())
+            .or_else(|| self.meters.get(&node.id).copied());
+        let monitor_pinned = monitor_port.is_some_and(|port| self.pinned_meter == Some(port));
 
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(control_rect)
                 .id_salt(("node-audio-controls", node.id)),
             |ui| {
-                ui.horizontal_centered(|ui| {
+                ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0 * control_scale;
                     let mute_button_size = vec2(28.0, 28.0) * control_scale;
                     let value_width = 36.0 * control_scale;
@@ -200,6 +233,86 @@ impl GraphCanvas {
                     if mute_response.clicked() {
                         state.muted = !state.muted;
                     }
+
+                    ui.add_space(2.0 * control_scale);
+                    ui.horizontal(|ui| {
+                        let (level, level_text, fill) = match meter {
+                            Some(reading) if reading.available => {
+                                let stale = reading.age_ms > 750;
+                                let value = reading.peak.clamp(0.0, 1.0);
+                                let text = format!("{:.0} dB", level_db(reading.rms));
+                                let color = if stale {
+                                    Color32::from_rgb(204, 163, 90)
+                                } else {
+                                    accent
+                                };
+                                (value, text, color)
+                            }
+                            Some(_) => (0.0, "-- dB".into(), Color32::from_gray(100)),
+                            None => (0.0, "-- dB".into(), Color32::from_gray(100)),
+                        };
+                        let label_color = if meter.is_some_and(|reading| reading.available) {
+                            accent
+                        } else {
+                            Color32::from_rgb(158, 172, 189)
+                        };
+                        ui.label(
+                            RichText::new(i18n.text("canvas.audio_monitor"))
+                                .size(9.0 * control_scale)
+                                .color(label_color),
+                        );
+                        let pin_size = vec2(22.0, 20.0) * control_scale;
+                        let text_width = 38.0 * control_scale;
+                        let meter_width = (ui.available_width() - pin_size.x - text_width)
+                            .max(34.0 * control_scale);
+                        ui.add_sized(
+                            vec2(meter_width, 12.0 * control_scale),
+                            ProgressBar::new(level).fill(fill),
+                        );
+                        ui.add_sized(
+                            vec2(text_width, 16.0 * control_scale),
+                            egui::Label::new(
+                                RichText::new(level_text)
+                                    .size(9.0 * control_scale)
+                                    .color(label_color),
+                            ),
+                        );
+                        let monitor_tooltip = i18n.text(if monitor_pinned {
+                            "canvas.audio_meter_unpin"
+                        } else {
+                            "canvas.audio_meter_pin"
+                        });
+                        let monitor_response = ui
+                            .add_sized(
+                                pin_size,
+                                egui::Button::image(icons::image(
+                                    NodeIcon::Monitor,
+                                    vec2(13.0, 13.0) * control_scale,
+                                    if monitor_pinned {
+                                        accent
+                                    } else {
+                                        Color32::from_rgb(183, 196, 212)
+                                    },
+                                ))
+                                .frame(false)
+                                .fill(if monitor_pinned {
+                                    Color32::from_rgba_unmultiplied(
+                                        accent.r(),
+                                        accent.g(),
+                                        accent.b(),
+                                        38,
+                                    )
+                                } else {
+                                    Color32::TRANSPARENT
+                                }),
+                            )
+                            .on_hover_text(monitor_tooltip);
+                        if monitor_response.clicked() {
+                            if let Some(port) = monitor_port {
+                                self.pinned_meter = if monitor_pinned { None } else { Some(port) };
+                            }
+                        }
+                    });
                 });
             },
         );

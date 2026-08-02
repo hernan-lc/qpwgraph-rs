@@ -61,7 +61,7 @@ pub(super) fn node_tooltip(node: &Node, ports: &[&Port], i18n: &I18n) -> String 
     )
 }
 
-fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
+pub(super) fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
     match node_type {
         NodeType::PipeWire => i18n.text("canvas.node_type_pipewire"),
         NodeType::AlsaMidi => i18n.text("canvas.node_type_alsa_midi"),

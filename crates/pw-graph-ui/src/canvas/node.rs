@@ -16,13 +16,13 @@ mod controls;
 mod helpers;
 mod layout;
 mod ports;
-use helpers::{dominant_port, node_color, node_tooltip};
+use helpers::{dominant_port, node_color, node_tooltip, node_type_label};
 
 const NODE_WIDTH: f32 = 244.0;
-const NODE_HEADER_HEIGHT: f32 = 34.0;
-const COLLAPSED_NODE_HEIGHT: f32 = 44.0;
+const NODE_HEADER_HEIGHT: f32 = 42.0;
+const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
-const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
+const AUDIO_CONTROLS_HEIGHT: f32 = 68.0;
 
 pub(super) struct NodeDrawContext<'a> {
     pub rect: Rect,
@@ -46,6 +46,7 @@ impl GraphCanvas {
         let anchors = &mut *context.anchors;
         let actions = &mut *context.actions;
         let ports = self.ordered_ports(graph, node);
+        let has_audio = ports.iter().any(|port| port.port_type == PortType::Audio);
         let node_rect = self.node_rect(rect, graph, node);
         let header = Rect::from_min_max(
             node_rect.min,
@@ -57,6 +58,16 @@ impl GraphCanvas {
         let tooltip = node_tooltip(node, &ports, i18n);
         let easy_connect = self.connect_mode == ConnectMode::Easy;
         let appearance = self.node_appearance(node.id);
+        let visible_audio_controls = has_audio && !appearance.collapsed && !self.thumbnail_mode;
+        let controls_height = if visible_audio_controls {
+            AUDIO_CONTROLS_HEIGHT * self.zoom
+        } else {
+            0.0
+        };
+        let header_drag_rect = Rect::from_min_max(
+            header.min,
+            pos2(header.right() - 60.0 * self.zoom, header.bottom()),
+        );
         let disconnect_node_label = i18n.text(if easy_connect {
             "canvas.disconnect_node_easy"
         } else {
@@ -70,11 +81,10 @@ impl GraphCanvas {
         // Keep the Easy-mode connect gesture out of the movable header. A
         // header drag is always a node move; the body below it is the
         // node-to-node connection target.
-        let body_rect = if easy_connect {
-            Rect::from_min_max(pos2(node_rect.left(), header.bottom()), node_rect.max)
-        } else {
-            node_rect
-        };
+        let body_rect = Rect::from_min_max(
+            pos2(node_rect.left(), header.bottom() + controls_height),
+            node_rect.max,
+        );
         let body_tooltip = if easy_connect {
             format!("{tooltip}\n\n{}", i18n.text("canvas.drag_body_connect"))
         } else {
@@ -101,7 +111,7 @@ impl GraphCanvas {
         });
         let header_response = ui
             .interact(
-                header,
+                header_drag_rect,
                 ui.id().with(("graph-node-header", node.id)),
                 Sense::click_and_drag(),
             )
@@ -241,7 +251,6 @@ impl GraphCanvas {
         let selected = self.selected_nodes.contains(&node.id);
         let focused = body_response.has_focus() || header_response.has_focus();
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
-        let has_audio = ports.iter().any(|port| port.port_type == PortType::Audio);
         let accent = appearance
             .color
             .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
@@ -283,36 +292,26 @@ impl GraphCanvas {
             8.0,
             accent,
         );
-        let inputs = ports
-            .iter()
-            .filter(|port| port.direction == Direction::Sink)
-            .count();
-        let outputs = ports
-            .iter()
-            .filter(|port| port.direction == Direction::Source)
-            .count();
         painter.text(
-            header.left_center() + vec2(12.0 * self.zoom, 0.0),
+            header.left_center() + vec2(12.0 * self.zoom, -7.0 * self.zoom),
             egui::Align2::LEFT_CENTER,
             compact_label(
                 &display_node_name(
                     appearance.custom_name.as_deref().unwrap_or(&node.name),
                     i18n,
                 ),
-                18,
+                22,
             ),
-            FontId::proportional(13.0 * self.zoom * text_scale),
+            FontId::proportional(12.5 * self.zoom * text_scale),
             Color32::WHITE,
         );
-        if !ports.is_empty() {
-            painter.text(
-                pos2(header.right() - 49.0 * self.zoom, header.center().y),
-                egui::Align2::RIGHT_CENTER,
-                format!("{inputs}/{outputs}"),
-                FontId::proportional(10.0 * self.zoom * text_scale),
-                Color32::from_rgb(178, 193, 210),
-            );
-        }
+        painter.text(
+            header.left_center() + vec2(12.0 * self.zoom, 9.0 * self.zoom),
+            egui::Align2::LEFT_CENTER,
+            node_type_label(node.node_type, i18n),
+            FontId::proportional(9.5 * self.zoom * text_scale),
+            Color32::from_rgb(170, 184, 201),
+        );
         self.draw_node_header_controls(
             ui,
             node,
@@ -322,18 +321,28 @@ impl GraphCanvas {
             accent,
             actions,
             i18n,
+            &tooltip,
         );
 
-        if has_audio && !appearance.collapsed && !self.thumbnail_mode {
-            let pointer_over_node = ui
-                .input(|input| input.pointer.hover_pos())
-                .is_some_and(|pointer| node_rect.contains(pointer));
+        if visible_audio_controls {
+            let monitor_port = ports
+                .iter()
+                .copied()
+                .filter(|port| port.port_type == PortType::Audio)
+                .max_by_key(|port| {
+                    (
+                        matches!(port_role(port), super::ports::PortRole::Monitor),
+                        port.direction.is_source(),
+                        port.id,
+                    )
+                })
+                .map(|port| port.id);
             self.draw_node_audio_controls(
                 ui,
                 node,
                 node_rect,
                 header,
-                selected || pointer_over_node,
+                monitor_port,
                 accent,
                 actions,
                 i18n,
