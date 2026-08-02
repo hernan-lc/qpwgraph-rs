@@ -43,6 +43,7 @@ pub(super) fn dominant_port<'a>(ports: &[&'a Port]) -> Option<&'a Port> {
 pub(super) fn node_color(node_type: NodeType) -> Color32 {
     match node_type {
         NodeType::PipeWire => Color32::from_rgb(91, 172, 224),
+        NodeType::Effect => Color32::from_rgb(224, 155, 73),
         NodeType::AlsaMidi => Color32::from_rgb(180, 128, 220),
         NodeType::Unknown => Color32::from_rgb(153, 163, 175),
     }
@@ -71,6 +72,7 @@ pub(super) fn node_tooltip(node: &Node, ports: &[&Port], i18n: &I18n) -> String 
 pub(super) fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
     match node_type {
         NodeType::PipeWire => i18n.text("canvas.node_type_pipewire"),
+        NodeType::Effect => i18n.text("canvas.node_type_effect"),
         NodeType::AlsaMidi => i18n.text("canvas.node_type_alsa_midi"),
         NodeType::Unknown => i18n.text("canvas.node_type_unknown"),
     }

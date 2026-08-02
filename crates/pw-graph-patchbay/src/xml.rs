@@ -137,7 +137,7 @@ fn attributes(
 
 fn node_type_text(node_type: NodeType) -> &'static str {
     match node_type {
-        NodeType::PipeWire | NodeType::Unknown => "pipewire",
+        NodeType::PipeWire | NodeType::Effect | NodeType::Unknown => "pipewire",
         NodeType::AlsaMidi => "alsa",
     }
 }

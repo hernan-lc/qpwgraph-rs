@@ -13,6 +13,7 @@ use crate::tray::tray_support;
 
 mod bootstrap;
 mod configuration;
+mod effects;
 mod graph_actions;
 mod layout;
 mod lifecycle;

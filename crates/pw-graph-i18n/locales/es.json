@@ -263,6 +263,7 @@
   "canvas.audio_meter_peak_hold": "Pico retenido",
   "canvas.audio_meter_age": "Actualizado hace {age} ms",
   "canvas.node_type_pipewire": "nodo de PipeWire",
+  "canvas.node_type_effect": "nodo de efecto de audio",
   "canvas.node_type_alsa_midi": "nodo MIDI ALSA",
   "canvas.node_type_unknown": "tipo de nodo desconocido",
   "canvas.unknown": "Desconocido",
@@ -292,5 +293,19 @@
   "debug.backend": "backend={backend} alsa_midi={enabled}",
   "tray.show": "Mostrar ventana",
   "tray.hide": "Minimizar ventana",
-  "tray.quit": "Salir"
+  "tray.quit": "Salir",
+  "effects.title": "Efectos",
+  "effects.insert": "Insertar puerta de ruido",
+  "effects.insert_help": "Inserta una puerta de ruido en el enlace de audio seleccionado.",
+  "effects.enabled": "Activado",
+  "effects.remove": "Eliminar efecto",
+  "effects.select_link": "Selecciona primero un enlace de audio",
+  "effects.link_unavailable": "El enlace seleccionado ya no está disponible",
+  "effects.audio_only": "Los efectos solo pueden insertarse en enlaces de audio",
+  "effects.inserted": "Puerta de ruido insertada",
+  "effects.insert_failed": "Falló la inserción del efecto: {error}",
+  "effects.update_failed": "Falló la actualización del efecto: {error}",
+  "effects.removed": "Efecto eliminado",
+  "effects.remove_failed": "Falló la eliminación del efecto: {error}",
+  "effects.restore_failed": "Falló la restauración del efecto: {error}"
 }

@@ -263,6 +263,7 @@
   "canvas.audio_meter_peak_hold": "Peak hold",
   "canvas.audio_meter_age": "Updated {age} ms ago",
   "canvas.node_type_pipewire": "PipeWire node",
+  "canvas.node_type_effect": "Audio effect node",
   "canvas.node_type_alsa_midi": "ALSA MIDI node",
   "canvas.node_type_unknown": "Unknown node type",
   "canvas.unknown": "Unknown",
@@ -292,5 +293,19 @@
   "debug.backend": "backend={backend} alsa_midi={enabled}",
   "tray.show": "Show window",
   "tray.hide": "Minimize window",
-  "tray.quit": "Quit"
+  "tray.quit": "Quit",
+  "effects.title": "Effects",
+  "effects.insert": "Insert noise gate",
+  "effects.insert_help": "Insert a noise gate into the selected audio link.",
+  "effects.enabled": "Enabled",
+  "effects.remove": "Remove effect",
+  "effects.select_link": "Select an audio link first",
+  "effects.link_unavailable": "The selected link is no longer available",
+  "effects.audio_only": "Effects can only be inserted on audio links",
+  "effects.inserted": "Noise gate inserted",
+  "effects.insert_failed": "Effect insertion failed: {error}",
+  "effects.update_failed": "Effect update failed: {error}",
+  "effects.removed": "Effect removed",
+  "effects.remove_failed": "Effect removal failed: {error}",
+  "effects.restore_failed": "Effect restore failed: {error}"
 }

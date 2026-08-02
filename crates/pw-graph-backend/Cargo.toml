@@ -11,5 +11,6 @@ pipewire = ["dep:pipewire"]
 
 [dependencies]
 pw-graph-core = { path = "../pw-graph-core" }
+pw-graph-effects = { path = "../pw-graph-effects" }
 thiserror.workspace = true
 pipewire = { workspace = true, optional = true }

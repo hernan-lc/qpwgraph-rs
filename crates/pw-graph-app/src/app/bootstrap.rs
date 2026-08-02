@@ -149,7 +149,7 @@ impl QpwgraphApp {
             i18n.text("tray.hide"),
             i18n.text("tray.quit"),
         );
-        Self {
+        let mut app = Self {
             driver,
             commands: pw_graph_command::CommandStack::new(),
             canvas,
@@ -179,6 +179,11 @@ impl QpwgraphApp {
             meter_policy,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
-        }
+        };
+        // Restore after the initial graph/patchbay snapshot is available. A
+        // missing module or endpoint is retained in config and reported by
+        // the effect layer instead of preventing application startup.
+        app.restore_effects();
+        app
     }
 }

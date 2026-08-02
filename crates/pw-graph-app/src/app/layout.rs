@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub(super) fn node_layout_key(node: &Node) -> String {
     let node_type = match node.node_type {
         NodeType::PipeWire => "PipeWire",
+        NodeType::Effect => "Effect",
         NodeType::AlsaMidi => "AlsaMidi",
         NodeType::Unknown => "Unknown",
     };

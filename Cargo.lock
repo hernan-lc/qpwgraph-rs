@@ -2597,6 +2597,7 @@ dependencies = [
  "pw-graph-command",
  "pw-graph-config",
  "pw-graph-core",
+ "pw-graph-effects",
  "pw-graph-i18n",
  "pw-graph-patchbay",
  "pw-graph-ui",
@@ -2609,6 +2610,7 @@ version = "0.1.0"
 dependencies = [
  "pipewire",
  "pw-graph-core",
+ "pw-graph-effects",
  "thiserror 1.0.69",
 ]
 
@@ -2625,6 +2627,8 @@ dependencies = [
 name = "pw-graph-config"
 version = "0.1.0"
 dependencies = [
+ "pw-graph-core",
+ "pw-graph-effects",
  "serde",
  "thiserror 1.0.69",
  "toml",
@@ -2635,6 +2639,15 @@ name = "pw-graph-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pw-graph-effects"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

@@ -5,6 +5,7 @@
 use pw_graph_core::{
     Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortKey, PortType,
 };
+use pw_graph_effects::{EffectDescriptor, EffectHost, EffectInstanceConfig};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -61,6 +62,73 @@ pub enum BackendError {
 
 pub type BackendResult<T> = Result<T, BackendError>;
 
+/// An effect insertion request. The endpoint keys are captured before the
+/// graph is mutated so an effect can be restored after PipeWire global IDs
+/// change.
+#[derive(Clone, Debug)]
+pub struct EffectInsertRequest {
+    pub instance_id: String,
+    pub effect_id: String,
+    pub module_path: Option<String>,
+    pub source: PortKey,
+    pub destination: PortKey,
+    pub enabled: bool,
+    pub parameters: BTreeMap<String, f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectInstance {
+    pub config: EffectInstanceConfig,
+    pub node_id: NodeId,
+    pub input_port: PortId,
+    pub output_port: PortId,
+    pub source: PortKey,
+    pub destination: PortKey,
+    pub error: Option<String>,
+}
+
+/// Effect operations are intentionally separate from topology operations. A
+/// backend that cannot host realtime processing can still implement the graph
+/// API and return a precise Unsupported error here.
+pub trait EffectDriver {
+    fn effect_descriptors(&self) -> Vec<EffectDescriptor> {
+        Vec::new()
+    }
+
+    fn effect_instances(&self) -> Vec<EffectInstance> {
+        Vec::new()
+    }
+
+    fn insert_effect(&mut self, _request: EffectInsertRequest) -> BackendResult<EffectInstance> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+
+    fn set_effect_enabled(&mut self, _instance_id: &str, _enabled: bool) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        _instance_id: &str,
+        _parameter: &str,
+        _value: f32,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+
+    fn remove_effect(&mut self, _instance_id: &str) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+}
+
 /// A normalized, node-level audio reading supplied by a backend.
 ///
 /// PipeWire exposes graph topology separately from audio buffers, so meters
@@ -98,7 +166,7 @@ impl Default for NodeAudioControl {
 }
 
 /// Common operations needed by commands, patchbay activation, and the UI.
-pub trait GraphDriver {
+pub trait GraphDriver: EffectDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>>;
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
@@ -238,11 +306,15 @@ pub trait GraphDriver {
 /// A deterministic demo backend that behaves like a PipeWire registry from
 /// the perspective of the application. It is useful for `--demo`, examples,
 /// and integration tests where a live PipeWire session is not available.
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct DemoDriver {
     graph: Graph,
     next_link_id: u64,
     audio_controls: BTreeMap<NodeId, NodeAudioControl>,
+    effects: BTreeMap<String, EffectInstance>,
+    effect_host: EffectHost,
+    effect_processors: BTreeMap<String, Box<dyn pw_graph_effects::EffectProcessor>>,
+    next_effect_id: u64,
 }
 
 impl DemoDriver {
@@ -252,6 +324,10 @@ impl DemoDriver {
             graph,
             next_link_id,
             audio_controls: BTreeMap::new(),
+            effects: BTreeMap::new(),
+            effect_host: EffectHost::new(),
+            effect_processors: BTreeMap::new(),
+            next_effect_id: 1000,
         }
     }
 
@@ -399,7 +475,7 @@ impl GraphDriver for DemoDriver {
     }
 
     fn is_node_type(&self, node_type: NodeType) -> bool {
-        matches!(node_type, NodeType::PipeWire)
+        matches!(node_type, NodeType::PipeWire | NodeType::Effect)
     }
 
     fn is_port_type(&self, port_type: PortType) -> bool {
@@ -407,6 +483,182 @@ impl GraphDriver for DemoDriver {
             port_type,
             PortType::Audio | PortType::Video | PortType::MidiJack
         )
+    }
+}
+
+impl EffectDriver for DemoDriver {
+    fn effect_descriptors(&self) -> Vec<EffectDescriptor> {
+        self.effect_host.descriptors()
+    }
+
+    fn effect_instances(&self) -> Vec<EffectInstance> {
+        self.effects.values().cloned().collect()
+    }
+
+    fn insert_effect(&mut self, request: EffectInsertRequest) -> BackendResult<EffectInstance> {
+        if self.effects.contains_key(&request.instance_id) {
+            return Err(BackendError::Native(format!(
+                "effect instance {} already exists",
+                request.instance_id
+            )));
+        }
+        let output = self
+            .graph
+            .resolve_port_key(&request.source)
+            .ok_or_else(|| BackendError::Native("effect source port is unavailable".into()))?;
+        let input = self
+            .graph
+            .resolve_port_key(&request.destination)
+            .ok_or_else(|| BackendError::Native("effect destination port is unavailable".into()))?;
+        let original = self
+            .graph
+            .links
+            .values()
+            .find(|link| link.output_port == output && link.input_port == input)
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::Native("effect source and destination are not linked".into())
+            })?;
+        let mut processor = self
+            .effect_host
+            .create(&request.effect_id)
+            .map_err(|error| BackendError::Native(format!("could not create effect: {error}")))?;
+        processor
+            .prepare(pw_graph_effects::AudioSpec {
+                sample_rate: 48_000,
+                channels: 2,
+                max_frames: 1024,
+            })
+            .map_err(|error| BackendError::Native(error.to_string()))?;
+        pw_graph_effects::apply_parameters(&mut *processor, &request.parameters)
+            .map_err(|error| BackendError::Native(error.to_string()))?;
+
+        let node_id = NodeId(self.next_effect_id);
+        self.next_effect_id += 1;
+        let input_port = PortId(self.next_effect_id);
+        self.next_effect_id += 1;
+        let output_port = PortId(self.next_effect_id);
+        self.next_effect_id += 1;
+        let mut node = Node::new(node_id, request.effect_id.clone(), NodeType::Effect)
+            .with_effect_instance(request.instance_id.clone());
+        node.position = [250.0, 180.0];
+        self.graph.add_node(node)?;
+        self.graph.add_port(Port::new(
+            input_port,
+            node_id,
+            "input",
+            Direction::Sink,
+            PortType::Audio,
+        ))?;
+        self.graph.add_port(Port::new(
+            output_port,
+            node_id,
+            "output",
+            Direction::Source,
+            PortType::Audio,
+        ))?;
+
+        // Commit the graph only after all validation and object creation have
+        // succeeded. DemoDriver uses the same transaction shape as the live
+        // PipeWire implementation will use.
+        self.graph.remove_link(original.id)?;
+        let first = self.allocate_link_id();
+        let second = self.allocate_link_id();
+        if let Err(error) = self.graph.add_link(first, output, input_port) {
+            self.graph.remove_link(first).ok();
+            self.graph.ports.remove(&input_port);
+            self.graph.ports.remove(&output_port);
+            self.graph.nodes.remove(&node_id);
+            self.graph.add_link(original.id, output, input).ok();
+            return Err(error.into());
+        }
+        if let Err(error) = self.graph.add_link(second, output_port, input) {
+            self.graph.remove_link(first).ok();
+            self.graph.ports.remove(&input_port);
+            self.graph.ports.remove(&output_port);
+            self.graph.nodes.remove(&node_id);
+            self.graph.add_link(original.id, output, input).ok();
+            return Err(error.into());
+        }
+        let config = EffectInstanceConfig {
+            instance_id: request.instance_id.clone(),
+            effect_id: request.effect_id,
+            module_path: request.module_path,
+            enabled: request.enabled,
+            parameters: request.parameters,
+        };
+        let instance = EffectInstance {
+            config,
+            node_id,
+            input_port,
+            output_port,
+            source: request.source,
+            destination: request.destination,
+            error: None,
+        };
+        self.effects
+            .insert(instance.config.instance_id.clone(), instance.clone());
+        self.effect_processors
+            .insert(instance.config.instance_id.clone(), processor);
+        Ok(instance)
+    }
+
+    fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
+        let instance = self.effects.get_mut(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        instance.config.enabled = enabled;
+        Ok(())
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        instance_id: &str,
+        parameter: &str,
+        value: f32,
+    ) -> BackendResult<()> {
+        let instance = self.effects.get_mut(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        instance.config.parameters.insert(parameter.into(), value);
+        Ok(())
+    }
+
+    fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
+        let instance = self.effects.remove(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        self.effect_processors.remove(instance_id);
+        let links: Vec<_> = self
+            .graph
+            .links
+            .values()
+            .filter(|link| {
+                link.output_port == instance.output_port || link.input_port == instance.input_port
+            })
+            .map(|link| link.id)
+            .collect();
+        for link in links {
+            self.graph.remove_link(link)?;
+        }
+        let source = self
+            .graph
+            .resolve_port_key(&instance.source)
+            .ok_or_else(|| {
+                BackendError::Native("effect source disappeared while removing effect".into())
+            })?;
+        let destination = self
+            .graph
+            .resolve_port_key(&instance.destination)
+            .ok_or_else(|| {
+                BackendError::Native("effect destination disappeared while removing effect".into())
+            })?;
+        let link_id = self.allocate_link_id();
+        self.graph.add_link(link_id, source, destination)?;
+        self.graph.ports.remove(&instance.input_port);
+        self.graph.ports.remove(&instance.output_port);
+        self.graph.nodes.remove(&instance.node_id);
+        Ok(())
     }
 }
 
@@ -477,7 +729,7 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn is_node_type(&self, node_type: NodeType) -> bool {
-        matches!(node_type, NodeType::PipeWire)
+        matches!(node_type, NodeType::PipeWire | NodeType::Effect)
     }
 
     fn is_port_type(&self, port_type: PortType) -> bool {
@@ -487,6 +739,8 @@ impl GraphDriver for PipewireDriver {
         )
     }
 }
+
+impl EffectDriver for PipewireDriver {}
 
 /// Used by patchbay activation to avoid reconnecting identical links.
 pub fn existing_connections(driver: &dyn GraphDriver) -> BTreeSet<(PortId, PortId)> {
@@ -534,6 +788,35 @@ mod tests {
             .nodes
             .values()
             .all(|node| node.node_type == NodeType::PipeWire));
+    }
+
+    #[test]
+    fn demo_backend_inserts_and_removes_an_effect_transactionally() {
+        let mut driver = DemoDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap();
+        let source = driver.graph().port_key(PortId(1)).unwrap();
+        let destination = driver.graph().port_key(PortId(3)).unwrap();
+        let instance = driver
+            .insert_effect(EffectInsertRequest {
+                instance_id: "test-effect".into(),
+                effect_id: pw_graph_effects::NOISE_GATE_ID.into(),
+                module_path: None,
+                source,
+                destination,
+                enabled: true,
+                parameters: BTreeMap::new(),
+            })
+            .unwrap();
+        assert_eq!(driver.effects.len(), 1);
+        assert_eq!(
+            driver.graph().nodes[&instance.node_id].node_type,
+            NodeType::Effect
+        );
+        assert_eq!(driver.graph().links.len(), 2);
+        driver.remove_effect("test-effect").unwrap();
+        assert!(driver.effects.is_empty());
+        assert_eq!(driver.graph().links.len(), 1);
+        assert_eq!(driver.graph().nodes.len(), 4);
     }
 
     #[cfg(feature = "pipewire")]

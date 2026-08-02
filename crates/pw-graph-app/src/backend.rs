@@ -216,3 +216,67 @@ impl GraphDriver for CompositeDriver {
         }
     }
 }
+
+impl pw_graph_backend::EffectDriver for CompositeDriver {
+    fn effect_descriptors(&self) -> Vec<pw_graph_effects::EffectDescriptor> {
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.effect_descriptors())
+            .unwrap_or_default()
+    }
+
+    fn effect_instances(&self) -> Vec<pw_graph_backend::EffectInstance> {
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.effect_instances())
+            .unwrap_or_default()
+    }
+
+    fn insert_effect(
+        &mut self,
+        request: pw_graph_backend::EffectInsertRequest,
+    ) -> pw_graph_backend::BackendResult<pw_graph_backend::EffectInstance> {
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .insert_effect(request)
+    }
+
+    fn set_effect_enabled(
+        &mut self,
+        instance_id: &str,
+        enabled: bool,
+    ) -> pw_graph_backend::BackendResult<()> {
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .set_effect_enabled(instance_id, enabled)
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        instance_id: &str,
+        parameter: &str,
+        value: f32,
+    ) -> pw_graph_backend::BackendResult<()> {
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .set_effect_parameter(instance_id, parameter, value)
+    }
+
+    fn remove_effect(&mut self, instance_id: &str) -> pw_graph_backend::BackendResult<()> {
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .remove_effect(instance_id)
+    }
+}

@@ -7,6 +7,8 @@ Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support.
 The code is split into small crates:
 
 - `pw-graph-core`: serializable nodes, ports, links, validation, and layout.
+- `pw-graph-effects`: realtime-safe effect processor API, built-in noise gate,
+  and the versioned WASM module ABI.
 - `pw-graph-backend`: the driver abstraction, deterministic Demo backend,
   native PipeWire registry/link backend, and optional audio meters.
 - `pw-graph-alsamidi`: native ALSA Sequencer enumeration and routing.
@@ -64,6 +66,20 @@ config** releases every helper stream.
 Press F1 for shortcuts. The graph also supports drag-to-connect, rectangle and
 multi-selection, node dragging, curved links, scroll-to-pan, zoom, media
 filters, port sorting, thumbnail mode, and default node arrangement.
+
+## Effects
+
+The effects API lives in `pw-graph-effects`. It processes interleaved `f32`
+audio buffers through a prepare/process/parameter/reset lifecycle. The first
+built-in effect is `builtin.noise-gate`, with threshold, attack, hold, release,
+and bypass parameters. The demo backend can insert it between a selected audio
+link, display it as an effect node, persist its stable endpoint keys, and remove
+it while restoring the original link.
+
+User modules should target `wasm32-unknown-unknown` and implement the exports
+documented by `pw_graph_effects::wasm::ABI_DOCUMENTATION`. The realtime ABI has
+no WASI imports: module loading, validation, instantiation, and memory growth
+belong on the control thread.
 
 ## CLI
 

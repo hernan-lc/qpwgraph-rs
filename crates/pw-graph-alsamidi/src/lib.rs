@@ -226,6 +226,8 @@ impl GraphDriver for AlsaMidiDriver {
     }
 }
 
+impl pw_graph_backend::EffectDriver for AlsaMidiDriver {}
+
 #[cfg(all(test, feature = "alsa"))]
 mod tests {
     use super::*;

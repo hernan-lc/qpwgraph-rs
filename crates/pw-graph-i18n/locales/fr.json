@@ -56,5 +56,20 @@
   "canvas.unmuted": "Son activé",
   "status.node_mute_changed": "État audio du nœud : {state}",
   "status.node_volume_changed": "Volume du nœud : {volume}",
-  "status.node_control_failed": "Échec du contrôle audio du nœud : {error}"
+  "status.node_control_failed": "Échec du contrôle audio du nœud : {error}",
+  "canvas.node_type_effect": "Nœud d’effet audio",
+  "effects.title": "Effets",
+  "effects.insert": "Insérer une porte de bruit",
+  "effects.insert_help": "Insérer une porte de bruit dans la liaison audio sélectionnée.",
+  "effects.enabled": "Activé",
+  "effects.remove": "Supprimer l’effet",
+  "effects.select_link": "Sélectionnez d’abord une liaison audio",
+  "effects.link_unavailable": "La liaison sélectionnée n’est plus disponible",
+  "effects.audio_only": "Les effets ne peuvent être insérés que sur l’audio",
+  "effects.inserted": "Porte de bruit insérée",
+  "effects.insert_failed": "Échec de l’insertion : {error}",
+  "effects.update_failed": "Échec de la mise à jour : {error}",
+  "effects.removed": "Effet supprimé",
+  "effects.remove_failed": "Échec de la suppression : {error}",
+  "effects.restore_failed": "Échec de la restauration : {error}"
 }

@@ -1,5 +1,7 @@
 //! TOML configuration compatible with the state surface described by qpwgraph.
 
+use pw_graph_core::PortKey;
+use pw_graph_effects::EffectInstanceConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -74,6 +76,18 @@ pub struct AppConfig {
     /// Optional named patchbay profiles and their files.
     pub patchbay_profiles: std::collections::BTreeMap<String, PathBuf>,
     pub active_patchbay_profile: String,
+    /// Effect definitions are kept in application config rather than the
+    /// qpwgraph XML format, which has no portable representation for DSP
+    /// modules.
+    #[serde(default)]
+    pub effects: Vec<PersistedEffect>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PersistedEffect {
+    pub instance: EffectInstanceConfig,
+    pub source: PortKey,
+    pub destination: PortKey,
 }
 
 impl Default for AppConfig {
@@ -111,6 +125,7 @@ impl Default for AppConfig {
             recent_patchbay_paths: Vec::new(),
             patchbay_profiles: std::collections::BTreeMap::new(),
             active_patchbay_profile: "default".into(),
+            effects: Vec::new(),
         }
     }
 }
@@ -181,6 +196,44 @@ mod tests {
                 color: Some([82, 207, 133, 255]),
             },
         );
+        expected.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn effect_configuration_round_trips() {
+        let directory =
+            std::env::temp_dir().join(format!("pw-graph-config-effects-{}", std::process::id()));
+        let path = directory.join("config.toml");
+        let mut expected = AppConfig::default();
+        expected.effects.push(PersistedEffect {
+            instance: EffectInstanceConfig {
+                instance_id: "effect-1".into(),
+                effect_id: "builtin.noise-gate".into(),
+                module_path: None,
+                enabled: true,
+                parameters: [("threshold-db".into(), -42.0)].into_iter().collect(),
+            },
+            source: PortKey {
+                node_name: "Capture".into(),
+                node_serial: None,
+                node_type: pw_graph_core::NodeType::PipeWire,
+                port_name: "out_FL".into(),
+                channel: Some("FL".into()),
+                direction: pw_graph_core::Direction::Source,
+                port_type: pw_graph_core::PortType::Audio,
+            },
+            destination: PortKey {
+                node_name: "Playback".into(),
+                node_serial: None,
+                node_type: pw_graph_core::NodeType::PipeWire,
+                port_name: "in_FL".into(),
+                channel: Some("FL".into()),
+                direction: pw_graph_core::Direction::Sink,
+                port_type: pw_graph_core::PortType::Audio,
+            },
+        });
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();

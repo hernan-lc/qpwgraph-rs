@@ -50,6 +50,7 @@ fn node_accent(
         })
         .unwrap_or(match node_type {
             NodeType::PipeWire => Color32::from_rgb(91, 172, 224),
+            NodeType::Effect => Color32::from_rgb(224, 155, 73),
             NodeType::AlsaMidi => Color32::from_rgb(180, 128, 220),
             NodeType::Unknown => Color32::from_rgb(153, 163, 175),
         })

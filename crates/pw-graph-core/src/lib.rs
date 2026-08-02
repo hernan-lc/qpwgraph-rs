@@ -55,6 +55,7 @@ impl Direction {
 pub enum NodeType {
     #[default]
     PipeWire,
+    Effect,
     AlsaMidi,
     Unknown,
 }
@@ -91,6 +92,10 @@ pub struct Node {
     /// unset and are resolved by their names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<u64>,
+    /// Stable identity assigned by the effect host. PipeWire global IDs are
+    /// intentionally not used for effect persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_instance_id: Option<String>,
     pub ports: Vec<PortId>,
     /// Canvas position in logical scene coordinates.
     pub position: [f32; 2],
@@ -103,6 +108,7 @@ impl Node {
             name: name.into(),
             node_type,
             serial: None,
+            effect_instance_id: None,
             ports: Vec::new(),
             position: [0.0, 0.0],
         }
@@ -110,6 +116,11 @@ impl Node {
 
     pub fn with_serial(mut self, serial: u64) -> Self {
         self.serial = Some(serial);
+        self
+    }
+
+    pub fn with_effect_instance(mut self, instance_id: impl Into<String>) -> Self {
+        self.effect_instance_id = Some(instance_id.into());
         self
     }
 }

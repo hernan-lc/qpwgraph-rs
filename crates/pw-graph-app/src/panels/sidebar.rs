@@ -216,7 +216,95 @@ impl QpwgraphApp {
                 self.activate_patchbay();
             }
         }
+        self.show_effect_controls(ui);
         self.show_media_filter_sidebar(ui);
+    }
+
+    fn show_effect_controls(&mut self, ui: &mut Ui) {
+        let instances = self.driver.effect_instances();
+        let descriptors = self.driver.effect_descriptors();
+        let selected_audio_link = self.canvas.selected_link().is_some_and(|link_id| {
+            self.driver.graph().link(link_id).is_some_and(|link| {
+                self.driver
+                    .graph()
+                    .port(link.output_port)
+                    .is_some_and(|port| port.port_type == pw_graph_core::PortType::Audio)
+            })
+        });
+        let mut insert = false;
+        let mut toggle = Vec::new();
+        let mut parameters = Vec::new();
+        let mut remove = Vec::new();
+        ui.collapsing(self.t("effects.title"), |ui| {
+            if ui
+                .add_enabled(
+                    selected_audio_link,
+                    egui::Button::new(self.t("effects.insert")),
+                )
+                .on_hover_text(self.t("effects.insert_help"))
+                .clicked()
+            {
+                insert = true;
+            }
+            for instance in &instances {
+                ui.separator();
+                ui.label(&instance.config.effect_id);
+                let mut enabled = instance.config.enabled;
+                if ui
+                    .checkbox(&mut enabled, self.t("effects.enabled"))
+                    .changed()
+                {
+                    toggle.push((instance.config.instance_id.clone(), enabled));
+                }
+                if let Some(descriptor) = descriptors
+                    .iter()
+                    .find(|descriptor| descriptor.id == instance.config.effect_id)
+                {
+                    for parameter in &descriptor.parameters {
+                        if parameter.id == pw_graph_effects::NOISE_GATE_BYPASS {
+                            continue;
+                        }
+                        let mut value = instance
+                            .config
+                            .parameters
+                            .get(&parameter.id)
+                            .copied()
+                            .unwrap_or(parameter.default);
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut value,
+                                    parameter.minimum..=parameter.maximum,
+                                )
+                                .text(format!("{} ({})", parameter.name, parameter.unit)),
+                            )
+                            .changed()
+                        {
+                            parameters.push((
+                                instance.config.instance_id.clone(),
+                                parameter.id.clone(),
+                                value,
+                            ));
+                        }
+                    }
+                }
+                if ui.button(self.t("effects.remove")).clicked() {
+                    remove.push(instance.config.instance_id.clone());
+                }
+            }
+        });
+        if insert {
+            self.insert_selected_noise_gate();
+        }
+        for (id, enabled) in toggle {
+            self.set_effect_enabled_from_ui(&id, enabled);
+        }
+        for (id, parameter, value) in parameters {
+            self.set_effect_parameter_from_ui(&id, &parameter, value);
+        }
+        for id in remove {
+            self.remove_effect_from_ui(&id);
+        }
     }
 
     /// Compact sort-by/sort-order toggles for the always-visible sidebar:
