@@ -1,0 +1,309 @@
+//! Public backend contracts shared by native and deterministic drivers.
+
+use pw_graph_core::{
+    Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, PortId, PortKey, PortType,
+};
+use pw_graph_effects::{EffectDescriptor, EffectInstanceConfig};
+use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
+
+/// How freely a backend may open helper streams to measure audio levels.
+///
+/// Measuring a PipeWire node means connecting a real capture stream to it. The
+/// session manager links that stream like any other client, which resumes
+/// suspended devices and can make the daemon renegotiate the graph rate. Doing
+/// that for every audio node continuously can visibly rewrite the user's audio
+/// configuration, so metering defaults to [`MeterPolicy::OnDemand`], which is
+/// limited to nodes represented by a currently visible application window.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MeterPolicy {
+    /// Never open helper streams. Meters report unavailable.
+    Disabled,
+    /// Measure filtered audio nodes while the application window is visible.
+    #[default]
+    OnDemand,
+    /// Measure every audio node continuously.
+    Always,
+}
+
+impl MeterPolicy {
+    pub const ALL: [Self; 3] = [Self::Disabled, Self::OnDemand, Self::Always];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "off",
+            Self::OnDemand => "on-demand",
+            Self::Always => "always",
+        }
+    }
+
+    /// Unknown values fall back to the safe default rather than failing a load,
+    /// so a hand-edited or older config file still starts the application.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => Self::Disabled,
+            "always" | "all" => Self::Always,
+            _ => Self::OnDemand,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum BackendError {
+    #[error(transparent)]
+    Graph(#[from] GraphError),
+    #[error("backend operation is not available: {0}")]
+    Unsupported(String),
+    #[error("native backend error: {0}")]
+    Native(String),
+}
+
+pub type BackendResult<T> = Result<T, BackendError>;
+
+/// An effect insertion request. The endpoint keys are captured before the
+/// graph is mutated so an effect can be restored after PipeWire global IDs
+/// change.
+#[derive(Clone, Debug)]
+pub struct EffectInsertRequest {
+    pub instance_id: String,
+    pub effect_id: String,
+    pub module_path: Option<String>,
+    pub source: PortKey,
+    pub destination: PortKey,
+    pub enabled: bool,
+    pub parameters: BTreeMap<String, f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectInstance {
+    pub config: EffectInstanceConfig,
+    pub node_id: NodeId,
+    pub input_port: PortId,
+    pub output_port: PortId,
+    pub source: PortKey,
+    pub destination: PortKey,
+    pub error: Option<String>,
+}
+
+/// Effect operations are intentionally separate from topology operations. A
+/// backend that cannot host realtime processing can still implement the graph
+/// API and return a precise Unsupported error here.
+pub trait EffectDriver {
+    fn effect_descriptors(&self) -> Vec<EffectDescriptor> {
+        Vec::new()
+    }
+
+    fn effect_instances(&self) -> Vec<EffectInstance> {
+        Vec::new()
+    }
+
+    fn insert_effect(&mut self, _request: EffectInsertRequest) -> BackendResult<EffectInstance> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+
+    fn set_effect_enabled(&mut self, _instance_id: &str, _enabled: bool) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        _instance_id: &str,
+        _parameter: &str,
+        _value: f32,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+
+    fn remove_effect(&mut self, _instance_id: &str) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
+    }
+}
+
+/// A normalized, node-level audio reading supplied by a backend.
+///
+/// PipeWire exposes graph topology separately from audio buffers, so meters
+/// are deliberately kept as an optional side channel. An empty collection is
+/// a valid result for backends that do not provide runtime audio data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioMeter {
+    pub node_id: NodeId,
+    /// Port represented by this reading. A node-level fallback is used when
+    /// the backend cannot expose a stable port association.
+    pub port_id: Option<PortId>,
+    /// Root-mean-square level normalized to 0..=1.
+    pub rms: f32,
+    /// Peak level normalized to 0..=1.
+    pub peak: f32,
+    /// Milliseconds since the backend received the last audio buffer.
+    pub age_ms: u32,
+    pub available: bool,
+}
+
+/// Audio controls exposed by a graph node when its backend supports them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeAudioControl {
+    pub muted: bool,
+    pub volume: f32,
+}
+
+impl Default for NodeAudioControl {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            volume: 1.0,
+        }
+    }
+}
+
+/// Common operations needed by commands, patchbay activation, and the UI.
+pub trait GraphDriver: EffectDriver {
+    fn refresh(&mut self) -> BackendResult<Vec<Node>>;
+    fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
+    fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
+
+    /// Connect a stable pair, returning `None` when it is already present.
+    /// The refresh is deliberately part of this helper: a UI action can be
+    /// based on the previous frame while a PipeWire stream is being recreated.
+    fn connect_by_key_if_missing(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> BackendResult<Option<Link>> {
+        self.refresh()?;
+        self.allow_connection(output, input);
+        if self.graph().find_link_by_keys(output, input).is_some() {
+            return Ok(None);
+        }
+        let output_id = self.graph().resolve_port_key(output).ok_or_else(|| {
+            BackendError::Native(format!(
+                "source port {}:{} is no longer available",
+                output.node_name, output.port_name
+            ))
+        })?;
+        let input_id = self.graph().resolve_port_key(input).ok_or_else(|| {
+            BackendError::Native(format!(
+                "destination port {}:{} is no longer available",
+                input.node_name, input.port_name
+            ))
+        })?;
+        match self.connect(output_id, input_id) {
+            Ok(link) => Ok(Some(link)),
+            Err(BackendError::Graph(GraphError::DuplicateConnection(_, _))) => {
+                self.refresh()?;
+                if self.graph().find_link_by_keys(output, input).is_some() {
+                    Ok(None)
+                } else {
+                    Err(BackendError::Graph(GraphError::DuplicateConnection(
+                        output_id, input_id,
+                    )))
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Disconnect a stable pair, returning `None` when it already vanished.
+    fn disconnect_by_key_if_present(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> BackendResult<Option<Link>> {
+        self.refresh()?;
+        let link = self.graph().find_link_by_keys(output, input);
+        let Some(link) = link else {
+            self.suppress_connection(output, input);
+            return Ok(None);
+        };
+        match self.disconnect(link.id) {
+            Ok(link) => Ok(Some(link)),
+            Err(BackendError::Graph(GraphError::MissingLink(_))) => {
+                self.suppress_connection(output, input);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Native drivers may keep a short-lived suppression rule after a manual
+    /// disconnect. An explicit connect/undo clears that rule.
+    fn allow_connection(&mut self, _output: &PortKey, _input: &PortKey) {}
+
+    /// Remember a manual deletion even if the link vanished during the
+    /// refresh that preceded the operation.
+    fn suppress_connection(&mut self, _output: &PortKey, _input: &PortKey) {}
+
+    fn set_node_position(
+        &mut self,
+        node: pw_graph_core::NodeId,
+        position: [f32; 2],
+    ) -> BackendResult<()> {
+        let _ = (node, position);
+        Err(BackendError::Unsupported(
+            "node layout is not supported by this backend".into(),
+        ))
+    }
+
+    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        let _ = (node, muted);
+        Err(BackendError::Unsupported(
+            "node mute is not supported by this backend".into(),
+        ))
+    }
+
+    fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        let _ = (node, volume);
+        Err(BackendError::Unsupported(
+            "node volume is not supported by this backend".into(),
+        ))
+    }
+
+    fn graph(&self) -> &Graph;
+
+    /// Returns whether registry state changed since the last `refresh`.
+    /// Backends without event-driven registries may keep the default `false`.
+    fn graph_dirty(&self) -> bool {
+        false
+    }
+
+    fn is_node_type(&self, node_type: NodeType) -> bool;
+    fn is_port_type(&self, port_type: PortType) -> bool;
+
+    fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
+        Ok(Vec::new())
+    }
+
+    /// Choose how aggressively the backend may attach metering streams.
+    fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {
+        let _ = policy;
+        Ok(())
+    }
+
+    /// Declare the nodes the UI currently wants a meter for.
+    ///
+    /// Under [`MeterPolicy::OnDemand`] this is the only thing that makes a
+    /// backend open a helper stream. Callers are expected to repeat the
+    /// request while the meter stays visible; backends may keep a stream alive
+    /// briefly after the last request so minimizing/restoring a window does
+    /// not thrash streams.
+    fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
+        let _ = nodes;
+        Ok(())
+    }
+
+    /// Release every helper stream this backend owns.
+    ///
+    /// This is the escape hatch for a session whose devices were resumed or
+    /// renegotiated by metering: dropping the streams lets the session manager
+    /// suspend and restore the nodes to their configured defaults.
+    fn reset_audio_config(&mut self) -> BackendResult<()> {
+        Ok(())
+    }
+}
