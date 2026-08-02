@@ -1884,6 +1884,7 @@ dependencies = [
  "pw-graph-command",
  "pw-graph-config",
  "pw-graph-core",
+ "pw-graph-i18n",
  "pw-graph-patchbay",
  "pw-graph-ui",
 ]
@@ -1920,6 +1921,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pw-graph-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

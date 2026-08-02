@@ -19,6 +19,7 @@ pub enum ConfigError {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub language: String,
     pub window_width: f32,
     pub window_height: f32,
     pub zoom: f32,
@@ -41,6 +42,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            language: "en".into(),
             window_width: 1100.0,
             window_height: 760.0,
             zoom: 1.0,

@@ -30,7 +30,7 @@ impl Default for GraphCanvas {
 }
 
 impl GraphCanvas {
-    pub fn show(&mut self, ui: &mut Ui, graph: &Graph) -> Vec<CanvasAction> {
+    pub fn show(&mut self, ui: &mut Ui, graph: &Graph, connect_hint: &str) -> Vec<CanvasAction> {
         let rect = ui.available_rect_before_wrap();
         let canvas_response = ui.allocate_rect(rect, Sense::drag());
         let painter = ui.painter_at(rect);
@@ -87,7 +87,7 @@ impl GraphCanvas {
                     painter.text(
                         start + vec2(8.0, -22.0),
                         egui::Align2::LEFT_TOP,
-                        format!("Connect {} → …", output.name),
+                        format!("{connect_hint} {} → …", output.name),
                         FontId::proportional(12.0),
                         Color32::LIGHT_GREEN,
                     );

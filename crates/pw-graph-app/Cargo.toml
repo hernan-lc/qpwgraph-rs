@@ -12,6 +12,6 @@ pw-graph-backend = { path = "../pw-graph-backend" }
 pw-graph-command = { path = "../pw-graph-command" }
 pw-graph-config = { path = "../pw-graph-config" }
 pw-graph-core = { path = "../pw-graph-core" }
+pw-graph-i18n = { path = "../pw-graph-i18n" }
 pw-graph-patchbay = { path = "../pw-graph-patchbay" }
 pw-graph-ui = { path = "../pw-graph-ui" }
-

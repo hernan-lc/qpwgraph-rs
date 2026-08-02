@@ -3,6 +3,7 @@ use pw_graph_backend::{GraphDriver, InMemoryDriver};
 use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{LinkId, PortId};
+use pw_graph_i18n::{I18n, Locale};
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, GraphCanvas};
 use std::path::PathBuf;
@@ -12,22 +13,38 @@ struct Args {
     minimized: bool,
     debug: bool,
     no_alsa_midi: bool,
+    language: Option<String>,
 }
 
 fn parse_args() -> Args {
     let mut args = Args::default();
-    for argument in std::env::args().skip(1) {
+    let system_language = std::env::var("LANG").unwrap_or_default();
+    let parser_i18n = I18n::from_language(&system_language);
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "-m" | "--minimized" => args.minimized = true,
             "-d" | "--debug" => args.debug = true,
             "-n" | "--no-alsa-midi" => args.no_alsa_midi = true,
+            "--lang" => args.language = arguments.next(),
+            value if value.starts_with("--lang=") => {
+                args.language = Some(value.trim_start_matches("--lang=").to_owned())
+            }
             "-h" | "--help" => {
                 println!(
-                    "qpwgraph-rs\n\nOptions:\n  -m, --minimized       start minimized\n  -d, --debug           enable debug logging\n  -n, --no-alsa-midi    disable optional ALSA MIDI backend\n"
+                    "qpwgraph-rs\n\n{}\n  -m, --minimized       {}\n  -d, --debug           {}\n  -n, --no-alsa-midi    {}\n      --lang <LANG>     {}\n",
+                    parser_i18n.text("cli.options"),
+                    parser_i18n.text("cli.minimized"),
+                    parser_i18n.text("cli.debug"),
+                    parser_i18n.text("cli.no_alsa"),
+                    parser_i18n.text("cli.lang")
                 );
                 std::process::exit(0);
             }
-            unknown => eprintln!("Ignoring unknown option: {unknown}"),
+            unknown => eprintln!(
+                "{}",
+                parser_i18n.format("cli.unknown_option", &[("option", unknown.into())])
+            ),
         }
     }
     args
@@ -45,12 +62,18 @@ struct QpwgraphApp {
     debug: bool,
     no_alsa_midi: bool,
     start_minimized: bool,
+    i18n: I18n,
 }
 
 impl QpwgraphApp {
     fn new(args: Args) -> Self {
         let config_file = config_path("qpwgraph-rs");
         let config = AppConfig::load_from(&config_file).unwrap_or_default();
+        let language = args
+            .language
+            .clone()
+            .unwrap_or_else(|| config.language.clone());
+        let i18n = I18n::from_language(&language);
         let patchbay_file = config
             .patchbay_path
             .clone()
@@ -65,11 +88,20 @@ impl QpwgraphApp {
             config,
             config_file,
             patchbay_file,
-            status: "Demo backend ready — click a source port, then a sink port to connect".into(),
+            status: i18n.text("status.demo_ready"),
             debug: args.debug,
             no_alsa_midi: args.no_alsa_midi,
             start_minimized: args.minimized,
+            i18n,
         }
+    }
+
+    fn t(&self, key: &str) -> String {
+        self.i18n.text(key)
+    }
+
+    fn tf(&self, key: &str, variables: &[(&str, String)]) -> String {
+        self.i18n.format(key, variables)
     }
 
     fn handle_canvas_actions(&mut self, actions: Vec<CanvasAction>) {
@@ -84,9 +116,17 @@ impl QpwgraphApp {
                                 input,
                                 self.config.patchbay_auto_pin,
                             );
-                            self.status = format!("Connected port {output} → {input}");
+                            self.status = self.tf(
+                                "status.connected",
+                                &[("output", output.to_string()), ("input", input.to_string())],
+                            );
                         }
-                        Err(error) => self.status = format!("Connect failed: {error}"),
+                        Err(error) => {
+                            self.status = self.tf(
+                                "status.connect_failed",
+                                &[("error", error.to_string())],
+                            )
+                        }
                     }
                 }
                 CanvasAction::Disconnect { link } => self.disconnect(link),
@@ -105,32 +145,48 @@ impl QpwgraphApp {
             Ok(()) => {
                 self.patchbay
                     .remove_connection(existing.output_port, existing.input_port);
-                self.status = format!("Disconnected link {link}");
+                self.status = self.tf("status.disconnected", &[("link", link.to_string())]);
             }
-            Err(error) => self.status = format!("Disconnect failed: {error}"),
+            Err(error) => {
+                self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())])
+            }
         }
     }
 
     fn undo(&mut self) {
         match self.commands.undo(&mut self.driver) {
-            Ok(true) => self.status = "Undo complete".into(),
-            Ok(false) => self.status = "Nothing to undo".into(),
-            Err(error) => self.status = format!("Undo failed: {error}"),
+            Ok(true) => self.status = self.t("status.undo_complete"),
+            Ok(false) => self.status = self.t("status.nothing_to_undo"),
+            Err(error) => {
+                self.status = self.tf("status.undo_failed", &[("error", error.to_string())])
+            }
         }
     }
 
     fn redo(&mut self) {
         match self.commands.redo(&mut self.driver) {
-            Ok(true) => self.status = "Redo complete".into(),
-            Ok(false) => self.status = "Nothing to redo".into(),
-            Err(error) => self.status = format!("Redo failed: {error}"),
+            Ok(true) => self.status = self.t("status.redo_complete"),
+            Ok(false) => self.status = self.t("status.nothing_to_redo"),
+            Err(error) => {
+                self.status = self.tf("status.redo_failed", &[("error", error.to_string())])
+            }
         }
     }
 
     fn save_patchbay(&mut self) {
         match self.patchbay.save_to(&self.patchbay_file) {
-            Ok(()) => self.status = format!("Saved patchbay to {}", self.patchbay_file.display()),
-            Err(error) => self.status = format!("Patchbay save failed: {error}"),
+            Ok(()) => {
+                self.status = self.tf(
+                    "status.saved_patchbay",
+                    &[("path", self.patchbay_file.display().to_string())],
+                )
+            }
+            Err(error) => {
+                self.status = self.tf(
+                    "status.patchbay_save_failed",
+                    &[("error", error.to_string())],
+                )
+            }
         }
     }
 
@@ -138,9 +194,17 @@ impl QpwgraphApp {
         match Patchbay::load_from(&self.patchbay_file) {
             Ok(patchbay) => {
                 self.patchbay = patchbay;
-                self.status = format!("Loaded {}", self.patchbay_file.display());
+                self.status = self.tf(
+                    "status.loaded",
+                    &[("path", self.patchbay_file.display().to_string())],
+                );
             }
-            Err(error) => self.status = format!("Patchbay load failed: {error}"),
+            Err(error) => {
+                self.status = self.tf(
+                    "status.patchbay_load_failed",
+                    &[("error", error.to_string())],
+                )
+            }
         }
     }
 }
@@ -161,44 +225,63 @@ impl eframe::App for QpwgraphApp {
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Refresh").clicked() {
+                if ui.button(self.t("toolbar.refresh")).clicked() {
                     match self.driver.refresh() {
-                        Ok(nodes) => self.status = format!("Refreshed {} nodes", nodes.len()),
-                        Err(error) => self.status = format!("Refresh failed: {error}"),
+                        Ok(nodes) => {
+                            self.status = self
+                                .tf("status.refreshed", &[("count", nodes.len().to_string())])
+                        }
+                        Err(error) => {
+                            self.status = self
+                                .tf("status.refresh_failed", &[("error", error.to_string())])
+                        }
                     }
                 }
                 if ui
-                    .add_enabled(self.commands.can_undo(), egui::Button::new("Undo"))
+                    .add_enabled(
+                        self.commands.can_undo(),
+                        egui::Button::new(self.t("toolbar.undo")),
+                    )
                     .clicked()
                 {
                     self.undo();
                 }
                 if ui
-                    .add_enabled(self.commands.can_redo(), egui::Button::new("Redo"))
+                    .add_enabled(
+                        self.commands.can_redo(),
+                        egui::Button::new(self.t("toolbar.redo")),
+                    )
                     .clicked()
                 {
                     self.redo();
                 }
                 ui.separator();
-                if ui.button("Save Patchbay").clicked() {
+                if ui.button(self.t("toolbar.save_patchbay")).clicked() {
                     self.save_patchbay();
                 }
-                if ui.button("Load Patchbay").clicked() {
+                if ui.button(self.t("toolbar.load_patchbay")).clicked() {
                     self.load_patchbay();
                 }
-                if ui.button("Activate").clicked() {
+                if ui.button(self.t("toolbar.activate")).clicked() {
                     match self.patchbay.activate(
                         &mut self.driver,
                         self.config.patchbay_exclusive,
                         self.config.patchbay_auto_disconnect,
                     ) {
                         Ok(report) => {
-                            self.status = format!(
-                            "Patchbay activated: {} connected, {} already present, {} disconnected",
-                            report.connected, report.already_present, report.disconnected
-                        )
+                            self.status = self.tf(
+                                "status.activated",
+                                &[
+                                    ("connected", report.connected.to_string()),
+                                    ("present", report.already_present.to_string()),
+                                    ("disconnected", report.disconnected.to_string()),
+                                ],
+                            )
                         }
-                        Err(error) => self.status = format!("Patchbay activation failed: {error}"),
+                        Err(error) => {
+                            self.status = self
+                                .tf("status.activation_failed", &[("error", error.to_string())])
+                        }
                     }
                 }
             });
