@@ -1380,7 +1380,7 @@ mod tests {
             .add_port(Port::new(
                 PortId(22),
                 NodeId(2),
-                "in_C",
+                "in_zz_extra",
                 Direction::Sink,
                 PortType::Audio,
             ))

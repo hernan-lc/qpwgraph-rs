@@ -19,10 +19,10 @@ category filtering, deterministic media/direction-based default organization,
 an F1 keyboard-shortcuts modal, and full node, port, and link tooltips without
 hiding the raw PipeWire names.
 The inspector was then redesigned with scrollable grouped sections, statistic
-cards, clearer panel headers, a wider responsive side panel, and independent
-text-size controls for application chrome, inspector panels, and graph nodes.
+cards, clearer panel headers, an expandable left sidebar, and independent
+text-size controls for application chrome, sidebar panels, and graph nodes.
 Audio ports now have a real PipeWire-backed hover meter with RMS/peak and dB
-readouts, stale-data indication, and a pinned monitor card in the Graph panel;
+readouts, stale-data indication, and a pinned monitor card in the Graph sidebar;
 private helper streams are excluded from the visible graph and non-metering
 backends report unavailable data rather than rendering fake activity.
 
@@ -38,8 +38,9 @@ The desktop shell is modularized: `main.rs` is a small entry point, while
 state, CLI parsing, backend composition, screen panels, and tray integration.
 The backend’s PipeWire implementation, patchbay XML support, and canvas
 rendering are also separated into `pipewire.rs`, `xml.rs`, and `canvas.rs`.
-The GUI uses a navigation rail with Graph and Patchbay screens plus a full-area
-Preferences panel instead of duplicating common controls in the inspector.
+The GUI uses an expandable left sidebar with Graph and Patchbay screens plus a
+full-area Preferences panel instead of duplicating common controls in a
+separate right-side inspector.
 
 ## Roadmap status
 
@@ -60,7 +61,7 @@ Preferences panel instead of duplicating common controls in the inspector.
 
 ## UI organization
 
-- Graph: node counts, media filtering, selection/rename, port sorting, default organization, and compact labels with full-name hover tooltips.
+- Graph sidebar: node counts, media filtering, selection/rename, port sorting, default organization, and compact labels with full-name hover tooltips.
 - Patchbay: persistent routing rules, activation behavior, live-link pinning,
   and disconnect actions.
 - Interface: language selection, configuration save, sidebar action toggles,

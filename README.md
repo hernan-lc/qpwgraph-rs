@@ -22,9 +22,9 @@ cargo run -p pw-graph-app
 ```
 
 Use `--lang es` to start in Spanish. The language can also be changed from the
-Interface screen and is persisted in the application config. The right-side
-panel is split into Graph and Patchbay screens, while Preferences owns
-interface, behavior, and presentation settings. Each panel uses scrollable
+Interface screen and is persisted in the application config. The expandable
+left sidebar contains Graph and Patchbay screens, while Preferences owns
+interface, behavior, and presentation settings. Each screen uses scrollable
 grouped sections; Preferences exposes independent application, panel, and node
 text-size controls.
 Hover any icon for its label and explanation, and use Save configuration to write immediately. The
@@ -35,13 +35,13 @@ platform-independent vector geometry rather than font glyphs. Use
 `--demo` to force the deterministic in-memory graph.
 
 Audio ports expose a hover monitor with RMS, peak, dB, freshness, and a pin action.
-Pinned monitors remain visible in the Graph inspector. Live meters are provided by
+Pinned monitors remain visible in the Graph sidebar. Live meters are provided by
 PipeWire capture streams and their private helper nodes are filtered from the graph;
 backends without runtime audio data show an explicit unavailable state instead of
 simulated levels.
 
 Measuring a node means attaching a real capture stream to it, so metering is
-opt-in per node. The Graph panel exposes the policy as **Measure levels**:
+opt-in per node. The Graph sidebar exposes the policy as **Measure levels**:
 
 | Policy | Behavior |
 |---|---|
@@ -49,7 +49,7 @@ opt-in per node. The Graph panel exposes the policy as **Measure levels**:
 | On demand (default) | A stream is attached only while a meter is hovered or pinned, and released a few seconds after the last request. |
 | Always | Every audio node is measured continuously, which keeps devices awake. |
 
-The same panel has **Reset audio config**, which releases every metering stream
+The same sidebar has **Reset audio config**, which releases every metering stream
 so PipeWire can suspend those nodes again and restore their configured settings.
 The policy is persisted as `audio_meters` in `config.toml`.
 
@@ -58,7 +58,7 @@ including language, layout, zoom, toolbar visibility, typography, and node
 positions. Patchbay connection files remain separate and continue to use their
 explicit Save Patchbay action.
 
-The Graph panel's **Show media** filter can display all nodes or only Audio,
+The Graph sidebar's **Show media** filter can display all nodes or only Audio,
 Video, or MIDI nodes and ports; MIDI includes both PipeWire/JACK and ALSA MIDI.
 Fresh nodes are initially organized into media-category bands with source-only
 nodes on the left and sink-only nodes on the right. **Arrange nodes** reapplies

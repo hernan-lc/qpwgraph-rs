@@ -14,6 +14,7 @@ const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
 const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
 const NAV_RAIL_WIDTH: f32 = 76.0;
+const SIDEBAR_WIDTH: f32 = 370.0;
 const FULL_PANEL_MARGIN: f32 = 8.0;
 
 fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
@@ -185,8 +186,7 @@ fn meter_policy_key(policy: MeterPolicy) -> &'static str {
     }
 }
 
-/// The two panels that live docked next to the canvas because their content
-/// is live data you want visible while working, not a one-off setting.
+/// The two live screens shown in the expandable sidebar next to the canvas.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) enum AppScreen {
     #[default]
@@ -194,8 +194,8 @@ pub(crate) enum AppScreen {
     Patchbay,
 }
 
-/// Tabs inside the Preferences modal, which holds the settings you configure
-/// once rather than watch while working the canvas.
+/// Tabs inside the Preferences modal, which holds settings you configure once
+/// rather than watch while working the canvas.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) enum PreferencesTab {
     #[default]
@@ -230,8 +230,10 @@ fn show_backdrop_rect(ctx: &egui::Context, id_source: &str, rect: egui::Rect) ->
             // The backdrop must receive pointer clicks, but it is not a real
             // control and must not interrupt Tab traversal inside the modal.
             sense.focusable = false;
-            let (response, painter) = ui.allocate_painter(rect.size(), sense);
-            painter.rect_filled(response.rect, 0.0, Color32::from_black_alpha(120));
+            // Keep the backdrop as an invisible hit target. The modal still
+            // owns the foreground layer and the backdrop can dismiss it, but
+            // opening a dialog no longer dims the graph behind it.
+            let (response, _painter) = ui.allocate_painter(rect.size(), sense);
             response
         })
         .inner
@@ -283,94 +285,95 @@ fn fresh_scroll_area(id_salt: impl std::hash::Hash, max_height: f32) -> egui::Sc
 impl QpwgraphApp {
     pub(crate) fn show_gui_panels(&mut self, ctx: &egui::Context) {
         if !self.any_modal_open() || self.show_preferences {
+            let sidebar_width = if self.dock_open {
+                SIDEBAR_WIDTH
+            } else {
+                NAV_RAIL_WIDTH
+            };
             egui::SidePanel::left("navigation")
                 .resizable(false)
-                .default_width(NAV_RAIL_WIDTH)
+                .exact_width(sidebar_width)
                 .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(6.0))
                 .show(ctx, |ui| {
                     apply_panel_text_scale(ui, self.config.panel_text_scale);
                     self.show_navigation(ui)
                 });
         }
+    }
 
-        if self.any_modal_open() || !self.dock_open {
-            return;
-        }
-        egui::SidePanel::right("screen_panel")
-            .default_width(370.0)
-            .width_range(310.0..=520.0)
-            .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(10.0))
-            .show(ctx, |ui| {
-                apply_panel_text_scale(ui, self.config.panel_text_scale);
-                let scroll_id = ("inspector-scroll", self.screen, self.dock_scroll_epoch);
+    fn show_navigation(&mut self, ui: &mut Ui) {
+        ui.vertical(|ui| {
+            ui.vertical_centered(|ui| {
+                let docks = [
+                    (AppScreen::Graph, Icon::Graph, "screen.graph"),
+                    (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
+                ];
+                for (screen, icon, label) in docks {
+                    let help_key = match screen {
+                        AppScreen::Graph => "help.navigation_graph",
+                        AppScreen::Patchbay => "help.navigation_patchbay",
+                    };
+                    let selected = self.dock_open && self.screen == screen;
+                    if sidebar_nav_icon_button(
+                        ui,
+                        label,
+                        icon,
+                        selected,
+                        self.t(label),
+                        self.t(help_key),
+                    ) {
+                        if selected {
+                            self.dock_open = false;
+                        } else {
+                            self.screen = screen;
+                            self.dock_open = true;
+                            self.show_preferences = false;
+                            self.show_shortcuts = false;
+                            self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
+                        }
+                    }
+                }
+                ui.separator();
+                if sidebar_nav_icon_button(
+                    ui,
+                    "nav.preferences",
+                    Icon::Settings,
+                    self.show_preferences,
+                    self.t("nav.preferences"),
+                    self.t("help.navigation_preferences"),
+                ) {
+                    if self.show_preferences {
+                        self.show_preferences = false;
+                    } else {
+                        self.show_preferences = true;
+                        self.show_shortcuts = false;
+                        self.preferences_scroll_epoch =
+                            self.preferences_scroll_epoch.wrapping_add(1);
+                    }
+                }
+                if sidebar_nav_icon_button(
+                    ui,
+                    "nav.shortcuts",
+                    Icon::Help,
+                    self.show_shortcuts,
+                    self.t("nav.shortcuts"),
+                    self.t("help.navigation_shortcuts"),
+                ) {
+                    self.toggle_shortcuts();
+                }
+                self.show_sidebar_actions(ui);
+            });
+
+            if self.dock_open {
+                ui.separator();
+                let scroll_id = ("sidebar-scroll", self.screen, self.dock_scroll_epoch);
                 fresh_scroll_area(scroll_id, ui.available_height())
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.screen {
                         AppScreen::Graph => self.show_graph_screen(ui),
                         AppScreen::Patchbay => self.show_patchbay_screen(ui),
                     });
-            });
-    }
-
-    fn show_navigation(&mut self, ui: &mut Ui) {
-        ui.vertical_centered(|ui| {
-            let docks = [
-                (AppScreen::Graph, Icon::Graph, "screen.graph"),
-                (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
-            ];
-            for (screen, icon, label) in docks {
-                let help_key = match screen {
-                    AppScreen::Graph => "help.navigation_graph",
-                    AppScreen::Patchbay => "help.navigation_patchbay",
-                };
-                let selected = self.dock_open && self.screen == screen;
-                if sidebar_nav_icon_button(
-                    ui,
-                    label,
-                    icon,
-                    selected,
-                    self.t(label),
-                    self.t(help_key),
-                ) {
-                    if selected {
-                        self.dock_open = false;
-                    } else {
-                        self.screen = screen;
-                        self.dock_open = true;
-                        self.show_preferences = false;
-                        self.show_shortcuts = false;
-                        self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
-                    }
-                }
             }
-            ui.separator();
-            if sidebar_nav_icon_button(
-                ui,
-                "nav.preferences",
-                Icon::Settings,
-                self.show_preferences,
-                self.t("nav.preferences"),
-                self.t("help.navigation_preferences"),
-            ) {
-                if self.show_preferences {
-                    self.show_preferences = false;
-                } else {
-                    self.show_preferences = true;
-                    self.show_shortcuts = false;
-                    self.preferences_scroll_epoch = self.preferences_scroll_epoch.wrapping_add(1);
-                }
-            }
-            if sidebar_nav_icon_button(
-                ui,
-                "nav.shortcuts",
-                Icon::Help,
-                self.show_shortcuts,
-                self.t("nav.shortcuts"),
-                self.t("help.navigation_shortcuts"),
-            ) {
-                self.toggle_shortcuts();
-            }
-            self.show_sidebar_actions(ui);
         });
     }
 
