@@ -192,6 +192,19 @@ impl GraphCanvas {
             self.draw_node(ui, painter.clone(), node, &mut context);
         }
 
+        // Handle this after the canvas has processed pointer input. This lets
+        // a link be selected and deleted during the same egui frame, and keeps
+        // the action in the same path as the context-menu disconnect.
+        if !ui.ctx().wants_keyboard_input()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+            })
+        {
+            if let Some(link) = self.selected_link.take() {
+                actions.push(CanvasAction::Disconnect { link });
+            }
+        }
+
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
             let selection = Rect::from_two_pos(start, end);
             painter.rect_filled(

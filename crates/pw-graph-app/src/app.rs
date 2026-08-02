@@ -206,7 +206,7 @@ impl QpwgraphApp {
             screen: AppScreen::default(),
             dock_open: false,
             show_shortcuts: false,
-            show_preferences: std::env::var("QPW_DEBUG_PREFS").is_ok(),
+            show_preferences: false,
             preferences_tab: PreferencesTab::default(),
             show_diagnostics: false,
             rename_node: None,
@@ -307,13 +307,6 @@ impl QpwgraphApp {
             self.load_patchbay();
             return;
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::Delete)) {
-            if let Some(link) = self.canvas.selected_link() {
-                self.disconnect(link);
-            }
-            return;
-        }
-
         if ctx.input(|input| input.key_pressed(egui::Key::R)) {
             self.refresh_graph();
         }
