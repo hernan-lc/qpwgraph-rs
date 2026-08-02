@@ -168,7 +168,12 @@ impl GraphCanvas {
             })
         {
             if let Some(link) = self.selected_link.take() {
-                actions.push(CanvasAction::Disconnect { link });
+                let links = self.selected_links_for(graph, link);
+                if links.len() > 1 {
+                    actions.push(CanvasAction::DisconnectMany { links });
+                } else {
+                    actions.push(CanvasAction::Disconnect { link });
+                }
             }
         }
 
@@ -293,6 +298,45 @@ impl GraphCanvas {
 
     pub fn selected_link(&self) -> Option<LinkId> {
         self.selected_link
+    }
+
+    /// Returns the selected link and, in Easy mode, its matching node-to-node
+    /// links. Advanced mode intentionally keeps selection port-specific.
+    pub fn selected_links(&self, graph: &Graph) -> Vec<LinkId> {
+        self.selected_link
+            .map(|link| self.selected_links_for(graph, link))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn selected_links_for(&self, graph: &Graph, selected: LinkId) -> Vec<LinkId> {
+        let Some(selected_link) = graph.link(selected) else {
+            return Vec::new();
+        };
+        if self.connect_mode != crate::ConnectMode::Easy {
+            return vec![selected];
+        }
+        let (Some(selected_source), Some(selected_destination)) = (
+            graph.port(selected_link.output_port),
+            graph.port(selected_link.input_port),
+        ) else {
+            return vec![selected];
+        };
+        graph
+            .links
+            .values()
+            .filter(|link| {
+                let (Some(source), Some(destination)) =
+                    (graph.port(link.output_port), graph.port(link.input_port))
+                else {
+                    return false;
+                };
+                source.node_id == selected_source.node_id
+                    && destination.node_id == selected_destination.node_id
+                    && source.port_type == selected_source.port_type
+                    && destination.port_type == selected_destination.port_type
+            })
+            .map(|link| link.id)
+            .collect()
     }
 
     pub fn clear_selected_link(&mut self) {

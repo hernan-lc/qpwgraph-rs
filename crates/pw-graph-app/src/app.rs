@@ -6,7 +6,7 @@ use eframe::egui;
 use pw_graph_alsamidi::AlsaMidiDriver;
 #[cfg(feature = "pipewire")]
 use pw_graph_backend::PipewireDriver;
-use pw_graph_backend::{GraphDriver, InMemoryDriver, MeterPolicy};
+use pw_graph_backend::{DemoDriver, GraphDriver, MeterPolicy};
 use pw_graph_command::{
     CommandStack, ConnectCommand, ConnectManyCommand, DisconnectAllCommand, DisconnectCommand,
     DisconnectManyCommand, MoveNodesCommand,
@@ -78,7 +78,7 @@ impl QpwgraphApp {
         let mut status = i18n.text("status.backend_unavailable");
         let (mut driver, backend_name): (Box<dyn GraphDriver>, String) = if args.demo {
             status = i18n.text("status.demo_ready");
-            (Box::new(InMemoryDriver::demo()), "in-memory".into())
+            (Box::new(DemoDriver::demo()), "demo".into())
         } else {
             let mut composite = CompositeDriver::default();
             #[allow(unused_mut)]
@@ -129,17 +129,11 @@ impl QpwgraphApp {
                     Err(error) => {
                         status =
                             i18n.format("status.backend_failed", &[("error", error.to_string())]);
-                        (
-                            Box::new(InMemoryDriver::new(Graph::default())),
-                            "none".into(),
-                        )
+                        (Box::new(DemoDriver::new(Graph::default())), "none".into())
                     }
                 }
             } else {
-                (
-                    Box::new(InMemoryDriver::new(Graph::default())),
-                    "none".into(),
-                )
+                (Box::new(DemoDriver::new(Graph::default())), "none".into())
             }
         };
         // Applied before anything else touches the graph so a launch under the
@@ -491,6 +485,7 @@ impl QpwgraphApp {
                 }
                 CanvasAction::ConnectMany { pairs } => self.connect_many(pairs),
                 CanvasAction::Disconnect { link } => self.disconnect(link),
+                CanvasAction::DisconnectMany { links } => self.disconnect_many(links),
                 CanvasAction::DisconnectNode { node } => self.disconnect_node(node),
                 CanvasAction::ArrangeNodes { nodes } => self.arrange_selected_nodes(nodes),
                 CanvasAction::MoveNode { node, position } => {
@@ -618,6 +613,36 @@ impl QpwgraphApp {
             }
             Err(error) => {
                 self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
+    pub(crate) fn disconnect_many(&mut self, link_ids: Vec<LinkId>) {
+        if link_ids.is_empty() {
+            return;
+        }
+        let links: Vec<_> = link_ids
+            .iter()
+            .filter_map(|link_id| self.driver.graph().link(*link_id).cloned())
+            .collect();
+        if links.is_empty() {
+            return;
+        }
+        let count = links.len();
+        match self.commands.execute(
+            Box::new(DisconnectManyCommand::new(link_ids)),
+            self.driver.as_mut(),
+        ) {
+            Ok(()) => {
+                for link in links {
+                    self.patchbay
+                        .remove_connection(link.output_port, link.input_port);
+                }
+                self.canvas.clear_selected_link();
+                self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
+            }
+            Err(error) => {
+                self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())]);
             }
         }
     }

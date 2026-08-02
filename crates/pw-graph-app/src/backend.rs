@@ -134,7 +134,6 @@ impl GraphDriver for CompositeDriver {
         self.pipewire
             .as_ref()
             .is_some_and(|driver| driver.graph_dirty())
-            || self.alsa.is_some()
     }
     fn is_node_type(&self, node_type: pw_graph_core::NodeType) -> bool {
         self.pipewire

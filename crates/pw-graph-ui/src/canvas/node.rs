@@ -55,6 +55,14 @@ impl GraphCanvas {
         } else {
             Sense::click()
         };
+        // Keep the Easy-mode connect gesture out of the movable header. A
+        // header drag is always a node move; the body below it is the
+        // node-to-node connection target.
+        let body_rect = if easy_connect {
+            Rect::from_min_max(pos2(node_rect.left(), header.bottom()), node_rect.max)
+        } else {
+            node_rect
+        };
         let body_tooltip = if easy_connect {
             format!("{tooltip}\n\n{}", i18n.text("canvas.drag_body_connect"))
         } else {
@@ -62,7 +70,7 @@ impl GraphCanvas {
         };
         let body_response = ui
             .interact(
-                node_rect,
+                body_rect,
                 ui.id().with(("graph-node-body", node.id)),
                 body_sense,
             )
@@ -136,7 +144,12 @@ impl GraphCanvas {
         }
         if self.pending_node_connect == Some(node.id) && body_response.drag_stopped() {
             self.pending_node_connect = None;
-            if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+            if let Some(pointer) = ui.input(|input| {
+                input
+                    .pointer
+                    .hover_pos()
+                    .or_else(|| input.pointer.interact_pos())
+            }) {
                 if let Some(target) = self.node_at(rect, graph, pointer, node.id) {
                     if let Some(target_node) = graph.node(target) {
                         let pairs: Vec<_> = self
@@ -348,8 +361,13 @@ impl GraphCanvas {
             );
             let hit_rect = Rect::from_center_size(anchor, vec2(22.0, 22.0) * self.zoom.max(0.7));
             let representative_id = group.representative().id;
+            let interaction_rect = if self.connect_mode == ConnectMode::Easy {
+                row_rect
+            } else {
+                hit_rect
+            };
             let mut response = ui.interact(
-                hit_rect,
+                interaction_rect,
                 ui.id()
                     .with(("graph-port", node.id, index, representative_id)),
                 Sense::click_and_drag(),
@@ -606,7 +624,11 @@ impl GraphCanvas {
         graph
             .nodes
             .values()
-            .filter(|node| node.id != exclude && self.media_filter.matches_node(graph, node.id))
+            .filter(|node| {
+                node.id != exclude
+                    && self.media_filter.matches_node(graph, node.id)
+                    && self.search_matches_node(graph, node.id)
+            })
             .find(|node| self.node_rect(rect, graph, node).contains(point))
             .map(|node| node.id)
     }

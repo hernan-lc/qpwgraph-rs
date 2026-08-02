@@ -19,6 +19,9 @@ pub enum CanvasAction {
     Disconnect {
         link: LinkId,
     },
+    DisconnectMany {
+        links: Vec<LinkId>,
+    },
     DisconnectNode {
         node: NodeId,
     },
@@ -227,6 +230,48 @@ mod tests {
         assert_eq!(canvas.zoom, 1.0);
         assert_eq!(canvas.selected_node, None);
         assert!(canvas.selected_nodes.is_empty());
+    }
+
+    #[test]
+    fn easy_mode_selects_a_node_connection_group() {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(NodeId(1), "Source", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_node(Node::new(NodeId(2), "Sink", NodeType::PipeWire))
+            .unwrap();
+        for (id, node_id, name, direction) in [
+            (10, 1, "out_L", Direction::Source),
+            (11, 1, "out_R", Direction::Source),
+            (20, 2, "in_L", Direction::Sink),
+            (21, 2, "in_R", Direction::Sink),
+        ] {
+            graph
+                .add_port(Port::new(
+                    PortId(id),
+                    NodeId(node_id),
+                    name,
+                    direction,
+                    PortType::Audio,
+                ))
+                .unwrap();
+        }
+        graph.add_link(LinkId(1), PortId(10), PortId(20)).unwrap();
+        graph.add_link(LinkId(2), PortId(11), PortId(21)).unwrap();
+
+        let canvas = GraphCanvas {
+            connect_mode: ConnectMode::Easy,
+            selected_link: Some(LinkId(1)),
+            ..GraphCanvas::default()
+        };
+        assert_eq!(canvas.selected_links(&graph), vec![LinkId(1), LinkId(2)]);
+
+        let advanced_canvas = GraphCanvas {
+            selected_link: Some(LinkId(1)),
+            ..GraphCanvas::default()
+        };
+        assert_eq!(advanced_canvas.selected_links(&graph), vec![LinkId(1)]);
     }
 
     #[test]

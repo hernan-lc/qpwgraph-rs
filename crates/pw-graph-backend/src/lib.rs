@@ -1,5 +1,6 @@
-//! Backend abstraction. The in-memory driver makes the rest of the application
-//! deterministic and testable while a PipeWire driver is added incrementally.
+//! Backend abstraction. The demo driver makes the rest of the application
+//! deterministic and testable while the native PipeWire driver talks to the
+//! live registry.
 
 use pw_graph_core::{
     Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
@@ -134,15 +135,16 @@ pub trait GraphDriver {
     }
 }
 
-/// A small backend that behaves like a PipeWire registry from the perspective
-/// of the application. It is also useful for examples and integration tests.
+/// A deterministic demo backend that behaves like a PipeWire registry from
+/// the perspective of the application. It is useful for `--demo`, examples,
+/// and integration tests where a live PipeWire session is not available.
 #[derive(Clone, Debug, Default)]
-pub struct InMemoryDriver {
+pub struct DemoDriver {
     graph: Graph,
     next_link_id: u64,
 }
 
-impl InMemoryDriver {
+impl DemoDriver {
     pub fn new(graph: Graph) -> Self {
         let next_link_id = graph.links.keys().map(|id| id.0).max().unwrap_or(0) + 1;
         Self {
@@ -226,6 +228,9 @@ impl InMemoryDriver {
     }
 }
 
+/// Compatibility name retained for callers of the original backend API.
+pub type InMemoryDriver = DemoDriver;
+
 fn add_demo_port(
     graph: &mut Graph,
     id: u64,
@@ -247,7 +252,7 @@ fn add_demo_port(
 
 use pw_graph_core::Direction;
 
-impl GraphDriver for InMemoryDriver {
+impl GraphDriver for DemoDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         Ok(self.graph.nodes.values().cloned().collect())
     }
@@ -382,11 +387,23 @@ mod tests {
 
     #[test]
     fn demo_backend_connects_and_disconnects() {
-        let mut driver = InMemoryDriver::demo();
+        let mut driver = DemoDriver::demo();
         let link = driver.connect(PortId(1), PortId(3)).unwrap();
         assert_eq!(driver.graph().links.len(), 1);
         driver.disconnect(link.id).unwrap();
         assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn demo_backend_has_a_stable_graph_for_demo_runs() {
+        let driver = DemoDriver::demo();
+        assert_eq!(driver.graph().nodes.len(), 4);
+        assert_eq!(driver.graph().ports.len(), 6);
+        assert!(driver
+            .graph()
+            .nodes
+            .values()
+            .all(|node| node.node_type == NodeType::PipeWire));
     }
 
     #[cfg(feature = "pipewire")]

@@ -241,6 +241,7 @@ fn modal_window(id_source: &str, title: String, default_width: f32) -> egui::Win
         .collapsible(false)
         .resizable(false)
         .default_width(default_width)
+        .max_width(default_width)
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
 }
@@ -380,16 +381,17 @@ impl QpwgraphApp {
                 self.arrange_nodes();
             }
             self.show_sort_controls(ui);
-            if let Some(selected_link) = self.canvas.selected_link() {
-                if sidebar_icon_button(
+            if self.canvas.selected_link().is_some()
+                && sidebar_icon_button(
                     ui,
                     "sidebar.disconnect-selected",
                     Icon::Delete,
                     self.t("toolbar.disconnect"),
                     self.t("help.disconnect_link"),
-                ) {
-                    self.disconnect(selected_link);
-                }
+                )
+            {
+                let links = self.canvas.selected_links(self.driver.graph());
+                self.disconnect_many(links);
             }
             if !self.driver.graph().links.is_empty()
                 && sidebar_icon_button(

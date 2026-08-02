@@ -47,7 +47,9 @@ impl GraphCanvas {
             ) else {
                 continue;
             };
-            let selected = self.selected_link == Some(link.id);
+            let selected = self.selected_link.is_some_and(|selected| {
+                self.selected_links_for(graph, selected).contains(&link.id)
+            });
             let points = bezier_points(
                 source_pos,
                 destination_pos,
@@ -126,7 +128,12 @@ impl GraphCanvas {
                 self.selected_link = Some(link.id);
                 self.selected_nodes.clear();
                 self.selected_node = None;
-                actions.push(CanvasAction::Disconnect { link: link.id });
+                let links = self.selected_links_for(graph, link.id);
+                if links.len() > 1 {
+                    actions.push(CanvasAction::DisconnectMany { links });
+                } else {
+                    actions.push(CanvasAction::Disconnect { link: link.id });
+                }
             }
         }
     }

@@ -7,8 +7,8 @@ Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support.
 The code is split into small crates:
 
 - `pw-graph-core`: serializable nodes, ports, links, validation, and layout.
-- `pw-graph-backend`: the driver abstraction, demo backend, native PipeWire
-  registry/link backend, and optional audio meters.
+- `pw-graph-backend`: the driver abstraction, deterministic Demo backend,
+  native PipeWire registry/link backend, and optional audio meters.
 - `pw-graph-alsamidi`: native ALSA Sequencer enumeration and routing.
 - `pw-graph-command`: undoable connect, grouped connect, disconnect,
   disconnect-all, and node-layout commands.
@@ -51,7 +51,7 @@ cargo run -p pw-graph-app -- --demo
 cargo run -p pw-graph-app -- --lang es
 ```
 
-`--demo` starts the deterministic in-memory graph. Without it, a missing live
+`--demo` starts the deterministic demo graph. Without it, a missing live
 backend produces an empty graph and an explanatory status message.
 
 Audio meters are opt-in. They can be off, on demand (the default), or always;

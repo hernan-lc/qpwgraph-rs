@@ -607,6 +607,14 @@ impl PipewireDriver {
         {
             return Err(GraphError::IncompatiblePorts(src, dst).into());
         }
+        if self
+            .graph
+            .links
+            .values()
+            .any(|link| link.output_port == src && link.input_port == dst)
+        {
+            return Err(GraphError::DuplicateConnection(src, dst).into());
+        }
 
         let properties = pw::properties::properties! {
             "link.output.node" => output.node_id.0.to_string(),
@@ -695,11 +703,14 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
+        if !self.graph.nodes.contains_key(&node) {
+            return Err(GraphError::MissingNode(node).into());
+        }
         self.positions.insert(node, position);
         self.graph
             .nodes
             .get_mut(&node)
-            .ok_or(GraphError::MissingNode(node))?
+            .expect("node checked above")
             .position = position;
         Ok(())
     }
