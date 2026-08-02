@@ -186,6 +186,7 @@
   "shortcuts.refresh": "Refresh the live graph",
   "shortcuts.arrange": "Arrange nodes by media and direction",
   "shortcuts.thumbnail": "Toggle thumbnail view",
+  "shortcuts.pan_keyboard": "Pan the graph with arrow keys (Shift faster, Ctrl/Cmd fastest)",
   "shortcuts.filter_all": "Show all media",
   "shortcuts.filter_audio": "Show Audio only",
   "shortcuts.filter_video": "Show Video only",

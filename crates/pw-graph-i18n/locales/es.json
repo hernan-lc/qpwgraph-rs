@@ -186,6 +186,7 @@
   "shortcuts.refresh": "Actualizar el gráfico activo",
   "shortcuts.arrange": "Organizar nodos por medio y dirección",
   "shortcuts.thumbnail": "Alternar vista en miniatura",
+  "shortcuts.pan_keyboard": "Desplaza el gráfico con las flechas (Shift más rápido, Ctrl/Cmd más rápido aún)",
   "shortcuts.filter_all": "Mostrar todos los medios",
   "shortcuts.filter_audio": "Mostrar solo Audio",
   "shortcuts.filter_video": "Mostrar solo Vídeo",

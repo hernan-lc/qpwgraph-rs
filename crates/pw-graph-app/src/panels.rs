@@ -133,6 +133,10 @@ const SHORTCUT_ENTRIES: &[ShortcutEntry] = &[
         description_key: "shortcuts.thumbnail",
     },
     ShortcutEntry {
+        keys: "Arrow keys",
+        description_key: "shortcuts.pan_keyboard",
+    },
+    ShortcutEntry {
         keys: "0",
         description_key: "shortcuts.filter_all",
     },

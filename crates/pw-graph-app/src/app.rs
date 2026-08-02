@@ -380,16 +380,21 @@ impl QpwgraphApp {
             return;
         }
 
-        let (command, shift, undo, redo, save, load) = ctx.input(|input| {
-            (
-                input.modifiers.command,
-                input.modifiers.shift,
-                input.key_pressed(egui::Key::Z),
-                input.key_pressed(egui::Key::Y),
-                input.key_pressed(egui::Key::S),
-                input.key_pressed(egui::Key::O),
-            )
-        });
+        let (command, shift, undo, redo, save, load, arrow_left, arrow_right, arrow_up, arrow_down) =
+            ctx.input(|input| {
+                (
+                    input.modifiers.command,
+                    input.modifiers.shift,
+                    input.key_pressed(egui::Key::Z),
+                    input.key_pressed(egui::Key::Y),
+                    input.key_pressed(egui::Key::S),
+                    input.key_pressed(egui::Key::O),
+                    input.key_pressed(egui::Key::ArrowLeft),
+                    input.key_pressed(egui::Key::ArrowRight),
+                    input.key_pressed(egui::Key::ArrowUp),
+                    input.key_pressed(egui::Key::ArrowDown),
+                )
+            });
         if command && undo {
             if shift {
                 self.redo();
@@ -414,6 +419,27 @@ impl QpwgraphApp {
             self.load_patchbay();
             return;
         }
+        let pan_step = if command {
+            192.0
+        } else if shift {
+            96.0
+        } else {
+            48.0
+        };
+        let mut pan_delta = egui::Vec2::ZERO;
+        if arrow_left {
+            pan_delta.x -= pan_step;
+        }
+        if arrow_right {
+            pan_delta.x += pan_step;
+        }
+        if arrow_up {
+            pan_delta.y -= pan_step;
+        }
+        if arrow_down {
+            pan_delta.y += pan_step;
+        }
+        self.canvas.pan += pan_delta;
         if ctx.input(|input| input.key_pressed(egui::Key::R)) {
             self.refresh_graph();
         }
