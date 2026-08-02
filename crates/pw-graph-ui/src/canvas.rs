@@ -195,7 +195,7 @@ impl GraphCanvas {
                             ],
                         ),
                         FontId::proportional(
-                            12.0 * self.zoom * self.node_text_scale.clamp(0.75, 1.75),
+                            12.0 * self.zoom * self.node_text_scale.clamp(0.80, 2.0),
                         ),
                         Color32::LIGHT_GREEN,
                     );
@@ -358,7 +358,7 @@ impl GraphCanvas {
         }
 
         let selected = self.selected_nodes.contains(&node.id);
-        let text_scale = self.node_text_scale.clamp(0.75, 1.75);
+        let text_scale = self.node_text_scale.clamp(0.80, 2.0);
         let accent = node_color(node.node_type);
         let fill = if selected {
             Color32::from_rgb(48, 60, 76)

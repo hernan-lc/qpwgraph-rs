@@ -10,7 +10,7 @@ const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
 const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
 
 fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
-    let scale = scale.clamp(0.75, 1.75);
+    let scale = scale.clamp(0.80, 2.0);
     for font_id in ui.style_mut().text_styles.values_mut() {
         font_id.size *= scale;
     }
@@ -511,6 +511,15 @@ impl QpwgraphApp {
         });
 
         panel_section(ui, self.t("inspector.typography"), |ui| {
+            if ui
+                .small_button(self.t("inspector.typography_recommended"))
+                .on_hover_text(self.t("help.typography_recommended"))
+                .clicked()
+            {
+                self.config.ui_text_scale = 1.10;
+                self.config.panel_text_scale = 1.20;
+                self.config.node_text_scale = 1.15;
+            }
             let ui_text_label = self.t("inspector.ui_text_scale");
             let ui_text_help = self.t("help.ui_text_scale");
             scale_slider(

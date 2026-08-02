@@ -200,7 +200,7 @@ impl QpwgraphApp {
     }
 
     fn apply_ui_text_scale(&self, ctx: &egui::Context) {
-        let scale = self.config.ui_text_scale.clamp(0.75, 1.75);
+        let scale = self.config.ui_text_scale.clamp(0.80, 2.0);
         let default_text_styles = egui::Style::default().text_styles;
         ctx.style_mut(|style| {
             for (text_style, font_id) in &default_text_styles {
