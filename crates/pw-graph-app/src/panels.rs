@@ -322,6 +322,16 @@ impl QpwgraphApp {
         );
         search.on_hover_text(self.t("search.help"));
         ui.add_space(4.0);
+        if sidebar_icon_toggle_button(
+            ui,
+            "sidebar.minimap",
+            Icon::Minimap,
+            self.canvas.minimap_visible,
+            self.t("toolbar.minimap"),
+            self.t("help.minimap"),
+        ) {
+            self.canvas.minimap_visible = !self.canvas.minimap_visible;
+        }
         if self.config.toolbar {
             if sidebar_icon_button(
                 ui,

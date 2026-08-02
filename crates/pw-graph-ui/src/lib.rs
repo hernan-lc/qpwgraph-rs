@@ -136,6 +136,7 @@ pub struct GraphCanvas {
     pub sort_ports_by_name: bool,
     pub sort_ports_descending: bool,
     pub thumbnail_mode: bool,
+    pub minimap_visible: bool,
     pub repel_overlapping_nodes: bool,
     pub connect_through_nodes: bool,
     pub connect_mode: ConnectMode,
@@ -176,6 +177,7 @@ impl Default for GraphCanvas {
             sort_ports_by_name: true,
             sort_ports_descending: false,
             thumbnail_mode: false,
+            minimap_visible: false,
             repel_overlapping_nodes: false,
             connect_through_nodes: false,
             connect_mode: ConnectMode::Advanced,
@@ -230,6 +232,7 @@ mod tests {
         assert_eq!(canvas.zoom, 1.0);
         assert_eq!(canvas.selected_node, None);
         assert!(canvas.selected_nodes.is_empty());
+        assert!(!canvas.minimap_visible);
     }
 
     #[test]

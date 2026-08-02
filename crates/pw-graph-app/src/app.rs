@@ -221,6 +221,7 @@ impl QpwgraphApp {
         canvas.sort_ports_by_name = config.sort_type != "id";
         canvas.sort_ports_descending = config.sort_order == "descending";
         canvas.thumbnail_mode = config.thumbnail_view;
+        canvas.minimap_visible = config.minimap_visible;
         canvas.repel_overlapping_nodes = config.repel_overlapping_nodes;
         canvas.connect_through_nodes = config.connect_through_nodes;
         canvas.connect_mode = ConnectMode::parse(&config.connect_mode);
@@ -1001,6 +1002,7 @@ impl QpwgraphApp {
             "ascending".into()
         };
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
+        self.config.minimap_visible = self.canvas.minimap_visible;
         self.config.connect_mode = self.canvas.connect_mode.as_str().into();
         self.config.media_filter = self.canvas.media_filter.as_str().into();
         self.config.graph_search = self.canvas.search_query.clone();
@@ -1123,6 +1125,7 @@ impl eframe::App for QpwgraphApp {
         self.canvas.repel_overlapping_nodes = self.config.repel_overlapping_nodes;
         self.canvas.connect_through_nodes = self.config.connect_through_nodes;
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
+        self.config.minimap_visible = self.canvas.minimap_visible;
         self.config.connect_mode = self.canvas.connect_mode.as_str().into();
 
         if self.config.statusbar {

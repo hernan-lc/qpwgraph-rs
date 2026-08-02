@@ -27,6 +27,7 @@ pub struct AppConfig {
     /// sessions. Ambiguous duplicate names are omitted by the app.
     pub node_positions_by_name: std::collections::BTreeMap<String, [f32; 2]>,
     pub thumbnail_view: bool,
+    pub minimap_visible: bool,
     pub window_width: f32,
     pub window_height: f32,
     pub zoom: f32,
@@ -72,6 +73,7 @@ impl Default for AppConfig {
             node_positions: std::collections::BTreeMap::new(),
             node_positions_by_name: std::collections::BTreeMap::new(),
             thumbnail_view: false,
+            minimap_visible: false,
             window_width: 1100.0,
             window_height: 760.0,
             zoom: 1.0,

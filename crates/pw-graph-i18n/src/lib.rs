@@ -155,6 +155,8 @@ mod tests {
             let i18n = I18n::new(locale);
             assert_ne!(i18n.text("toolbar.refresh"), "toolbar.refresh");
             assert_ne!(i18n.text("help.refresh"), "help.refresh");
+            assert_ne!(i18n.text("toolbar.minimap"), "toolbar.minimap");
+            assert_ne!(i18n.text("help.minimap"), "help.minimap");
         }
     }
 }
