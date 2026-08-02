@@ -1,5 +1,8 @@
 use crate::app::QpwgraphApp;
-use crate::icons::{icon_button, icon_checkbox, icon_heading, icon_label, nav_icon_button, Icon};
+use crate::icons::{
+    icon_button, icon_button_enabled, icon_checkbox, icon_heading, icon_label, nav_icon_button,
+    Icon,
+};
 use egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
 use pw_graph_command::RenameCommand;
@@ -10,6 +13,8 @@ use pw_graph_ui::MediaFilter;
 const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
 const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
+const NAV_RAIL_WIDTH: f32 = 64.0;
+const FULL_PANEL_MARGIN: f32 = 8.0;
 
 fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
     let scale = scale.clamp(0.80, 2.0);
@@ -31,11 +36,13 @@ fn panel_header(ui: &mut Ui, icon: Icon, title: String, hint: String) {
 }
 
 fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&mut Ui)) {
+    let available_width = ui.available_width();
     egui::Frame::group(ui.style())
         .fill(SECTION_FILL)
         .stroke(Stroke::new(1.0_f32, SECTION_STROKE))
         .inner_margin(9.0)
         .show(ui, |ui| {
+            ui.set_min_width((available_width - 18.0).max(0.0));
             ui.label(
                 RichText::new(title)
                     .strong()
@@ -212,7 +219,10 @@ pub(crate) enum PreferencesTab {
 }
 
 fn show_backdrop(ctx: &egui::Context, id_source: &str) -> bool {
-    let screen_rect = ctx.screen_rect();
+    show_backdrop_rect(ctx, id_source, ctx.screen_rect())
+}
+
+fn show_backdrop_rect(ctx: &egui::Context, id_source: &str, rect: egui::Rect) -> bool {
     let backdrop_id = egui::Id::new(("modal-backdrop", id_source));
     // Keep the modal window above its backdrop no matter what. Clicking the
     // backdrop (to dismiss the dialog) makes egui call `move_to_top` on that
@@ -229,18 +239,37 @@ fn show_backdrop(ctx: &egui::Context, id_source: &str) -> bool {
     );
     egui::Area::new(backdrop_id)
         .order(egui::Order::Foreground)
-        .fixed_pos(screen_rect.min)
+        .fixed_pos(rect.min)
         .show(ctx, |ui| {
             let mut sense = egui::Sense::click();
             // The backdrop must receive pointer clicks, but it is not a real
             // control and must not interrupt Tab traversal inside the modal.
             sense.focusable = false;
-            let (response, painter) = ui.allocate_painter(screen_rect.size(), sense);
+            let (response, painter) = ui.allocate_painter(rect.size(), sense);
             painter.rect_filled(response.rect, 0.0, Color32::from_black_alpha(120));
             response
         })
         .inner
         .clicked()
+}
+
+fn preferences_rect(ctx: &egui::Context) -> egui::Rect {
+    let screen = ctx.screen_rect();
+    let left = screen.left() + NAV_RAIL_WIDTH + FULL_PANEL_MARGIN;
+    let top = screen.top() + FULL_PANEL_MARGIN;
+    let width = (screen.width() - NAV_RAIL_WIDTH - FULL_PANEL_MARGIN * 2.0).max(240.0);
+    let height = (screen.height() - FULL_PANEL_MARGIN * 2.0).max(260.0);
+    egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height))
+}
+
+fn full_panel_window(id_source: &str, title: String, rect: egui::Rect) -> egui::Window<'static> {
+    egui::Window::new(title)
+        .id(egui::Id::new(("modal-window", id_source)))
+        .collapsible(false)
+        .resizable(false)
+        .fixed_pos(rect.min)
+        .fixed_size(rect.size())
+        .order(egui::Order::Foreground)
 }
 
 /// Shared chrome for every dialog: fixed size, centered, non-collapsible,
@@ -270,16 +299,18 @@ fn fresh_scroll_area(id_salt: impl std::hash::Hash, max_height: f32) -> egui::Sc
 
 impl QpwgraphApp {
     pub(crate) fn show_gui_panels(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("navigation")
-            .resizable(false)
-            .default_width(64.0)
-            .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(6.0))
-            .show(ctx, |ui| {
-                apply_panel_text_scale(ui, self.config.panel_text_scale);
-                self.show_navigation(ui)
-            });
+        if !self.any_modal_open() || self.show_preferences {
+            egui::SidePanel::left("navigation")
+                .resizable(false)
+                .default_width(NAV_RAIL_WIDTH)
+                .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(6.0))
+                .show(ctx, |ui| {
+                    apply_panel_text_scale(ui, self.config.panel_text_scale);
+                    self.show_navigation(ui)
+                });
+        }
 
-        if !self.dock_open {
+        if self.any_modal_open() || !self.dock_open {
             return;
         }
         egui::SidePanel::right("screen_panel")
@@ -316,6 +347,9 @@ impl QpwgraphApp {
                     } else {
                         self.screen = screen;
                         self.dock_open = true;
+                        self.show_preferences = false;
+                        self.show_diagnostics = false;
+                        self.show_shortcuts = false;
                         self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
                     }
                 }
@@ -364,7 +398,85 @@ impl QpwgraphApp {
             ) {
                 self.toggle_shortcuts();
             }
+            self.show_sidebar_actions(ui);
         });
+    }
+
+    fn show_sidebar_actions(&mut self, ui: &mut Ui) {
+        if !self.config.toolbar && !self.config.patchbay_toolbar {
+            return;
+        }
+        ui.separator();
+        if self.config.toolbar {
+            if icon_button(
+                ui,
+                "sidebar.refresh",
+                Icon::Refresh,
+                self.t("toolbar.refresh"),
+                self.t("help.refresh"),
+            ) {
+                self.refresh_graph();
+            }
+            if icon_button_enabled(
+                ui,
+                "sidebar.undo",
+                Icon::Undo,
+                self.t("toolbar.undo"),
+                self.t("help.undo"),
+                self.commands.can_undo(),
+            ) {
+                self.undo();
+            }
+            if icon_button_enabled(
+                ui,
+                "sidebar.redo",
+                Icon::Redo,
+                self.t("toolbar.redo"),
+                self.t("help.redo"),
+                self.commands.can_redo(),
+            ) {
+                self.redo();
+            }
+        }
+        if self.config.patchbay_toolbar {
+            if icon_button(
+                ui,
+                "sidebar.save",
+                Icon::Save,
+                self.t("toolbar.save_patchbay"),
+                self.t("help.save_patchbay"),
+            ) {
+                self.save_patchbay();
+            }
+            if icon_button(
+                ui,
+                "sidebar.load",
+                Icon::Load,
+                self.t("toolbar.load_patchbay"),
+                self.t("help.load_patchbay"),
+            ) {
+                self.load_patchbay();
+            }
+            if icon_button(
+                ui,
+                "sidebar.snapshot",
+                Icon::Snapshot,
+                self.t("toolbar.snapshot"),
+                self.t("help.snapshot"),
+            ) {
+                self.snapshot_patchbay();
+            }
+            if icon_button(
+                ui,
+                "sidebar.activate",
+                Icon::Activate,
+                self.t("toolbar.activate"),
+                self.t("help.activate"),
+            ) {
+                self.activate_patchbay();
+            }
+        }
+        self.show_media_filter_sidebar(ui);
     }
 
     fn show_graph_screen(&mut self, ui: &mut Ui) {
@@ -479,12 +591,6 @@ impl QpwgraphApp {
         self.show_media_filter_combo(ui, "inspector-media-filter");
     }
 
-    pub(crate) fn show_media_filter_toolbar(&mut self, ui: &mut Ui) {
-        ui.separator();
-        ui.label(RichText::new(self.t("toolbar.media_filter")).strong());
-        self.show_media_filter_combo(ui, "toolbar-media-filter");
-    }
-
     fn show_media_filter_combo(&mut self, ui: &mut Ui, id: &str) {
         let current_filter = MediaFilter::parse(&self.config.media_filter);
         let mut selected_filter = current_filter;
@@ -502,6 +608,33 @@ impl QpwgraphApp {
         filter_response
             .response
             .on_hover_text(self.t("help.media_filter"));
+        if selected_filter != current_filter {
+            self.config.media_filter = selected_filter.as_str().into();
+            self.canvas.media_filter = selected_filter;
+        }
+    }
+
+    fn show_media_filter_sidebar(&mut self, ui: &mut Ui) {
+        ui.separator();
+        let current_filter = MediaFilter::parse(&self.config.media_filter);
+        let mut selected_filter = current_filter;
+        let response = egui::ComboBox::from_id_salt("sidebar-media-filter")
+            .selected_text(self.t(media_filter_key(current_filter)))
+            .width(48.0)
+            .show_ui(ui, |ui| {
+                for filter in MediaFilter::ALL {
+                    ui.selectable_value(
+                        &mut selected_filter,
+                        filter,
+                        self.t(media_filter_key(filter)),
+                    );
+                }
+            });
+        response.response.on_hover_text(format!(
+            "{}\n{}",
+            self.t("toolbar.media_filter"),
+            self.t("help.media_filter")
+        ));
         if selected_filter != current_filter {
             self.config.media_filter = selected_filter.as_str().into();
             self.canvas.media_filter = selected_filter;
@@ -885,11 +1018,12 @@ impl QpwgraphApp {
         if !self.show_preferences {
             return;
         }
-        if show_backdrop(ctx, "preferences") {
+        let rect = preferences_rect(ctx);
+        if show_backdrop_rect(ctx, "preferences", rect) {
             self.show_preferences = false;
             return;
         }
-        modal_window("preferences", self.t("preferences.title"), 440.0).show(ctx, |ui| {
+        full_panel_window("preferences", self.t("preferences.title"), rect).show(ctx, |ui| {
             apply_panel_text_scale(ui, self.config.panel_text_scale);
             ui.horizontal(|ui| {
                 for (tab, label_key) in [
@@ -915,10 +1049,12 @@ impl QpwgraphApp {
                 self.preferences_tab,
                 self.preferences_scroll_epoch,
             );
-            fresh_scroll_area(scroll_id, 460.0).show(ui, |ui| match self.preferences_tab {
-                PreferencesTab::Interface => self.show_preferences_interface_tab(ui),
-                PreferencesTab::Patchbay => self.show_preferences_patchbay_tab(ui),
-            });
+            fresh_scroll_area(scroll_id, ui.available_height().max(0.0))
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.preferences_tab {
+                    PreferencesTab::Interface => self.show_preferences_interface_tab(ui),
+                    PreferencesTab::Patchbay => self.show_preferences_patchbay_tab(ui),
+                });
             ui.add_space(8.0);
             if self.show_close_button(ui) {
                 self.show_preferences = false;

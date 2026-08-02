@@ -28,10 +28,10 @@ layout, routing, presentation, and status options remain separate. Each screen
 uses scrollable grouped sections and compact statistic cards; the Interface
 screen exposes independent application, panel, and node text-size controls.
 Hover any icon for its label and explanation, and use Save configuration to write immediately. The
-single action toolbar contains graph history controls and optional patchbay actions;
-the same commands are not repeated in a second menu row. Toolbar, navigation, and
-settings icons are drawn as platform-independent vector geometry rather than font
-glyphs. Use
+left navigation rail contains shared graph/history controls, optional patchbay
+actions, and the media filter, so common actions remain available while
+preferences are open. Toolbar, navigation, and settings icons are drawn as
+platform-independent vector geometry rather than font glyphs. Use
 `--demo` to force the deterministic in-memory graph.
 
 Audio ports expose a hover monitor with RMS, peak, dB, freshness, and a pin action.
@@ -110,7 +110,7 @@ sample graph is wanted.
 ## Patchbay files
 
 Files ending in `.qpwgraph` or `.xml` use the qpwgraph XML shape and resolve rules
-by node and port names; other extensions use JSON. The inspector and toolbar can
+by node and port names; other extensions use JSON. The inspector and sidebar can
 snapshot live links, activate saved links, enable exclusive activation, and
 auto-disconnect sink conflicts.
 

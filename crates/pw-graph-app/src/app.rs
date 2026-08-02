@@ -1,6 +1,5 @@
 use crate::args::Args;
 use crate::backend::CompositeDriver;
-use crate::icons::{icon_button, icon_button_enabled, Icon};
 use crate::panels::{AppScreen, PreferencesTab};
 use eframe::egui;
 #[cfg(feature = "alsa")]
@@ -251,7 +250,7 @@ impl QpwgraphApp {
         });
     }
 
-    fn refresh_graph(&mut self) {
+    pub(crate) fn refresh_graph(&mut self) {
         match self.driver.refresh() {
             Ok(nodes) => {
                 self.status = self.tf("status.refreshed", &[("count", nodes.len().to_string())])
@@ -505,7 +504,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn undo(&mut self) {
+    pub(crate) fn undo(&mut self) {
         match self.commands.undo(self.driver.as_mut()) {
             Ok(true) => self.status = self.t("status.undo_complete"),
             Ok(false) => self.status = self.t("status.nothing_to_undo"),
@@ -515,7 +514,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn redo(&mut self) {
+    pub(crate) fn redo(&mut self) {
         match self.commands.redo(self.driver.as_mut()) {
             Ok(true) => self.status = self.t("status.redo_complete"),
             Ok(false) => self.status = self.t("status.nothing_to_redo"),
@@ -525,7 +524,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn save_patchbay(&mut self) {
+    pub(crate) fn save_patchbay(&mut self) {
         match self.patchbay.save_to(&self.patchbay_file) {
             Ok(()) => {
                 self.status = self.tf(
@@ -542,7 +541,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn load_patchbay(&mut self) {
+    pub(crate) fn load_patchbay(&mut self) {
         match Patchbay::load_from(&self.patchbay_file) {
             Ok(patchbay) => {
                 self.patchbay = patchbay;
@@ -582,7 +581,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn snapshot_patchbay(&mut self) {
+    pub(crate) fn snapshot_patchbay(&mut self) {
         self.patchbay
             .snapshot_graph(self.driver.graph(), self.config.patchbay_auto_pin);
         self.status = self.tf(
@@ -705,95 +704,7 @@ impl eframe::App for QpwgraphApp {
             self.config.window_height = rect.height();
         }
 
-        if !self.any_modal_open() && (self.config.toolbar || self.config.patchbay_toolbar) {
-            egui::TopBottomPanel::top("action_toolbar")
-                .frame(
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(29, 33, 40))
-                        .inner_margin(egui::Margin::symmetric(8.0, 6.0)),
-                )
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if self.config.toolbar {
-                            if icon_button(
-                                ui,
-                                "toolbar.refresh",
-                                Icon::Refresh,
-                                self.t("toolbar.refresh"),
-                                self.t("help.refresh"),
-                            ) {
-                                self.refresh_graph();
-                            }
-                            if icon_button_enabled(
-                                ui,
-                                "toolbar.undo",
-                                Icon::Undo,
-                                self.t("toolbar.undo"),
-                                self.t("help.undo"),
-                                self.commands.can_undo(),
-                            ) {
-                                self.undo();
-                            }
-                            if icon_button_enabled(
-                                ui,
-                                "toolbar.redo",
-                                Icon::Redo,
-                                self.t("toolbar.redo"),
-                                self.t("help.redo"),
-                                self.commands.can_redo(),
-                            ) {
-                                self.redo();
-                            }
-                        }
-                        if self.config.patchbay_toolbar {
-                            if self.config.toolbar {
-                                ui.separator();
-                            }
-                            if icon_button(
-                                ui,
-                                "toolbar.save",
-                                Icon::Save,
-                                self.t("toolbar.save_patchbay"),
-                                self.t("help.save_patchbay"),
-                            ) {
-                                self.save_patchbay();
-                            }
-                            if icon_button(
-                                ui,
-                                "toolbar.load",
-                                Icon::Load,
-                                self.t("toolbar.load_patchbay"),
-                                self.t("help.load_patchbay"),
-                            ) {
-                                self.load_patchbay();
-                            }
-                            if icon_button(
-                                ui,
-                                "toolbar.snapshot",
-                                Icon::Snapshot,
-                                self.t("toolbar.snapshot"),
-                                self.t("help.snapshot"),
-                            ) {
-                                self.snapshot_patchbay();
-                            }
-                            if icon_button(
-                                ui,
-                                "toolbar.activate",
-                                Icon::Activate,
-                                self.t("toolbar.activate"),
-                                self.t("help.activate"),
-                            ) {
-                                self.activate_patchbay();
-                            }
-                        }
-                        self.show_media_filter_toolbar(ui);
-                    });
-                });
-        }
-
-        if !self.any_modal_open() {
-            self.show_gui_panels(ctx);
-        }
+        self.show_gui_panels(ctx);
 
         self.canvas.media_filter = MediaFilter::parse(&self.config.media_filter);
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
