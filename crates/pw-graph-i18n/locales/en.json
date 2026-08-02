@@ -242,6 +242,7 @@
   "canvas.node_color": "Node color",
   "canvas.reset_color": "Reset color",
   "canvas.mute_node": "Mute node",
+  "canvas.unmute_node": "Unmute node",
   "canvas.volume": "Volume",
   "canvas.audio_controls_unavailable": "Audio controls are unavailable for this node.",
   "canvas.muted": "Muted",

@@ -49,6 +49,7 @@
   "canvas.node_color": "Couleur du nœud",
   "canvas.reset_color": "Réinitialiser la couleur",
   "canvas.mute_node": "Rendre le nœud muet",
+  "canvas.unmute_node": "Réactiver le son du nœud",
   "canvas.volume": "Volume",
   "canvas.audio_controls_unavailable": "Les contrôles audio ne sont pas disponibles pour ce nœud.",
   "canvas.muted": "Muet",

@@ -2,16 +2,16 @@ use egui::{include_image, Color32, Image, ImageSource, Vec2};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NodeIcon {
-    Expand,
-    Collapse,
     More,
+    Volume,
+    VolumeMuted,
 }
 
 fn source(icon: NodeIcon) -> ImageSource<'static> {
     match icon {
-        NodeIcon::Expand => include_image!("../../assets/icons/expand.svg"),
-        NodeIcon::Collapse => include_image!("../../assets/icons/collapse.svg"),
         NodeIcon::More => include_image!("../../assets/icons/more.svg"),
+        NodeIcon::Volume => include_image!("../../assets/icons/volume.svg"),
+        NodeIcon::VolumeMuted => include_image!("../../assets/icons/volume_muted.svg"),
     }
 }
 

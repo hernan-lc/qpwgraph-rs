@@ -242,6 +242,7 @@
   "canvas.node_color": "Color del nodo",
   "canvas.reset_color": "Restablecer color",
   "canvas.mute_node": "Silenciar nodo",
+  "canvas.unmute_node": "Activar sonido del nodo",
   "canvas.volume": "Volumen",
   "canvas.audio_controls_unavailable": "Los controles de audio no están disponibles para este nodo.",
   "canvas.muted": "Silenciado",

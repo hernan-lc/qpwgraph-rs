@@ -21,6 +21,7 @@ const NODE_WIDTH: f32 = 244.0;
 const NODE_HEADER_HEIGHT: f32 = 34.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 44.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
+const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
 
 pub(super) struct NodeDrawContext<'a> {
     pub rect: Rect,
@@ -239,6 +240,7 @@ impl GraphCanvas {
         let selected = self.selected_nodes.contains(&node.id);
         let focused = body_response.has_focus() || header_response.has_focus();
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
+        let has_audio = ports.iter().any(|port| port.port_type == PortType::Audio);
         let accent = appearance
             .color
             .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
@@ -315,11 +317,27 @@ impl GraphCanvas {
             node,
             header,
             &appearance,
+            !ports.is_empty(),
             accent,
-            ports.iter().any(|port| port.port_type == PortType::Audio),
             actions,
             i18n,
         );
+
+        if has_audio && !appearance.collapsed && !self.thumbnail_mode {
+            let pointer_over_node = ui
+                .input(|input| input.pointer.hover_pos())
+                .is_some_and(|pointer| node_rect.contains(pointer));
+            self.draw_node_audio_controls(
+                ui,
+                node,
+                node_rect,
+                header,
+                selected || pointer_over_node,
+                accent,
+                actions,
+                i18n,
+            );
+        }
 
         if let Some(source_id) = self.pending_node_connect {
             if source_id == node.id {
@@ -369,8 +387,14 @@ impl GraphCanvas {
         let mut group_label_seen: HashMap<(Direction, String), usize> = HashMap::new();
 
         for (index, group) in groups.into_iter().enumerate() {
+            let controls_offset = if has_audio {
+                AUDIO_CONTROLS_HEIGHT
+            } else {
+                0.0
+            };
             let y = node_rect.top()
-                + (NODE_HEADER_HEIGHT + 13.0 + index as f32 * PORT_ROW_HEIGHT) * self.zoom;
+                + (NODE_HEADER_HEIGHT + controls_offset + 13.0 + index as f32 * PORT_ROW_HEIGHT)
+                    * self.zoom;
             let x = if group.direction == Direction::Source {
                 node_rect.right() - 12.0 * self.zoom
             } else {
@@ -576,46 +600,11 @@ impl GraphCanvas {
         node: &Node,
         header: Rect,
         appearance: &NodeAppearance,
+        can_collapse: bool,
         accent: Color32,
-        has_audio: bool,
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
     ) {
-        let collapse_rect = Rect::from_min_size(
-            pos2(
-                header.right() - 39.0 * self.zoom,
-                header.top() + 5.0 * self.zoom,
-            ),
-            vec2(17.0, 24.0) * self.zoom,
-        );
-        let collapse_response = ui.put(
-            collapse_rect,
-            egui::Button::image(icons::image(
-                if appearance.collapsed {
-                    NodeIcon::Expand
-                } else {
-                    NodeIcon::Collapse
-                },
-                vec2(12.0, 12.0) * self.zoom,
-                ui.visuals().text_color(),
-            ))
-            .frame(false),
-        );
-        let collapse_response =
-            collapse_response.on_hover_text(i18n.text(if appearance.collapsed {
-                "canvas.expand_node"
-            } else {
-                "canvas.collapse_node"
-            }));
-        if collapse_response.clicked() {
-            let mut next = appearance.clone();
-            next.collapsed = !next.collapsed;
-            actions.push(CanvasAction::SetNodeAppearance {
-                node: node.id,
-                appearance: next,
-            });
-        }
-
         let mut name_draft = self
             .node_name_drafts
             .get(&node.id)
@@ -628,14 +617,12 @@ impl GraphCanvas {
             });
         let mut working_appearance = appearance.clone();
         let mut appearance_changed = false;
-        let mut audio_state = self.node_audio_state(node.id);
-        let mut audio_changed = false;
         let menu_rect = Rect::from_min_size(
             pos2(
-                header.right() - 21.0 * self.zoom,
+                header.right() - 27.0 * self.zoom,
                 header.top() + 5.0 * self.zoom,
             ),
-            vec2(18.0, 24.0) * self.zoom,
+            vec2(22.0, 24.0) * self.zoom,
         );
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -649,20 +636,22 @@ impl GraphCanvas {
                         ui.visuals().text_color(),
                     ),
                     |ui| {
-                        if ui
-                            .button(i18n.text(if appearance.collapsed {
-                                "canvas.expand_node"
-                            } else {
-                                "canvas.collapse_node"
-                            }))
-                            .clicked()
-                        {
-                            working_appearance.collapsed = !working_appearance.collapsed;
-                            appearance_changed = true;
-                            ui.close_menu();
+                        if can_collapse {
+                            if ui
+                                .button(i18n.text(if appearance.collapsed {
+                                    "canvas.expand_node"
+                                } else {
+                                    "canvas.collapse_node"
+                                }))
+                                .clicked()
+                            {
+                                working_appearance.collapsed = !working_appearance.collapsed;
+                                appearance_changed = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
                         }
 
-                        ui.separator();
                         ui.label(i18n.text("canvas.node_name"));
                         let name_response = ui.text_edit_singleline(&mut name_draft);
                         let submit_name = name_response.lost_focus()
@@ -705,31 +694,6 @@ impl GraphCanvas {
                             appearance_changed = true;
                             ui.close_menu();
                         }
-
-                        if has_audio {
-                            ui.separator();
-                            if ui
-                                .checkbox(&mut audio_state.muted, i18n.text("canvas.mute_node"))
-                                .changed()
-                            {
-                                audio_changed = true;
-                            }
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut audio_state.volume, 0.0..=1.5)
-                                        .text(i18n.text("canvas.volume"))
-                                        .custom_formatter(|value, _| {
-                                            format!("{:.0}%", value * 100.0)
-                                        }),
-                                )
-                                .changed()
-                            {
-                                audio_changed = true;
-                            }
-                        } else {
-                            ui.separator();
-                            ui.label(i18n.text("canvas.audio_controls_unavailable"));
-                        }
                     },
                 );
             },
@@ -741,19 +705,103 @@ impl GraphCanvas {
                 appearance: working_appearance,
             });
         }
-        if audio_changed {
-            if audio_state.muted != self.node_audio_state(node.id).muted {
-                actions.push(CanvasAction::SetNodeMute {
-                    node: node.id,
-                    muted: audio_state.muted,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_node_audio_controls(
+        &mut self,
+        ui: &mut Ui,
+        node: &Node,
+        node_rect: Rect,
+        header: Rect,
+        visible: bool,
+        accent: Color32,
+        actions: &mut Vec<CanvasAction>,
+        i18n: &I18n,
+    ) {
+        if !visible {
+            return;
+        }
+
+        let control_rect = Rect::from_min_size(
+            pos2(
+                node_rect.left() + 8.0 * self.zoom,
+                header.bottom() + 5.0 * self.zoom,
+            ),
+            vec2(
+                node_rect.width() - 16.0 * self.zoom,
+                (AUDIO_CONTROLS_HEIGHT - 8.0) * self.zoom,
+            ),
+        );
+        let previous = self.node_audio_state(node.id);
+        let mut state = previous;
+        let control_scale = self.zoom.max(0.75);
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(control_rect)
+                .id_salt(("node-audio-controls", node.id)),
+            |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0 * control_scale;
+                    let mute_button_size = vec2(28.0, 28.0) * control_scale;
+                    let value_width = 36.0 * control_scale;
+                    let slider_width = (ui.available_width()
+                        - mute_button_size.x
+                        - value_width
+                        - 10.0 * control_scale)
+                        .max(28.0 * control_scale);
+                    ui.add_sized(
+                        vec2(slider_width, 20.0 * control_scale),
+                        egui::Slider::new(&mut state.volume, 0.0..=1.5).show_value(false),
+                    );
+                    ui.add_sized(
+                        vec2(value_width, 20.0 * control_scale),
+                        egui::Label::new(
+                            RichText::new(format!("{:.0}%", state.volume * 100.0))
+                                .size(10.0 * control_scale)
+                                .color(accent),
+                        ),
+                    );
+                    let icon = if state.muted {
+                        NodeIcon::VolumeMuted
+                    } else {
+                        NodeIcon::Volume
+                    };
+                    let tooltip = i18n.text(if state.muted {
+                        "canvas.unmute_node"
+                    } else {
+                        "canvas.mute_node"
+                    });
+                    let mute_response = ui
+                        .add_sized(
+                            mute_button_size,
+                            egui::Button::image(icons::image(
+                                icon,
+                                vec2(16.0, 16.0) * control_scale,
+                                ui.visuals().text_color(),
+                            ))
+                            .frame(false),
+                        )
+                        .on_hover_text(tooltip);
+                    if mute_response.clicked() {
+                        state.muted = !state.muted;
+                    }
                 });
-            }
-            if (audio_state.volume - self.node_audio_state(node.id).volume).abs() > f32::EPSILON {
-                actions.push(CanvasAction::SetNodeVolume {
-                    node: node.id,
-                    volume: audio_state.volume,
-                });
-            }
+            },
+        );
+
+        if state.muted != previous.muted {
+            actions.push(CanvasAction::SetNodeMute {
+                node: node.id,
+                muted: state.muted,
+            });
+        }
+        if (state.volume - previous.volume).abs() > f32::EPSILON {
+            actions.push(CanvasAction::SetNodeVolume {
+                node: node.id,
+                volume: state.volume,
+            });
         }
     }
 
@@ -784,7 +832,13 @@ impl GraphCanvas {
         } else {
             let ports = self.ordered_ports(graph, node);
             let port_count = super::ports::grouped_rows(self.connect_mode, &ports).len();
-            (NODE_HEADER_HEIGHT + 14.0 + port_count as f32 * PORT_ROW_HEIGHT).max(62.0)
+            let controls_height = if ports.iter().any(|port| port.port_type == PortType::Audio) {
+                AUDIO_CONTROLS_HEIGHT
+            } else {
+                0.0
+            };
+            (NODE_HEADER_HEIGHT + controls_height + 14.0 + port_count as f32 * PORT_ROW_HEIGHT)
+                .max(62.0)
         };
         vec2(NODE_WIDTH, height)
     }
@@ -831,7 +885,15 @@ impl GraphCanvas {
         Some(pos2(
             x,
             node_rect.top()
-                + (NODE_HEADER_HEIGHT + 13.0 + index as f32 * PORT_ROW_HEIGHT) * self.zoom,
+                + (NODE_HEADER_HEIGHT
+                    + if ordered.iter().any(|item| item.port_type == PortType::Audio) {
+                        AUDIO_CONTROLS_HEIGHT
+                    } else {
+                        0.0
+                    }
+                    + 13.0
+                    + index as f32 * PORT_ROW_HEIGHT)
+                    * self.zoom,
         ))
     }
 
