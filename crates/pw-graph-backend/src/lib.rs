@@ -376,6 +376,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn meter_policy_round_trips_and_defaults_safely() {
+        for policy in MeterPolicy::ALL {
+            assert_eq!(MeterPolicy::parse(policy.as_str()), policy);
+        }
+        assert_eq!(MeterPolicy::parse("OFF"), MeterPolicy::Disabled);
+        assert_eq!(MeterPolicy::parse("all"), MeterPolicy::Always);
+        // An unreadable or older config must not silently start metering
+        // everything, so anything unrecognized lands on the default.
+        assert_eq!(MeterPolicy::parse("nonsense"), MeterPolicy::default());
+        assert_eq!(MeterPolicy::default(), MeterPolicy::OnDemand);
+    }
+
+    #[test]
     fn demo_backend_connects_and_disconnects() {
         let mut driver = InMemoryDriver::demo();
         let link = driver.connect(PortId(1), PortId(3)).unwrap();
@@ -398,6 +411,54 @@ mod tests {
             .expect("PipeWire registry snapshot should succeed");
         assert!(!nodes.is_empty());
         assert!(!driver.graph().ports.is_empty());
+    }
+
+    /// Regression guard for the startup behaviour users actually noticed: the
+    /// driver used to open a capture stream against every audio node as soon as
+    /// the graph was first read, which resumed suspended devices and made the
+    /// daemon renegotiate their format.
+    #[cfg(feature = "pipewire")]
+    #[test]
+    fn native_backend_meters_nothing_until_it_is_asked_to() {
+        let Ok(mut driver) = PipewireDriver::new() else {
+            return;
+        };
+        driver.refresh().expect("registry snapshot should succeed");
+        assert_eq!(driver.active_meter_count(), 0);
+        assert!(driver.audio_meters().unwrap().is_empty());
+    }
+
+    /// Opt-in: this one attaches a real (passive, monitor-flagged) stream to a
+    /// node in the user's live session, so it is not part of a default run.
+    #[cfg(feature = "pipewire")]
+    #[test]
+    fn native_backend_attaches_and_releases_a_requested_meter() {
+        if std::env::var_os("PW_GRAPH_TEST_METERS").is_none() {
+            return;
+        }
+        let mut driver = PipewireDriver::new().expect("PipeWire daemon should be available");
+        driver.refresh().expect("registry snapshot should succeed");
+        let target = driver.graph().nodes.values().find(|node| {
+            node.ports.iter().any(|port_id| {
+                driver.graph().port(*port_id).is_some_and(|port| {
+                    port.direction.is_source() && port.port_type == PortType::Audio
+                })
+            })
+        });
+        let Some(target) = target.map(|node| node.id) else {
+            return;
+        };
+
+        driver
+            .request_meters(&BTreeSet::from([target]))
+            .expect("requesting a meter should succeed");
+        assert_eq!(driver.active_meter_count(), 1);
+
+        driver
+            .reset_audio_config()
+            .expect("releasing meters should succeed");
+        assert_eq!(driver.active_meter_count(), 0);
+        assert!(driver.audio_meters().unwrap().is_empty());
     }
 
     #[cfg(feature = "pipewire")]

@@ -243,7 +243,10 @@ impl QpwgraphApp {
         self.meter_policy = policy;
         self.canvas.metering_disabled = policy == MeterPolicy::Disabled;
         if let Err(error) = self.driver.set_meter_policy(policy) {
-            self.status = self.tf("status.meter_policy_failed", &[("error", error.to_string())]);
+            self.status = self.tf(
+                "status.meter_policy_failed",
+                &[("error", error.to_string())],
+            );
         }
     }
 

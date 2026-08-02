@@ -85,6 +85,25 @@ impl Default for GraphCanvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pw_graph_core::{Direction, Graph, Node, NodeType, Port, PortType};
+
+    /// One audio node with a single source port, as the canvas would see it.
+    fn metering_graph() -> Graph {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(NodeId(1), "Playback", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(10),
+                NodeId(1),
+                "monitor_FL",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+    }
 
     #[test]
     fn canvas_has_expected_default_view() {
@@ -92,5 +111,30 @@ mod tests {
         assert_eq!(canvas.zoom, 1.0);
         assert_eq!(canvas.selected_node, None);
         assert!(canvas.selected_nodes.is_empty());
+    }
+
+    #[test]
+    fn idle_canvas_requests_no_meters() {
+        let canvas = GraphCanvas::default();
+        assert!(canvas.requested_meter_nodes(&metering_graph()).is_empty());
+    }
+
+    #[test]
+    fn pinned_and_hovered_ports_request_their_nodes() {
+        let graph = metering_graph();
+        let mut canvas = GraphCanvas::default();
+        canvas.pinned_meter = Some(PortId(10));
+        canvas.hovered_meter_node = Some(NodeId(4));
+        assert_eq!(
+            canvas.requested_meter_nodes(&graph),
+            BTreeSet::from([NodeId(1), NodeId(4)])
+        );
+    }
+
+    #[test]
+    fn a_pinned_port_that_left_the_graph_requests_nothing() {
+        let mut canvas = GraphCanvas::default();
+        canvas.pinned_meter = Some(PortId(999));
+        assert!(canvas.requested_meter_nodes(&metering_graph()).is_empty());
     }
 }

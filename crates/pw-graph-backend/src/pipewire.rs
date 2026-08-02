@@ -149,7 +149,9 @@ impl PipewireDriver {
                             .unwrap_or("PipeWire node")
                             .to_owned();
                         let media_class = props.get(MEDIA_CLASS).unwrap_or_default().to_owned();
-                        let serial = props.get(OBJECT_SERIAL).and_then(|value| value.parse().ok());
+                        let serial = props
+                            .get(OBJECT_SERIAL)
+                            .and_then(|value| value.parse().ok());
                         state.nodes.insert(
                             global.id,
                             NodeRecord {
@@ -376,6 +378,13 @@ impl PipewireDriver {
                 .filter(|node_id| measurable.contains(node_id))
                 .collect(),
         }
+    }
+
+    /// Number of live metering streams. Tests use this to prove that a plain
+    /// launch attaches nothing to the user's audio graph.
+    #[cfg(test)]
+    pub(crate) fn active_meter_count(&self) -> usize {
+        self.meters.len()
     }
 
     /// Drop request entries that have outlived [`METER_LINGER`].
