@@ -10,6 +10,8 @@ interaction ID to its canvas and graph item.
 The desktop shell is modularized: `main.rs` is a small entry point, while
 `app.rs`, `args.rs`, `backend.rs`, `panels.rs`, and `tray.rs` own application
 state, CLI parsing, backend composition, screen panels, and tray integration.
+The backend’s PipeWire implementation, patchbay XML support, and canvas
+rendering are also separated into `pipewire.rs`, `xml.rs`, and `canvas.rs`.
 The GUI uses a navigation rail with separate Graph, Patchbay, Interface, and
 Diagnostics screens instead of placing every option in one inspector column.
 

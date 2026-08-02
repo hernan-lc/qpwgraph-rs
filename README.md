@@ -6,13 +6,13 @@ ALSA Sequencer MIDI support.
 The workspace provides:
 
 - `pw-graph-core`: serializable nodes, ports, links, validation, and graph operations.
-- `pw-graph-backend`: a driver trait, deterministic demo backend, and native PipeWire registry/link backend.
+- `pw-graph-backend`: a driver trait, deterministic demo backend, and native PipeWire registry/link backend. The native driver is isolated in `pipewire.rs`.
 - `pw-graph-alsamidi`: native ALSA Sequencer enumeration and connection backend.
 - `pw-graph-command`: connect, disconnect, and rename commands with undo/redo.
-- `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation.
+- `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation. XML serialization/parsing is isolated in `xml.rs`.
 - `pw-graph-config`: TOML application settings and XDG config path helpers.
 - `pw-graph-i18n`: catalog-based English/Spanish localization with fallback.
-- `pw-graph-ui`: egui graph canvas, drag-to-connect, selection, moving, sorting, and thumbnail view.
+- `pw-graph-ui`: egui graph canvas, drag-to-connect, selection, moving, sorting, and thumbnail view. Canvas interaction/rendering is isolated in `canvas.rs`.
 - `pw-graph-app`: a runnable egui desktop shell, backend selection, patchbay controls, localization, and CLI flags. Its application state, argument parsing, composite backend, tray integration, and GUI panels live in separate modules.
 
 ## Run
