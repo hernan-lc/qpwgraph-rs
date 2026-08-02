@@ -12,7 +12,6 @@ const PANEL_SIZE: egui::Vec2 = vec2(238.0, 164.0);
 const PANEL_MARGIN: f32 = 12.0;
 const INNER_MARGIN: f32 = 8.0;
 const TITLE_HEIGHT: f32 = 17.0;
-const NODE_SIZE: egui::Vec2 = vec2(244.0, 62.0);
 
 fn extend_rect(bounds: &mut Option<Rect>, candidate: Rect) {
     *bounds = Some(match *bounds {
@@ -30,15 +29,24 @@ fn extend_rect(bounds: &mut Option<Rect>, candidate: Rect) {
     });
 }
 
-fn node_accent(graph: &Graph, node_id: NodeId, node_type: NodeType) -> Color32 {
-    graph
-        .node(node_id)
-        .and_then(|node| {
-            node.ports
-                .iter()
-                .filter_map(|port_id| graph.port(*port_id))
-                .map(|port| port_color(port.port_type, port_role(port)))
-                .next()
+fn node_accent(
+    canvas: &GraphCanvas,
+    graph: &Graph,
+    node_id: NodeId,
+    node_type: NodeType,
+) -> Color32 {
+    let appearance = canvas.node_appearance(node_id);
+    appearance
+        .color
+        .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
+        .or_else(|| {
+            graph.node(node_id).and_then(|node| {
+                node.ports
+                    .iter()
+                    .filter_map(|port_id| graph.port(*port_id))
+                    .map(|port| port_color(port.port_type, port_role(port)))
+                    .next()
+            })
         })
         .unwrap_or(match node_type {
             NodeType::PipeWire => Color32::from_rgb(91, 172, 224),
@@ -113,7 +121,10 @@ impl GraphCanvas {
         {
             extend_rect(
                 &mut scene_bounds,
-                Rect::from_min_size(pos2(node.position[0], node.position[1]), NODE_SIZE),
+                Rect::from_min_size(
+                    pos2(node.position[0], node.position[1]),
+                    self.node_scene_size(graph, node),
+                ),
             );
         }
         if scene_bounds.is_none() {
@@ -159,10 +170,14 @@ impl GraphCanvas {
             {
                 continue;
             }
-            let source_center =
-                map_point(pos2(source.position[0], source.position[1]) + NODE_SIZE * 0.5);
-            let destination_center =
-                map_point(pos2(destination.position[0], destination.position[1]) + NODE_SIZE * 0.5);
+            let source_center = map_point(
+                pos2(source.position[0], source.position[1])
+                    + self.node_scene_size(graph, source) * 0.5,
+            );
+            let destination_center = map_point(
+                pos2(destination.position[0], destination.position[1])
+                    + self.node_scene_size(graph, destination) * 0.5,
+            );
             minimap_painter.line_segment(
                 [source_center, destination_center],
                 Stroke::new(1.0_f32, link_color(output.port_type, port_role(output))),
@@ -176,14 +191,14 @@ impl GraphCanvas {
         {
             let node_rect = map_rect_for_scene(Rect::from_min_size(
                 pos2(node.position[0], node.position[1]),
-                NODE_SIZE,
+                self.node_scene_size(graph, node),
             ));
             let fill = if self.selected_nodes.contains(&node.id) {
                 Color32::from_rgb(78, 112, 145)
             } else {
                 Color32::from_rgb(48, 58, 72)
             };
-            let accent = node_accent(graph, node.id, node.node_type);
+            let accent = node_accent(self, graph, node.id, node.node_type);
             minimap_painter.rect(node_rect, 2.0, fill, Stroke::new(1.0_f32, accent));
             minimap_painter.rect_filled(
                 Rect::from_min_max(

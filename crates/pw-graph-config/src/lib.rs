@@ -16,6 +16,13 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct NodeViewConfig {
+    pub collapsed: bool,
+    pub custom_name: Option<String>,
+    pub color: Option<[u8; 4]>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -26,6 +33,9 @@ pub struct AppConfig {
     /// lets a saved layout survive PipeWire global node IDs changing between
     /// sessions. Ambiguous duplicate names are omitted by the app.
     pub node_positions_by_name: std::collections::BTreeMap<String, [f32; 2]>,
+    /// Visual node overrides keyed by the same stable backend-independent key
+    /// as the saved layout.
+    pub node_view_by_name: std::collections::BTreeMap<String, NodeViewConfig>,
     pub thumbnail_view: bool,
     pub minimap_visible: bool,
     pub window_width: f32,
@@ -72,6 +82,7 @@ impl Default for AppConfig {
             language: "en".into(),
             node_positions: std::collections::BTreeMap::new(),
             node_positions_by_name: std::collections::BTreeMap::new(),
+            node_view_by_name: std::collections::BTreeMap::new(),
             thumbnail_view: false,
             minimap_visible: false,
             window_width: 1100.0,
@@ -162,6 +173,14 @@ mod tests {
         expected
             .node_positions_by_name
             .insert("PipeWire:Capture".into(), [120.5, -18.0]);
+        expected.node_view_by_name.insert(
+            "PipeWire:Capture".into(),
+            NodeViewConfig {
+                collapsed: true,
+                custom_name: Some("Microphone".into()),
+                color: Some([82, 207, 133, 255]),
+            },
+        );
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();

@@ -32,6 +32,7 @@ const AUDIO_CHANNEL: &str = "audio.channel";
 const PORT_DIRECTION: &str = "port.direction";
 const LINK_OUTPUT_PORT: &str = "link.output.port";
 const LINK_INPUT_PORT: &str = "link.input.port";
+const NODE_INTERFACE_VERSION: u32 = 3;
 
 /// Node name given to our own metering streams. They are helper objects, so
 /// they are filtered back out of the graph the UI renders.
@@ -168,6 +169,7 @@ pub struct PipewireDriver {
     epoch: Instant,
     graph: Graph,
     positions: BTreeMap<NodeId, [f32; 2]>,
+    audio_controls: BTreeMap<NodeId, NodeAudioControl>,
     /// Manual disconnects are kept as stable endpoint pairs. WirePlumber may
     /// recreate an application's link when it resumes; the next synchronized
     /// snapshot removes only those links the user explicitly deleted.
@@ -294,6 +296,7 @@ impl PipewireDriver {
             epoch: Instant::now(),
             graph: Graph::default(),
             positions: BTreeMap::new(),
+            audio_controls: BTreeMap::new(),
             blocked_connections: Vec::new(),
         };
 
@@ -764,6 +767,66 @@ impl PipewireDriver {
         self.rebuild_graph_locked()?;
         Ok(existing)
     }
+
+    fn set_node_props_locked(
+        &self,
+        node: NodeId,
+        properties: Vec<pw::spa::pod::Property>,
+    ) -> BackendResult<()> {
+        let object = pw::registry::GlobalObject {
+            id: node.0 as u32,
+            permissions: pw::permissions::PermissionFlags::empty(),
+            type_: pw::types::ObjectType::Node,
+            // pipewire-rs keeps ObjectType::client_version private; version 3
+            // is the public node interface version used by pipewire 0.8.
+            version: NODE_INTERFACE_VERSION,
+            props: None::<pw::properties::Properties>,
+        };
+        let proxy = self
+            .registry()?
+            .bind::<pw::node::Node, _>(&object)
+            .map_err(|error| native_error("PipeWire node binding", error))?;
+        let value = pw::spa::pod::Value::Object(pw::spa::pod::Object {
+            type_: pw::spa::utils::SpaTypes::ObjectParamProps.as_raw(),
+            id: ParamType::Props.as_raw(),
+            properties,
+        });
+        let pod_bytes = PodSerializer::serialize(Cursor::new(Vec::new()), &value)
+            .map_err(|error| native_error("PipeWire node properties serialization", error))?
+            .0
+            .into_inner();
+        let pod = Pod::from_bytes(&pod_bytes).ok_or_else(|| {
+            BackendError::Native("could not serialize PipeWire node properties".into())
+        })?;
+        proxy.set_param(ParamType::Props, 0, &pod);
+        drop(proxy);
+        self.roundtrip_locked()
+    }
+
+    fn set_node_mute_locked(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        self.set_node_props_locked(
+            node,
+            vec![pw::spa::pod::Property::new(
+                pw::spa::sys::SPA_PROP_mute,
+                pw::spa::pod::Value::Bool(muted),
+            )],
+        )?;
+        self.audio_controls.entry(node).or_default().muted = muted;
+        Ok(())
+    }
+
+    fn set_node_volume_locked(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        let volume = volume.clamp(0.0, 1.5);
+        self.set_node_props_locked(
+            node,
+            vec![pw::spa::pod::Property::new(
+                pw::spa::sys::SPA_PROP_volume,
+                pw::spa::pod::Value::Float(volume),
+            )],
+        )?;
+        self.audio_controls.entry(node).or_default().volume = volume;
+        Ok(())
+    }
 }
 
 impl Drop for PipewireDriver {
@@ -834,6 +897,26 @@ impl GraphDriver for PipewireDriver {
             .expect("node checked above")
             .position = position;
         Ok(())
+    }
+
+    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        if !self.graph.nodes.contains_key(&node) {
+            return Err(GraphError::MissingNode(node).into());
+        }
+        let loop_for_mute = self.thread_loop.clone();
+        let _guard = loop_for_mute.lock();
+        self.roundtrip_locked()?;
+        self.set_node_mute_locked(node, muted)
+    }
+
+    fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        if !self.graph.nodes.contains_key(&node) {
+            return Err(GraphError::MissingNode(node).into());
+        }
+        let loop_for_volume = self.thread_loop.clone();
+        let _guard = loop_for_volume.lock();
+        self.roundtrip_locked()?;
+        self.set_node_volume_locked(node, volume)
     }
 
     fn graph(&self) -> &Graph {

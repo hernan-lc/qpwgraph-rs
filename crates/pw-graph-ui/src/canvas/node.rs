@@ -1,7 +1,7 @@
 //! Rendering and interaction for a single node: header dragging, whole-node
 //! Easy-mode connect drags, and the port/group rows underneath.
 
-use crate::{CanvasAction, ConnectMode, GraphCanvas, NodeId, PortId};
+use crate::{CanvasAction, ConnectMode, GraphCanvas, NodeAppearance, NodeId, PortId};
 use egui::{
     pos2, vec2, Color32, FontId, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
@@ -18,6 +18,7 @@ use super::ports::{
 
 const NODE_WIDTH: f32 = 244.0;
 const NODE_HEADER_HEIGHT: f32 = 34.0;
+const COLLAPSED_NODE_HEIGHT: f32 = 44.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 
 pub(super) struct NodeDrawContext<'a> {
@@ -52,6 +53,7 @@ impl GraphCanvas {
         );
         let tooltip = node_tooltip(node, &ports, i18n);
         let easy_connect = self.connect_mode == ConnectMode::Easy;
+        let appearance = self.node_appearance(node.id);
         let disconnect_node_label = i18n.text(if easy_connect {
             "canvas.disconnect_node_easy"
         } else {
@@ -236,9 +238,14 @@ impl GraphCanvas {
         let selected = self.selected_nodes.contains(&node.id);
         let focused = body_response.has_focus() || header_response.has_focus();
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
-        let accent = dominant_port(&ports)
-            .map(|port| port_color(port.port_type, port_role(port)))
-            .unwrap_or_else(|| node_color(node.node_type));
+        let accent = appearance
+            .color
+            .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
+            .unwrap_or_else(|| {
+                dominant_port(&ports)
+                    .map(|port| port_color(port.port_type, port_role(port)))
+                    .unwrap_or_else(|| node_color(node.node_type))
+            });
         let fill = if selected {
             Color32::from_rgb(48, 60, 76)
         } else {
@@ -283,24 +290,34 @@ impl GraphCanvas {
         painter.text(
             header.left_center() + vec2(12.0 * self.zoom, 0.0),
             egui::Align2::LEFT_CENTER,
-            compact_label(&display_node_name(&node.name, i18n), 22),
+            compact_label(
+                &display_node_name(
+                    appearance.custom_name.as_deref().unwrap_or(&node.name),
+                    i18n,
+                ),
+                18,
+            ),
             FontId::proportional(13.0 * self.zoom * text_scale),
             Color32::WHITE,
         );
         if !ports.is_empty() {
             painter.text(
-                pos2(header.right() - 28.0 * self.zoom, header.center().y),
+                pos2(header.right() - 49.0 * self.zoom, header.center().y),
                 egui::Align2::RIGHT_CENTER,
                 format!("{inputs}/{outputs}"),
                 FontId::proportional(10.0 * self.zoom * text_scale),
                 Color32::from_rgb(178, 193, 210),
             );
         }
-        paint_drag_grip(
-            &painter,
-            pos2(header.right() - 10.0 * self.zoom, header.center().y),
-            self.zoom,
-            Color32::from_rgb(174, 189, 204),
+        self.draw_node_header_controls(
+            ui,
+            node,
+            header,
+            &appearance,
+            accent,
+            ports.iter().any(|port| port.port_type == PortType::Audio),
+            actions,
+            i18n,
         );
 
         if let Some(source_id) = self.pending_node_connect {
@@ -337,7 +354,7 @@ impl GraphCanvas {
             }
         }
 
-        if self.thumbnail_mode {
+        if self.thumbnail_mode || appearance.collapsed {
             return;
         }
 
@@ -551,6 +568,176 @@ impl GraphCanvas {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn draw_node_header_controls(
+        &mut self,
+        ui: &mut Ui,
+        node: &Node,
+        header: Rect,
+        appearance: &NodeAppearance,
+        accent: Color32,
+        has_audio: bool,
+        actions: &mut Vec<CanvasAction>,
+        i18n: &I18n,
+    ) {
+        let collapse_rect = Rect::from_min_size(
+            pos2(
+                header.right() - 39.0 * self.zoom,
+                header.top() + 5.0 * self.zoom,
+            ),
+            vec2(17.0, 24.0) * self.zoom,
+        );
+        let collapse_response = ui.put(
+            collapse_rect,
+            egui::Button::new(if appearance.collapsed { "▸" } else { "▾" }).frame(false),
+        );
+        let collapse_response =
+            collapse_response.on_hover_text(i18n.text(if appearance.collapsed {
+                "canvas.expand_node"
+            } else {
+                "canvas.collapse_node"
+            }));
+        if collapse_response.clicked() {
+            let mut next = appearance.clone();
+            next.collapsed = !next.collapsed;
+            actions.push(CanvasAction::SetNodeAppearance {
+                node: node.id,
+                appearance: next,
+            });
+        }
+
+        let mut name_draft = self
+            .node_name_drafts
+            .get(&node.id)
+            .cloned()
+            .unwrap_or_else(|| {
+                appearance
+                    .custom_name
+                    .clone()
+                    .unwrap_or_else(|| node.name.clone())
+            });
+        let mut working_appearance = appearance.clone();
+        let mut appearance_changed = false;
+        let mut audio_state = self.node_audio_state(node.id);
+        let mut audio_changed = false;
+        let menu_rect = Rect::from_min_size(
+            pos2(
+                header.right() - 21.0 * self.zoom,
+                header.top() + 5.0 * self.zoom,
+            ),
+            vec2(18.0, 24.0) * self.zoom,
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(menu_rect)
+                .id_salt(("node-options", node.id)),
+            |ui| {
+                ui.menu_button("⋮", |ui| {
+                    if ui
+                        .button(i18n.text(if appearance.collapsed {
+                            "canvas.expand_node"
+                        } else {
+                            "canvas.collapse_node"
+                        }))
+                        .clicked()
+                    {
+                        working_appearance.collapsed = !working_appearance.collapsed;
+                        appearance_changed = true;
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+                    ui.label(i18n.text("canvas.node_name"));
+                    let name_response = ui.text_edit_singleline(&mut name_draft);
+                    let submit_name = name_response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button(i18n.text("canvas.apply_name")).clicked() || submit_name {
+                        let name = name_draft.trim();
+                        working_appearance.custom_name = if name.is_empty() {
+                            None
+                        } else if name == node.name {
+                            None
+                        } else {
+                            Some(name.to_owned())
+                        };
+                        appearance_changed = true;
+                        ui.close_menu();
+                    }
+                    if ui.button(i18n.text("canvas.reset_name")).clicked() {
+                        name_draft = node.name.clone();
+                        working_appearance.custom_name = None;
+                        appearance_changed = true;
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(i18n.text("canvas.node_color"));
+                        let mut color = working_appearance
+                            .color
+                            .unwrap_or_else(|| accent.to_array());
+                        if ui
+                            .color_edit_button_srgba_unmultiplied(&mut color)
+                            .changed()
+                        {
+                            working_appearance.color = Some(color);
+                            appearance_changed = true;
+                        }
+                    });
+                    if ui.button(i18n.text("canvas.reset_color")).clicked() {
+                        working_appearance.color = None;
+                        appearance_changed = true;
+                        ui.close_menu();
+                    }
+
+                    if has_audio {
+                        ui.separator();
+                        if ui
+                            .checkbox(&mut audio_state.muted, i18n.text("canvas.mute_node"))
+                            .changed()
+                        {
+                            audio_changed = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut audio_state.volume, 0.0..=1.5)
+                                    .text(i18n.text("canvas.volume"))
+                                    .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+                            )
+                            .changed()
+                        {
+                            audio_changed = true;
+                        }
+                    } else {
+                        ui.separator();
+                        ui.label(i18n.text("canvas.audio_controls_unavailable"));
+                    }
+                });
+            },
+        );
+        self.node_name_drafts.insert(node.id, name_draft);
+        if appearance_changed {
+            actions.push(CanvasAction::SetNodeAppearance {
+                node: node.id,
+                appearance: working_appearance,
+            });
+        }
+        if audio_changed {
+            if audio_state.muted != self.node_audio_state(node.id).muted {
+                actions.push(CanvasAction::SetNodeMute {
+                    node: node.id,
+                    muted: audio_state.muted,
+                });
+            }
+            if (audio_state.volume - self.node_audio_state(node.id).volume).abs() > f32::EPSILON {
+                actions.push(CanvasAction::SetNodeVolume {
+                    node: node.id,
+                    volume: audio_state.volume,
+                });
+            }
+        }
+    }
+
     pub(super) fn ordered_ports<'a>(&self, graph: &'a Graph, node: &Node) -> Vec<&'a Port> {
         let mut ports: Vec<&Port> = node
             .ports
@@ -570,19 +757,21 @@ impl GraphCanvas {
         ports
     }
 
-    pub(super) fn node_rect(&self, rect: Rect, graph: &Graph, node: &Node) -> Rect {
-        let port_count = if self.thumbnail_mode {
-            0
-        } else {
-            let ports = self.ordered_ports(graph, node);
-            super::ports::grouped_rows(self.connect_mode, &ports).len()
-        };
-        let width = NODE_WIDTH * self.zoom;
+    pub(super) fn node_scene_size(&self, graph: &Graph, node: &Node) -> Vec2 {
         let height = if self.thumbnail_mode {
             62.0
+        } else if self.node_appearance(node.id).collapsed {
+            COLLAPSED_NODE_HEIGHT
         } else {
+            let ports = self.ordered_ports(graph, node);
+            let port_count = super::ports::grouped_rows(self.connect_mode, &ports).len();
             (NODE_HEADER_HEIGHT + 14.0 + port_count as f32 * PORT_ROW_HEIGHT).max(62.0)
-        } * self.zoom;
+        };
+        vec2(NODE_WIDTH, height)
+    }
+
+    pub(super) fn node_rect(&self, rect: Rect, graph: &Graph, node: &Node) -> Rect {
+        let size = self.node_scene_size(graph, node) * self.zoom;
         let position = self
             .dragging_origin
             .get(&node.id)
@@ -596,7 +785,7 @@ impl GraphCanvas {
             .unwrap_or(node.position);
         let top_left =
             rect.left_top() + self.pan + vec2(position[0] * self.zoom, position[1] * self.zoom);
-        Rect::from_min_size(top_left, vec2(width, height))
+        Rect::from_min_size(top_left, size)
     }
 
     pub(super) fn port_anchor(&self, rect: Rect, graph: &Graph, port: &Port) -> Option<Pos2> {
@@ -607,6 +796,14 @@ impl GraphCanvas {
             .iter()
             .position(|row| row.iter().any(|item| item.id == port.id))?;
         let node_rect = self.node_rect(rect, graph, node);
+        if self.node_appearance(node.id).collapsed {
+            let x = if port.direction == Direction::Source {
+                node_rect.right() - 12.0 * self.zoom
+            } else {
+                node_rect.left() + 12.0 * self.zoom
+            };
+            return Some(pos2(x, node_rect.center().y));
+        }
         let x = if port.direction == Direction::Source {
             node_rect.right() - 12.0 * self.zoom
         } else {
@@ -725,18 +922,5 @@ fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
         NodeType::PipeWire => i18n.text("canvas.node_type_pipewire"),
         NodeType::AlsaMidi => i18n.text("canvas.node_type_alsa_midi"),
         NodeType::Unknown => i18n.text("canvas.node_type_unknown"),
-    }
-}
-
-fn paint_drag_grip(painter: &egui::Painter, center: Pos2, zoom: f32, color: Color32) {
-    let spacing = 3.0 * zoom;
-    for column in [-0.5_f32, 0.5] {
-        for row in [-1.0_f32, 0.0, 1.0] {
-            painter.circle_filled(
-                center + vec2(column * spacing, row * spacing),
-                0.9 * zoom,
-                color,
-            );
-        }
     }
 }

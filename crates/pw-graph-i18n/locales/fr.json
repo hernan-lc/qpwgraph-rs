@@ -40,5 +40,20 @@
   "patchbay.output": "Sortie",
   "patchbay.input": "Entrée",
   "canvas.disconnect_node": "Déconnecter toutes les connexions du nœud",
-  "canvas.arrange_selection": "Organiser la sélection"
+  "canvas.arrange_selection": "Organiser la sélection",
+  "canvas.expand_node": "Développer le nœud",
+  "canvas.collapse_node": "Réduire le nœud",
+  "canvas.node_name": "Nom du nœud",
+  "canvas.apply_name": "Appliquer le nom",
+  "canvas.reset_name": "Réinitialiser le nom",
+  "canvas.node_color": "Couleur du nœud",
+  "canvas.reset_color": "Réinitialiser la couleur",
+  "canvas.mute_node": "Rendre le nœud muet",
+  "canvas.volume": "Volume",
+  "canvas.audio_controls_unavailable": "Les contrôles audio ne sont pas disponibles pour ce nœud.",
+  "canvas.muted": "Muet",
+  "canvas.unmuted": "Son activé",
+  "status.node_mute_changed": "État audio du nœud : {state}",
+  "status.node_volume_changed": "Volume du nœud : {volume}",
+  "status.node_control_failed": "Échec du contrôle audio du nœud : {error}"
 }

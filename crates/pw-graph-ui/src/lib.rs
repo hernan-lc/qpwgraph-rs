@@ -7,6 +7,32 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod canvas;
 
+/// User-facing appearance overrides for a node. The backend keeps the native
+/// node identity and name; this state controls how the node is presented in
+/// the canvas and can be persisted by the application.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NodeAppearance {
+    pub collapsed: bool,
+    pub custom_name: Option<String>,
+    pub color: Option<[u8; 4]>,
+}
+
+/// Local UI mirror of the node's audio controls.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeAudioState {
+    pub muted: bool,
+    pub volume: f32,
+}
+
+impl Default for NodeAudioState {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            volume: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasAction {
     Connect {
@@ -27,6 +53,18 @@ pub enum CanvasAction {
     },
     ArrangeNodes {
         nodes: Vec<NodeId>,
+    },
+    SetNodeAppearance {
+        node: NodeId,
+        appearance: NodeAppearance,
+    },
+    SetNodeMute {
+        node: NodeId,
+        muted: bool,
+    },
+    SetNodeVolume {
+        node: NodeId,
+        volume: f32,
     },
     MoveNode {
         node: NodeId,
@@ -152,6 +190,9 @@ pub struct GraphCanvas {
     /// so the meter popover can say so instead of claiming no data exists.
     pub metering_disabled: bool,
     peak_hold: BTreeMap<NodeId, f32>,
+    node_appearances: BTreeMap<NodeId, NodeAppearance>,
+    node_audio: BTreeMap<NodeId, NodeAudioState>,
+    node_name_drafts: BTreeMap<NodeId, String>,
     /// Output ports of an in-progress connection drag. A single-port row
     /// (always the case in Advanced mode) holds one id; an Easy-mode grouped
     /// row holds every channel in that group.
@@ -189,6 +230,9 @@ impl Default for GraphCanvas {
             hovered_meter_node: None,
             metering_disabled: false,
             peak_hold: BTreeMap::new(),
+            node_appearances: BTreeMap::new(),
+            node_audio: BTreeMap::new(),
+            node_name_drafts: BTreeMap::new(),
             pending_outputs: None,
             pending_node_connect: None,
             selected_node: None,
@@ -199,6 +243,35 @@ impl Default for GraphCanvas {
             dragging_node: None,
             dragging_origin: BTreeMap::new(),
             drag_delta: Vec2::ZERO,
+        }
+    }
+}
+
+impl GraphCanvas {
+    pub fn node_appearance(&self, node_id: NodeId) -> NodeAppearance {
+        self.node_appearances
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_node_appearance(&mut self, node_id: NodeId, appearance: NodeAppearance) {
+        if appearance == NodeAppearance::default() {
+            self.node_appearances.remove(&node_id);
+        } else {
+            self.node_appearances.insert(node_id, appearance);
+        }
+    }
+
+    pub fn node_audio_state(&self, node_id: NodeId) -> NodeAudioState {
+        self.node_audio.get(&node_id).copied().unwrap_or_default()
+    }
+
+    pub fn set_node_audio_state(&mut self, node_id: NodeId, state: NodeAudioState) {
+        if state == NodeAudioState::default() {
+            self.node_audio.remove(&node_id);
+        } else {
+            self.node_audio.insert(node_id, state);
         }
     }
 }
@@ -233,6 +306,28 @@ mod tests {
         assert_eq!(canvas.selected_node, None);
         assert!(canvas.selected_nodes.is_empty());
         assert!(!canvas.minimap_visible);
+    }
+
+    #[test]
+    fn node_view_apis_round_trip_and_clear_defaults() {
+        let mut canvas = GraphCanvas::default();
+        let node = NodeId(7);
+        let appearance = NodeAppearance {
+            collapsed: true,
+            custom_name: Some("Microphone".into()),
+            color: Some([82, 207, 133, 255]),
+        };
+        canvas.set_node_appearance(node, appearance.clone());
+        assert_eq!(canvas.node_appearance(node), appearance);
+        canvas.set_node_appearance(node, NodeAppearance::default());
+        assert_eq!(canvas.node_appearance(node), NodeAppearance::default());
+
+        let audio = NodeAudioState {
+            muted: true,
+            volume: 0.5,
+        };
+        canvas.set_node_audio_state(node, audio);
+        assert_eq!(canvas.node_audio_state(node), audio);
     }
 
     #[test]

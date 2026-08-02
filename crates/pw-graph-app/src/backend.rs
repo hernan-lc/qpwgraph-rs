@@ -127,6 +127,40 @@ impl GraphDriver for CompositeDriver {
         Ok(())
     }
 
+    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> pw_graph_backend::BackendResult<()> {
+        let alsa = 1_u64 << 63;
+        if node.0 & alsa != 0 {
+            return Err(pw_graph_backend::BackendError::Unsupported(
+                "ALSA MIDI nodes do not expose audio mute".into(),
+            ));
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .set_node_mute(node, muted)
+    }
+
+    fn set_node_volume(
+        &mut self,
+        node: NodeId,
+        volume: f32,
+    ) -> pw_graph_backend::BackendResult<()> {
+        let alsa = 1_u64 << 63;
+        if node.0 & alsa != 0 {
+            return Err(pw_graph_backend::BackendError::Unsupported(
+                "ALSA MIDI nodes do not expose audio volume".into(),
+            ));
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .set_node_volume(node, volume)
+    }
+
     fn graph(&self) -> &Graph {
         &self.graph
     }

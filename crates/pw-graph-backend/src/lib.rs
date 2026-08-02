@@ -5,7 +5,7 @@
 use pw_graph_core::{
     Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortKey, PortType,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// How freely a backend may open helper streams to measure audio levels.
@@ -79,6 +79,22 @@ pub struct AudioMeter {
     /// Milliseconds since the backend received the last audio buffer.
     pub age_ms: u32,
     pub available: bool,
+}
+
+/// Audio controls exposed by a graph node when its backend supports them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeAudioControl {
+    pub muted: bool,
+    pub volume: f32,
+}
+
+impl Default for NodeAudioControl {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            volume: 1.0,
+        }
+    }
 }
 
 /// Common operations needed by commands, patchbay activation, and the UI.
@@ -167,6 +183,18 @@ pub trait GraphDriver {
             "node layout is not supported by this backend".into(),
         ))
     }
+    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        let _ = (node, muted);
+        Err(BackendError::Unsupported(
+            "node mute is not supported by this backend".into(),
+        ))
+    }
+    fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        let _ = (node, volume);
+        Err(BackendError::Unsupported(
+            "node volume is not supported by this backend".into(),
+        ))
+    }
     fn graph(&self) -> &Graph;
     /// Returns whether registry state changed since the last `refresh`.
     /// Backends without event-driven registries may keep the default `false`.
@@ -213,6 +241,7 @@ pub trait GraphDriver {
 pub struct DemoDriver {
     graph: Graph,
     next_link_id: u64,
+    audio_controls: BTreeMap<NodeId, NodeAudioControl>,
 }
 
 impl DemoDriver {
@@ -221,6 +250,7 @@ impl DemoDriver {
         Self {
             graph,
             next_link_id,
+            audio_controls: BTreeMap::new(),
         }
     }
 
@@ -347,6 +377,22 @@ impl GraphDriver for DemoDriver {
         Ok(())
     }
 
+    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        if !self.graph.nodes.contains_key(&node) {
+            return Err(GraphError::MissingNode(node).into());
+        }
+        self.audio_controls.entry(node).or_default().muted = muted;
+        Ok(())
+    }
+
+    fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        if !self.graph.nodes.contains_key(&node) {
+            return Err(GraphError::MissingNode(node).into());
+        }
+        self.audio_controls.entry(node).or_default().volume = volume.clamp(0.0, 1.5);
+        Ok(())
+    }
+
     fn graph(&self) -> &Graph {
         &self.graph
     }
@@ -411,6 +457,18 @@ impl GraphDriver for PipewireDriver {
             .ok_or(GraphError::MissingNode(node))?
             .position = position;
         Ok(())
+    }
+
+    fn set_node_mute(&mut self, _node: NodeId, _muted: bool) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "PipeWire feature is disabled".into(),
+        ))
+    }
+
+    fn set_node_volume(&mut self, _node: NodeId, _volume: f32) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "PipeWire feature is disabled".into(),
+        ))
     }
 
     fn graph(&self) -> &Graph {

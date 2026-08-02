@@ -1,7 +1,7 @@
 //! Core graph types shared by every backend and presentation layer.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 macro_rules! id_type {
@@ -33,9 +33,6 @@ macro_rules! id_type {
 id_type!(NodeId);
 id_type!(PortId);
 id_type!(LinkId);
-
-type LayoutNode = (NodeId, String, usize);
-type LayoutGroups = BTreeMap<(u8, u8), Vec<LayoutNode>>;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum Direction {
@@ -378,49 +375,134 @@ impl Graph {
             .filter(move |link| link.output_port == port_id || link.input_port == port_id)
     }
 
-    /// Suggest a readable first layout for a graph that does not have saved
-    /// positions yet. Media categories form horizontal bands and the port
-    /// direction forms columns: source-only nodes on the left, mixed nodes in
-    /// the middle, and sink-only nodes on the right.
+    /// Suggest a readable, deterministic layout for every node in the graph.
+    ///
+    /// Connected nodes are assigned to layers following the direction of
+    /// their links, so sources appear before their sinks and multi-hop graphs
+    /// spread across several columns. Unconnected nodes use their port role as
+    /// a fallback layer. Ordering inside a layer is stable by media category,
+    /// direction, display name, and numeric ID, which keeps repeated refreshes
+    /// from shuffling the graph.
     pub fn default_node_positions(&self) -> BTreeMap<NodeId, [f32; 2]> {
-        let mut groups: LayoutGroups = BTreeMap::new();
-        for node in self.nodes.values() {
-            let category = self.node_media_category(node);
-            let role = self.node_layout_role(node);
-            groups.entry((category, role)).or_default().push((
-                node.id,
-                node.name.to_ascii_lowercase(),
-                node.ports.len(),
-            ));
+        let mut incoming: BTreeMap<NodeId, usize> =
+            self.nodes.keys().copied().map(|node| (node, 0)).collect();
+        let mut outgoing: BTreeMap<NodeId, Vec<NodeId>> = self
+            .nodes
+            .keys()
+            .copied()
+            .map(|node| (node, Vec::new()))
+            .collect();
+        for link in self.links.values() {
+            let (Some(output), Some(input)) =
+                (self.port(link.output_port), self.port(link.input_port))
+            else {
+                continue;
+            };
+            if output.node_id == input.node_id || !self.nodes.contains_key(&output.node_id) {
+                continue;
+            }
+            outgoing
+                .entry(output.node_id)
+                .or_default()
+                .push(input.node_id);
+            if let Some(count) = incoming.get_mut(&input.node_id) {
+                *count += 1;
+            }
+        }
+        for targets in outgoing.values_mut() {
+            targets.sort_unstable();
+            targets.dedup();
         }
 
-        for nodes in groups.values_mut() {
-            nodes.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        let node_limit = self.nodes.len().saturating_sub(1);
+        let mut graph_layers: BTreeMap<NodeId, usize> =
+            self.nodes.keys().copied().map(|node| (node, 0)).collect();
+        let mut queue: std::collections::VecDeque<NodeId> = incoming
+            .iter()
+            .filter_map(|(node, count)| (*count == 0).then_some(*node))
+            .collect();
+        if queue.is_empty() {
+            queue.extend(self.nodes.keys().copied().take(1));
         }
-
-        let categories: BTreeSet<u8> = groups.keys().map(|(category, _)| *category).collect();
-        let mut positions = BTreeMap::new();
-        let mut category_top = 40.0;
-        for category in categories {
-            let mut role_tops = [category_top; 3];
-            for role in 0..3_u8 {
-                let Some(nodes) = groups.get(&(category, role)) else {
-                    continue;
-                };
-                for (node_id, _, port_count) in nodes {
-                    positions.insert(
-                        *node_id,
-                        [40.0 + f32::from(role) * 320.0, role_tops[role as usize]],
-                    );
-                    let height = (34.0 + 14.0 + *port_count as f32 * 25.0).max(62.0);
-                    role_tops[role as usize] += height + 70.0;
+        while let Some(node_id) = queue.pop_front() {
+            let current_layer = graph_layers.get(&node_id).copied().unwrap_or_default();
+            for target in outgoing.get(&node_id).into_iter().flatten() {
+                let candidate = (current_layer + 1).min(node_limit);
+                let target_layer = graph_layers.entry(*target).or_default();
+                if candidate > *target_layer {
+                    *target_layer = candidate;
+                    queue.push_back(*target);
                 }
             }
-            category_top = role_tops
-                .into_iter()
-                .max_by(f32::total_cmp)
-                .unwrap_or(category_top)
-                + 100.0;
+        }
+
+        // A disconnected cycle has no zero-indegree root. Seed each remaining
+        // component deterministically so it still receives a useful layer.
+        for node_id in self.nodes.keys().copied() {
+            if incoming.get(&node_id).copied().unwrap_or_default() > 0
+                && graph_layers.get(&node_id).copied().unwrap_or_default() == 0
+            {
+                queue.push_back(node_id);
+                while let Some(current) = queue.pop_front() {
+                    let current_layer = graph_layers.get(&current).copied().unwrap_or_default();
+                    for target in outgoing.get(&current).into_iter().flatten() {
+                        let candidate = (current_layer + 1).min(node_limit);
+                        let target_layer = graph_layers.entry(*target).or_default();
+                        if candidate > *target_layer {
+                            *target_layer = candidate;
+                            queue.push_back(*target);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut layers: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for node in self.nodes.values() {
+            let graph_layer = graph_layers.get(&node.id).copied().unwrap_or_default();
+            let role_layer = match self.node_layout_role(node) {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                _ => 0,
+            };
+            let layer = if graph_layer == 0 {
+                role_layer
+            } else {
+                graph_layer
+            };
+            layers.entry(layer).or_default().push(node.id);
+        }
+
+        for nodes in layers.values_mut() {
+            nodes.sort_by(|left, right| {
+                let left_node = self.nodes.get(left).expect("layout node exists");
+                let right_node = self.nodes.get(right).expect("layout node exists");
+                self.node_media_category(left_node)
+                    .cmp(&self.node_media_category(right_node))
+                    .then_with(|| {
+                        self.node_layout_role(left_node)
+                            .cmp(&self.node_layout_role(right_node))
+                    })
+                    .then_with(|| {
+                        left_node
+                            .name
+                            .to_ascii_lowercase()
+                            .cmp(&right_node.name.to_ascii_lowercase())
+                    })
+                    .then_with(|| left.cmp(right))
+            });
+        }
+
+        let mut positions = BTreeMap::new();
+        for (layer, nodes) in layers {
+            let mut top = 40.0;
+            for node_id in nodes {
+                let node = self.nodes.get(&node_id).expect("layout node exists");
+                positions.insert(node_id, [40.0 + layer as f32 * 360.0, top]);
+                let height = (34.0 + 14.0 + node.ports.len() as f32 * 25.0).max(62.0);
+                top += height + 70.0;
+            }
         }
         positions
     }
@@ -554,5 +636,38 @@ mod tests {
         let positions = graph.default_node_positions();
         assert!(positions[&NodeId(1)][0] < positions[&NodeId(2)][0]);
         assert!(positions[&NodeId(1)][1] < positions[&NodeId(3)][1]);
+    }
+
+    #[test]
+    fn default_layout_places_connected_hops_in_ordered_layers() {
+        let mut graph = Graph::default();
+        for (id, name) in [(1, "Source"), (2, "Mixer"), (3, "Sink")] {
+            graph
+                .add_node(Node::new(NodeId(id), name, NodeType::PipeWire))
+                .unwrap();
+        }
+        for (id, node, name, direction) in [
+            (10, 1, "out", Direction::Source),
+            (11, 2, "in", Direction::Sink),
+            (12, 2, "out", Direction::Source),
+            (13, 3, "in", Direction::Sink),
+        ] {
+            graph
+                .add_port(Port::new(
+                    PortId(id),
+                    NodeId(node),
+                    name,
+                    direction,
+                    PortType::Audio,
+                ))
+                .unwrap();
+        }
+        graph.add_link(LinkId(20), PortId(10), PortId(11)).unwrap();
+        graph.add_link(LinkId(21), PortId(12), PortId(13)).unwrap();
+
+        let positions = graph.default_node_positions();
+        assert!(positions[&NodeId(1)][0] < positions[&NodeId(2)][0]);
+        assert!(positions[&NodeId(2)][0] < positions[&NodeId(3)][0]);
+        assert_eq!(positions, graph.default_node_positions());
     }
 }

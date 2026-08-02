@@ -307,20 +307,9 @@ impl GraphCanvas {
             .values()
             .filter(|node| visible_node_ids.contains(&node.id))
         {
-            let port_count = if self.thumbnail_mode {
-                0
-            } else {
-                let ports = self.ordered_ports(graph, node);
-                ports::grouped_rows(self.connect_mode, &ports).len()
-            };
-            let height = if self.thumbnail_mode {
-                62.0
-            } else {
-                (34.0 + 14.0 + port_count as f32 * 25.0).max(62.0)
-            };
             let candidate = Rect::from_min_size(
                 egui::pos2(node.position[0], node.position[1]),
-                vec2(244.0, height),
+                self.node_scene_size(graph, node),
             );
             bounds = Some(match bounds {
                 Some(current) => current.union(candidate),
@@ -446,6 +435,12 @@ impl GraphCanvas {
     }
 
     fn prune_hidden_state(&mut self, graph: &Graph, visible_node_ids: &BTreeSet<NodeId>) {
+        self.node_appearances
+            .retain(|node_id, _| graph.nodes.contains_key(node_id));
+        self.node_audio
+            .retain(|node_id, _| graph.nodes.contains_key(node_id));
+        self.node_name_drafts
+            .retain(|node_id, _| graph.nodes.contains_key(node_id));
         self.selected_nodes
             .retain(|node_id| visible_node_ids.contains(node_id));
         if self

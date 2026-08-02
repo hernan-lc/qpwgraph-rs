@@ -1,6 +1,7 @@
 use super::{layout, QpwgraphApp};
 use eframe::egui;
-use pw_graph_ui::MediaFilter;
+use pw_graph_config::NodeViewConfig;
+use pw_graph_ui::{MediaFilter, NodeAppearance};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -42,8 +43,28 @@ impl QpwgraphApp {
                 (key_counts.get(&key) == Some(&1)).then_some((key, node.position))
             })
             .collect();
+        let node_view_by_name = graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let key = layout::node_layout_key(node);
+                if key_counts.get(&key) != Some(&1) {
+                    return None;
+                }
+                let appearance = self.canvas.node_appearance(node.id);
+                (appearance != NodeAppearance::default()).then_some((
+                    key,
+                    NodeViewConfig {
+                        collapsed: appearance.collapsed,
+                        custom_name: appearance.custom_name,
+                        color: appearance.color,
+                    },
+                ))
+            })
+            .collect();
         self.config.node_positions = node_positions;
         self.config.node_positions_by_name = node_positions_by_name;
+        self.config.node_view_by_name = node_view_by_name;
         self.config.patchbay_path = Some(self.patchbay_file.clone());
         self.config.patchbay_profiles.insert(
             self.config.active_patchbay_profile.clone(),
@@ -95,6 +116,30 @@ impl QpwgraphApp {
         self.canvas.node_text_scale = self.config.node_text_scale;
         self.canvas.repel_overlapping_nodes = self.config.repel_overlapping_nodes;
         self.canvas.connect_through_nodes = self.config.connect_through_nodes;
+        let graph = self.driver.graph();
+        let mut key_counts = BTreeMap::new();
+        for node in graph.nodes.values() {
+            *key_counts
+                .entry(layout::node_layout_key(node))
+                .or_insert(0_usize) += 1;
+        }
+        for node in graph.nodes.values() {
+            let key = layout::node_layout_key(node);
+            let appearance = if key_counts.get(&key) == Some(&1) {
+                self.config
+                    .node_view_by_name
+                    .get(&key)
+                    .map(|view| NodeAppearance {
+                        collapsed: view.collapsed,
+                        custom_name: view.custom_name.clone(),
+                        color: view.color,
+                    })
+                    .unwrap_or_default()
+            } else {
+                NodeAppearance::default()
+            };
+            self.canvas.set_node_appearance(node.id, appearance);
+        }
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
         self.config.minimap_visible = self.canvas.minimap_visible;
         self.config.connect_mode = self.canvas.connect_mode.as_str().into();

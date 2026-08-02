@@ -51,6 +51,54 @@ impl QpwgraphApp {
                 CanvasAction::DisconnectMany { links } => self.disconnect_many(links),
                 CanvasAction::DisconnectNode { node } => self.disconnect_node(node),
                 CanvasAction::ArrangeNodes { nodes } => self.arrange_selected_nodes(nodes),
+                CanvasAction::SetNodeAppearance { node, appearance } => {
+                    self.canvas.set_node_appearance(node, appearance);
+                }
+                CanvasAction::SetNodeMute { node, muted } => {
+                    match self.driver.set_node_mute(node, muted) {
+                        Ok(()) => {
+                            let mut state = self.canvas.node_audio_state(node);
+                            state.muted = muted;
+                            self.canvas.set_node_audio_state(node, state);
+                            self.status = self.tf(
+                                "status.node_mute_changed",
+                                &[(
+                                    "state",
+                                    self.t(if muted {
+                                        "canvas.muted"
+                                    } else {
+                                        "canvas.unmuted"
+                                    }),
+                                )],
+                            );
+                        }
+                        Err(error) => {
+                            self.status = self.tf(
+                                "status.node_control_failed",
+                                &[("error", error.to_string())],
+                            )
+                        }
+                    }
+                }
+                CanvasAction::SetNodeVolume { node, volume } => {
+                    match self.driver.set_node_volume(node, volume) {
+                        Ok(()) => {
+                            let mut state = self.canvas.node_audio_state(node);
+                            state.volume = volume.clamp(0.0, 1.5);
+                            self.canvas.set_node_audio_state(node, state);
+                            self.status = self.tf(
+                                "status.node_volume_changed",
+                                &[("volume", format!("{:.0}%", state.volume * 100.0))],
+                            );
+                        }
+                        Err(error) => {
+                            self.status = self.tf(
+                                "status.node_control_failed",
+                                &[("error", error.to_string())],
+                            )
+                        }
+                    }
+                }
                 CanvasAction::MoveNode { node, position } => {
                     let _ = self.driver.set_node_position(node, position);
                 }
