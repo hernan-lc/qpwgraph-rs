@@ -12,7 +12,9 @@ use std::collections::HashMap;
 
 use super::geometry::bezier_points;
 use super::names::{compact_label, display_node_name};
-use super::ports::{display_groups, link_exists, pair_ports, port_color, port_group_tooltip};
+use super::ports::{
+    display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role, PortRole,
+};
 
 const NODE_WIDTH: f32 = 244.0;
 const NODE_HEADER_HEIGHT: f32 = 34.0;
@@ -234,8 +236,8 @@ impl GraphCanvas {
         let selected = self.selected_nodes.contains(&node.id);
         let focused = body_response.has_focus() || header_response.has_focus();
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
-        let accent = dominant_port_type(&ports)
-            .map(port_color)
+        let accent = dominant_port(&ports)
+            .map(|port| port_color(port.port_type, port_role(port)))
             .unwrap_or_else(|| node_color(node.node_type));
         let fill = if selected {
             Color32::from_rgb(48, 60, 76)
@@ -476,7 +478,7 @@ impl GraphCanvas {
                 );
             }
             let radius = 6.0 * self.zoom.max(0.7);
-            let dot_color = port_color(group.port_type);
+            let dot_color = port_color(group.port_type, port_role(group.representative()));
             painter.circle_stroke(
                 anchor,
                 radius + 0.6,
@@ -665,17 +667,29 @@ fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
 }
 
-fn dominant_port_type(ports: &[&Port]) -> Option<PortType> {
+fn dominant_port<'a>(ports: &[&'a Port]) -> Option<&'a Port> {
     let mut counts: HashMap<PortType, usize> = HashMap::new();
     for port in ports {
         if port.port_type != PortType::Unknown {
             *counts.entry(port.port_type).or_insert(0) += 1;
         }
     }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(port_type, _)| port_type)
+    ports
+        .iter()
+        .copied()
+        .filter(|port| port.port_type != PortType::Unknown)
+        .max_by_key(|port| {
+            let role_priority = match port_role(port) {
+                PortRole::Monitor => 2,
+                PortRole::Output => 1,
+                PortRole::Input => 0,
+            };
+            (
+                counts.get(&port.port_type).copied().unwrap_or_default(),
+                role_priority,
+                port.id,
+            )
+        })
 }
 
 fn node_color(node_type: NodeType) -> Color32 {

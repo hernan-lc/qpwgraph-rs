@@ -2,9 +2,11 @@
 
 use crate::{GraphCanvas, NodeId};
 use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Stroke};
-use pw_graph_core::{Graph, NodeType, PortType};
+use pw_graph_core::{Graph, NodeType};
 use pw_graph_i18n::I18n;
 use std::collections::BTreeSet;
+
+use super::ports::{link_color, port_color, port_role};
 
 const PANEL_SIZE: egui::Vec2 = vec2(238.0, 164.0);
 const PANEL_MARGIN: f32 = 12.0;
@@ -28,16 +30,6 @@ fn extend_rect(bounds: &mut Option<Rect>, candidate: Rect) {
     });
 }
 
-fn link_color(port_type: PortType) -> Color32 {
-    match port_type {
-        PortType::Audio => Color32::from_rgb(106, 187, 147),
-        PortType::Video => Color32::from_rgb(92, 157, 218),
-        PortType::MidiJack => Color32::from_rgb(213, 111, 123),
-        PortType::MidiAlsa => Color32::from_rgb(166, 126, 208),
-        PortType::Unknown => Color32::from_rgb(138, 151, 169),
-    }
-}
-
 fn node_accent(graph: &Graph, node_id: NodeId, node_type: NodeType) -> Color32 {
     graph
         .node(node_id)
@@ -45,7 +37,7 @@ fn node_accent(graph: &Graph, node_id: NodeId, node_type: NodeType) -> Color32 {
             node.ports
                 .iter()
                 .filter_map(|port_id| graph.port(*port_id))
-                .map(|port| link_color(port.port_type))
+                .map(|port| port_color(port.port_type, port_role(port)))
                 .next()
         })
         .unwrap_or(match node_type {
@@ -173,7 +165,7 @@ impl GraphCanvas {
                 map_point(pos2(destination.position[0], destination.position[1]) + NODE_SIZE * 0.5);
             minimap_painter.line_segment(
                 [source_center, destination_center],
-                Stroke::new(1.0_f32, link_color(output.port_type)),
+                Stroke::new(1.0_f32, link_color(output.port_type, port_role(output))),
             );
         }
 

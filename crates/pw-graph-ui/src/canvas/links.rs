@@ -2,12 +2,13 @@
 
 use crate::{CanvasAction, GraphCanvas, NodeId};
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Ui};
-use pw_graph_core::{Graph, Port, PortType};
+use pw_graph_core::{Graph, Port};
 use pw_graph_i18n::I18n;
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use super::geometry::{bezier_points, point_near_polyline, points_bounds};
+use super::ports::{link_color, port_role};
 
 const EDGE_HIT_DISTANCE: f32 = 9.0;
 
@@ -92,7 +93,7 @@ impl GraphCanvas {
             } else if hovered {
                 Color32::WHITE
             } else {
-                edge_color(source.port_type)
+                link_color(source.port_type, port_role(source))
             };
             painter.add(Shape::line(
                 points.clone(),
@@ -169,14 +170,4 @@ fn link_tooltip(graph: &Graph, source: &Port, destination: &Port, i18n: &I18n) -
             ("destination_port", destination.name.clone()),
         ],
     )
-}
-
-fn edge_color(port_type: PortType) -> Color32 {
-    match port_type {
-        PortType::Audio => Color32::from_rgb(106, 187, 147),
-        PortType::Video => Color32::from_rgb(92, 157, 218),
-        PortType::MidiJack => Color32::from_rgb(213, 111, 123),
-        PortType::MidiAlsa => Color32::from_rgb(166, 126, 208),
-        PortType::Unknown => Color32::from_rgb(138, 151, 169),
-    }
 }

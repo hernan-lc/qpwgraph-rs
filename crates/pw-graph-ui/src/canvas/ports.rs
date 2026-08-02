@@ -269,13 +269,71 @@ pub(crate) fn link_exists(graph: &Graph, output: PortId, input: PortId) -> bool 
         .any(|link| link.output_port == output && link.input_port == input)
 }
 
-pub(crate) fn port_color(port_type: PortType) -> Color32 {
-    match port_type {
-        PortType::Audio => Color32::from_rgb(87, 199, 133),
-        PortType::Video => Color32::from_rgb(78, 157, 230),
-        PortType::MidiJack => Color32::from_rgb(227, 93, 106),
-        PortType::MidiAlsa => Color32::from_rgb(169, 121, 209),
-        PortType::Unknown => Color32::from_rgb(165, 165, 165),
+/// The visual role of a port within its media family.
+///
+/// Monitor ports are detected from their name because PipeWire represents
+/// them as ordinary input/output ports. They intentionally get their own
+/// shade so a monitor path remains recognizable without introducing a new
+/// media category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PortRole {
+    Input,
+    Output,
+    Monitor,
+}
+
+pub(crate) fn port_role(port: &Port) -> PortRole {
+    if port.name.to_ascii_lowercase().contains("monitor") {
+        PortRole::Monitor
+    } else if port.direction.is_source() {
+        PortRole::Output
+    } else {
+        PortRole::Input
+    }
+}
+
+/// Color palette shared by port dots, node accents and the minimap.
+///
+/// Each media type keeps its own hue family. Within that family, input is the
+/// darkest shade, output is brighter, and monitor is the lightest shade.
+pub(crate) fn port_color(port_type: PortType, role: PortRole) -> Color32 {
+    match (port_type, role) {
+        (PortType::Audio, PortRole::Input) => Color32::from_rgb(44, 151, 96),
+        (PortType::Audio, PortRole::Output) => Color32::from_rgb(82, 207, 133),
+        (PortType::Audio, PortRole::Monitor) => Color32::from_rgb(139, 231, 177),
+        (PortType::Video, PortRole::Input) => Color32::from_rgb(43, 125, 202),
+        (PortType::Video, PortRole::Output) => Color32::from_rgb(91, 181, 244),
+        (PortType::Video, PortRole::Monitor) => Color32::from_rgb(151, 213, 255),
+        (PortType::MidiJack, PortRole::Input) => Color32::from_rgb(186, 57, 87),
+        (PortType::MidiJack, PortRole::Output) => Color32::from_rgb(237, 108, 128),
+        (PortType::MidiJack, PortRole::Monitor) => Color32::from_rgb(255, 161, 177),
+        (PortType::MidiAlsa, PortRole::Input) => Color32::from_rgb(128, 78, 172),
+        (PortType::MidiAlsa, PortRole::Output) => Color32::from_rgb(190, 132, 225),
+        (PortType::MidiAlsa, PortRole::Monitor) => Color32::from_rgb(220, 177, 245),
+        (PortType::Unknown, PortRole::Input) => Color32::from_rgb(116, 127, 141),
+        (PortType::Unknown, PortRole::Output) => Color32::from_rgb(177, 188, 202),
+        (PortType::Unknown, PortRole::Monitor) => Color32::from_rgb(214, 222, 232),
+    }
+}
+
+/// Slightly muted version of the port palette for connection lines.
+pub(crate) fn link_color(port_type: PortType, role: PortRole) -> Color32 {
+    match (port_type, role) {
+        (PortType::Audio, PortRole::Input) => Color32::from_rgb(38, 126, 80),
+        (PortType::Audio, PortRole::Output) => Color32::from_rgb(62, 173, 109),
+        (PortType::Audio, PortRole::Monitor) => Color32::from_rgb(105, 194, 145),
+        (PortType::Video, PortRole::Input) => Color32::from_rgb(37, 105, 170),
+        (PortType::Video, PortRole::Output) => Color32::from_rgb(69, 147, 204),
+        (PortType::Video, PortRole::Monitor) => Color32::from_rgb(112, 177, 218),
+        (PortType::MidiJack, PortRole::Input) => Color32::from_rgb(151, 48, 72),
+        (PortType::MidiJack, PortRole::Output) => Color32::from_rgb(198, 83, 105),
+        (PortType::MidiJack, PortRole::Monitor) => Color32::from_rgb(220, 125, 145),
+        (PortType::MidiAlsa, PortRole::Input) => Color32::from_rgb(104, 62, 141),
+        (PortType::MidiAlsa, PortRole::Output) => Color32::from_rgb(157, 105, 191),
+        (PortType::MidiAlsa, PortRole::Monitor) => Color32::from_rgb(187, 145, 213),
+        (PortType::Unknown, PortRole::Input) => Color32::from_rgb(93, 103, 116),
+        (PortType::Unknown, PortRole::Output) => Color32::from_rgb(143, 155, 171),
+        (PortType::Unknown, PortRole::Monitor) => Color32::from_rgb(178, 188, 202),
     }
 }
 
@@ -355,6 +413,47 @@ pub(crate) fn port_group_tooltip(node: &Node, group: &PortGroup, i18n: &I18n) ->
 mod tests {
     use super::*;
     use pw_graph_core::{LinkId, NodeId, NodeType};
+
+    #[test]
+    fn port_role_distinguishes_direction_and_monitor_names() {
+        let input = Port::new(
+            PortId(1),
+            NodeId(1),
+            "capture_FL",
+            Direction::Sink,
+            PortType::Audio,
+        );
+        let output = Port::new(
+            PortId(2),
+            NodeId(1),
+            "playback_FL",
+            Direction::Source,
+            PortType::Audio,
+        );
+        let monitor = Port::new(
+            PortId(3),
+            NodeId(1),
+            "Monitor_FL",
+            Direction::Source,
+            PortType::Audio,
+        );
+
+        assert_eq!(port_role(&input), PortRole::Input);
+        assert_eq!(port_role(&output), PortRole::Output);
+        assert_eq!(port_role(&monitor), PortRole::Monitor);
+    }
+
+    #[test]
+    fn media_palette_keeps_role_shades_in_the_same_family() {
+        let input = port_color(PortType::Audio, PortRole::Input);
+        let output = port_color(PortType::Audio, PortRole::Output);
+        let monitor = port_color(PortType::Audio, PortRole::Monitor);
+
+        assert_ne!(input, output);
+        assert_ne!(output, monitor);
+        assert!(input.g() < output.g());
+        assert!(output.g() < monitor.g());
+    }
 
     fn stereo_pair_graph() -> Graph {
         let mut graph = Graph::default();
