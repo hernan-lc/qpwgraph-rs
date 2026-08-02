@@ -297,14 +297,9 @@ fn fresh_scroll_area(id_salt: impl std::hash::Hash, max_height: f32) -> egui::Sc
 impl QpwgraphApp {
     pub(crate) fn show_gui_panels(&mut self, ctx: &egui::Context) {
         if !self.any_modal_open() || self.show_preferences {
-            let sidebar_width = if self.dock_open {
-                SIDEBAR_WIDTH
-            } else {
-                NAV_RAIL_WIDTH
-            };
             egui::SidePanel::left("navigation")
                 .resizable(false)
-                .exact_width(sidebar_width)
+                .exact_width(NAV_RAIL_WIDTH)
                 .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(6.0))
                 .show(ctx, |ui| {
                     apply_panel_text_scale(ui, self.config.panel_text_scale);
@@ -314,81 +309,38 @@ impl QpwgraphApp {
     }
 
     fn show_navigation(&mut self, ui: &mut Ui) {
-        ui.vertical(|ui| {
-            let rail_max_height = ui.available_height();
-            fresh_scroll_area("nav-rail-scroll", rail_max_height).show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    let docks = [
-                        (AppScreen::Graph, Icon::Graph, "screen.graph"),
-                        (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
-                    ];
-                    for (screen, icon, label) in docks {
-                        let help_key = match screen {
-                            AppScreen::Graph => "help.navigation_graph",
-                            AppScreen::Patchbay => "help.navigation_patchbay",
-                        };
-                        let selected = self.dock_open && self.screen == screen;
-                        if sidebar_nav_icon_button(
-                            ui,
-                            label,
-                            icon,
-                            selected,
-                            self.t(label),
-                            self.t(help_key),
-                        ) {
-                            if selected {
-                                self.dock_open = false;
-                            } else {
-                                self.screen = screen;
-                                self.dock_open = true;
-                                self.show_preferences = false;
-                                self.show_shortcuts = false;
-                                self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
-                            }
-                        }
+        let rail_max_height = ui.available_height();
+        fresh_scroll_area("nav-rail-scroll", rail_max_height).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                if sidebar_nav_icon_button(
+                    ui,
+                    "nav.preferences",
+                    Icon::Settings,
+                    self.show_preferences,
+                    self.t("nav.preferences"),
+                    self.t("help.navigation_preferences"),
+                ) {
+                    if self.show_preferences {
+                        self.show_preferences = false;
+                    } else {
+                        self.show_preferences = true;
+                        self.show_shortcuts = false;
+                        self.preferences_scroll_epoch =
+                            self.preferences_scroll_epoch.wrapping_add(1);
                     }
-                    ui.separator();
-                    if sidebar_nav_icon_button(
-                        ui,
-                        "nav.preferences",
-                        Icon::Settings,
-                        self.show_preferences,
-                        self.t("nav.preferences"),
-                        self.t("help.navigation_preferences"),
-                    ) {
-                        if self.show_preferences {
-                            self.show_preferences = false;
-                        } else {
-                            self.show_preferences = true;
-                            self.show_shortcuts = false;
-                            self.preferences_scroll_epoch =
-                                self.preferences_scroll_epoch.wrapping_add(1);
-                        }
-                    }
-                    if sidebar_nav_icon_button(
-                        ui,
-                        "nav.shortcuts",
-                        Icon::Help,
-                        self.show_shortcuts,
-                        self.t("nav.shortcuts"),
-                        self.t("help.navigation_shortcuts"),
-                    ) {
-                        self.toggle_shortcuts();
-                    }
-                    self.show_sidebar_actions(ui);
-                });
+                }
+                if sidebar_nav_icon_button(
+                    ui,
+                    "nav.shortcuts",
+                    Icon::Help,
+                    self.show_shortcuts,
+                    self.t("nav.shortcuts"),
+                    self.t("help.navigation_shortcuts"),
+                ) {
+                    self.toggle_shortcuts();
+                }
+                self.show_sidebar_actions(ui);
             });
-
-            if self.dock_open {
-                ui.separator();
-                let scroll_id = ("sidebar-scroll", self.screen, self.dock_scroll_epoch);
-                fresh_scroll_area(scroll_id, ui.available_height())
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match self.screen {
-                        AppScreen::Graph => self.show_graph_screen(ui),
-                        AppScreen::Patchbay => self.show_patchbay_screen(ui),
-                    });
-            }
         });
     }
 
@@ -509,41 +461,6 @@ impl QpwgraphApp {
             }
         }
         self.show_media_filter_sidebar(ui);
-    }
-
-    fn show_graph_screen(&mut self, ui: &mut Ui) {
-        panel_header(
-            ui,
-            Icon::Graph,
-            self.t("screen.graph"),
-            self.t("screen.graph_hint"),
-        );
-        let (node_count, port_count, link_count) = self.canvas.visible_counts(self.driver.graph());
-        let node_count = node_count.to_string();
-        let port_count = port_count.to_string();
-        let link_count = link_count.to_string();
-        panel_section(ui, self.t("inspector.overview"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                stat_card(ui, self.t("inspector.nodes_short"), node_count);
-                stat_card(ui, self.t("inspector.ports_short"), port_count);
-                stat_card(ui, self.t("inspector.links_short"), link_count);
-            });
-        });
-        panel_section(ui, self.t("inspector.audio_metering"), |ui| {
-            self.show_meter_controls(ui);
-        });
-
-        if let Some(pinned_port) = self.canvas.pinned_meter {
-            panel_section(ui, self.t("inspector.audio_monitor"), |ui| {
-                self.show_meter_monitor(ui, pinned_port);
-            });
-        }
-
-        if let Some(selected_node) = self.canvas.selected_node {
-            panel_section(ui, self.t("inspector.rename"), |ui| {
-                self.show_rename_control(ui, selected_node);
-            });
-        }
     }
 
     /// Compact sort-by/sort-order toggles for the always-visible sidebar:
@@ -743,228 +660,6 @@ impl QpwgraphApp {
         );
 
         ui.add_space(2.0);
-    }
-
-    fn show_meter_monitor(&mut self, ui: &mut Ui, port_id: PortId) {
-        let Some(port) = self.driver.graph().port(port_id) else {
-            self.canvas.pinned_meter = None;
-            return;
-        };
-        let node_id = port.node_id;
-        let port_name = port.name.clone();
-        let node_name = self
-            .driver
-            .graph()
-            .node(node_id)
-            .map(|node| node.name.clone())
-            .unwrap_or_else(|| node_id.to_string());
-        ui.label(RichText::new(format!("{node_name} / {port_name}")).strong());
-        ui.label(RichText::new(self.t("canvas.audio_meter_node")).weak());
-        if let Some(reading) = self.canvas.meters.get(&node_id).copied() {
-            if reading.available {
-                let stale = reading.age_ms > 750;
-                ui.add(
-                    egui::ProgressBar::new(reading.rms.clamp(0.0, 1.0))
-                        .desired_width(ui.available_width())
-                        .text(format!(
-                            "{}  {:.1} dB",
-                            self.t("canvas.audio_meter_rms"),
-                            level_db(reading.rms)
-                        )),
-                );
-                let peak_hold = self.canvas.meter_peak_hold(node_id, reading.peak);
-                ui.add(
-                    egui::ProgressBar::new(peak_hold.clamp(0.0, 1.0))
-                        .desired_width(ui.available_width())
-                        .text(format!(
-                            "{}  {:.1} dB",
-                            self.t("canvas.audio_meter_peak_hold"),
-                            level_db(peak_hold)
-                        )),
-                );
-                ui.label(
-                    RichText::new(if stale {
-                        self.t("canvas.audio_meter_stale")
-                    } else {
-                        self.t("canvas.audio_meter_live")
-                    })
-                    .weak(),
-                );
-                ui.label(
-                    RichText::new(self.tf(
-                        "canvas.audio_meter_age",
-                        &[("age", reading.age_ms.to_string())],
-                    ))
-                    .small()
-                    .weak(),
-                );
-            } else {
-                ui.label(RichText::new(self.t("canvas.audio_meter_unavailable")).weak());
-            }
-        } else {
-            ui.label(RichText::new(self.t("canvas.audio_meter_unavailable")).weak());
-        }
-        if ui
-            .button(self.t("inspector.audio_monitor_unpin"))
-            .on_hover_text(self.t("help.audio_monitor_unpin"))
-            .clicked()
-        {
-            self.canvas.pinned_meter = None;
-        }
-    }
-
-    fn show_rename_control(&mut self, ui: &mut Ui, selected_node: NodeId) {
-        let current_name = self
-            .driver
-            .graph()
-            .node(selected_node)
-            .map(|node| node.name.clone());
-        let Some(current_name) = current_name else {
-            return;
-        };
-        ui.label(RichText::new(self.t("inspector.selected_node")).weak());
-        if self.rename_node != Some(selected_node) {
-            self.rename_node = Some(selected_node);
-            self.rename_buffer = current_name.clone();
-        }
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut self.rename_buffer)
-                .id(egui::Id::new(("rename-node", selected_node))),
-        );
-        if response.lost_focus()
-            && ui.input(|input| input.key_pressed(egui::Key::Enter))
-            && self.rename_buffer != current_name
-            && !self.rename_buffer.trim().is_empty()
-        {
-            let edited_name = self.rename_buffer.clone();
-            match self.commands.execute(
-                Box::new(RenameCommand::new(selected_node, current_name, edited_name)),
-                self.driver.as_mut(),
-            ) {
-                Ok(()) => self.status = self.t("status.renamed"),
-                Err(error) => {
-                    self.status = self.tf("status.rename_failed", &[("error", error.to_string())])
-                }
-            }
-        }
-    }
-
-    fn show_patchbay_screen(&mut self, ui: &mut Ui) {
-        panel_header(
-            ui,
-            Icon::Patchbay,
-            self.t("screen.patchbay"),
-            self.t("screen.patchbay_hint"),
-        );
-        panel_section(ui, self.t("inspector.live_links"), |ui| {
-            let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
-            if links.is_empty() {
-                ui.label(RichText::new(self.t("inspector.no_live_links")).weak());
-            }
-            for link in links {
-                let (output_node, output_port) = self
-                    .driver
-                    .graph()
-                    .port(link.output_port)
-                    .map(|port| {
-                        (
-                            self.driver
-                                .graph()
-                                .node(port.node_id)
-                                .map(|node| node.name.clone())
-                                .unwrap_or_else(|| port.node_id.to_string()),
-                            port.name.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (link.output_port.to_string(), link.output_port.to_string())
-                    });
-                let (input_node, input_port) = self
-                    .driver
-                    .graph()
-                    .port(link.input_port)
-                    .map(|port| {
-                        (
-                            self.driver
-                                .graph()
-                                .node(port.node_id)
-                                .map(|node| node.name.clone())
-                                .unwrap_or_else(|| port.node_id.to_string()),
-                            port.name.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| (link.input_port.to_string(), link.input_port.to_string()));
-                let link_summary = self.tf(
-                    "patchbay.link_summary",
-                    &[
-                        ("output_node", output_node),
-                        ("output_port", output_port),
-                        ("input_node", input_node),
-                        ("input_port", input_port),
-                    ],
-                );
-                ui.push_id(("live-link", link.id), |ui| {
-                    ui.horizontal(|ui| {
-                        let row_height = ui.spacing().interact_size.y;
-                        let spacing = ui.spacing().item_spacing.x;
-                        let pinned_width = 78.0;
-                        let delete_width = 34.0;
-                        let label_width =
-                            (ui.available_width() - pinned_width - delete_width - spacing * 2.0)
-                                .max(48.0);
-                        let summary_response = ui.add_sized(
-                            [label_width, row_height],
-                            egui::Label::new(RichText::new(link_summary.clone()).weak()).truncate(),
-                        );
-                        summary_response.on_hover_ui(|ui| {
-                            ui.set_max_width(520.0);
-                            ui.add(egui::Label::new(link_summary.clone()).wrap());
-                        });
-                        let mut pinned = self
-                            .patchbay
-                            .connections
-                            .iter()
-                            .find(|connection| {
-                                connection.output_port == link.output_port
-                                    && connection.input_port == link.input_port
-                            })
-                            .is_some_and(|connection| connection.pinned);
-                        if ui
-                            .add_sized(
-                                [pinned_width, row_height],
-                                egui::Checkbox::new(&mut pinned, self.t("inspector.pinned")),
-                            )
-                            .changed()
-                        {
-                            if let Some(connection) =
-                                self.patchbay.connections.iter_mut().find(|connection| {
-                                    connection.output_port == link.output_port
-                                        && connection.input_port == link.input_port
-                                })
-                            {
-                                connection.pinned = pinned;
-                            } else {
-                                self.patchbay.add_graph_connection(
-                                    self.driver.graph(),
-                                    link.output_port,
-                                    link.input_port,
-                                    pinned,
-                                );
-                            }
-                        }
-                        if icon_button(
-                            ui,
-                            "disconnect",
-                            Icon::Delete,
-                            self.t("toolbar.disconnect"),
-                            self.t("help.disconnect_link"),
-                        ) {
-                            self.disconnect(link.id);
-                        }
-                    });
-                });
-            }
-        });
     }
 
     pub(crate) fn show_preferences_modal(&mut self, ctx: &egui::Context) {
@@ -1168,6 +863,10 @@ impl QpwgraphApp {
                 thumbnail_label,
                 thumbnail_help,
             );
+        });
+
+        panel_section(ui, self.t("inspector.audio_metering"), |ui| {
+            self.show_meter_controls(ui);
         });
 
         panel_section(ui, self.t("inspector.typography"), |ui| {
