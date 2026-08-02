@@ -11,6 +11,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use super::geometry::bezier_points;
+use super::icons::{self, NodeIcon};
 use super::names::{compact_label, display_node_name};
 use super::ports::{
     display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role, PortRole,
@@ -589,7 +590,16 @@ impl GraphCanvas {
         );
         let collapse_response = ui.put(
             collapse_rect,
-            egui::Button::new(if appearance.collapsed { "▸" } else { "▾" }).frame(false),
+            egui::Button::image(icons::image(
+                if appearance.collapsed {
+                    NodeIcon::Expand
+                } else {
+                    NodeIcon::Collapse
+                },
+                vec2(12.0, 12.0) * self.zoom,
+                ui.visuals().text_color(),
+            ))
+            .frame(false),
         );
         let collapse_response =
             collapse_response.on_hover_text(i18n.text(if appearance.collapsed {
@@ -632,87 +642,96 @@ impl GraphCanvas {
                 .max_rect(menu_rect)
                 .id_salt(("node-options", node.id)),
             |ui| {
-                ui.menu_button("⋮", |ui| {
-                    if ui
-                        .button(i18n.text(if appearance.collapsed {
-                            "canvas.expand_node"
-                        } else {
-                            "canvas.collapse_node"
-                        }))
-                        .clicked()
-                    {
-                        working_appearance.collapsed = !working_appearance.collapsed;
-                        appearance_changed = true;
-                        ui.close_menu();
-                    }
-
-                    ui.separator();
-                    ui.label(i18n.text("canvas.node_name"));
-                    let name_response = ui.text_edit_singleline(&mut name_draft);
-                    let submit_name = name_response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if ui.button(i18n.text("canvas.apply_name")).clicked() || submit_name {
-                        let name = name_draft.trim();
-                        working_appearance.custom_name = if name.is_empty() {
-                            None
-                        } else if name == node.name {
-                            None
-                        } else {
-                            Some(name.to_owned())
-                        };
-                        appearance_changed = true;
-                        ui.close_menu();
-                    }
-                    if ui.button(i18n.text("canvas.reset_name")).clicked() {
-                        name_draft = node.name.clone();
-                        working_appearance.custom_name = None;
-                        appearance_changed = true;
-                        ui.close_menu();
-                    }
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(i18n.text("canvas.node_color"));
-                        let mut color = working_appearance
-                            .color
-                            .unwrap_or_else(|| accent.to_array());
+                ui.menu_image_button(
+                    icons::image(
+                        NodeIcon::More,
+                        vec2(12.0, 12.0) * self.zoom,
+                        ui.visuals().text_color(),
+                    ),
+                    |ui| {
                         if ui
-                            .color_edit_button_srgba_unmultiplied(&mut color)
-                            .changed()
+                            .button(i18n.text(if appearance.collapsed {
+                                "canvas.expand_node"
+                            } else {
+                                "canvas.collapse_node"
+                            }))
+                            .clicked()
                         {
-                            working_appearance.color = Some(color);
+                            working_appearance.collapsed = !working_appearance.collapsed;
                             appearance_changed = true;
+                            ui.close_menu();
                         }
-                    });
-                    if ui.button(i18n.text("canvas.reset_color")).clicked() {
-                        working_appearance.color = None;
-                        appearance_changed = true;
-                        ui.close_menu();
-                    }
 
-                    if has_audio {
                         ui.separator();
-                        if ui
-                            .checkbox(&mut audio_state.muted, i18n.text("canvas.mute_node"))
-                            .changed()
-                        {
-                            audio_changed = true;
+                        ui.label(i18n.text("canvas.node_name"));
+                        let name_response = ui.text_edit_singleline(&mut name_draft);
+                        let submit_name = name_response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        if ui.button(i18n.text("canvas.apply_name")).clicked() || submit_name {
+                            let name = name_draft.trim();
+                            working_appearance.custom_name = if name.is_empty() {
+                                None
+                            } else if name == node.name {
+                                None
+                            } else {
+                                Some(name.to_owned())
+                            };
+                            appearance_changed = true;
+                            ui.close_menu();
                         }
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut audio_state.volume, 0.0..=1.5)
-                                    .text(i18n.text("canvas.volume"))
-                                    .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
-                            )
-                            .changed()
-                        {
-                            audio_changed = true;
+                        if ui.button(i18n.text("canvas.reset_name")).clicked() {
+                            name_draft = node.name.clone();
+                            working_appearance.custom_name = None;
+                            appearance_changed = true;
+                            ui.close_menu();
                         }
-                    } else {
+
                         ui.separator();
-                        ui.label(i18n.text("canvas.audio_controls_unavailable"));
-                    }
-                });
+                        ui.horizontal(|ui| {
+                            ui.label(i18n.text("canvas.node_color"));
+                            let mut color = working_appearance
+                                .color
+                                .unwrap_or_else(|| accent.to_array());
+                            if ui
+                                .color_edit_button_srgba_unmultiplied(&mut color)
+                                .changed()
+                            {
+                                working_appearance.color = Some(color);
+                                appearance_changed = true;
+                            }
+                        });
+                        if ui.button(i18n.text("canvas.reset_color")).clicked() {
+                            working_appearance.color = None;
+                            appearance_changed = true;
+                            ui.close_menu();
+                        }
+
+                        if has_audio {
+                            ui.separator();
+                            if ui
+                                .checkbox(&mut audio_state.muted, i18n.text("canvas.mute_node"))
+                                .changed()
+                            {
+                                audio_changed = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut audio_state.volume, 0.0..=1.5)
+                                        .text(i18n.text("canvas.volume"))
+                                        .custom_formatter(|value, _| {
+                                            format!("{:.0}%", value * 100.0)
+                                        }),
+                                )
+                                .changed()
+                            {
+                                audio_changed = true;
+                            }
+                        } else {
+                            ui.separator();
+                            ui.label(i18n.text("canvas.audio_controls_unavailable"));
+                        }
+                    },
+                );
             },
         );
         self.node_name_drafts.insert(node.id, name_draft);

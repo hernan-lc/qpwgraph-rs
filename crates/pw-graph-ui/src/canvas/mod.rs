@@ -11,6 +11,7 @@ use pw_graph_i18n::I18n;
 use std::collections::{BTreeSet, HashMap};
 
 mod geometry;
+mod icons;
 mod links;
 mod minimap;
 mod names;
