@@ -1,8 +1,8 @@
 //! Deterministic in-memory backend used by demo mode and tests.
 
 use super::api::{
-    BackendError, BackendResult, EffectDriver, EffectInsertRequest, EffectInstance, GraphDriver,
-    NodeAudioControl,
+    BackendError, BackendResult, EffectDriver, EffectInsertRequest, EffectInstance,
+    EffectNodeRequest, GraphDriver, NodeAudioControl,
 };
 use pw_graph_core::{
     Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
@@ -111,6 +111,110 @@ impl DemoDriver {
         self.next_link_id += 1;
         id
     }
+
+    fn create_effect_node_internal(
+        &mut self,
+        request: EffectNodeRequest,
+    ) -> BackendResult<EffectInstance> {
+        if self.effects.contains_key(&request.instance_id) {
+            return Err(BackendError::Native(format!(
+                "effect instance {} already exists",
+                request.instance_id
+            )));
+        }
+
+        // Prepare and validate before touching the graph. This keeps failed
+        // module/parameter requests from leaving an empty node behind.
+        let mut processor = self
+            .effect_host
+            .create(&request.effect_id)
+            .map_err(|error| BackendError::Native(format!("could not create effect: {error}")))?;
+        processor
+            .prepare(AudioSpec {
+                sample_rate: 48_000,
+                channels: 2,
+                max_frames: 1024,
+            })
+            .map_err(|error| BackendError::Native(error.to_string()))?;
+        pw_graph_effects::apply_parameters(&mut *processor, &request.parameters)
+            .map_err(|error| BackendError::Native(error.to_string()))?;
+
+        let node_id = NodeId(self.next_effect_id);
+        self.next_effect_id += 1;
+        let input_port = PortId(self.next_effect_id);
+        self.next_effect_id += 1;
+        let output_port = PortId(self.next_effect_id);
+        self.next_effect_id += 1;
+        let mut node = Node::new(node_id, request.effect_id.clone(), NodeType::Effect)
+            .with_effect_instance(request.instance_id.clone());
+        node.position = request.position;
+        self.graph.add_node(node)?;
+        if let Err(error) = self.graph.add_port(Port::new(
+            input_port,
+            node_id,
+            "input",
+            Direction::Sink,
+            PortType::Audio,
+        )) {
+            self.graph.nodes.remove(&node_id);
+            return Err(error.into());
+        }
+        if let Err(error) = self.graph.add_port(Port::new(
+            output_port,
+            node_id,
+            "output",
+            Direction::Source,
+            PortType::Audio,
+        )) {
+            self.graph.ports.remove(&input_port);
+            self.graph.nodes.remove(&node_id);
+            return Err(error.into());
+        }
+
+        let instance = EffectInstance {
+            config: EffectInstanceConfig {
+                instance_id: request.instance_id.clone(),
+                effect_id: request.effect_id,
+                module_path: request.module_path,
+                enabled: request.enabled,
+                parameters: request.parameters,
+            },
+            node_id,
+            input_port,
+            output_port,
+            source: None,
+            destination: None,
+            error: None,
+        };
+        self.effects
+            .insert(instance.config.instance_id.clone(), instance.clone());
+        self.effect_processors
+            .insert(instance.config.instance_id.clone(), processor);
+        Ok(instance)
+    }
+
+    /// Remove an effect node and all links touching it without restoring an
+    /// original connection. Used for standalone-node removal and insertion
+    /// rollback after a graph mutation fails.
+    fn remove_effect_node_internal(&mut self, instance: &EffectInstance) {
+        let links: Vec<_> = self
+            .graph
+            .links
+            .values()
+            .filter(|link| {
+                link.output_port == instance.output_port || link.input_port == instance.input_port
+            })
+            .map(|link| link.id)
+            .collect();
+        for link in links {
+            let _ = self.graph.remove_link(link);
+        }
+        self.graph.ports.remove(&instance.input_port);
+        self.graph.ports.remove(&instance.output_port);
+        self.graph.nodes.remove(&instance.node_id);
+        self.effects.remove(&instance.config.instance_id);
+        self.effect_processors.remove(&instance.config.instance_id);
+    }
 }
 
 /// Compatibility name retained for callers of the original backend API.
@@ -200,13 +304,15 @@ impl EffectDriver for DemoDriver {
         self.effects.values().cloned().collect()
     }
 
+    fn supports_effect_nodes(&self) -> bool {
+        true
+    }
+
+    fn create_effect_node(&mut self, request: EffectNodeRequest) -> BackendResult<EffectInstance> {
+        self.create_effect_node_internal(request)
+    }
+
     fn insert_effect(&mut self, request: EffectInsertRequest) -> BackendResult<EffectInstance> {
-        if self.effects.contains_key(&request.instance_id) {
-            return Err(BackendError::Native(format!(
-                "effect instance {} already exists",
-                request.instance_id
-            )));
-        }
         let output = self
             .graph
             .resolve_port_key(&request.source)
@@ -224,87 +330,37 @@ impl EffectDriver for DemoDriver {
             .ok_or_else(|| {
                 BackendError::Native("effect source and destination are not linked".into())
             })?;
-        let mut processor = self
-            .effect_host
-            .create(&request.effect_id)
-            .map_err(|error| BackendError::Native(format!("could not create effect: {error}")))?;
-        processor
-            .prepare(AudioSpec {
-                sample_rate: 48_000,
-                channels: 2,
-                max_frames: 1024,
-            })
-            .map_err(|error| BackendError::Native(error.to_string()))?;
-        pw_graph_effects::apply_parameters(&mut *processor, &request.parameters)
-            .map_err(|error| BackendError::Native(error.to_string()))?;
 
-        let node_id = NodeId(self.next_effect_id);
-        self.next_effect_id += 1;
-        let input_port = PortId(self.next_effect_id);
-        self.next_effect_id += 1;
-        let output_port = PortId(self.next_effect_id);
-        self.next_effect_id += 1;
-        let mut node = Node::new(node_id, request.effect_id.clone(), NodeType::Effect)
-            .with_effect_instance(request.instance_id.clone());
-        node.position = [250.0, 180.0];
-        self.graph.add_node(node)?;
-        self.graph.add_port(Port::new(
-            input_port,
-            node_id,
-            "input",
-            Direction::Sink,
-            PortType::Audio,
-        ))?;
-        self.graph.add_port(Port::new(
-            output_port,
-            node_id,
-            "output",
-            Direction::Source,
-            PortType::Audio,
-        ))?;
-
-        // Commit the graph only after all validation and object creation have
-        // succeeded. DemoDriver uses the same transaction shape as the live
-        // PipeWire implementation will use.
-        self.graph.remove_link(original.id)?;
-        let first = self.allocate_link_id();
-        let second = self.allocate_link_id();
-        if let Err(error) = self.graph.add_link(first, output, input_port) {
-            self.graph.remove_link(first).ok();
-            self.graph.ports.remove(&input_port);
-            self.graph.ports.remove(&output_port);
-            self.graph.nodes.remove(&node_id);
-            self.graph.add_link(original.id, output, input).ok();
-            return Err(error.into());
-        }
-        if let Err(error) = self.graph.add_link(second, output_port, input) {
-            self.graph.remove_link(first).ok();
-            self.graph.ports.remove(&input_port);
-            self.graph.ports.remove(&output_port);
-            self.graph.nodes.remove(&node_id);
-            self.graph.add_link(original.id, output, input).ok();
-            return Err(error.into());
-        }
-        let config = EffectInstanceConfig {
-            instance_id: request.instance_id.clone(),
+        let mut instance = self.create_effect_node_internal(EffectNodeRequest {
+            instance_id: request.instance_id,
             effect_id: request.effect_id,
             module_path: request.module_path,
             enabled: request.enabled,
             parameters: request.parameters,
-        };
-        let instance = EffectInstance {
-            config,
-            node_id,
-            input_port,
-            output_port,
-            source: request.source,
-            destination: request.destination,
-            error: None,
-        };
+            position: request.position,
+        })?;
+
+        // Commit the link rewrite only after the free node has been fully
+        // created. Every failure below removes that node and restores the
+        // original direct connection.
+        self.graph.remove_link(original.id)?;
+        let first = self.allocate_link_id();
+        let second = self.allocate_link_id();
+        if let Err(error) = self.graph.add_link(first, output, instance.input_port) {
+            self.remove_effect_node_internal(&instance);
+            self.graph.add_link(original.id, output, input).ok();
+            return Err(error.into());
+        }
+        if let Err(error) = self.graph.add_link(second, instance.output_port, input) {
+            self.graph.remove_link(first).ok();
+            self.remove_effect_node_internal(&instance);
+            self.graph.add_link(original.id, output, input).ok();
+            return Err(error.into());
+        }
+        instance.source = Some(request.source);
+        instance.destination = Some(request.destination);
         self.effects
             .insert(instance.config.instance_id.clone(), instance.clone());
-        self.effect_processors
-            .insert(instance.config.instance_id.clone(), processor);
         Ok(instance)
     }
 
@@ -322,6 +378,12 @@ impl EffectDriver for DemoDriver {
         parameter: &str,
         value: f32,
     ) -> BackendResult<()> {
+        let processor = self.effect_processors.get_mut(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        processor
+            .set_parameter(parameter, value)
+            .map_err(|error| BackendError::Native(error.to_string()))?;
         let instance = self.effects.get_mut(instance_id).ok_or_else(|| {
             BackendError::Native(format!("unknown effect instance {instance_id}"))
         })?;
@@ -330,10 +392,28 @@ impl EffectDriver for DemoDriver {
     }
 
     fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
-        let instance = self.effects.remove(instance_id).ok_or_else(|| {
+        let instance = self.effects.get(instance_id).cloned().ok_or_else(|| {
             BackendError::Native(format!("unknown effect instance {instance_id}"))
         })?;
-        self.effect_processors.remove(instance_id);
+
+        let restored_endpoints = match (&instance.source, &instance.destination) {
+            (Some(source), Some(destination)) => Some((
+                self.graph.resolve_port_key(source).ok_or_else(|| {
+                    BackendError::Native("effect source disappeared while removing effect".into())
+                })?,
+                self.graph.resolve_port_key(destination).ok_or_else(|| {
+                    BackendError::Native(
+                        "effect destination disappeared while removing effect".into(),
+                    )
+                })?,
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(BackendError::Native(
+                    "effect routing is incomplete and cannot be restored".into(),
+                ));
+            }
+        };
         let links: Vec<_> = self
             .graph
             .links
@@ -343,26 +423,27 @@ impl EffectDriver for DemoDriver {
             })
             .map(|link| link.id)
             .collect();
+        let removed_links: Vec<_> = links
+            .iter()
+            .filter_map(|link| self.graph.link(*link).cloned())
+            .collect();
         for link in links {
             self.graph.remove_link(link)?;
         }
-        let source = self
-            .graph
-            .resolve_port_key(&instance.source)
-            .ok_or_else(|| {
-                BackendError::Native("effect source disappeared while removing effect".into())
-            })?;
-        let destination = self
-            .graph
-            .resolve_port_key(&instance.destination)
-            .ok_or_else(|| {
-                BackendError::Native("effect destination disappeared while removing effect".into())
-            })?;
-        let link_id = self.allocate_link_id();
-        self.graph.add_link(link_id, source, destination)?;
+        if let Some((source, destination)) = restored_endpoints {
+            let link_id = self.allocate_link_id();
+            if let Err(error) = self.graph.add_link(link_id, source, destination) {
+                for link in removed_links {
+                    self.graph.insert_existing_link(link).ok();
+                }
+                return Err(error.into());
+            }
+        }
         self.graph.ports.remove(&instance.input_port);
         self.graph.ports.remove(&instance.output_port);
         self.graph.nodes.remove(&instance.node_id);
+        self.effects.remove(instance_id);
+        self.effect_processors.remove(instance_id);
         Ok(())
     }
 }

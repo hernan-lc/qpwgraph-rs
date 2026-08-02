@@ -60,6 +60,21 @@ pub enum BackendError {
 
 pub type BackendResult<T> = Result<T, BackendError>;
 
+/// Parameters used to create a free-standing effect node. The node has one
+/// audio input and one audio output, so callers can patch it like any other
+/// node in the graph.
+#[derive(Clone, Debug)]
+pub struct EffectNodeRequest {
+    pub instance_id: String,
+    pub effect_id: String,
+    pub module_path: Option<String>,
+    pub enabled: bool,
+    pub parameters: BTreeMap<String, f32>,
+    /// Initial canvas position in logical scene coordinates. Backends that do
+    /// not persist layouts may still use it for their in-memory graph model.
+    pub position: [f32; 2],
+}
+
 /// An effect insertion request. The endpoint keys are captured before the
 /// graph is mutated so an effect can be restored after PipeWire global IDs
 /// change.
@@ -72,6 +87,8 @@ pub struct EffectInsertRequest {
     pub destination: PortKey,
     pub enabled: bool,
     pub parameters: BTreeMap<String, f32>,
+    /// Position for the newly inserted effect node.
+    pub position: [f32; 2],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,8 +97,11 @@ pub struct EffectInstance {
     pub node_id: NodeId,
     pub input_port: PortId,
     pub output_port: PortId,
-    pub source: PortKey,
-    pub destination: PortKey,
+    /// Original endpoints when this instance was inserted into an existing
+    /// link. Free-standing nodes leave both endpoints unset and can be wired
+    /// through the regular graph canvas.
+    pub source: Option<PortKey>,
+    pub destination: Option<PortKey>,
     pub error: Option<String>,
 }
 
@@ -95,6 +115,24 @@ pub trait EffectDriver {
 
     fn effect_instances(&self) -> Vec<EffectInstance> {
         Vec::new()
+    }
+
+    /// Whether the backend can create a processing node. Exposing an effect
+    /// descriptor is not enough: the app uses this capability to avoid
+    /// presenting an enabled Create action on a backend that cannot host DSP.
+    fn supports_effect_nodes(&self) -> bool {
+        false
+    }
+
+    /// Create an unconnected effect node which can be linked through normal
+    /// graph operations.
+    fn create_effect_node(
+        &mut self,
+        _request: EffectNodeRequest,
+    ) -> BackendResult<EffectInstance> {
+        Err(BackendError::Unsupported(
+            "effect processing is not available for this backend".into(),
+        ))
     }
 
     fn insert_effect(&mut self, _request: EffectInsertRequest) -> BackendResult<EffectInstance> {

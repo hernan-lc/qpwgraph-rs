@@ -86,8 +86,20 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PersistedEffect {
     pub instance: EffectInstanceConfig,
-    pub source: PortKey,
-    pub destination: PortKey,
+    /// The original endpoints for an effect inserted into a link. A detached
+    /// effect node deliberately has no endpoints until the user patches it.
+    #[serde(default)]
+    pub source: Option<PortKey>,
+    #[serde(default)]
+    pub destination: Option<PortKey>,
+    /// Stored independently of graph node IDs because PipeWire assigns fresh
+    /// IDs whenever an effect node is recreated on startup.
+    #[serde(default = "default_effect_position")]
+    pub position: [f32; 2],
+}
+
+fn default_effect_position() -> [f32; 2] {
+    [260.0, 180.0]
 }
 
 impl Default for AppConfig {
@@ -215,7 +227,7 @@ mod tests {
                 enabled: true,
                 parameters: [("threshold-db".into(), -42.0)].into_iter().collect(),
             },
-            source: PortKey {
+            source: Some(PortKey {
                 node_name: "Capture".into(),
                 node_serial: None,
                 node_type: pw_graph_core::NodeType::PipeWire,
@@ -223,8 +235,8 @@ mod tests {
                 channel: Some("FL".into()),
                 direction: pw_graph_core::Direction::Source,
                 port_type: pw_graph_core::PortType::Audio,
-            },
-            destination: PortKey {
+            }),
+            destination: Some(PortKey {
                 node_name: "Playback".into(),
                 node_serial: None,
                 node_type: pw_graph_core::NodeType::PipeWire,
@@ -232,7 +244,8 @@ mod tests {
                 channel: Some("FL".into()),
                 direction: pw_graph_core::Direction::Sink,
                 port_type: pw_graph_core::PortType::Audio,
-            },
+            }),
+            position: [260.0, 180.0],
         });
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);

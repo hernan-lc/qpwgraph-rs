@@ -100,6 +100,7 @@ mod tests {
                 destination,
                 enabled: true,
                 parameters: BTreeMap::new(),
+                position: [250.0, 180.0],
             })
             .unwrap();
         assert_eq!(driver.effect_instances().len(), 1);
