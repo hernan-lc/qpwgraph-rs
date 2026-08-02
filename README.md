@@ -13,7 +13,7 @@ The workspace provides:
 - `pw-graph-config`: TOML application settings and XDG config path helpers.
 - `pw-graph-i18n`: catalog-based English/Spanish localization with fallback.
 - `pw-graph-ui`: egui graph canvas, drag-to-connect, selection, moving, sorting, and thumbnail view.
-- `pw-graph-app`: a runnable egui desktop shell, backend selection, patchbay controls, localization, and CLI flags.
+- `pw-graph-app`: a runnable egui desktop shell, backend selection, patchbay controls, localization, and CLI flags. Its application state, argument parsing, composite backend, tray integration, and GUI panels live in separate modules.
 
 ## Run
 
@@ -22,11 +22,11 @@ cargo run -p pw-graph-app
 ```
 
 Use `--lang es` to start in Spanish. The language can also be changed from the
-configuration section in the inspector and is persisted in the application
-config. The same section exposes patchbay, interface, graph-behavior, layout,
-and thumbnail settings; hover any icon for an explanation and use Save
-configuration to write immediately. Use `--demo` to force the deterministic
-in-memory graph.
+Interface screen and is persisted in the application config. The right-side
+panel is split into Graph, Patchbay, Interface, and Diagnostics screens so
+layout, routing, presentation, and status options remain separate. Hover any
+icon for an explanation and use Save configuration to write immediately. Use
+`--demo` to force the deterministic in-memory graph.
 
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
 support. PipeWire and ALSA are feature-gated so the application can still be

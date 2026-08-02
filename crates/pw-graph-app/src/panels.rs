@@ -1,8 +1,8 @@
 use crate::app::QpwgraphApp;
 use egui::Ui;
 use pw_graph_command::RenameCommand;
-use pw_graph_i18n::Locale;
 use pw_graph_core::NodeId;
+use pw_graph_i18n::Locale;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AppScreen {
@@ -80,11 +80,7 @@ impl QpwgraphApp {
                 let button = egui::Button::new(egui::RichText::new(icon).size(20.0))
                     .min_size(egui::vec2(42.0, 38.0))
                     .selected(self.screen == screen);
-                if ui
-                    .add(button)
-                    .on_hover_text(self.t(label))
-                    .clicked()
-                {
+                if ui.add(button).on_hover_text(self.t(label)).clicked() {
                     self.screen = screen;
                 }
             }
@@ -251,12 +247,12 @@ impl QpwgraphApp {
                                 && connection.input_port == link.input_port
                         })
                         .is_some_and(|connection| connection.pinned);
-                    if ui.checkbox(&mut pinned, self.t("inspector.pinned")).changed() {
-                        if let Some(connection) = self
-                            .patchbay
-                            .connections
-                            .iter_mut()
-                            .find(|connection| {
+                    if ui
+                        .checkbox(&mut pinned, self.t("inspector.pinned"))
+                        .changed()
+                    {
+                        if let Some(connection) =
+                            self.patchbay.connections.iter_mut().find(|connection| {
                                 connection.output_port == link.output_port
                                     && connection.input_port == link.input_port
                             })
@@ -321,41 +317,46 @@ impl QpwgraphApp {
 
         ui.separator();
         ui.heading(self.t("inspector.interface"));
-        let options = [
-            (
-                "interface.toolbar",
-                &mut self.config.toolbar,
-                "▤",
-                "inspector.toolbar_visible",
-                "help.toolbar_visible",
-            ),
-            (
-                "interface.statusbar",
-                &mut self.config.statusbar,
-                "▥",
-                "inspector.statusbar_visible",
-                "help.statusbar_visible",
-            ),
-            (
-                "interface.patchbay_toolbar",
-                &mut self.config.patchbay_toolbar,
-                "▦",
-                "inspector.patchbay_toolbar_visible",
-                "help.patchbay_toolbar_visible",
-            ),
-            (
-                "interface.menubar",
-                &mut self.config.menubar,
-                "☰",
-                "inspector.menubar_visible",
-                "help.menubar_visible",
-            ),
-        ];
-        for (id, value, icon, label, help) in options {
-            let label = self.t(label);
-            let help = self.t(help);
-            icon_checkbox(ui, id, value, icon, label, help);
-        }
+        let toolbar_label = self.t("inspector.toolbar_visible");
+        let toolbar_help = self.t("help.toolbar_visible");
+        icon_checkbox(
+            ui,
+            "interface.toolbar",
+            &mut self.config.toolbar,
+            "▤",
+            toolbar_label,
+            toolbar_help,
+        );
+        let statusbar_label = self.t("inspector.statusbar_visible");
+        let statusbar_help = self.t("help.statusbar_visible");
+        icon_checkbox(
+            ui,
+            "interface.statusbar",
+            &mut self.config.statusbar,
+            "▥",
+            statusbar_label,
+            statusbar_help,
+        );
+        let patchbay_toolbar_label = self.t("inspector.patchbay_toolbar_visible");
+        let patchbay_toolbar_help = self.t("help.patchbay_toolbar_visible");
+        icon_checkbox(
+            ui,
+            "interface.patchbay_toolbar",
+            &mut self.config.patchbay_toolbar,
+            "▦",
+            patchbay_toolbar_label,
+            patchbay_toolbar_help,
+        );
+        let menubar_label = self.t("inspector.menubar_visible");
+        let menubar_help = self.t("help.menubar_visible");
+        icon_checkbox(
+            ui,
+            "interface.menubar",
+            &mut self.config.menubar,
+            "☰",
+            menubar_label,
+            menubar_help,
+        );
 
         ui.separator();
         ui.heading(self.t("inspector.behavior"));
@@ -395,11 +396,11 @@ impl QpwgraphApp {
         ui.heading(format!("ⓘ {}", self.t("screen.diagnostics")));
         ui.label(self.t("screen.diagnostics_hint"));
         ui.separator();
-        ui.label(self.tf("diagnostics.backend", &[("name", self.backend_name.clone())]));
         ui.label(self.tf(
-            "diagnostics.status",
-            &[("status", self.status.clone())],
+            "diagnostics.backend",
+            &[("name", self.backend_name.clone())],
         ));
+        ui.label(self.tf("diagnostics.status", &[("status", self.status.clone())]));
         ui.label(self.tf(
             "diagnostics.nodes",
             &[("count", self.driver.graph().nodes.len().to_string())],
@@ -416,8 +417,14 @@ impl QpwgraphApp {
         ui.label(self.t("inspector.port_colors"));
         ui.colored_label(egui::Color32::from_rgb(87, 199, 133), self.t("port.audio"));
         ui.colored_label(egui::Color32::from_rgb(78, 157, 230), self.t("port.video"));
-        ui.colored_label(egui::Color32::from_rgb(227, 93, 106), self.t("port.pw_midi"));
-        ui.colored_label(egui::Color32::from_rgb(169, 121, 209), self.t("port.alsa_midi"));
+        ui.colored_label(
+            egui::Color32::from_rgb(227, 93, 106),
+            self.t("port.pw_midi"),
+        );
+        ui.colored_label(
+            egui::Color32::from_rgb(169, 121, 209),
+            self.t("port.alsa_midi"),
+        );
         ui.separator();
         ui.label(self.tf(
             "inspector.config_path",

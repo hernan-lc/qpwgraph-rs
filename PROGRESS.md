@@ -3,9 +3,15 @@
 The requested i18n and roadmap implementation is complete through M9 for the
 current Rust/egui implementation. English and Spanish are bundled catalogs with
 English fallback, runtime language switching, localized CLI help, status text,
-inspector controls, patchbay actions, tray labels, and configuration help
+panel controls, patchbay actions, tray labels, and configuration help
 tooltips. The canvas widget-ID clash overlay was fixed by scoping every graph
 interaction ID to its canvas and graph item.
+
+The desktop shell is modularized: `main.rs` is a small entry point, while
+`app.rs`, `args.rs`, `backend.rs`, `panels.rs`, and `tray.rs` own application
+state, CLI parsing, backend composition, screen panels, and tray integration.
+The GUI uses a navigation rail with separate Graph, Patchbay, Interface, and
+Diagnostics screens instead of placing every option in one inspector column.
 
 ## Roadmap status
 
@@ -21,6 +27,15 @@ interaction ID to its canvas and graph item.
 | M7 – ALSA MIDI | Implemented | Native ALSA Sequencer enumeration, existing-subscription discovery, namespaced IDs, connect, disconnect, refresh, and composite PipeWire+ALSA routing are implemented. |
 | M8 – Extras | Implemented | `-m`, `-d`, `-n`, `--lang`, and `--demo` are available; thumbnail mode and Linux StatusNotifier tray Show/Hide/Quit actions are implemented. |
 | M9 – Packaging | Implemented | Desktop entry, AppStream metadata, Flatpak manifest, reproducible lockfile, and packaging instructions are included. |
+
+## UI organization
+
+- Graph: node counts, selection/rename, and port sorting.
+- Patchbay: persistent routing rules, activation behavior, live-link pinning,
+  and disconnect actions.
+- Interface: language selection, configuration save, visibility toggles, and
+  graph presentation behavior.
+- Diagnostics: active backend, status, graph counts, and port color legend.
 
 ## Native/runtime notes
 

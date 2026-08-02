@@ -1,80 +1,39 @@
+use crate::args::Args;
+use crate::backend::CompositeDriver;
+use crate::panels::{icon_button, AppScreen};
 use eframe::egui;
-use pw_graph_backend::{GraphDriver, InMemoryDriver};
-use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand, RenameCommand};
+use pw_graph_alsamidi::AlsaMidiDriver;
+use pw_graph_backend::{GraphDriver, InMemoryDriver, PipewireDriver};
+use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
-use pw_graph_core::{GraphError, Link, LinkId, NodeId, PortId};
+use pw_graph_core::{LinkId, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, GraphCanvas};
-use crate::args::Args;
-use crate::backend::CompositeDriver;
 use std::path::PathBuf;
 
 #[cfg(all(target_os = "linux", feature = "tray"))]
 use crate::tray::tray_support;
 
-
-
-
-
-
-
-
-
 pub(crate) struct QpwgraphApp {
-    driver: Box<dyn GraphDriver>,
-    commands: CommandStack,
-    canvas: GraphCanvas,
-    patchbay: Patchbay,
-    config: AppConfig,
-    config_file: PathBuf,
-    patchbay_file: PathBuf,
-    status: String,
-    debug: bool,
-    no_alsa_midi: bool,
-    start_minimized: bool,
-    i18n: I18n,
-    backend_name: String,
-    rename_node: Option<NodeId>,
-    rename_buffer: String,
+    pub(crate) driver: Box<dyn GraphDriver>,
+    pub(crate) commands: CommandStack,
+    pub(crate) canvas: GraphCanvas,
+    pub(crate) patchbay: Patchbay,
+    pub(crate) config: AppConfig,
+    pub(crate) config_file: PathBuf,
+    pub(crate) patchbay_file: PathBuf,
+    pub(crate) status: String,
+    pub(crate) debug: bool,
+    pub(crate) no_alsa_midi: bool,
+    pub(crate) start_minimized: bool,
+    pub(crate) i18n: I18n,
+    pub(crate) backend_name: String,
+    pub(crate) screen: AppScreen,
+    pub(crate) rename_node: Option<NodeId>,
+    pub(crate) rename_buffer: String,
     #[cfg(all(target_os = "linux", feature = "tray"))]
-    tray: Option<tray_support::State>,
-}
-
-fn icon_button(
-    ui: &mut egui::Ui,
-    id: &str,
-    icon: &str,
-    label: String,
-    explanation: String,
-) -> bool {
-    ui.push_id(("action", id), |ui| {
-        ui.button(format!("{icon} {label}"))
-            .on_hover_text(explanation)
-            .clicked()
-    })
-    .inner
-}
-
-fn icon_checkbox(
-    ui: &mut egui::Ui,
-    id: &str,
-    value: &mut bool,
-    icon: &str,
-    label: String,
-    explanation: String,
-) -> bool {
-    ui.push_id(("configuration", id), |ui| {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(icon).color(egui::Color32::LIGHT_BLUE));
-            let response = ui.checkbox(value, label);
-            let changed = response.changed();
-            response.on_hover_text(explanation);
-            changed
-        })
-        .inner
-    })
-    .inner
+    pub(crate) tray: Option<tray_support::State>,
 }
 
 impl QpwgraphApp {
@@ -210,6 +169,7 @@ impl QpwgraphApp {
             start_minimized: args.minimized,
             i18n,
             backend_name,
+            screen: AppScreen::default(),
             rename_node: None,
             rename_buffer: String::new(),
             #[cfg(all(target_os = "linux", feature = "tray"))]
@@ -217,11 +177,11 @@ impl QpwgraphApp {
         }
     }
 
-    fn t(&self, key: &str) -> String {
+    pub(crate) fn t(&self, key: &str) -> String {
         self.i18n.text(key)
     }
 
-    fn tf(&self, key: &str, variables: &[(&str, String)]) -> String {
+    pub(crate) fn tf(&self, key: &str, variables: &[(&str, String)]) -> String {
         self.i18n.format(key, variables)
     }
 
@@ -257,7 +217,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn disconnect(&mut self, link: LinkId) {
+    pub(crate) fn disconnect(&mut self, link: LinkId) {
         let Some(existing) = self.driver.graph().link(link).cloned() else {
             return;
         };
@@ -331,7 +291,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn activate_patchbay(&mut self) {
+    pub(crate) fn activate_patchbay(&mut self) {
         match self.patchbay.activate(
             self.driver.as_mut(),
             self.config.patchbay_exclusive,
@@ -385,7 +345,7 @@ impl QpwgraphApp {
         self.config.patchbay_path = Some(self.patchbay_file.clone());
     }
 
-    fn save_config_now(&mut self) {
+    pub(crate) fn save_config_now(&mut self) {
         self.sync_config();
         match self.config.save_to(&self.config_file) {
             Ok(()) => self.status = self.t("status.config_saved"),
@@ -573,316 +533,7 @@ impl eframe::App for QpwgraphApp {
             });
         }
 
-        let current_locale = self.i18n.locale();
-        let mut selected_locale = current_locale;
-        egui::SidePanel::right("inspector")
-            .default_width(250.0)
-            .show(ctx, |ui| {
-                ui.heading(self.t("inspector.graph"));
-                ui.label(self.tf(
-                    "inspector.nodes",
-                    &[("count", self.driver.graph().nodes.len().to_string())],
-                ));
-                ui.label(self.tf(
-                    "inspector.ports",
-                    &[("count", self.driver.graph().ports.len().to_string())],
-                ));
-                ui.label(self.tf(
-                    "inspector.links",
-                    &[("count", self.driver.graph().links.len().to_string())],
-                ));
-                if let Some(selected_node) = self.canvas.selected_node {
-                    let current_name = self
-                        .driver
-                        .graph()
-                        .node(selected_node)
-                        .map(|node| node.name.clone());
-                    if let Some(current_name) = current_name {
-                        ui.separator();
-                        ui.label(self.t("inspector.selected_node"));
-                        if self.rename_node != Some(selected_node) {
-                            self.rename_node = Some(selected_node);
-                            self.rename_buffer = current_name.clone();
-                        }
-                        let response = ui.text_edit_singleline(&mut self.rename_buffer);
-                        if response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            && self.rename_buffer != current_name
-                            && !self.rename_buffer.trim().is_empty()
-                        {
-                            let edited_name = self.rename_buffer.clone();
-                            match self.commands.execute(
-                                Box::new(RenameCommand::new(
-                                    selected_node,
-                                    current_name,
-                                    edited_name,
-                                )),
-                                self.driver.as_mut(),
-                            ) {
-                                Ok(()) => self.status = self.t("status.renamed"),
-                                Err(error) => {
-                                    self.status = self
-                                        .tf("status.rename_failed", &[("error", error.to_string())])
-                                }
-                            }
-                        }
-                    }
-                }
-                ui.separator();
-                ui.heading(format!("⚙ {}", self.t("inspector.configuration")));
-                ui.label(self.t("inspector.configuration_hint"))
-                    .on_hover_text(self.t("help.configuration"));
-                ui.horizontal(|ui| {
-                    ui.label("🌐");
-                    egui::ComboBox::from_label(self.t("language.label"))
-                        .selected_text(selected_locale.native_name())
-                        .show_ui(ui, |ui| {
-                            for locale in Locale::ALL {
-                                ui.selectable_value(
-                                    &mut selected_locale,
-                                    locale,
-                                    locale.native_name(),
-                                );
-                            }
-                        });
-                });
-                ui.label(self.t("help.language"));
-                if icon_button(
-                    ui,
-                    "configuration.save",
-                    "▣",
-                    self.t("inspector.save_configuration"),
-                    self.t("help.save_configuration"),
-                ) {
-                    self.save_config_now();
-                }
-                ui.label(self.tf(
-                    "inspector.config_path",
-                    &[("path", self.config_file.display().to_string())],
-                ));
-                ui.separator();
-                ui.label(self.t("inspector.patchbay_options"));
-                let exclusive_label = self.t("inspector.exclusive");
-                let exclusive_help = self.t("help.exclusive");
-                let auto_disconnect_label = self.t("inspector.auto_disconnect");
-                let auto_disconnect_help = self.t("help.auto_disconnect");
-                let auto_pin_label = self.t("inspector.auto_pin");
-                let auto_pin_help = self.t("help.auto_pin");
-                let patchbay_activated_label = self.t("inspector.patchbay_activated");
-                let patchbay_activated_help = self.t("help.patchbay_activated");
-                icon_checkbox(
-                    ui,
-                    "patchbay.exclusive",
-                    &mut self.config.patchbay_exclusive,
-                    "◇",
-                    exclusive_label,
-                    exclusive_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "patchbay.auto_disconnect",
-                    &mut self.config.patchbay_auto_disconnect,
-                    "⇄",
-                    auto_disconnect_label,
-                    auto_disconnect_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "patchbay.auto_pin",
-                    &mut self.config.patchbay_auto_pin,
-                    "⚑",
-                    auto_pin_label,
-                    auto_pin_help,
-                );
-                let patchbay_activated_before = self.config.patchbay_activated;
-                icon_checkbox(
-                    ui,
-                    "patchbay.activated",
-                    &mut self.config.patchbay_activated,
-                    "⏱",
-                    patchbay_activated_label,
-                    patchbay_activated_help,
-                );
-                if self.config.patchbay_activated && !patchbay_activated_before {
-                    self.activate_patchbay();
-                }
-                ui.separator();
-                ui.heading(self.t("inspector.interface"));
-                let toolbar_visible_label = self.t("inspector.toolbar_visible");
-                let toolbar_visible_help = self.t("help.toolbar_visible");
-                let statusbar_visible_label = self.t("inspector.statusbar_visible");
-                let statusbar_visible_help = self.t("help.statusbar_visible");
-                let patchbay_toolbar_visible_label = self.t("inspector.patchbay_toolbar_visible");
-                let patchbay_toolbar_visible_help = self.t("help.patchbay_toolbar_visible");
-                let menubar_visible_label = self.t("inspector.menubar_visible");
-                let menubar_visible_help = self.t("help.menubar_visible");
-                icon_checkbox(
-                    ui,
-                    "interface.toolbar",
-                    &mut self.config.toolbar,
-                    "▤",
-                    toolbar_visible_label,
-                    toolbar_visible_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "interface.statusbar",
-                    &mut self.config.statusbar,
-                    "▥",
-                    statusbar_visible_label,
-                    statusbar_visible_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "interface.patchbay_toolbar",
-                    &mut self.config.patchbay_toolbar,
-                    "▦",
-                    patchbay_toolbar_visible_label,
-                    patchbay_toolbar_visible_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "interface.menubar",
-                    &mut self.config.menubar,
-                    "☰",
-                    menubar_visible_label,
-                    menubar_visible_help,
-                );
-                ui.separator();
-                ui.label(self.t("inspector.behavior"));
-                let repel_overlaps_label = self.t("inspector.repel_overlaps");
-                let repel_overlaps_help = self.t("help.repel_overlaps");
-                let connect_through_label = self.t("inspector.connect_through");
-                let connect_through_help = self.t("help.connect_through");
-                let thumbnail_label = self.t("inspector.thumbnail_view");
-                let thumbnail_help = self.t("help.thumbnail_view");
-                icon_checkbox(
-                    ui,
-                    "behavior.repel",
-                    &mut self.config.repel_overlapping_nodes,
-                    "✣",
-                    repel_overlaps_label,
-                    repel_overlaps_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "behavior.connect_through",
-                    &mut self.config.connect_through_nodes,
-                    "↔",
-                    connect_through_label,
-                    connect_through_help,
-                );
-                icon_checkbox(
-                    ui,
-                    "behavior.thumbnail",
-                    &mut self.canvas.thumbnail_mode,
-                    "▧",
-                    thumbnail_label,
-                    thumbnail_help,
-                );
-                let sort_by_name = self.config.sort_type != "id";
-                let sort_by_name_before = sort_by_name;
-                let mut sort_by_name_choice = sort_by_name;
-                egui::ComboBox::from_label(self.t("inspector.sort_ports"))
-                    .selected_text(if sort_by_name {
-                        self.t("sort.name")
-                    } else {
-                        self.t("sort.id")
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut sort_by_name_choice, true, self.t("sort.name"));
-                        ui.selectable_value(&mut sort_by_name_choice, false, self.t("sort.id"));
-                    });
-                if sort_by_name_choice != sort_by_name_before {
-                    self.config.sort_type = if sort_by_name_choice { "name" } else { "id" }.into();
-                }
-                let descending = self.config.sort_order == "descending";
-                let mut descending_choice = descending;
-                egui::ComboBox::from_label(self.t("inspector.sort_order"))
-                    .selected_text(if descending {
-                        self.t("sort.descending")
-                    } else {
-                        self.t("sort.ascending")
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut descending_choice,
-                            false,
-                            self.t("sort.ascending"),
-                        );
-                        ui.selectable_value(
-                            &mut descending_choice,
-                            true,
-                            self.t("sort.descending"),
-                        );
-                    });
-                if descending_choice != descending {
-                    self.config.sort_order = if descending_choice {
-                        "descending"
-                    } else {
-                        "ascending"
-                    }
-                    .into();
-                }
-                ui.separator();
-                ui.heading(self.t("inspector.live_links"));
-                let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
-                for link in links {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{} → {}", link.output_port, link.input_port));
-                        let mut pinned = self
-                            .patchbay
-                            .connections
-                            .iter()
-                            .find(|connection| {
-                                connection.output_port == link.output_port
-                                    && connection.input_port == link.input_port
-                            })
-                            .is_some_and(|connection| connection.pinned);
-                        if ui
-                            .checkbox(&mut pinned, self.t("inspector.pinned"))
-                            .changed()
-                        {
-                            if let Some(connection) =
-                                self.patchbay.connections.iter_mut().find(|connection| {
-                                    connection.output_port == link.output_port
-                                        && connection.input_port == link.input_port
-                                })
-                            {
-                                connection.pinned = pinned;
-                            } else {
-                                self.patchbay.add_graph_connection(
-                                    self.driver.graph(),
-                                    link.output_port,
-                                    link.input_port,
-                                    pinned,
-                                );
-                            }
-                        }
-                        if ui.small_button("×").clicked() {
-                            self.disconnect(link.id);
-                        }
-                    });
-                }
-                ui.separator();
-                ui.label(self.t("inspector.port_colors"));
-                ui.colored_label(egui::Color32::from_rgb(87, 199, 133), self.t("port.audio"));
-                ui.colored_label(egui::Color32::from_rgb(78, 157, 230), self.t("port.video"));
-                ui.colored_label(
-                    egui::Color32::from_rgb(227, 93, 106),
-                    self.t("port.pw_midi"),
-                );
-                ui.colored_label(
-                    egui::Color32::from_rgb(169, 121, 209),
-                    self.t("port.alsa_midi"),
-                );
-            });
-
-        if selected_locale != current_locale {
-            self.i18n.set_locale(selected_locale);
-            self.config.language = selected_locale.code().to_owned();
-            self.status = self.t("status.language_changed");
-        }
+        self.show_gui_panels(ctx);
 
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
         self.canvas.sort_ports_descending = self.config.sort_order == "descending";
@@ -945,4 +596,3 @@ pub(crate) fn run(args: Args) -> eframe::Result<()> {
         Box::new(move |_creation_context| Ok(Box::new(app))),
     )
 }
-
