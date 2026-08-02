@@ -252,6 +252,22 @@ impl Graph {
         Ok(link)
     }
 
+    /// Insert a link reported by a backend snapshot. Backends may know about
+    /// legacy or partially-described links that cannot be revalidated locally.
+    pub fn insert_existing_link(&mut self, link: Link) -> Result<(), GraphError> {
+        if self.links.contains_key(&link.id) {
+            return Err(GraphError::DuplicateLink(link.id));
+        }
+        if !self.ports.contains_key(&link.output_port) {
+            return Err(GraphError::MissingPort(link.output_port));
+        }
+        if !self.ports.contains_key(&link.input_port) {
+            return Err(GraphError::MissingPort(link.input_port));
+        }
+        self.links.insert(link.id, link);
+        Ok(())
+    }
+
     pub fn links_for_port(&self, port_id: PortId) -> impl Iterator<Item = &Link> {
         self.links
             .values()

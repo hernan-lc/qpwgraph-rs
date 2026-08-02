@@ -2,20 +2,31 @@
 //! never owns the driver or command stack.
 
 use egui::{pos2, vec2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use pw_graph_core::{Direction, Graph, Node, NodeId, Port, PortId, PortType};
-use std::collections::HashMap;
+use pw_graph_core::{Direction, Graph, LinkId, Node, NodeId, Port, PortId, PortType};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CanvasAction {
     Connect { output: PortId, input: PortId },
-    Disconnect { link: pw_graph_core::LinkId },
+    Disconnect { link: LinkId },
+    MoveNode { node: NodeId, position: [f32; 2] },
 }
 
 pub struct GraphCanvas {
     pub zoom: f32,
     pub pan: Vec2,
+    pub sort_ports_by_name: bool,
+    pub sort_ports_descending: bool,
+    pub thumbnail_mode: bool,
     pending_output: Option<PortId>,
     pub selected_node: Option<NodeId>,
+    pub selected_nodes: BTreeSet<NodeId>,
+    selected_link: Option<LinkId>,
+    selection_start: Option<Pos2>,
+    selection_current: Option<Pos2>,
+    dragging_node: Option<NodeId>,
+    dragging_origin: BTreeMap<NodeId, [f32; 2]>,
+    drag_delta: Vec2,
 }
 
 impl Default for GraphCanvas {
@@ -23,8 +34,18 @@ impl Default for GraphCanvas {
         Self {
             zoom: 1.0,
             pan: vec2(24.0, 24.0),
+            sort_ports_by_name: true,
+            sort_ports_descending: false,
+            thumbnail_mode: false,
             pending_output: None,
             selected_node: None,
+            selected_nodes: BTreeSet::new(),
+            selected_link: None,
+            selection_start: None,
+            selection_current: None,
+            dragging_node: None,
+            dragging_origin: BTreeMap::new(),
+            drag_delta: Vec2::ZERO,
         }
     }
 }
@@ -40,9 +61,46 @@ impl GraphCanvas {
         painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
         self.draw_grid(&painter, rect);
 
-        if canvas_response.dragged() {
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.pending_output = None;
+            self.selection_start = None;
+            self.selection_current = None;
+            self.selected_link = None;
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
+            if let Some(link) = self.selected_link.take() {
+                actions.push(CanvasAction::Disconnect { link });
+            }
+        }
+
+        if canvas_response.drag_started() && self.dragging_node.is_none() {
+            self.selection_start = ui.input(|input| input.pointer.interact_pos());
+            self.selection_current = self.selection_start;
+        }
+        if self.selection_start.is_some() && canvas_response.dragged() {
+            self.selection_current = ui.input(|input| input.pointer.interact_pos());
+        }
+        if canvas_response.drag_stopped() {
+            if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
+                let selection = Rect::from_two_pos(start, end);
+                self.selected_nodes = graph
+                    .nodes
+                    .values()
+                    .filter(|node| self.node_rect(rect, graph, node).intersects(selection))
+                    .map(|node| node.id)
+                    .collect();
+                self.selected_node = self.selected_nodes.iter().next().copied();
+            }
+            self.selection_start = None;
+            self.selection_current = None;
+        }
+        if canvas_response.dragged()
+            && self.dragging_node.is_none()
+            && self.selection_start.is_none()
+        {
             self.pan += canvas_response.drag_delta();
         }
+
         let scroll = ui.input(|input| input.raw_scroll_delta.y);
         if scroll.abs() > f32::EPSILON
             && rect.contains(ui.input(|input| input.pointer.hover_pos().unwrap_or(rect.center())))
@@ -51,6 +109,9 @@ impl GraphCanvas {
         }
 
         for link in graph.links.values() {
+            if self.thumbnail_mode {
+                break;
+            }
             if let (Some(source), Some(destination)) = (
                 graph.ports.get(&link.output_port),
                 graph.ports.get(&link.input_port),
@@ -59,10 +120,26 @@ impl GraphCanvas {
                     self.port_anchor(rect, graph, source),
                     self.port_anchor(rect, graph, destination),
                 ) {
+                    let selected = self.selected_link == Some(link.id);
                     painter.line_segment(
                         [source_pos, destination_pos],
-                        Stroke::new(2.0_f32, Color32::from_rgb(115, 133, 154)),
+                        Stroke::new(
+                            if selected { 3.0_f32 } else { 2.0_f32 },
+                            if selected {
+                                Color32::LIGHT_GREEN
+                            } else {
+                                Color32::from_rgb(115, 133, 154)
+                            },
+                        ),
                     );
+                    let hit_rect = Rect::from_two_pos(source_pos, destination_pos).expand(8.0);
+                    let response =
+                        ui.interact(hit_rect, Id::new(("link", link.id)), Sense::click());
+                    if response.clicked() {
+                        self.selected_link = Some(link.id);
+                        self.selected_nodes.clear();
+                        self.selected_node = None;
+                    }
                 }
             }
         }
@@ -77,6 +154,16 @@ impl GraphCanvas {
                 &mut anchors,
                 &mut actions,
             );
+        }
+
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
+            let selection = Rect::from_two_pos(start, end);
+            painter.rect_filled(
+                selection,
+                0.0,
+                Color32::from_rgba_unmultiplied(80, 130, 190, 40),
+            );
+            painter.rect_stroke(selection, 0.0, Stroke::new(1.0_f32, Color32::LIGHT_BLUE));
         }
 
         if let Some(output_id) = self.pending_output {
@@ -130,22 +217,55 @@ impl GraphCanvas {
         anchors: &mut HashMap<PortId, Pos2>,
         actions: &mut Vec<CanvasAction>,
     ) {
-        let ports: Vec<&Port> = node
-            .ports
-            .iter()
-            .filter_map(|id| graph.ports.get(id))
-            .collect();
-        let width = 220.0 * self.zoom;
-        let height = (32.0 + ports.len() as f32 * 26.0).max(58.0) * self.zoom;
-        let top_left = rect.left_top()
-            + self.pan
-            + vec2(node.position[0] * self.zoom, node.position[1] * self.zoom);
-        let node_rect = Rect::from_min_size(top_left, vec2(width, height));
-        let response = ui.interact(node_rect, Id::new(("node", node.id)), Sense::click());
+        let ports = self.ordered_ports(graph, node);
+        let node_rect = self.node_rect(rect, graph, node);
+        let response = ui.interact(
+            node_rect,
+            Id::new(("node", node.id)),
+            Sense::click_and_drag(),
+        );
         if response.clicked() {
-            self.selected_node = Some(node.id);
+            let shift = ui.input(|input| input.modifiers.shift);
+            if !shift {
+                self.selected_nodes.clear();
+            }
+            if !self.selected_nodes.insert(node.id) && shift {
+                self.selected_nodes.remove(&node.id);
+            }
+            self.selected_node = self.selected_nodes.iter().next().copied();
+            self.selected_link = None;
         }
-        let fill = if self.selected_node == Some(node.id) {
+        if response.drag_started() {
+            if !self.selected_nodes.contains(&node.id) {
+                self.selected_nodes.clear();
+                self.selected_nodes.insert(node.id);
+                self.selected_node = Some(node.id);
+            }
+            self.dragging_node = Some(node.id);
+            self.dragging_origin = self
+                .selected_nodes
+                .iter()
+                .filter_map(|id| graph.node(*id).map(|item| (*id, item.position)))
+                .collect();
+        }
+        if response.dragged() && self.dragging_node == Some(node.id) {
+            self.drag_delta = response.drag_delta();
+            let delta = response.drag_delta() / self.zoom;
+            for (selected_id, origin) in &self.dragging_origin {
+                actions.push(CanvasAction::MoveNode {
+                    node: *selected_id,
+                    position: [origin[0] + delta.x, origin[1] + delta.y],
+                });
+            }
+        }
+        if response.drag_stopped() && self.dragging_node == Some(node.id) {
+            self.dragging_node = None;
+            self.dragging_origin.clear();
+            self.drag_delta = Vec2::ZERO;
+        }
+
+        let selected = self.selected_nodes.contains(&node.id);
+        let fill = if selected {
             Color32::from_rgb(55, 72, 91)
         } else {
             Color32::from_rgb(42, 48, 58)
@@ -154,7 +274,14 @@ impl GraphCanvas {
             node_rect,
             6.0,
             fill,
-            Stroke::new(1.0_f32, Color32::from_rgb(93, 108, 127)),
+            Stroke::new(
+                if selected { 2.0_f32 } else { 1.0_f32 },
+                if selected {
+                    Color32::LIGHT_BLUE
+                } else {
+                    Color32::from_rgb(93, 108, 127)
+                },
+            ),
         );
         let header = Rect::from_min_max(
             node_rect.min,
@@ -168,6 +295,10 @@ impl GraphCanvas {
             FontId::proportional(14.0 * self.zoom),
             Color32::WHITE,
         );
+
+        if self.thumbnail_mode {
+            return;
+        }
 
         for (index, port) in ports.into_iter().enumerate() {
             let y = node_rect.top() + (43.0 + index as f32 * 26.0) * self.zoom;
@@ -219,20 +350,54 @@ impl GraphCanvas {
         }
     }
 
+    fn ordered_ports<'a>(&self, graph: &'a Graph, node: &Node) -> Vec<&'a Port> {
+        let mut ports: Vec<&Port> = node
+            .ports
+            .iter()
+            .filter_map(|id| graph.ports.get(id))
+            .collect();
+        if self.sort_ports_by_name {
+            ports.sort_by_key(|port| port.name.to_ascii_lowercase());
+        } else {
+            ports.sort_by_key(|port| port.id);
+        }
+        if self.sort_ports_descending {
+            ports.reverse();
+        }
+        ports
+    }
+
+    fn node_rect(&self, rect: Rect, graph: &Graph, node: &Node) -> Rect {
+        let port_count = if self.thumbnail_mode {
+            0
+        } else {
+            self.ordered_ports(graph, node).len()
+        };
+        let width = 220.0 * self.zoom;
+        let height = (32.0 + port_count as f32 * 26.0).max(58.0) * self.zoom;
+        let position = self
+            .dragging_origin
+            .get(&node.id)
+            .copied()
+            .map(|origin| {
+                [
+                    origin[0] + self.drag_delta.x / self.zoom,
+                    origin[1] + self.drag_delta.y / self.zoom,
+                ]
+            })
+            .unwrap_or(node.position);
+        let top_left =
+            rect.left_top() + self.pan + vec2(position[0] * self.zoom, position[1] * self.zoom);
+        Rect::from_min_size(top_left, vec2(width, height))
+    }
+
     fn port_anchor(&self, rect: Rect, graph: &Graph, port: &Port) -> Option<Pos2> {
         let node = graph.nodes.get(&port.node_id)?;
-        let index = node.ports.iter().position(|id| *id == port.id)?;
-        let width = 220.0 * self.zoom;
-        let top_left = rect.left_top()
-            + self.pan
-            + vec2(node.position[0] * self.zoom, node.position[1] * self.zoom);
-        let node_rect = Rect::from_min_size(
-            top_left,
-            vec2(
-                width,
-                (32.0 + node.ports.len() as f32 * 26.0).max(58.0) * self.zoom,
-            ),
-        );
+        let index = self
+            .ordered_ports(graph, node)
+            .iter()
+            .position(|item| item.id == port.id)?;
+        let node_rect = self.node_rect(rect, graph, node);
         let x = if port.direction == Direction::Source {
             node_rect.right() - 12.0 * self.zoom
         } else {
@@ -264,5 +429,6 @@ mod tests {
         let canvas = GraphCanvas::default();
         assert_eq!(canvas.zoom, 1.0);
         assert_eq!(canvas.selected_node, None);
+        assert!(canvas.selected_nodes.is_empty());
     }
 }

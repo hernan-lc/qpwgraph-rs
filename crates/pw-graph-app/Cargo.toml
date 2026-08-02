@@ -5,10 +5,16 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = ["pipewire", "alsa"]
+pipewire = ["pw-graph-backend/pipewire"]
+alsa = ["pw-graph-alsamidi/alsa"]
+
 [dependencies]
 eframe.workspace = true
 egui.workspace = true
 pw-graph-backend = { path = "../pw-graph-backend" }
+pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false }
 pw-graph-command = { path = "../pw-graph-command" }
 pw-graph-config = { path = "../pw-graph-config" }
 pw-graph-core = { path = "../pw-graph-core" }

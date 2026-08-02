@@ -20,6 +20,8 @@ pub enum ConfigError {
 #[serde(default)]
 pub struct AppConfig {
     pub language: String,
+    pub node_positions: std::collections::BTreeMap<u64, [f32; 2]>,
+    pub thumbnail_view: bool,
     pub window_width: f32,
     pub window_height: f32,
     pub zoom: f32,
@@ -43,6 +45,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             language: "en".into(),
+            node_positions: std::collections::BTreeMap::new(),
+            thumbnail_view: false,
             window_width: 1100.0,
             window_height: 760.0,
             zoom: 1.0,

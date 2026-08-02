@@ -11,6 +11,8 @@ pub enum BackendError {
     Graph(#[from] GraphError),
     #[error("backend operation is not available: {0}")]
     Unsupported(String),
+    #[error("native backend error: {0}")]
+    Native(String),
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
@@ -21,6 +23,16 @@ pub trait GraphDriver {
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
     fn rename_node(&mut self, node: pw_graph_core::NodeId, name: String) -> BackendResult<()>;
+    fn set_node_position(
+        &mut self,
+        node: pw_graph_core::NodeId,
+        position: [f32; 2],
+    ) -> BackendResult<()> {
+        let _ = (node, position);
+        Err(BackendError::Unsupported(
+            "node layout is not supported by this backend".into(),
+        ))
+    }
     fn graph(&self) -> &Graph;
     fn is_node_type(&self, node_type: NodeType) -> bool;
     fn is_port_type(&self, port_type: PortType) -> bool;
@@ -163,6 +175,15 @@ impl GraphDriver for InMemoryDriver {
         Ok(())
     }
 
+    fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
+        self.graph
+            .nodes
+            .get_mut(&node)
+            .ok_or(GraphError::MissingNode(node))?
+            .position = position;
+        Ok(())
+    }
+
     fn graph(&self) -> &Graph {
         &self.graph
     }
@@ -179,42 +200,296 @@ impl GraphDriver for InMemoryDriver {
     }
 }
 
-/// Placeholder for the real registry-backed implementation. Keeping this type
-/// in the public API lets the app switch backends without changing its wiring.
+#[cfg(feature = "pipewire")]
+mod pipewire_native {
+    use super::*;
+    use std::ffi::{c_char, c_void, CStr};
+
+    const MAX_NODES: usize = 4096;
+    const MAX_PORTS: usize = 16384;
+    const MAX_LINKS: usize = 16384;
+
+    #[repr(C)]
+    struct RawNode {
+        id: u32,
+        name: [c_char; 256],
+    }
+
+    #[repr(C)]
+    struct RawPort {
+        id: u32,
+        node_id: u32,
+        direction: u32,
+        name: [c_char; 256],
+        media_type: [c_char; 64],
+    }
+
+    #[repr(C)]
+    struct RawLink {
+        id: u32,
+        output_port: u32,
+        input_port: u32,
+    }
+
+    #[repr(C)]
+    struct RawSnapshot {
+        node_count: u32,
+        port_count: u32,
+        link_count: u32,
+        nodes: [RawNode; MAX_NODES],
+        ports: [RawPort; MAX_PORTS],
+        links: [RawLink; MAX_LINKS],
+    }
+
+    unsafe extern "C" {
+        fn pw_graph_shim_new() -> *mut c_void;
+        fn pw_graph_shim_free(shim: *mut c_void);
+        fn pw_graph_shim_snapshot(shim: *mut c_void, snapshot: *mut RawSnapshot) -> i32;
+        fn pw_graph_shim_create_link(
+            shim: *mut c_void,
+            output_port: u32,
+            input_port: u32,
+            link_id: *mut u32,
+        ) -> i32;
+        fn pw_graph_shim_destroy_link(shim: *mut c_void, link_id: u32) -> i32;
+    }
+
+    fn raw_text(value: &[c_char]) -> String {
+        unsafe { CStr::from_ptr(value.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn native_error(operation: &str, code: i32) -> BackendError {
+        BackendError::Native(format!("{operation} failed with code {code}"))
+    }
+
+    #[derive(Debug)]
+    pub struct PipewireDriver {
+        native: *mut c_void,
+        graph: Graph,
+        positions: std::collections::BTreeMap<NodeId, [f32; 2]>,
+    }
+
+    impl PipewireDriver {
+        pub fn new() -> BackendResult<Self> {
+            let native = unsafe { pw_graph_shim_new() };
+            if native.is_null() {
+                return Err(BackendError::Native(
+                    "could not connect to the PipeWire daemon".into(),
+                ));
+            }
+            Ok(Self {
+                native,
+                graph: Graph::default(),
+                positions: std::collections::BTreeMap::new(),
+            })
+        }
+
+        fn snapshot(&mut self) -> BackendResult<()> {
+            let mut snapshot = Box::<RawSnapshot>::new_uninit();
+            let result = unsafe { pw_graph_shim_snapshot(self.native, snapshot.as_mut_ptr()) };
+            if result < 0 {
+                return Err(native_error("PipeWire registry snapshot", result));
+            }
+            let snapshot = unsafe { snapshot.assume_init() };
+
+            let mut graph = Graph::default();
+            for (index, raw) in snapshot.nodes[..(snapshot.node_count as usize).min(MAX_NODES)]
+                .iter()
+                .enumerate()
+            {
+                let id = NodeId(raw.id as u64);
+                let mut node = Node::new(id, raw_text(&raw.name), NodeType::PipeWire);
+                node.position = self.positions.get(&id).copied().unwrap_or_else(|| {
+                    let column = (index % 4) as f32;
+                    let row = (index / 4) as f32;
+                    [40.0 + column * 280.0, 40.0 + row * 180.0]
+                });
+                self.positions.insert(id, node.position);
+                graph.add_node(node)?;
+            }
+            for raw in snapshot.ports[..(snapshot.port_count as usize).min(MAX_PORTS)].iter() {
+                let node_id = NodeId(raw.node_id as u64);
+                if graph.node(node_id).is_none() {
+                    continue;
+                }
+                graph.add_port(Port::new(
+                    PortId(raw.id as u64),
+                    node_id,
+                    raw_text(&raw.name),
+                    if raw.direction == 1 {
+                        Direction::Source
+                    } else {
+                        Direction::Sink
+                    },
+                    match raw_text(&raw.media_type).to_ascii_lowercase().as_str() {
+                        "audio" => PortType::Audio,
+                        "video" => PortType::Video,
+                        "midi" => PortType::MidiJack,
+                        _ => PortType::Unknown,
+                    },
+                ))?;
+            }
+            for raw in snapshot.links[..(snapshot.link_count as usize).min(MAX_LINKS)].iter() {
+                let _ = graph.insert_existing_link(Link {
+                    id: LinkId(raw.id as u64),
+                    output_port: PortId(raw.output_port as u64),
+                    input_port: PortId(raw.input_port as u64),
+                });
+            }
+            self.graph = graph;
+            Ok(())
+        }
+    }
+
+    impl Drop for PipewireDriver {
+        fn drop(&mut self) {
+            if !self.native.is_null() {
+                unsafe { pw_graph_shim_free(self.native) };
+                self.native = std::ptr::null_mut();
+            }
+        }
+    }
+
+    impl GraphDriver for PipewireDriver {
+        fn refresh(&mut self) -> BackendResult<Vec<Node>> {
+            self.snapshot()?;
+            Ok(self.graph.nodes.values().cloned().collect())
+        }
+
+        fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+            let output = self.graph.port(src).ok_or(GraphError::MissingPort(src))?;
+            let input = self.graph.port(dst).ok_or(GraphError::MissingPort(dst))?;
+            if !output.direction.is_source() {
+                return Err(GraphError::NotSource(src).into());
+            }
+            if !input.direction.is_sink() {
+                return Err(GraphError::NotSink(dst).into());
+            }
+            if output.port_type != input.port_type
+                && output.port_type != PortType::Unknown
+                && input.port_type != PortType::Unknown
+            {
+                return Err(GraphError::IncompatiblePorts(src, dst).into());
+            }
+            let mut link_id = 0;
+            let result = unsafe {
+                pw_graph_shim_create_link(self.native, src.0 as u32, dst.0 as u32, &mut link_id)
+            };
+            if result < 0 {
+                return Err(native_error("PipeWire link creation", result));
+            }
+            self.snapshot()?;
+            Ok(self
+                .graph
+                .link(LinkId(link_id as u64))
+                .cloned()
+                .unwrap_or(Link {
+                    id: LinkId(link_id as u64),
+                    output_port: src,
+                    input_port: dst,
+                }))
+        }
+
+        fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
+            let existing = self
+                .graph
+                .link(link)
+                .cloned()
+                .ok_or(GraphError::MissingLink(link))?;
+            let result = unsafe { pw_graph_shim_destroy_link(self.native, link.0 as u32) };
+            if result < 0 {
+                return Err(native_error("PipeWire link destruction", result));
+            }
+            self.snapshot()?;
+            Ok(existing)
+        }
+
+        fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
+            Err(BackendError::Unsupported(
+                "PipeWire node names are owned by the producing client".into(),
+            ))
+        }
+
+        fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
+            self.positions.insert(node, position);
+            if let Some(node_data) = self.graph.nodes.get_mut(&node) {
+                node_data.position = position;
+                Ok(())
+            } else {
+                Err(GraphError::MissingNode(node).into())
+            }
+        }
+
+        fn graph(&self) -> &Graph {
+            &self.graph
+        }
+
+        fn is_node_type(&self, node_type: NodeType) -> bool {
+            matches!(node_type, NodeType::PipeWire)
+        }
+
+        fn is_port_type(&self, port_type: PortType) -> bool {
+            matches!(
+                port_type,
+                PortType::Audio | PortType::Video | PortType::MidiJack | PortType::Unknown
+            )
+        }
+    }
+}
+
+#[cfg(feature = "pipewire")]
+pub use pipewire_native::PipewireDriver;
+
+#[cfg(not(feature = "pipewire"))]
 #[derive(Debug, Default)]
 pub struct PipewireDriver {
     graph: Graph,
 }
 
+#[cfg(not(feature = "pipewire"))]
 impl PipewireDriver {
     pub fn new() -> BackendResult<Self> {
-        Ok(Self::default())
+        Err(BackendError::Unsupported(
+            "compile pw-graph-backend with the pipewire feature".into(),
+        ))
     }
 }
 
+#[cfg(not(feature = "pipewire"))]
 impl GraphDriver for PipewireDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         Err(BackendError::Unsupported(
-            "PipeWire registry integration is behind the next backend milestone".into(),
+            "PipeWire feature is disabled".into(),
         ))
     }
 
     fn connect(&mut self, _src: PortId, _dst: PortId) -> BackendResult<Link> {
         Err(BackendError::Unsupported(
-            "PipeWire link creation is not wired yet".into(),
+            "PipeWire feature is disabled".into(),
         ))
     }
 
     fn disconnect(&mut self, _link: LinkId) -> BackendResult<Link> {
         Err(BackendError::Unsupported(
-            "PipeWire link destruction is not wired yet".into(),
+            "PipeWire feature is disabled".into(),
         ))
     }
 
     fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
         Err(BackendError::Unsupported(
-            "PipeWire node rename is not an application operation".into(),
+            "PipeWire feature is disabled".into(),
         ))
+    }
+
+    fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
+        self.graph
+            .nodes
+            .get_mut(&node)
+            .ok_or(GraphError::MissingNode(node))?
+            .position = position;
+        Ok(())
     }
 
     fn graph(&self) -> &Graph {
@@ -254,5 +529,16 @@ mod tests {
         assert_eq!(driver.graph().links.len(), 1);
         driver.disconnect(link.id).unwrap();
         assert!(driver.graph().links.is_empty());
+    }
+
+    #[cfg(feature = "pipewire")]
+    #[test]
+    fn native_backend_refreshes_running_pipewire_registry() {
+        let mut driver = PipewireDriver::new().expect("PipeWire daemon should be available");
+        let nodes = driver
+            .refresh()
+            .expect("PipeWire registry snapshot should succeed");
+        assert!(!nodes.is_empty());
+        assert!(!driver.graph().ports.is_empty());
     }
 }

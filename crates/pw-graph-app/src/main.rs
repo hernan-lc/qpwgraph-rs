@@ -1,8 +1,9 @@
 use eframe::egui;
-use pw_graph_backend::{GraphDriver, InMemoryDriver};
+use pw_graph_alsamidi::AlsaMidiDriver;
+use pw_graph_backend::{GraphDriver, InMemoryDriver, PipewireDriver};
 use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
-use pw_graph_core::{LinkId, PortId};
+use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, PortId, PortType};
 use pw_graph_i18n::{I18n, Locale};
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, GraphCanvas};
@@ -14,6 +15,174 @@ struct Args {
     debug: bool,
     no_alsa_midi: bool,
     language: Option<String>,
+    demo: bool,
+}
+
+#[derive(Default)]
+struct CompositeDriver {
+    pipewire: Option<PipewireDriver>,
+    alsa: Option<AlsaMidiDriver>,
+    graph: Graph,
+}
+
+impl CompositeDriver {
+    fn merge_graph(destination: &mut Graph, source: &Graph) -> Result<(), GraphError> {
+        for node in source.nodes.values().cloned() {
+            destination.add_node(node)?;
+        }
+        for port in source.ports.values().cloned() {
+            destination.add_port(port)?;
+        }
+        for link in source.links.values().cloned() {
+            destination.insert_existing_link(link)?;
+        }
+        Ok(())
+    }
+}
+
+impl GraphDriver for CompositeDriver {
+    fn refresh(&mut self) -> pw_graph_backend::BackendResult<Vec<Node>> {
+        if let Some(driver) = self.pipewire.as_mut() {
+            driver.refresh()?;
+        }
+        if let Some(driver) = self.alsa.as_mut() {
+            driver.refresh()?;
+        }
+        let mut graph = Graph::default();
+        if let Some(driver) = self.pipewire.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        if let Some(driver) = self.alsa.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        self.graph = graph;
+        Ok(self.graph.nodes.values().cloned().collect())
+    }
+
+    fn connect(&mut self, src: PortId, dst: PortId) -> pw_graph_backend::BackendResult<Link> {
+        let alsa = 1_u64 << 63;
+        let link = if src.0 & alsa != 0 && dst.0 & alsa != 0 {
+            self.alsa
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
+                })?
+                .connect(src, dst)?
+        } else if src.0 & alsa == 0 && dst.0 & alsa == 0 {
+            self.pipewire
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported(
+                        "PipeWire backend is disabled".into(),
+                    )
+                })?
+                .connect(src, dst)?
+        } else {
+            return Err(pw_graph_backend::BackendError::Unsupported(
+                "connections cannot cross PipeWire and ALSA MIDI backends".into(),
+            ));
+        };
+        self.refresh()?;
+        Ok(link)
+    }
+
+    fn disconnect(&mut self, link: LinkId) -> pw_graph_backend::BackendResult<Link> {
+        let alsa = 1_u64 << 63;
+        let existing = self
+            .graph
+            .link(link)
+            .cloned()
+            .ok_or(GraphError::MissingLink(link))?;
+        if link.0 & alsa != 0 {
+            self.alsa
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
+                })?
+                .disconnect(link)?;
+        } else {
+            self.pipewire
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported(
+                        "PipeWire backend is disabled".into(),
+                    )
+                })?
+                .disconnect(link)?;
+        }
+        self.refresh()?;
+        Ok(existing)
+    }
+
+    fn rename_node(&mut self, node: NodeId, name: String) -> pw_graph_backend::BackendResult<()> {
+        if node.0 & (1_u64 << 63) != 0 {
+            self.alsa
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
+                })?
+                .rename_node(node, name)
+        } else {
+            self.pipewire
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported(
+                        "PipeWire backend is disabled".into(),
+                    )
+                })?
+                .rename_node(node, name)
+        }
+    }
+
+    fn set_node_position(
+        &mut self,
+        node: NodeId,
+        position: [f32; 2],
+    ) -> pw_graph_backend::BackendResult<()> {
+        if node.0 & (1_u64 << 63) != 0 {
+            self.alsa
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
+                })?
+                .set_node_position(node, position)?;
+        } else {
+            self.pipewire
+                .as_mut()
+                .ok_or_else(|| {
+                    pw_graph_backend::BackendError::Unsupported(
+                        "PipeWire backend is disabled".into(),
+                    )
+                })?
+                .set_node_position(node, position)?;
+        }
+        if let Some(node_data) = self.graph.nodes.get_mut(&node) {
+            node_data.position = position;
+        }
+        Ok(())
+    }
+
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+    fn is_node_type(&self, node_type: pw_graph_core::NodeType) -> bool {
+        self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.is_node_type(node_type))
+            || self
+                .alsa
+                .as_ref()
+                .is_some_and(|driver| driver.is_node_type(node_type))
+    }
+    fn is_port_type(&self, port_type: PortType) -> bool {
+        self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.is_port_type(port_type))
+            || self
+                .alsa
+                .as_ref()
+                .is_some_and(|driver| driver.is_port_type(port_type))
+    }
 }
 
 fn parse_args() -> Args {
@@ -26,18 +195,20 @@ fn parse_args() -> Args {
             "-m" | "--minimized" => args.minimized = true,
             "-d" | "--debug" => args.debug = true,
             "-n" | "--no-alsa-midi" => args.no_alsa_midi = true,
+            "--demo" => args.demo = true,
             "--lang" => args.language = arguments.next(),
             value if value.starts_with("--lang=") => {
                 args.language = Some(value.trim_start_matches("--lang=").to_owned())
             }
             "-h" | "--help" => {
                 println!(
-                    "qpwgraph-rs\n\n{}\n  -m, --minimized       {}\n  -d, --debug           {}\n  -n, --no-alsa-midi    {}\n      --lang <LANG>     {}\n",
+                    "qpwgraph-rs\n\n{}\n  -m, --minimized       {}\n  -d, --debug           {}\n  -n, --no-alsa-midi    {}\n      --lang <LANG>     {}\n      --demo             {}\n",
                     parser_i18n.text("cli.options"),
                     parser_i18n.text("cli.minimized"),
                     parser_i18n.text("cli.debug"),
                     parser_i18n.text("cli.no_alsa"),
-                    parser_i18n.text("cli.lang")
+                    parser_i18n.text("cli.lang"),
+                    parser_i18n.text("cli.demo")
                 );
                 std::process::exit(0);
             }
@@ -51,7 +222,7 @@ fn parse_args() -> Args {
 }
 
 struct QpwgraphApp {
-    driver: InMemoryDriver,
+    driver: Box<dyn GraphDriver>,
     commands: CommandStack,
     canvas: GraphCanvas,
     patchbay: Patchbay,
@@ -63,6 +234,7 @@ struct QpwgraphApp {
     no_alsa_midi: bool,
     start_minimized: bool,
     i18n: I18n,
+    backend_name: String,
 }
 
 impl QpwgraphApp {
@@ -77,22 +249,87 @@ impl QpwgraphApp {
         let patchbay_file = config
             .patchbay_path
             .clone()
-            .unwrap_or_else(|| config_file.with_file_name("default.qpwgraph.json"));
+            .unwrap_or_else(|| config_file.with_file_name("default.qpwgraph"));
+        let mut status = i18n.text("status.demo_ready");
+        let (mut driver, backend_name): (Box<dyn GraphDriver>, String) = if args.demo {
+            (Box::new(InMemoryDriver::demo()), "in-memory".into())
+        } else {
+            let mut composite = CompositeDriver::default();
+            let mut has_pipewire = false;
+            let mut has_alsa = false;
+
+            #[cfg(feature = "pipewire")]
+            match PipewireDriver::new() {
+                Ok(driver) => {
+                    composite.pipewire = Some(driver);
+                    has_pipewire = true;
+                }
+                Err(error) => {
+                    status = i18n.format("status.pipewire_failed", &[("error", error.to_string())]);
+                }
+            }
+
+            #[cfg(feature = "alsa")]
+            if !args.no_alsa_midi {
+                match AlsaMidiDriver::new() {
+                    Ok(driver) => {
+                        composite.alsa = Some(driver);
+                        has_alsa = true;
+                    }
+                    Err(error) => {
+                        status = i18n.format("status.alsa_failed", &[("error", error.to_string())]);
+                    }
+                }
+            }
+
+            if has_pipewire || has_alsa {
+                match composite.refresh() {
+                    Ok(_) => {
+                        status = if has_pipewire {
+                            i18n.text("status.pipewire_ready")
+                        } else {
+                            i18n.text("status.alsa_ready")
+                        };
+                        let backend_name = match (has_pipewire, has_alsa) {
+                            (true, true) => "pipewire+alsa",
+                            (true, false) => "pipewire",
+                            (false, true) => "alsa",
+                            (false, false) => "in-memory",
+                        };
+                        (Box::new(composite), backend_name.into())
+                    }
+                    Err(error) => {
+                        status =
+                            i18n.format("status.backend_failed", &[("error", error.to_string())]);
+                        (Box::new(InMemoryDriver::demo()), "in-memory".into())
+                    }
+                }
+            } else {
+                (Box::new(InMemoryDriver::demo()), "in-memory".into())
+            }
+        };
+        for (node_id, position) in &config.node_positions {
+            let _ = driver.set_node_position(NodeId(*node_id), *position);
+        }
         let mut canvas = GraphCanvas::default();
         canvas.zoom = config.zoom;
+        canvas.sort_ports_by_name = config.sort_type != "id";
+        canvas.sort_ports_descending = config.sort_order == "descending";
+        canvas.thumbnail_mode = config.thumbnail_view;
         Self {
-            driver: InMemoryDriver::demo(),
+            driver,
             commands: CommandStack::new(),
             canvas,
             patchbay: Patchbay::new("default"),
             config,
             config_file,
             patchbay_file,
-            status: i18n.text("status.demo_ready"),
+            status,
             debug: args.debug,
             no_alsa_midi: args.no_alsa_midi,
             start_minimized: args.minimized,
             i18n,
+            backend_name,
         }
     }
 
@@ -109,9 +346,10 @@ impl QpwgraphApp {
             match action {
                 CanvasAction::Connect { output, input } => {
                     let command = Box::new(ConnectCommand::new(output, input));
-                    match self.commands.execute(command, &mut self.driver) {
+                    match self.commands.execute(command, self.driver.as_mut()) {
                         Ok(()) => {
-                            self.patchbay.add_connection(
+                            self.patchbay.add_graph_connection(
+                                self.driver.graph(),
                                 output,
                                 input,
                                 self.config.patchbay_auto_pin,
@@ -128,6 +366,9 @@ impl QpwgraphApp {
                     }
                 }
                 CanvasAction::Disconnect { link } => self.disconnect(link),
+                CanvasAction::MoveNode { node, position } => {
+                    let _ = self.driver.set_node_position(node, position);
+                }
             }
         }
     }
@@ -138,7 +379,7 @@ impl QpwgraphApp {
         };
         match self
             .commands
-            .execute(Box::new(DisconnectCommand::new(link)), &mut self.driver)
+            .execute(Box::new(DisconnectCommand::new(link)), self.driver.as_mut())
         {
             Ok(()) => {
                 self.patchbay
@@ -152,7 +393,7 @@ impl QpwgraphApp {
     }
 
     fn undo(&mut self) {
-        match self.commands.undo(&mut self.driver) {
+        match self.commands.undo(self.driver.as_mut()) {
             Ok(true) => self.status = self.t("status.undo_complete"),
             Ok(false) => self.status = self.t("status.nothing_to_undo"),
             Err(error) => {
@@ -162,7 +403,7 @@ impl QpwgraphApp {
     }
 
     fn redo(&mut self) {
-        match self.commands.redo(&mut self.driver) {
+        match self.commands.redo(self.driver.as_mut()) {
             Ok(true) => self.status = self.t("status.redo_complete"),
             Ok(false) => self.status = self.t("status.nothing_to_redo"),
             Err(error) => {
@@ -221,69 +462,75 @@ impl eframe::App for QpwgraphApp {
             }
         }
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button(self.t("toolbar.refresh")).clicked() {
-                    match self.driver.refresh() {
-                        Ok(nodes) => {
-                            self.status =
-                                self.tf("status.refreshed", &[("count", nodes.len().to_string())])
-                        }
-                        Err(error) => {
-                            self.status =
-                                self.tf("status.refresh_failed", &[("error", error.to_string())])
-                        }
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        self.commands.can_undo(),
-                        egui::Button::new(self.t("toolbar.undo")),
-                    )
-                    .clicked()
-                {
-                    self.undo();
-                }
-                if ui
-                    .add_enabled(
-                        self.commands.can_redo(),
-                        egui::Button::new(self.t("toolbar.redo")),
-                    )
-                    .clicked()
-                {
-                    self.redo();
-                }
-                ui.separator();
-                if ui.button(self.t("toolbar.save_patchbay")).clicked() {
-                    self.save_patchbay();
-                }
-                if ui.button(self.t("toolbar.load_patchbay")).clicked() {
-                    self.load_patchbay();
-                }
-                if ui.button(self.t("toolbar.activate")).clicked() {
-                    match self.patchbay.activate(
-                        &mut self.driver,
-                        self.config.patchbay_exclusive,
-                        self.config.patchbay_auto_disconnect,
-                    ) {
-                        Ok(report) => {
-                            self.status = self.tf(
-                                "status.activated",
-                                &[
-                                    ("connected", report.connected.to_string()),
-                                    ("present", report.already_present.to_string()),
-                                    ("disconnected", report.disconnected.to_string()),
-                                ],
-                            )
-                        }
-                        Err(error) => {
-                            self.status =
-                                self.tf("status.activation_failed", &[("error", error.to_string())])
+        if self.config.toolbar {
+            egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(self.t("toolbar.refresh")).clicked() {
+                        match self.driver.refresh() {
+                            Ok(nodes) => {
+                                self.status = self
+                                    .tf("status.refreshed", &[("count", nodes.len().to_string())])
+                            }
+                            Err(error) => {
+                                self.status = self
+                                    .tf("status.refresh_failed", &[("error", error.to_string())])
+                            }
                         }
                     }
-                }
+                    if ui
+                        .add_enabled(
+                            self.commands.can_undo(),
+                            egui::Button::new(self.t("toolbar.undo")),
+                        )
+                        .clicked()
+                    {
+                        self.undo();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.commands.can_redo(),
+                            egui::Button::new(self.t("toolbar.redo")),
+                        )
+                        .clicked()
+                    {
+                        self.redo();
+                    }
+                    if self.config.patchbay_toolbar {
+                        ui.separator();
+                        if ui.button(self.t("toolbar.save_patchbay")).clicked() {
+                            self.save_patchbay();
+                        }
+                        if ui.button(self.t("toolbar.load_patchbay")).clicked() {
+                            self.load_patchbay();
+                        }
+                        if ui.button(self.t("toolbar.activate")).clicked() {
+                            match self.patchbay.activate(
+                                self.driver.as_mut(),
+                                self.config.patchbay_exclusive,
+                                self.config.patchbay_auto_disconnect,
+                            ) {
+                                Ok(report) => {
+                                    self.status = self.tf(
+                                        "status.activated",
+                                        &[
+                                            ("connected", report.connected.to_string()),
+                                            ("present", report.already_present.to_string()),
+                                            ("disconnected", report.disconnected.to_string()),
+                                        ],
+                                    )
+                                }
+                                Err(error) => {
+                                    self.status = self.tf(
+                                        "status.activation_failed",
+                                        &[("error", error.to_string())],
+                                    )
+                                }
+                            }
+                        }
+                    }
+                });
             });
-        });
+        }
 
         let current_locale = self.i18n.locale();
         let mut selected_locale = current_locale;
@@ -313,6 +560,75 @@ impl eframe::App for QpwgraphApp {
                 );
                 let auto_pin_label = self.t("inspector.auto_pin");
                 ui.checkbox(&mut self.config.patchbay_auto_pin, auto_pin_label);
+                ui.separator();
+                ui.heading(self.t("inspector.interface"));
+                let toolbar_visible_label = self.t("inspector.toolbar_visible");
+                ui.checkbox(&mut self.config.toolbar, toolbar_visible_label);
+                let statusbar_visible_label = self.t("inspector.statusbar_visible");
+                ui.checkbox(&mut self.config.statusbar, statusbar_visible_label);
+                let patchbay_toolbar_visible_label = self.t("inspector.patchbay_toolbar_visible");
+                ui.checkbox(
+                    &mut self.config.patchbay_toolbar,
+                    patchbay_toolbar_visible_label,
+                );
+                let menubar_visible_label = self.t("inspector.menubar_visible");
+                ui.checkbox(&mut self.config.menubar, menubar_visible_label);
+                let repel_overlaps_label = self.t("inspector.repel_overlaps");
+                ui.checkbox(
+                    &mut self.config.repel_overlapping_nodes,
+                    repel_overlaps_label,
+                );
+                let connect_through_label = self.t("inspector.connect_through");
+                ui.checkbox(
+                    &mut self.config.connect_through_nodes,
+                    connect_through_label,
+                );
+                let thumbnail_label = self.t("inspector.thumbnail_view");
+                ui.checkbox(&mut self.canvas.thumbnail_mode, thumbnail_label);
+                let sort_by_name = self.config.sort_type != "id";
+                let sort_by_name_before = sort_by_name;
+                let mut sort_by_name_choice = sort_by_name;
+                egui::ComboBox::from_label(self.t("inspector.sort_ports"))
+                    .selected_text(if sort_by_name {
+                        self.t("sort.name")
+                    } else {
+                        self.t("sort.id")
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut sort_by_name_choice, true, self.t("sort.name"));
+                        ui.selectable_value(&mut sort_by_name_choice, false, self.t("sort.id"));
+                    });
+                if sort_by_name_choice != sort_by_name_before {
+                    self.config.sort_type = if sort_by_name_choice { "name" } else { "id" }.into();
+                }
+                let descending = self.config.sort_order == "descending";
+                let mut descending_choice = descending;
+                egui::ComboBox::from_label(self.t("inspector.sort_order"))
+                    .selected_text(if descending {
+                        self.t("sort.descending")
+                    } else {
+                        self.t("sort.ascending")
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut descending_choice,
+                            false,
+                            self.t("sort.ascending"),
+                        );
+                        ui.selectable_value(
+                            &mut descending_choice,
+                            true,
+                            self.t("sort.descending"),
+                        );
+                    });
+                if descending_choice != descending {
+                    self.config.sort_order = if descending_choice {
+                        "descending"
+                    } else {
+                        "ascending"
+                    }
+                    .into();
+                }
                 ui.separator();
                 ui.heading(self.t("inspector.live_links"));
                 let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
@@ -352,18 +668,27 @@ impl eframe::App for QpwgraphApp {
             self.status = self.t("status.language_changed");
         }
 
-        egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                if self.debug {
-                    ui.separator();
-                    ui.monospace(self.i18n.format(
-                        "debug.backend",
-                        &[("enabled", (!self.no_alsa_midi).to_string())],
-                    ));
-                }
+        self.canvas.sort_ports_by_name = self.config.sort_type != "id";
+        self.canvas.sort_ports_descending = self.config.sort_order == "descending";
+        self.config.thumbnail_view = self.canvas.thumbnail_mode;
+
+        if self.config.statusbar {
+            egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(&self.status);
+                    if self.debug {
+                        ui.separator();
+                        ui.monospace(self.i18n.format(
+                            "debug.backend",
+                            &[
+                                ("backend", self.backend_name.clone()),
+                                ("enabled", (!self.no_alsa_midi).to_string()),
+                            ],
+                        ));
+                    }
+                });
             });
-        });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let connect_hint = self.t("canvas.connect_hint");
@@ -374,6 +699,23 @@ impl eframe::App for QpwgraphApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.config.zoom = self.canvas.zoom;
+        self.config.sort_type = if self.canvas.sort_ports_by_name {
+            "name".into()
+        } else {
+            "id".into()
+        };
+        self.config.sort_order = if self.canvas.sort_ports_descending {
+            "descending".into()
+        } else {
+            "ascending".into()
+        };
+        self.config.node_positions = self
+            .driver
+            .graph()
+            .nodes
+            .iter()
+            .map(|(id, node)| (id.0, node.position))
+            .collect();
         self.config.patchbay_path = Some(self.patchbay_file.clone());
         if let Err(error) = self.config.save_to(&self.config_file) {
             eprintln!(

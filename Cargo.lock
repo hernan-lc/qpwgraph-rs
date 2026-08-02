@@ -1870,6 +1870,8 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 name = "pw-graph-alsamidi"
 version = "0.1.0"
 dependencies = [
+ "cc",
+ "pkg-config",
  "pw-graph-backend",
  "pw-graph-core",
 ]
@@ -1880,6 +1882,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "pw-graph-alsamidi",
  "pw-graph-backend",
  "pw-graph-command",
  "pw-graph-config",
@@ -1893,6 +1896,8 @@ dependencies = [
 name = "pw-graph-backend"
 version = "0.1.0"
 dependencies = [
+ "cc",
+ "pkg-config",
  "pw-graph-core",
  "thiserror 1.0.69",
 ]
@@ -1937,6 +1942,7 @@ version = "0.1.0"
 dependencies = [
  "pw-graph-backend",
  "pw-graph-core",
+ "quick-xml",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
