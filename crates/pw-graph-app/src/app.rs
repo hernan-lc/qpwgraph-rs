@@ -3,8 +3,11 @@ use crate::backend::CompositeDriver;
 use crate::icons::{icon_button, icon_button_enabled, Icon};
 use crate::panels::AppScreen;
 use eframe::egui;
+#[cfg(feature = "alsa")]
 use pw_graph_alsamidi::AlsaMidiDriver;
-use pw_graph_backend::{GraphDriver, InMemoryDriver, PipewireDriver};
+#[cfg(feature = "pipewire")]
+use pw_graph_backend::PipewireDriver;
+use pw_graph_backend::{GraphDriver, InMemoryDriver};
 use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, LinkId, NodeId};

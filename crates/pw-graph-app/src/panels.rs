@@ -93,7 +93,7 @@ impl QpwgraphApp {
         let sort_by_name = self.config.sort_type != "id";
         let sort_by_name_before = sort_by_name;
         let mut sort_by_name_choice = sort_by_name;
-        egui::ComboBox::from_label(self.t("inspector.sort_ports"))
+        let sort_ports_response = egui::ComboBox::from_label(self.t("inspector.sort_ports"))
             .selected_text(if sort_by_name {
                 self.t("sort.name")
             } else {
@@ -103,12 +103,15 @@ impl QpwgraphApp {
                 ui.selectable_value(&mut sort_by_name_choice, true, self.t("sort.name"));
                 ui.selectable_value(&mut sort_by_name_choice, false, self.t("sort.id"));
             });
+        sort_ports_response
+            .response
+            .on_hover_text(self.t("help.sort_ports"));
         if sort_by_name_choice != sort_by_name_before {
             self.config.sort_type = if sort_by_name_choice { "name" } else { "id" }.into();
         }
         let descending = self.config.sort_order == "descending";
         let mut descending_choice = descending;
-        egui::ComboBox::from_label(self.t("inspector.sort_order"))
+        let sort_order_response = egui::ComboBox::from_label(self.t("inspector.sort_order"))
             .selected_text(if descending {
                 self.t("sort.descending")
             } else {
@@ -118,6 +121,9 @@ impl QpwgraphApp {
                 ui.selectable_value(&mut descending_choice, false, self.t("sort.ascending"));
                 ui.selectable_value(&mut descending_choice, true, self.t("sort.descending"));
             });
+        sort_order_response
+            .response
+            .on_hover_text(self.t("help.sort_order"));
         if descending_choice != descending {
             self.config.sort_order = if descending_choice {
                 "descending"

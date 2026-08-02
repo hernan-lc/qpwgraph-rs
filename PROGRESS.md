@@ -13,6 +13,9 @@ All UI icons are now painted from vector geometry in the app itself, avoiding
 emoji and font-symbol rendering differences across operating systems.
 Node dragging now accumulates per-frame pointer deltas, keeps group movement
 stable, and reserves node hit areas before canvas pan or rectangle selection.
+The graph canvas now presents type-accented draggable node headers, compact
+human-readable names, port-row hover states, media-colored curved links, and
+full node, port, and link tooltips without hiding the raw PipeWire names.
 
 The desktop shell is modularized: `main.rs` is a small entry point, while
 `app.rs`, `args.rs`, `backend.rs`, `panels.rs`, and `tray.rs` own application

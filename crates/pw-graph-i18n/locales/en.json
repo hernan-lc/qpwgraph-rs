@@ -117,6 +117,8 @@
   "help.repel_overlaps": "Move overlapping nodes apart automatically while the graph is idle.",
   "help.connect_through": "Click a node body to connect to its first compatible sink port.",
   "help.thumbnail_view": "Show compact node cards without ports or link lines.",
+  "help.sort_ports": "Order each node's ports by name or by their native numeric ID.",
+  "help.sort_order": "Reverse the selected port ordering.",
   "diagnostics.backend": "Backend: {name}",
   "diagnostics.status": "Status: {status}",
   "diagnostics.nodes": "Nodes: {count}",

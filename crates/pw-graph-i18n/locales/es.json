@@ -117,6 +117,8 @@
   "help.repel_overlaps": "Separa automáticamente los nodos superpuestos cuando el gráfico está inactivo.",
   "help.connect_through": "Haz clic en el cuerpo de un nodo para conectar su primer destino compatible.",
   "help.thumbnail_view": "Muestra tarjetas compactas sin puertos ni líneas de enlace.",
+  "help.sort_ports": "Ordena los puertos de cada nodo por nombre o por su identificador numérico nativo.",
+  "help.sort_order": "Invierte el orden de puertos seleccionado.",
   "diagnostics.backend": "Backend: {name}",
   "diagnostics.status": "Estado: {status}",
   "diagnostics.nodes": "Nodos: {count}",

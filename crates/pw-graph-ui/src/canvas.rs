@@ -1,9 +1,14 @@
 //! Graph rendering and interaction implementation.
 
 use super::*;
-use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use pw_graph_core::{Direction, Graph, Node, Port, PortType};
+use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
+use pw_graph_core::{Direction, Graph, Node, NodeType, Port, PortType};
 use std::collections::HashMap;
+
+const NODE_WIDTH: f32 = 244.0;
+const NODE_HEADER_HEIGHT: f32 = 34.0;
+const PORT_ROW_HEIGHT: f32 = 25.0;
+const EDGE_HIT_DISTANCE: f32 = 9.0;
 
 impl GraphCanvas {
     pub fn show(&mut self, ui: &mut Ui, graph: &Graph, connect_hint: &str) -> Vec<CanvasAction> {
@@ -93,18 +98,30 @@ impl GraphCanvas {
                     self.port_anchor(rect, graph, destination),
                 ) {
                     let selected = self.selected_link == Some(link.id);
-                    painter.line_segment(
-                        [source_pos, destination_pos],
-                        Stroke::new(
-                            if selected { 3.0_f32 } else { 2.0_f32 },
-                            if selected {
-                                Color32::LIGHT_GREEN
-                            } else {
-                                Color32::from_rgb(115, 133, 154)
-                            },
-                        ),
+                    let points = bezier_points(
+                        source_pos,
+                        destination_pos,
+                        (link_index as i32 % 5 - 2) as f32 * 5.0,
                     );
-                    let hit_rect = Rect::from_two_pos(source_pos, destination_pos).expand(8.0);
+                    let hovered = pointer_pos.is_some_and(|pointer| {
+                        point_near_polyline(pointer, &points, EDGE_HIT_DISTANCE)
+                    });
+                    let color = if selected {
+                        Color32::LIGHT_GREEN
+                    } else if hovered {
+                        Color32::WHITE
+                    } else {
+                        edge_color(source.port_type)
+                    };
+                    painter.add(Shape::line(
+                        points.clone(),
+                        Stroke::new(if selected { 5.0_f32 } else { 3.5_f32 }, Color32::BLACK),
+                    ));
+                    painter.add(Shape::line(
+                        points.clone(),
+                        Stroke::new(if selected { 2.8_f32 } else { 1.6_f32 }, color),
+                    ));
+                    let hit_rect = points_bounds(&points).expand(EDGE_HIT_DISTANCE);
                     let link_widget_id = ui.id().with((
                         "graph-link",
                         link_index,
@@ -112,10 +129,15 @@ impl GraphCanvas {
                         link.output_port,
                         link.input_port,
                     ));
-                    let response = ui
-                        .interact(hit_rect, link_widget_id, Sense::click())
-                        .on_hover_text(format!("{} to {}", source.name, destination.name));
-                    if response.clicked() {
+                    let mut response = ui.interact(hit_rect, link_widget_id, Sense::hover());
+                    if hovered {
+                        response = response.on_hover_text(link_tooltip(graph, source, destination));
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let clicked = hovered
+                        && !pointer_over_node
+                        && ui.input(|input| input.pointer.primary_clicked());
+                    if clicked {
                         self.selected_link = Some(link.id);
                         self.selected_nodes.clear();
                         self.selected_node = None;
@@ -150,7 +172,15 @@ impl GraphCanvas {
             if let Some(output) = graph.ports.get(&output_id) {
                 if let Some(start) = anchors.get(&output_id).copied() {
                     let end = ui.input(|input| input.pointer.hover_pos()).unwrap_or(start);
-                    painter.line_segment([start, end], Stroke::new(2.0_f32, Color32::LIGHT_GREEN));
+                    let points = bezier_points(start, end, 0.0);
+                    painter.add(Shape::line(
+                        points.clone(),
+                        Stroke::new(4.0_f32, Color32::BLACK),
+                    ));
+                    painter.add(Shape::line(
+                        points,
+                        Stroke::new(2.0_f32, Color32::LIGHT_GREEN),
+                    ));
                     painter.text(
                         start + vec2(8.0, -22.0),
                         egui::Align2::LEFT_TOP,
@@ -221,14 +251,29 @@ impl GraphCanvas {
     ) {
         let ports = self.ordered_ports(graph, node);
         let node_rect = self.node_rect(rect, graph, node);
-        let response = ui
+        let header = Rect::from_min_max(
+            node_rect.min,
+            pos2(
+                node_rect.max.x,
+                node_rect.min.y + NODE_HEADER_HEIGHT * self.zoom,
+            ),
+        );
+        let tooltip = node_tooltip(node, &ports);
+        let body_response = ui
             .interact(
                 node_rect,
-                ui.id().with(("graph-node", node.id)),
+                ui.id().with(("graph-node-body", node.id)),
+                Sense::click(),
+            )
+            .on_hover_text(tooltip.clone());
+        let header_response = ui
+            .interact(
+                header,
+                ui.id().with(("graph-node-header", node.id)),
                 Sense::click_and_drag(),
             )
-            .on_hover_text(format!("{}\nDrag to move - click to select", node.name));
-        if response.clicked() {
+            .on_hover_text(format!("{tooltip}\n\nDrag this header to move the node."));
+        if body_response.clicked() || header_response.clicked() {
             let shift = ui.input(|input| input.modifiers.shift);
             if !shift {
                 self.selected_nodes.clear();
@@ -263,7 +308,7 @@ impl GraphCanvas {
                 }
             }
         }
-        if response.drag_started() {
+        if header_response.drag_started() {
             if !self.selected_nodes.contains(&node.id) {
                 self.selected_nodes.clear();
                 self.selected_nodes.insert(node.id);
@@ -277,10 +322,10 @@ impl GraphCanvas {
                 .filter_map(|id| graph.node(*id).map(|item| (*id, item.position)))
                 .collect();
         }
-        if response.dragged() && self.dragging_node == Some(node.id) {
+        if header_response.dragged() && self.dragging_node == Some(node.id) {
             // egui reports the movement since the previous frame. Accumulate it
             // so the node follows the pointer for the whole drag gesture.
-            self.drag_delta += response.drag_delta();
+            self.drag_delta += header_response.drag_delta();
             let delta = self.drag_delta / self.zoom;
             for (selected_id, origin) in &self.dragging_origin {
                 actions.push(CanvasAction::MoveNode {
@@ -289,42 +334,75 @@ impl GraphCanvas {
                 });
             }
         }
-        if response.drag_stopped() && self.dragging_node == Some(node.id) {
+        if header_response.drag_stopped() && self.dragging_node == Some(node.id) {
             self.dragging_node = None;
             self.dragging_origin.clear();
             self.drag_delta = Vec2::ZERO;
         }
+        if header_response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if header_response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
 
         let selected = self.selected_nodes.contains(&node.id);
+        let accent = node_color(node.node_type);
         let fill = if selected {
-            Color32::from_rgb(55, 72, 91)
+            Color32::from_rgb(48, 60, 76)
         } else {
-            Color32::from_rgb(42, 48, 58)
+            Color32::from_rgb(38, 45, 56)
         };
         painter.rect(
             node_rect,
-            6.0,
+            8.0,
             fill,
             Stroke::new(
                 if selected { 2.0_f32 } else { 1.0_f32 },
                 if selected {
-                    Color32::LIGHT_BLUE
+                    accent
                 } else {
-                    Color32::from_rgb(93, 108, 127)
+                    Color32::from_rgb(86, 103, 125)
                 },
             ),
         );
-        let header = Rect::from_min_max(
-            node_rect.min,
-            pos2(node_rect.max.x, node_rect.min.y + 30.0 * self.zoom),
+        painter.rect_filled(header, 8.0, Color32::from_rgb(48, 58, 72));
+        painter.rect_filled(
+            Rect::from_min_max(
+                header.min,
+                pos2(header.left() + 4.0 * self.zoom, header.bottom()),
+            ),
+            8.0,
+            accent,
         );
-        painter.rect_filled(header, 6.0, Color32::from_rgb(51, 59, 70));
+        let inputs = ports
+            .iter()
+            .filter(|port| port.direction == Direction::Sink)
+            .count();
+        let outputs = ports
+            .iter()
+            .filter(|port| port.direction == Direction::Source)
+            .count();
         painter.text(
-            header.left_center() + vec2(10.0, 0.0),
+            header.left_center() + vec2(12.0 * self.zoom, 0.0),
             egui::Align2::LEFT_CENTER,
-            compact_label(&node.name, 27),
-            FontId::proportional(14.0 * self.zoom),
+            compact_label(&display_node_name(&node.name), 22),
+            FontId::proportional(13.0 * self.zoom),
             Color32::WHITE,
+        );
+        if !ports.is_empty() {
+            painter.text(
+                pos2(header.right() - 28.0 * self.zoom, header.center().y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{inputs}/{outputs}"),
+                FontId::proportional(10.0 * self.zoom),
+                Color32::from_rgb(178, 193, 210),
+            );
+        }
+        paint_drag_grip(
+            &painter,
+            pos2(header.right() - 10.0 * self.zoom, header.center().y),
+            self.zoom,
+            Color32::from_rgb(174, 189, 204),
         );
 
         if self.thumbnail_mode {
@@ -332,7 +410,8 @@ impl GraphCanvas {
         }
 
         for (index, port) in ports.into_iter().enumerate() {
-            let y = node_rect.top() + (43.0 + index as f32 * 26.0) * self.zoom;
+            let y = node_rect.top()
+                + (NODE_HEADER_HEIGHT + 13.0 + index as f32 * PORT_ROW_HEIGHT) * self.zoom;
             let x = if port.direction == Direction::Source {
                 node_rect.right() - 12.0 * self.zoom
             } else {
@@ -340,6 +419,10 @@ impl GraphCanvas {
             };
             let anchor = pos2(x, y);
             anchors.insert(port.id, anchor);
+            let row_rect = Rect::from_min_max(
+                pos2(node_rect.left() + 5.0 * self.zoom, y - 10.0 * self.zoom),
+                pos2(node_rect.right() - 5.0 * self.zoom, y + 10.0 * self.zoom),
+            );
             let hit_rect = Rect::from_center_size(anchor, vec2(22.0, 22.0) * self.zoom.max(0.7));
             let response = ui
                 .interact(
@@ -347,10 +430,18 @@ impl GraphCanvas {
                     ui.id().with(("graph-port", node.id, index, port.id)),
                     Sense::click_and_drag(),
                 )
-                .on_hover_text(port_tooltip(port));
+                .on_hover_text(port_tooltip(node, port));
+            let pending = self.pending_output == Some(port.id);
+            if response.hovered() || pending {
+                painter.rect_filled(
+                    row_rect,
+                    4.0,
+                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 42),
+                );
+            }
             let radius = 6.0 * self.zoom.max(0.7);
             painter.circle_filled(anchor, radius, port_color(port.port_type));
-            if response.hovered() {
+            if response.hovered() || pending {
                 painter.circle_stroke(anchor, radius + 3.0, Stroke::new(1.5_f32, Color32::WHITE));
             }
             let text_pos = if port.direction == Direction::Source {
@@ -365,8 +456,8 @@ impl GraphCanvas {
                 } else {
                     egui::Align2::LEFT_CENTER
                 },
-                compact_label(&port.name, 27),
-                FontId::proportional(12.0 * self.zoom),
+                compact_label(&display_port_name(&port.name), 25),
+                FontId::proportional(11.5 * self.zoom),
                 Color32::from_rgb(215, 220, 227),
             );
 
@@ -410,8 +501,12 @@ impl GraphCanvas {
         } else {
             self.ordered_ports(graph, node).len()
         };
-        let width = 220.0 * self.zoom;
-        let height = (32.0 + port_count as f32 * 26.0).max(58.0) * self.zoom;
+        let width = NODE_WIDTH * self.zoom;
+        let height = if self.thumbnail_mode {
+            62.0
+        } else {
+            (NODE_HEADER_HEIGHT + 14.0 + port_count as f32 * PORT_ROW_HEIGHT).max(62.0)
+        } * self.zoom;
         let position = self
             .dragging_origin
             .get(&node.id)
@@ -442,7 +537,8 @@ impl GraphCanvas {
         };
         Some(pos2(
             x,
-            node_rect.top() + (43.0 + index as f32 * 26.0) * self.zoom,
+            node_rect.top()
+                + (NODE_HEADER_HEIGHT + 13.0 + index as f32 * PORT_ROW_HEIGHT) * self.zoom,
         ))
     }
 }
@@ -457,18 +553,87 @@ fn port_color(port_type: PortType) -> Color32 {
     }
 }
 
-fn port_tooltip(port: &Port) -> String {
+fn edge_color(port_type: PortType) -> Color32 {
+    match port_type {
+        PortType::Audio => Color32::from_rgb(106, 187, 147),
+        PortType::Video => Color32::from_rgb(92, 157, 218),
+        PortType::MidiJack => Color32::from_rgb(213, 111, 123),
+        PortType::MidiAlsa => Color32::from_rgb(166, 126, 208),
+        PortType::Unknown => Color32::from_rgb(138, 151, 169),
+    }
+}
+
+fn node_color(node_type: NodeType) -> Color32 {
+    match node_type {
+        NodeType::PipeWire => Color32::from_rgb(91, 172, 224),
+        NodeType::AlsaMidi => Color32::from_rgb(180, 128, 220),
+        NodeType::Unknown => Color32::from_rgb(153, 163, 175),
+    }
+}
+
+fn node_tooltip(node: &Node, ports: &[&Port]) -> String {
+    let inputs = ports
+        .iter()
+        .filter(|port| port.direction == Direction::Sink)
+        .count();
+    let outputs = ports
+        .iter()
+        .filter(|port| port.direction == Direction::Source)
+        .count();
+    format!(
+        "{}\n{}\n{} inputs, {} outputs\n\nDrag the header to move. Click the body to select. Shift-click to add or remove it from the selection.",
+        node_type_label(node.node_type),
+        node.name,
+        inputs,
+        outputs
+    )
+}
+
+fn link_tooltip(graph: &Graph, source: &Port, destination: &Port) -> String {
+    let source_node = graph
+        .node(source.node_id)
+        .map(|node| node.name.as_str())
+        .unwrap_or("Unknown node");
+    let destination_node = graph
+        .node(destination.node_id)
+        .map(|node| node.name.as_str())
+        .unwrap_or("Unknown node");
+    format!(
+        "{} connection\n\nFrom: {} / {}\nTo: {} / {}\n\nClick to select. Press Delete to disconnect it.",
+        port_type_label(source.port_type),
+        source_node,
+        source.name,
+        destination_node,
+        destination.name
+    )
+}
+
+fn port_tooltip(node: &Node, port: &Port) -> String {
     let direction = if port.direction == Direction::Source {
         "Output"
     } else {
         "Input"
     };
     format!(
-        "{} / {} / {}",
-        port.name,
+        "{} {}\n{}\nNode: {}\n\n{}",
         direction,
-        port_type_label(port.port_type)
+        port_type_label(port.port_type),
+        port.name,
+        node.name,
+        if port.direction == Direction::Source {
+            "Click or drag from this port, then choose a compatible input."
+        } else {
+            "Choose this port after selecting an output to create a connection."
+        }
     )
+}
+
+fn node_type_label(node_type: NodeType) -> &'static str {
+    match node_type {
+        NodeType::PipeWire => "PipeWire node",
+        NodeType::AlsaMidi => "ALSA MIDI node",
+        NodeType::Unknown => "Unknown node type",
+    }
 }
 
 fn port_type_label(port_type: PortType) -> &'static str {
@@ -481,6 +646,131 @@ fn port_type_label(port_type: PortType) -> &'static str {
     }
 }
 
+fn display_node_name(name: &str) -> String {
+    let (kind, detail) = if let Some(detail) = name.strip_prefix("alsa_input.") {
+        ("ALSA Input", short_device_name(detail))
+    } else if let Some(detail) = name.strip_prefix("alsa_output.") {
+        ("ALSA Output", short_device_name(detail))
+    } else if let Some(detail) = name.strip_prefix("bluez_input.") {
+        ("Bluetooth Input", bluetooth_suffix(detail))
+    } else if let Some(detail) = name.strip_prefix("bluez_output.") {
+        ("Bluetooth Output", bluetooth_suffix(detail))
+    } else if let Some(detail) = name.strip_prefix("bluez_capture_internal.") {
+        ("Bluetooth Capture", bluetooth_suffix(detail))
+    } else if name.starts_with("bluez_midi.") {
+        ("Bluetooth MIDI", None)
+    } else if name.starts_with("v4l2_input.") {
+        ("Camera Input", None)
+    } else if name.starts_with("Midi Through:") {
+        ("MIDI Through", None)
+    } else {
+        return name.replace(['_', '-'], " ");
+    };
+    detail
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| format!("{kind} - {detail}"))
+        .unwrap_or_else(|| kind.to_owned())
+}
+
+fn short_device_name(detail: &str) -> Option<String> {
+    let device = detail.split("usb-").nth(1).unwrap_or(detail);
+    let words: Vec<_> = device
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+        .take(3)
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+fn bluetooth_suffix(detail: &str) -> Option<String> {
+    if !detail
+        .chars()
+        .all(|character| character.is_ascii_hexdigit() || matches!(character, ':' | '_' | '-'))
+    {
+        return None;
+    }
+    let digits: String = detail
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .collect();
+    (digits.len() >= 4).then(|| {
+        let suffix = &digits[digits.len() - 4..];
+        format!("{}:{}", &suffix[..2], &suffix[2..])
+    })
+}
+
+fn display_port_name(name: &str) -> String {
+    let name = name.rsplit(": ").next().unwrap_or(name);
+    let name = name
+        .replace("(capture)", "Capture")
+        .replace("(playback)", "Playback")
+        .replace(['_', '-'], " ");
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_uppercase(), characters.as_str())
+}
+
+fn paint_drag_grip(painter: &egui::Painter, center: Pos2, zoom: f32, color: Color32) {
+    let spacing = 3.0 * zoom;
+    for column in [-0.5_f32, 0.5] {
+        for row in [-1.0_f32, 0.0, 1.0] {
+            painter.circle_filled(
+                center + vec2(column * spacing, row * spacing),
+                0.9 * zoom,
+                color,
+            );
+        }
+    }
+}
+
+fn bezier_points(start: Pos2, end: Pos2, lane_offset: f32) -> Vec<Pos2> {
+    let handle = (end.x - start.x).abs().clamp(72.0, 220.0) * 0.45;
+    let control_one = start + vec2(handle, lane_offset);
+    let control_two = end - vec2(handle, lane_offset);
+    (0..=28)
+        .map(|index| {
+            let t = index as f32 / 28.0;
+            let inverse = 1.0 - t;
+            let point = start.to_vec2() * inverse.powi(3)
+                + control_one.to_vec2() * (3.0 * inverse.powi(2) * t)
+                + control_two.to_vec2() * (3.0 * inverse * t.powi(2))
+                + end.to_vec2() * t.powi(3);
+            pos2(point.x, point.y)
+        })
+        .collect()
+}
+
+fn points_bounds(points: &[Pos2]) -> Rect {
+    let mut min = points[0];
+    let mut max = points[0];
+    for point in points.iter().skip(1) {
+        min.x = min.x.min(point.x);
+        min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x);
+        max.y = max.y.max(point.y);
+    }
+    Rect::from_min_max(min, max)
+}
+
+fn point_near_polyline(point: Pos2, points: &[Pos2], threshold: f32) -> bool {
+    let threshold_squared = threshold * threshold;
+    points.windows(2).any(|segment| {
+        point_to_segment_distance_squared(point, segment[0], segment[1]) <= threshold_squared
+    })
+}
+
+fn point_to_segment_distance_squared(point: Pos2, start: Pos2, end: Pos2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_sq();
+    if length_squared <= f32::EPSILON {
+        return point.distance_sq(start);
+    }
+    let factor = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance_sq(start + segment * factor)
+}
+
 fn compact_label(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let compact: String = chars.by_ref().take(max_chars).collect();
@@ -488,5 +778,33 @@ fn compact_label(value: &str, max_chars: usize) -> String {
         format!("{compact}...")
     } else {
         compact
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_hide_transport_prefixes_without_losing_device_identity() {
+        assert_eq!(display_node_name("Dummy-Driver"), "Dummy Driver");
+        assert_eq!(
+            display_node_name("bluez_output.B0:F0:0C:5E:99:5A"),
+            "Bluetooth Output - 99:5A"
+        );
+        assert_eq!(
+            display_port_name("Midi Through: Port-0 (capture)"),
+            "Port 0 Capture"
+        );
+    }
+
+    #[test]
+    fn bezier_curve_starts_and_ends_at_ports() {
+        let start = pos2(20.0, 40.0);
+        let end = pos2(220.0, 120.0);
+        let points = bezier_points(start, end, 0.0);
+        assert_eq!(points.first().copied(), Some(start));
+        assert_eq!(points.last().copied(), Some(end));
+        assert!(point_near_polyline(points[14], &points, 1.0));
     }
 }
