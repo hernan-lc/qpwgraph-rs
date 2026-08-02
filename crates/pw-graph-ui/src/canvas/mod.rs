@@ -102,11 +102,32 @@ impl GraphCanvas {
             self.pan += canvas_response.drag_delta();
         }
 
-        let scroll = ui.input(|input| input.raw_scroll_delta.y);
-        if scroll.abs() > f32::EPSILON
-            && rect.contains(ui.input(|input| input.pointer.hover_pos().unwrap_or(rect.center())))
-        {
-            self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.35, 2.5);
+        // Ctrl/Cmd+scroll zooms; Shift+scroll pans horizontally; a plain
+        // scroll pans (vertically, or horizontally too if the device already
+        // reports a horizontal component, e.g. a trackpad swipe).
+        let pointer_over_canvas = ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pointer| rect.contains(pointer));
+        if pointer_over_canvas {
+            let scroll = ui.input(|input| input.raw_scroll_delta);
+            let modifiers = ui.input(|input| input.modifiers);
+            if scroll.x.abs() > f32::EPSILON || scroll.y.abs() > f32::EPSILON {
+                if modifiers.command {
+                    self.zoom = (self.zoom * (1.0 + scroll.y * 0.001)).clamp(0.35, 2.5);
+                } else if modifiers.shift {
+                    // Some backends already turn Shift+wheel into a
+                    // horizontal delta; fall back to the vertical one so the
+                    // shortcut works either way.
+                    let delta = if scroll.x.abs() > scroll.y.abs() {
+                        scroll.x
+                    } else {
+                        scroll.y
+                    };
+                    self.pan.x += delta;
+                } else {
+                    self.pan += scroll;
+                }
+            }
         }
 
         if !self.thumbnail_mode {

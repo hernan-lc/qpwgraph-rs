@@ -176,6 +176,18 @@ const SHORTCUT_ENTRIES: &[ShortcutEntry] = &[
         keys: "+ / -",
         description_key: "shortcuts.zoom",
     },
+    ShortcutEntry {
+        keys: "Scroll",
+        description_key: "shortcuts.scroll_pan",
+    },
+    ShortcutEntry {
+        keys: "Shift+Scroll",
+        description_key: "shortcuts.scroll_pan_horizontal",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+Scroll",
+        description_key: "shortcuts.scroll_zoom",
+    },
 ];
 
 fn meter_policy_key(policy: MeterPolicy) -> &'static str {
@@ -303,65 +315,68 @@ impl QpwgraphApp {
 
     fn show_navigation(&mut self, ui: &mut Ui) {
         ui.vertical(|ui| {
-            ui.vertical_centered(|ui| {
-                let docks = [
-                    (AppScreen::Graph, Icon::Graph, "screen.graph"),
-                    (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
-                ];
-                for (screen, icon, label) in docks {
-                    let help_key = match screen {
-                        AppScreen::Graph => "help.navigation_graph",
-                        AppScreen::Patchbay => "help.navigation_patchbay",
-                    };
-                    let selected = self.dock_open && self.screen == screen;
-                    if sidebar_nav_icon_button(
-                        ui,
-                        label,
-                        icon,
-                        selected,
-                        self.t(label),
-                        self.t(help_key),
-                    ) {
-                        if selected {
-                            self.dock_open = false;
-                        } else {
-                            self.screen = screen;
-                            self.dock_open = true;
-                            self.show_preferences = false;
-                            self.show_shortcuts = false;
-                            self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
+            let rail_max_height = ui.available_height();
+            fresh_scroll_area("nav-rail-scroll", rail_max_height).show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    let docks = [
+                        (AppScreen::Graph, Icon::Graph, "screen.graph"),
+                        (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
+                    ];
+                    for (screen, icon, label) in docks {
+                        let help_key = match screen {
+                            AppScreen::Graph => "help.navigation_graph",
+                            AppScreen::Patchbay => "help.navigation_patchbay",
+                        };
+                        let selected = self.dock_open && self.screen == screen;
+                        if sidebar_nav_icon_button(
+                            ui,
+                            label,
+                            icon,
+                            selected,
+                            self.t(label),
+                            self.t(help_key),
+                        ) {
+                            if selected {
+                                self.dock_open = false;
+                            } else {
+                                self.screen = screen;
+                                self.dock_open = true;
+                                self.show_preferences = false;
+                                self.show_shortcuts = false;
+                                self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
+                            }
                         }
                     }
-                }
-                ui.separator();
-                if sidebar_nav_icon_button(
-                    ui,
-                    "nav.preferences",
-                    Icon::Settings,
-                    self.show_preferences,
-                    self.t("nav.preferences"),
-                    self.t("help.navigation_preferences"),
-                ) {
-                    if self.show_preferences {
-                        self.show_preferences = false;
-                    } else {
-                        self.show_preferences = true;
-                        self.show_shortcuts = false;
-                        self.preferences_scroll_epoch =
-                            self.preferences_scroll_epoch.wrapping_add(1);
+                    ui.separator();
+                    if sidebar_nav_icon_button(
+                        ui,
+                        "nav.preferences",
+                        Icon::Settings,
+                        self.show_preferences,
+                        self.t("nav.preferences"),
+                        self.t("help.navigation_preferences"),
+                    ) {
+                        if self.show_preferences {
+                            self.show_preferences = false;
+                        } else {
+                            self.show_preferences = true;
+                            self.show_shortcuts = false;
+                            self.preferences_scroll_epoch =
+                                self.preferences_scroll_epoch.wrapping_add(1);
+                        }
                     }
-                }
-                if sidebar_nav_icon_button(
-                    ui,
-                    "nav.shortcuts",
-                    Icon::Help,
-                    self.show_shortcuts,
-                    self.t("nav.shortcuts"),
-                    self.t("help.navigation_shortcuts"),
-                ) {
-                    self.toggle_shortcuts();
-                }
-                self.show_sidebar_actions(ui);
+                    if sidebar_nav_icon_button(
+                        ui,
+                        "nav.shortcuts",
+                        Icon::Help,
+                        self.show_shortcuts,
+                        self.t("nav.shortcuts"),
+                        self.t("help.navigation_shortcuts"),
+                    ) {
+                        self.toggle_shortcuts();
+                    }
+                    self.show_sidebar_actions(ui);
+                });
             });
 
             if self.dock_open {
@@ -379,6 +394,15 @@ impl QpwgraphApp {
 
     fn show_sidebar_actions(&mut self, ui: &mut Ui) {
         if self.config.toolbar {
+            if sidebar_icon_button(
+                ui,
+                "sidebar.refresh",
+                Icon::Refresh,
+                self.t("toolbar.refresh"),
+                self.t("help.refresh"),
+            ) {
+                self.refresh_graph();
+            }
             if sidebar_icon_button_enabled(
                 ui,
                 "sidebar.undo",
@@ -423,6 +447,27 @@ impl QpwgraphApp {
                 } else {
                     ConnectMode::Easy
                 };
+            }
+            if sidebar_icon_button(
+                ui,
+                "sidebar.arrange",
+                Icon::Repel,
+                self.t("inspector.arrange_nodes"),
+                self.t("help.arrange_nodes"),
+            ) {
+                self.arrange_nodes();
+            }
+            self.show_sort_controls(ui);
+            if let Some(selected_link) = self.canvas.selected_link() {
+                if sidebar_icon_button(
+                    ui,
+                    "sidebar.disconnect-selected",
+                    Icon::Delete,
+                    self.t("toolbar.disconnect"),
+                    self.t("help.disconnect_link"),
+                ) {
+                    self.disconnect(selected_link);
+                }
             }
         }
         if self.config.patchbay_toolbar {
@@ -484,20 +529,6 @@ impl QpwgraphApp {
                 stat_card(ui, self.t("inspector.links_short"), link_count);
             });
         });
-        if let Some(selected_link) = self.canvas.selected_link() {
-            panel_section(ui, self.t("inspector.selected_link"), |ui| {
-                if icon_button(
-                    ui,
-                    "graph.disconnect-selected",
-                    Icon::Delete,
-                    self.t("toolbar.disconnect"),
-                    self.t("help.disconnect_link"),
-                ) {
-                    self.disconnect(selected_link);
-                }
-            });
-        }
-
         panel_section(ui, self.t("inspector.audio_metering"), |ui| {
             self.show_meter_controls(ui);
         });
@@ -513,83 +544,67 @@ impl QpwgraphApp {
                 self.show_rename_control(ui, selected_node);
             });
         }
+    }
 
-        panel_section(ui, self.t("inspector.layout"), |ui| {
-            if ui
-                .button(self.t("inspector.arrange_nodes"))
-                .on_hover_text(self.t("help.arrange_nodes"))
-                .clicked()
-            {
-                self.arrange_nodes();
-            }
+    /// Compact sort-by/sort-order toggles for the always-visible sidebar:
+    /// icon only, current state and full explanation on hover. A `ComboBox`
+    /// with an inline label doesn't fit the narrow rail width and spills
+    /// text past the panel edge, so these cycle on click like every other
+    /// icon button here instead.
+    fn show_sort_controls(&mut self, ui: &mut Ui) {
+        let sort_by_name = self.config.sort_type != "id";
+        let sort_label = self.t(if sort_by_name { "sort.name" } else { "sort.id" });
+        if sidebar_icon_toggle_button(
+            ui,
+            "sidebar.sort_by",
+            Icon::Sort,
+            sort_by_name,
+            format!("{}: {}", self.t("inspector.sort_ports"), sort_label),
+            self.t("help.sort_ports"),
+        ) {
+            self.config.sort_type = if sort_by_name { "id" } else { "name" }.into();
+        }
 
-            let sort_by_name = self.config.sort_type != "id";
-            let sort_by_name_before = sort_by_name;
-            let mut sort_by_name_choice = sort_by_name;
-            let sort_ports_response = egui::ComboBox::from_label(self.t("inspector.sort_ports"))
-                .selected_text(if sort_by_name {
-                    self.t("sort.name")
-                } else {
-                    self.t("sort.id")
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut sort_by_name_choice, true, self.t("sort.name"));
-                    ui.selectable_value(&mut sort_by_name_choice, false, self.t("sort.id"));
-                });
-            sort_ports_response
-                .response
-                .on_hover_text(self.t("help.sort_ports"));
-            if sort_by_name_choice != sort_by_name_before {
-                self.config.sort_type = if sort_by_name_choice { "name" } else { "id" }.into();
-            }
-            let descending = self.config.sort_order == "descending";
-            let mut descending_choice = descending;
-            let sort_order_response = egui::ComboBox::from_label(self.t("inspector.sort_order"))
-                .selected_text(if descending {
-                    self.t("sort.descending")
-                } else {
-                    self.t("sort.ascending")
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut descending_choice, false, self.t("sort.ascending"));
-                    ui.selectable_value(&mut descending_choice, true, self.t("sort.descending"));
-                });
-            sort_order_response
-                .response
-                .on_hover_text(self.t("help.sort_order"));
-            if descending_choice != descending {
-                self.config.sort_order = if descending_choice {
-                    "descending"
-                } else {
-                    "ascending"
-                }
-                .into();
-            }
+        let descending = self.config.sort_order == "descending";
+        let order_label = self.t(if descending {
+            "sort.descending"
+        } else {
+            "sort.ascending"
         });
+        if sidebar_icon_toggle_button(
+            ui,
+            "sidebar.sort_order",
+            Icon::SortDirection,
+            descending,
+            format!("{}: {}", self.t("inspector.sort_order"), order_label),
+            self.t("help.sort_order"),
+        ) {
+            self.config.sort_order = if descending {
+                "ascending"
+            } else {
+                "descending"
+            }
+            .into();
+        }
     }
 
     fn show_media_filter_sidebar(&mut self, ui: &mut Ui) {
         ui.separator();
         let current_filter = MediaFilter::parse(&self.config.media_filter);
-        let mut selected_filter = current_filter;
-        let response = egui::ComboBox::from_id_salt("sidebar-media-filter")
-            .selected_text(self.t(media_filter_key(current_filter)))
-            .width(48.0)
-            .show_ui(ui, |ui| {
-                for filter in MediaFilter::ALL {
-                    ui.selectable_value(
-                        &mut selected_filter,
-                        filter,
-                        self.t(media_filter_key(filter)),
-                    );
-                }
-            });
-        response.response.on_hover_text(format!(
-            "{}\n{}",
-            self.t("toolbar.media_filter"),
-            self.t("help.media_filter")
-        ));
-        if selected_filter != current_filter {
+        let filter_label = self.t(media_filter_key(current_filter));
+        if sidebar_icon_button(
+            ui,
+            "sidebar.media_filter",
+            Icon::Filter,
+            format!("{}: {}", self.t("toolbar.media_filter"), filter_label),
+            self.t("help.media_filter"),
+        ) {
+            let next_index = MediaFilter::ALL
+                .iter()
+                .position(|filter| *filter == current_filter)
+                .map(|index| (index + 1) % MediaFilter::ALL.len())
+                .unwrap_or(0);
+            let selected_filter = MediaFilter::ALL[next_index];
             self.config.media_filter = selected_filter.as_str().into();
             self.canvas.media_filter = selected_filter;
         }
