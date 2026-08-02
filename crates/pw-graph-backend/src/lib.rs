@@ -19,9 +19,6 @@ pub use pipewire::PipewireDriver;
 #[cfg(not(feature = "pipewire"))]
 pub use pipewire_stub::PipewireDriver;
 
-#[cfg(feature = "pipewire")]
-impl EffectDriver for PipewireDriver {}
-
 // The native driver and its focused submodules use these graph types in their
 // internal implementation. Keep the imports at the façade boundary so those
 // modules do not need to depend on the public API module's implementation

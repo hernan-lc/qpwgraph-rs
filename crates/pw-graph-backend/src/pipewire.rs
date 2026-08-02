@@ -12,6 +12,7 @@ use pw::spa::param::ParamType;
 use pw::spa::pod::serialize::PodSerializer;
 use pw::spa::pod::{Pod, Value};
 use pw::spa::utils::Direction as SpaDirection;
+use pw_graph_effects::{EffectDescriptor, EffectHost};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
@@ -69,6 +70,7 @@ pub struct PipewireDriver {
     graph: Graph,
     positions: BTreeMap<NodeId, [f32; 2]>,
     audio_controls: BTreeMap<NodeId, NodeAudioControl>,
+    effect_host: EffectHost,
     /// Manual disconnects are kept as stable endpoint pairs. WirePlumber may
     /// recreate an application's link when it resumes; the next synchronized
     /// snapshot removes only those links the user explicitly deleted.
@@ -196,6 +198,7 @@ impl PipewireDriver {
             graph: Graph::default(),
             positions: BTreeMap::new(),
             audio_controls: BTreeMap::new(),
+            effect_host: EffectHost::new(),
             blocked_connections: Vec::new(),
         };
 
@@ -762,6 +765,12 @@ impl GraphDriver for PipewireDriver {
         let _guard = loop_for_reset.lock();
         self.meters.clear();
         Ok(())
+    }
+}
+
+impl EffectDriver for PipewireDriver {
+    fn effect_descriptors(&self) -> Vec<EffectDescriptor> {
+        self.effect_host.descriptors()
     }
 }
 

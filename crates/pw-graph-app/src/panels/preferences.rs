@@ -1,3 +1,4 @@
+use super::components::modal_combo;
 use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, full_panel_window, meter_policy_key, panel_section,
     preferences_rect, scale_slider, show_backdrop_rect, show_close_button,
@@ -30,17 +31,21 @@ impl QpwgraphApp {
         ) {
             self.reset_audio_config();
         }
-        let response = egui::ComboBox::from_label(self.t("inspector.audio_metering_policy"))
-            .selected_text(self.t(meter_policy_key(current)))
-            .show_ui(ui, |ui| {
-                for policy in MeterPolicy::ALL {
-                    let label = self.t(meter_policy_key(policy));
-                    ui.selectable_value(&mut selected, policy, label);
-                }
-            });
-        response
-            .response
-            .on_hover_text(self.t("help.audio_metering_policy"));
+        modal_combo(
+            ui,
+            "meters.policy",
+            self.t("inspector.audio_metering_policy"),
+            self.t(meter_policy_key(current)),
+            &mut selected,
+            MeterPolicy::ALL
+                .into_iter()
+                .map(|policy| (policy, self.t(meter_policy_key(policy)))),
+        );
+        ui.label(
+            RichText::new(self.t("help.audio_metering_policy"))
+                .small()
+                .weak(),
+        );
         if selected != current {
             self.config.audio_meters = selected.as_str().to_owned();
         }

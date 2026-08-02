@@ -4,7 +4,10 @@ use pw_graph_ui::MediaFilter;
 
 impl QpwgraphApp {
     pub(crate) fn any_modal_open(&self) -> bool {
-        self.show_shortcuts || self.show_history || self.show_preferences
+        self.show_shortcuts
+            || self.show_history
+            || self.show_preferences
+            || self.effect_wizard.is_some()
     }
 
     pub(crate) fn toggle_shortcuts(&mut self) {
@@ -16,6 +19,7 @@ impl QpwgraphApp {
         self.show_shortcuts = true;
         self.show_preferences = false;
         self.show_history = false;
+        self.effect_wizard = None;
         self.shortcut_search.clear();
         self.shortcut_focus_search = true;
         self.shortcut_scroll_epoch = self.shortcut_scroll_epoch.wrapping_add(1);
@@ -31,6 +35,7 @@ impl QpwgraphApp {
         if self.show_history {
             self.show_shortcuts = false;
             self.show_preferences = false;
+            self.effect_wizard = None;
         }
     }
 

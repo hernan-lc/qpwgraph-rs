@@ -2,13 +2,96 @@ use super::QpwgraphApp;
 use pw_graph_backend::{EffectInsertRequest, GraphDriver};
 use pw_graph_config::PersistedEffect;
 use pw_graph_core::{LinkId, PortType};
-use pw_graph_effects::NOISE_GATE_ID;
+use pw_graph_effects::{EffectDescriptor, NOISE_GATE_ID};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// State for the modal effect-creation wizard. Keeping this separate from the
+/// persisted configuration means cancelling a setup never changes the saved
+/// graph or effect list.
+#[derive(Clone, Debug)]
+pub(crate) struct EffectWizardState {
+    pub(crate) step: usize,
+    pub(crate) effect_id: String,
+    pub(crate) link_id: Option<LinkId>,
+    pub(crate) enabled: bool,
+    pub(crate) parameters: BTreeMap<String, f32>,
+}
+
+impl EffectWizardState {
+    fn new(descriptor: &EffectDescriptor, link_id: Option<LinkId>) -> Self {
+        Self {
+            step: 0,
+            effect_id: descriptor.id.clone(),
+            link_id,
+            enabled: true,
+            parameters: default_parameters(descriptor),
+        }
+    }
+}
+
+pub(crate) fn default_parameters(descriptor: &EffectDescriptor) -> BTreeMap<String, f32> {
+    descriptor
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.id.clone(), parameter.default))
+        .collect()
+}
+
+pub(crate) fn audio_link_options(driver: &dyn GraphDriver) -> Vec<(LinkId, String)> {
+    driver
+        .graph()
+        .links
+        .values()
+        .filter_map(|link| {
+            let source = driver.graph().port_key(link.output_port)?;
+            let destination = driver.graph().port_key(link.input_port)?;
+            (source.port_type == PortType::Audio && destination.port_type == PortType::Audio).then(
+                || {
+                    (
+                        link.id,
+                        format!(
+                            "{} / {}  →  {} / {}",
+                            source.node_name,
+                            source.port_name,
+                            destination.node_name,
+                            destination.port_name
+                        ),
+                    )
+                },
+            )
+        })
+        .collect()
+}
+
 impl QpwgraphApp {
-    pub(crate) fn insert_selected_noise_gate(&mut self) {
-        let Some(link_id) = self.canvas.selected_link() else {
+    pub(crate) fn open_effect_wizard(&mut self) {
+        let mut descriptors = self.driver.effect_descriptors();
+        // The native PipeWire effect host is still being connected to the
+        // filter-node runtime. Keep the built-in effect visible in the setup
+        // screen so the action is discoverable and can report a precise
+        // backend error at commit time instead of appearing inert.
+        if descriptors.is_empty() {
+            descriptors = pw_graph_effects::EffectHost::new().descriptors();
+        }
+        let Some(descriptor) = descriptors.first() else {
+            self.status = self.t("effects.no_available");
+            return;
+        };
+        let links = audio_link_options(self.driver.as_ref());
+        let selected_link = self
+            .canvas
+            .selected_link()
+            .filter(|link_id| links.iter().any(|(id, _)| id == link_id))
+            .or_else(|| links.first().map(|(id, _)| *id));
+        self.show_shortcuts = false;
+        self.show_history = false;
+        self.show_preferences = false;
+        self.effect_wizard = Some(EffectWizardState::new(descriptor, selected_link));
+    }
+
+    pub(crate) fn finish_effect_wizard(&mut self, wizard: EffectWizardState) {
+        let Some(link_id) = wizard.link_id else {
             self.status = self.t("effects.select_link");
             return;
         };
@@ -16,18 +99,6 @@ impl QpwgraphApp {
             self.status = self.t("effects.link_unavailable");
             return;
         };
-        let Some(output) = self.driver.graph().port(link.output_port) else {
-            self.status = self.t("effects.link_unavailable");
-            return;
-        };
-        let Some(input) = self.driver.graph().port(link.input_port) else {
-            self.status = self.t("effects.link_unavailable");
-            return;
-        };
-        if output.port_type != PortType::Audio || input.port_type != PortType::Audio {
-            self.status = self.t("effects.audio_only");
-            return;
-        }
         let Some(source) = self.driver.graph().port_key(link.output_port) else {
             self.status = self.t("effects.link_unavailable");
             return;
@@ -36,15 +107,24 @@ impl QpwgraphApp {
             self.status = self.t("effects.link_unavailable");
             return;
         };
+        if source.port_type != PortType::Audio || destination.port_type != PortType::Audio {
+            self.status = self.t("effects.audio_only");
+            return;
+        }
+
         let instance_id = unique_effect_id();
         let request = EffectInsertRequest {
-            instance_id: instance_id.clone(),
-            effect_id: NOISE_GATE_ID.into(),
+            instance_id,
+            effect_id: if wizard.effect_id.is_empty() {
+                NOISE_GATE_ID.into()
+            } else {
+                wizard.effect_id
+            },
             module_path: None,
             source: source.clone(),
             destination: destination.clone(),
-            enabled: true,
-            parameters: BTreeMap::new(),
+            enabled: wizard.enabled,
+            parameters: wizard.parameters,
         };
         match self.driver.insert_effect(request) {
             Ok(instance) => {
@@ -148,15 +228,4 @@ fn unique_effect_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("effect-{nanos:x}")
-}
-
-#[allow(dead_code)]
-fn _link_type_is_audio(driver: &dyn GraphDriver, link_id: LinkId) -> bool {
-    let Some(link) = driver.graph().link(link_id) else {
-        return false;
-    };
-    driver
-        .graph()
-        .port(link.output_port)
-        .is_some_and(|port| port.port_type == PortType::Audio)
 }

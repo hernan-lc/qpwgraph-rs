@@ -1,3 +1,4 @@
+mod components;
 mod modals;
 mod preferences;
 mod shared;

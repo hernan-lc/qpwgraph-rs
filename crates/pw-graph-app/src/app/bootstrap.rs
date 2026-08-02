@@ -177,6 +177,7 @@ impl QpwgraphApp {
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
             last_graph_refresh: Instant::now(),
             meter_policy,
+            effect_wizard: None,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         };

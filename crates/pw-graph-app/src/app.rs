@@ -13,7 +13,7 @@ use crate::tray::tray_support;
 
 mod bootstrap;
 mod configuration;
-mod effects;
+pub(crate) mod effects;
 mod graph_actions;
 mod layout;
 mod lifecycle;
@@ -57,6 +57,7 @@ pub(crate) struct QpwgraphApp {
     /// Mirrors `config.audio_meters` so a change in the panel is pushed to the
     /// driver exactly once instead of on every frame.
     pub(crate) meter_policy: MeterPolicy,
+    pub(crate) effect_wizard: Option<effects::EffectWizardState>,
     #[cfg(all(target_os = "linux", feature = "tray"))]
     pub(crate) tray: Option<tray_support::State>,
 }
