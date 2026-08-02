@@ -194,7 +194,9 @@ impl GraphCanvas {
                                 ("port", display_port_name(&output.name, i18n)),
                             ],
                         ),
-                        FontId::proportional(12.0 * self.zoom * self.node_text_scale.clamp(0.75, 1.75)),
+                        FontId::proportional(
+                            12.0 * self.zoom * self.node_text_scale.clamp(0.75, 1.75),
+                        ),
                         Color32::LIGHT_GREEN,
                     );
                 }

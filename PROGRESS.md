@@ -16,6 +16,9 @@ stable, and reserves node hit areas before canvas pan or rectangle selection.
 The graph canvas now presents type-accented draggable node headers, compact
 human-readable names, port-row hover states, media-colored curved links, and
 full node, port, and link tooltips without hiding the raw PipeWire names.
+The inspector was then redesigned with scrollable grouped sections, statistic
+cards, clearer panel headers, a wider responsive side panel, and independent
+text-size controls for application chrome, inspector panels, and graph nodes.
 
 The desktop shell is modularized: `main.rs` is a small entry point, while
 `app.rs`, `args.rs`, `backend.rs`, `panels.rs`, and `tray.rs` own application
@@ -34,7 +37,7 @@ Diagnostics screens instead of placing every option in one inspector column.
 | M2 – Minimal GUI | Implemented | egui desktop shell renders nodes, ports, links, zoom, pan, and color-coded media types. |
 | M3 – Interactive connections | Implemented | Source-to-sink click/drag, link selection/deletion, rectangle and multi-selection, node movement, port sorting, overlap repulsion, connect-through-node mode, and thumbnail view are present. |
 | M4 – Undo/redo | Implemented | Connect, disconnect, and rename commands support undo/redo; keyboard shortcuts and toolbar controls are wired. |
-| M5 – Config persistence | Implemented | TOML persists language, window geometry, zoom, string-keyed node positions, sort state, toolbar/status visibility, patchbay flags/path, thumbnail, and layout options. |
+| M5 – Config persistence | Implemented | TOML persists language, window geometry, zoom, string-keyed node positions, sort state, toolbar/status visibility, patchbay flags/path, thumbnail, layout options, and independent UI/panel/node text scales. |
 | M6 – Patchbay system | Implemented | qpwgraph-style XML and JSON are supported; name-based activation, startup activation, snapshot, pin/unpin, exclusive mode, auto-disconnect, idempotence, and activation reporting are wired. |
 | M7 – ALSA MIDI | Implemented | Native ALSA Sequencer enumeration, existing-subscription discovery, namespaced IDs, connect, disconnect, refresh, and composite PipeWire+ALSA routing are implemented. |
 | M8 – Extras | Implemented | `-m`, `-d`, `-n`, `--lang`, and `--demo` are available; thumbnail mode and Linux StatusNotifier tray Show/Hide/Quit actions are implemented. |
@@ -46,7 +49,8 @@ Diagnostics screens instead of placing every option in one inspector column.
 - Patchbay: persistent routing rules, activation behavior, live-link pinning,
   and disconnect actions.
 - Interface: language selection, configuration save, one action-toolbar toggle,
-  visibility toggles, and graph presentation behavior.
+  visibility toggles, graph presentation behavior, and independent typography
+  controls for application, panel, and node text.
 - Diagnostics: active backend, status, graph counts, and port color legend.
 
 ## Native/runtime notes

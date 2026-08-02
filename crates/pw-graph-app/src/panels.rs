@@ -31,10 +31,14 @@ fn panel_header(ui: &mut Ui, icon: Icon, title: String, hint: String) {
 fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&mut Ui)) {
     egui::Frame::group(ui.style())
         .fill(SECTION_FILL)
-        .stroke(Stroke::new(1.0, SECTION_STROKE))
+        .stroke(Stroke::new(1.0_f32, SECTION_STROKE))
         .inner_margin(9.0)
         .show(ui, |ui| {
-            ui.label(RichText::new(title).strong().color(Color32::from_rgb(205, 216, 230)));
+            ui.label(
+                RichText::new(title)
+                    .strong()
+                    .color(Color32::from_rgb(205, 216, 230)),
+            );
             ui.add_space(5.0);
             contents(ui);
         });
@@ -301,94 +305,96 @@ impl QpwgraphApp {
         });
 
         panel_section(ui, self.t("inspector.live_links"), |ui| {
-        let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
-        if links.is_empty() {
-            ui.label(RichText::new(self.t("inspector.no_live_links")).weak());
-        }
-        for link in links {
-            let (output_node, output_port) = self
-                .driver
-                .graph()
-                .port(link.output_port)
-                .map(|port| {
-                    (
-                        self.driver
-                            .graph()
-                            .node(port.node_id)
-                            .map(|node| node.name.clone())
-                            .unwrap_or_else(|| port.node_id.to_string()),
-                        port.name.clone(),
-                    )
-                })
-                .unwrap_or_else(|| (link.output_port.to_string(), link.output_port.to_string()));
-            let (input_node, input_port) = self
-                .driver
-                .graph()
-                .port(link.input_port)
-                .map(|port| {
-                    (
-                        self.driver
-                            .graph()
-                            .node(port.node_id)
-                            .map(|node| node.name.clone())
-                            .unwrap_or_else(|| port.node_id.to_string()),
-                        port.name.clone(),
-                    )
-                })
-                .unwrap_or_else(|| (link.input_port.to_string(), link.input_port.to_string()));
-            let link_summary = self.tf(
-                "patchbay.link_summary",
-                &[
-                    ("output_node", output_node),
-                    ("output_port", output_port),
-                    ("input_node", input_node),
-                    ("input_port", input_port),
-                ],
-            );
-            ui.push_id(("live-link", link.id), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(link_summary);
-                    let mut pinned = self
-                        .patchbay
-                        .connections
-                        .iter()
-                        .find(|connection| {
-                            connection.output_port == link.output_port
-                                && connection.input_port == link.input_port
-                        })
-                        .is_some_and(|connection| connection.pinned);
-                    if ui
-                        .checkbox(&mut pinned, self.t("inspector.pinned"))
-                        .changed()
-                    {
-                        if let Some(connection) =
-                            self.patchbay.connections.iter_mut().find(|connection| {
+            let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
+            if links.is_empty() {
+                ui.label(RichText::new(self.t("inspector.no_live_links")).weak());
+            }
+            for link in links {
+                let (output_node, output_port) = self
+                    .driver
+                    .graph()
+                    .port(link.output_port)
+                    .map(|port| {
+                        (
+                            self.driver
+                                .graph()
+                                .node(port.node_id)
+                                .map(|node| node.name.clone())
+                                .unwrap_or_else(|| port.node_id.to_string()),
+                            port.name.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (link.output_port.to_string(), link.output_port.to_string())
+                    });
+                let (input_node, input_port) = self
+                    .driver
+                    .graph()
+                    .port(link.input_port)
+                    .map(|port| {
+                        (
+                            self.driver
+                                .graph()
+                                .node(port.node_id)
+                                .map(|node| node.name.clone())
+                                .unwrap_or_else(|| port.node_id.to_string()),
+                            port.name.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| (link.input_port.to_string(), link.input_port.to_string()));
+                let link_summary = self.tf(
+                    "patchbay.link_summary",
+                    &[
+                        ("output_node", output_node),
+                        ("output_port", output_port),
+                        ("input_node", input_node),
+                        ("input_port", input_port),
+                    ],
+                );
+                ui.push_id(("live-link", link.id), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(link_summary);
+                        let mut pinned = self
+                            .patchbay
+                            .connections
+                            .iter()
+                            .find(|connection| {
                                 connection.output_port == link.output_port
                                     && connection.input_port == link.input_port
                             })
+                            .is_some_and(|connection| connection.pinned);
+                        if ui
+                            .checkbox(&mut pinned, self.t("inspector.pinned"))
+                            .changed()
                         {
-                            connection.pinned = pinned;
-                        } else {
-                            self.patchbay.add_graph_connection(
-                                self.driver.graph(),
-                                link.output_port,
-                                link.input_port,
-                                pinned,
-                            );
+                            if let Some(connection) =
+                                self.patchbay.connections.iter_mut().find(|connection| {
+                                    connection.output_port == link.output_port
+                                        && connection.input_port == link.input_port
+                                })
+                            {
+                                connection.pinned = pinned;
+                            } else {
+                                self.patchbay.add_graph_connection(
+                                    self.driver.graph(),
+                                    link.output_port,
+                                    link.input_port,
+                                    pinned,
+                                );
+                            }
                         }
-                    }
-                    if icon_button(
-                        ui,
-                        "disconnect",
-                        Icon::Delete,
-                        self.t("toolbar.disconnect"),
-                        self.t("help.disconnect_link"),
-                    ) {
-                        self.disconnect(link.id);
-                    }
+                        if icon_button(
+                            ui,
+                            "disconnect",
+                            Icon::Delete,
+                            self.t("toolbar.disconnect"),
+                            self.t("help.disconnect_link"),
+                        ) {
+                            self.disconnect(link.id);
+                        }
+                    });
                 });
-            });
-        }
+            }
         });
     }
 
@@ -408,11 +414,7 @@ impl QpwgraphApp {
                     .selected_text(selected_locale.native_name())
                     .show_ui(ui, |ui| {
                         for locale in Locale::ALL {
-                            ui.selectable_value(
-                                &mut selected_locale,
-                                locale,
-                                locale.native_name(),
-                            );
+                            ui.selectable_value(&mut selected_locale, locale, locale.native_name());
                         }
                     });
                 response.response.on_hover_text(self.t("help.language"));
@@ -427,10 +429,14 @@ impl QpwgraphApp {
             ) {
                 self.save_config_now();
             }
-            ui.label(RichText::new(self.tf(
-                "inspector.config_path",
-                &[("path", self.config_file.display().to_string())],
-            )).small().weak());
+            ui.label(
+                RichText::new(self.tf(
+                    "inspector.config_path",
+                    &[("path", self.config_file.display().to_string())],
+                ))
+                .small()
+                .weak(),
+            );
         });
         if selected_locale != current_locale {
             self.i18n.set_locale(selected_locale);
@@ -505,26 +511,32 @@ impl QpwgraphApp {
         });
 
         panel_section(ui, self.t("inspector.typography"), |ui| {
+            let ui_text_label = self.t("inspector.ui_text_scale");
+            let ui_text_help = self.t("help.ui_text_scale");
             scale_slider(
                 ui,
                 "ui",
                 &mut self.config.ui_text_scale,
-                self.t("inspector.ui_text_scale"),
-                self.t("help.ui_text_scale"),
+                ui_text_label,
+                ui_text_help,
             );
+            let panel_text_label = self.t("inspector.panel_text_scale");
+            let panel_text_help = self.t("help.panel_text_scale");
             scale_slider(
                 ui,
                 "panels",
                 &mut self.config.panel_text_scale,
-                self.t("inspector.panel_text_scale"),
-                self.t("help.panel_text_scale"),
+                panel_text_label,
+                panel_text_help,
             );
+            let node_text_label = self.t("inspector.node_text_scale");
+            let node_text_help = self.t("help.node_text_scale");
             scale_slider(
                 ui,
                 "nodes",
                 &mut self.config.node_text_scale,
-                self.t("inspector.node_text_scale"),
-                self.t("help.node_text_scale"),
+                node_text_label,
+                node_text_help,
             );
         });
     }

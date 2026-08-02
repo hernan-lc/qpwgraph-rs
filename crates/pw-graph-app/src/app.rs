@@ -206,9 +206,7 @@ impl QpwgraphApp {
             for (text_style, font_id) in &default_text_styles {
                 let mut scaled_font = font_id.clone();
                 scaled_font.size *= scale;
-                style
-                    .text_styles
-                    .insert(text_style.clone(), scaled_font);
+                style.text_styles.insert(text_style.clone(), scaled_font);
             }
         });
     }
@@ -440,82 +438,88 @@ impl eframe::App for QpwgraphApp {
         }
 
         if self.config.toolbar || self.config.patchbay_toolbar {
-            egui::TopBottomPanel::top("action_toolbar").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if self.config.toolbar {
-                        if icon_button(
-                            ui,
-                            "toolbar.refresh",
-                            Icon::Refresh,
-                            self.t("toolbar.refresh"),
-                            self.t("help.refresh"),
-                        ) {
-                            self.refresh_graph();
-                        }
-                        if icon_button_enabled(
-                            ui,
-                            "toolbar.undo",
-                            Icon::Undo,
-                            self.t("toolbar.undo"),
-                            self.t("help.undo"),
-                            self.commands.can_undo(),
-                        ) {
-                            self.undo();
-                        }
-                        if icon_button_enabled(
-                            ui,
-                            "toolbar.redo",
-                            Icon::Redo,
-                            self.t("toolbar.redo"),
-                            self.t("help.redo"),
-                            self.commands.can_redo(),
-                        ) {
-                            self.redo();
-                        }
-                    }
-                    if self.config.patchbay_toolbar {
+            egui::TopBottomPanel::top("action_toolbar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(29, 33, 40))
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
                         if self.config.toolbar {
-                            ui.separator();
+                            if icon_button(
+                                ui,
+                                "toolbar.refresh",
+                                Icon::Refresh,
+                                self.t("toolbar.refresh"),
+                                self.t("help.refresh"),
+                            ) {
+                                self.refresh_graph();
+                            }
+                            if icon_button_enabled(
+                                ui,
+                                "toolbar.undo",
+                                Icon::Undo,
+                                self.t("toolbar.undo"),
+                                self.t("help.undo"),
+                                self.commands.can_undo(),
+                            ) {
+                                self.undo();
+                            }
+                            if icon_button_enabled(
+                                ui,
+                                "toolbar.redo",
+                                Icon::Redo,
+                                self.t("toolbar.redo"),
+                                self.t("help.redo"),
+                                self.commands.can_redo(),
+                            ) {
+                                self.redo();
+                            }
                         }
-                        if icon_button(
-                            ui,
-                            "toolbar.save",
-                            Icon::Save,
-                            self.t("toolbar.save_patchbay"),
-                            self.t("help.save_patchbay"),
-                        ) {
-                            self.save_patchbay();
+                        if self.config.patchbay_toolbar {
+                            if self.config.toolbar {
+                                ui.separator();
+                            }
+                            if icon_button(
+                                ui,
+                                "toolbar.save",
+                                Icon::Save,
+                                self.t("toolbar.save_patchbay"),
+                                self.t("help.save_patchbay"),
+                            ) {
+                                self.save_patchbay();
+                            }
+                            if icon_button(
+                                ui,
+                                "toolbar.load",
+                                Icon::Load,
+                                self.t("toolbar.load_patchbay"),
+                                self.t("help.load_patchbay"),
+                            ) {
+                                self.load_patchbay();
+                            }
+                            if icon_button(
+                                ui,
+                                "toolbar.snapshot",
+                                Icon::Snapshot,
+                                self.t("toolbar.snapshot"),
+                                self.t("help.snapshot"),
+                            ) {
+                                self.snapshot_patchbay();
+                            }
+                            if icon_button(
+                                ui,
+                                "toolbar.activate",
+                                Icon::Activate,
+                                self.t("toolbar.activate"),
+                                self.t("help.activate"),
+                            ) {
+                                self.activate_patchbay();
+                            }
                         }
-                        if icon_button(
-                            ui,
-                            "toolbar.load",
-                            Icon::Load,
-                            self.t("toolbar.load_patchbay"),
-                            self.t("help.load_patchbay"),
-                        ) {
-                            self.load_patchbay();
-                        }
-                        if icon_button(
-                            ui,
-                            "toolbar.snapshot",
-                            Icon::Snapshot,
-                            self.t("toolbar.snapshot"),
-                            self.t("help.snapshot"),
-                        ) {
-                            self.snapshot_patchbay();
-                        }
-                        if icon_button(
-                            ui,
-                            "toolbar.activate",
-                            Icon::Activate,
-                            self.t("toolbar.activate"),
-                            self.t("help.activate"),
-                        ) {
-                            self.activate_patchbay();
-                        }
-                    }
+                    });
                 });
-            });
         }
 
         self.show_gui_panels(ctx);
@@ -528,21 +532,27 @@ impl eframe::App for QpwgraphApp {
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
 
         if self.config.statusbar {
-            egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(&self.status);
-                    if self.debug {
-                        ui.separator();
-                        ui.monospace(self.i18n.format(
-                            "debug.backend",
-                            &[
-                                ("backend", self.backend_name.clone()),
-                                ("enabled", (!self.no_alsa_midi).to_string()),
-                            ],
-                        ));
-                    }
+            egui::TopBottomPanel::bottom("statusbar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(29, 33, 40))
+                        .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(&self.status);
+                        if self.debug {
+                            ui.separator();
+                            ui.monospace(self.i18n.format(
+                                "debug.backend",
+                                &[
+                                    ("backend", self.backend_name.clone()),
+                                    ("enabled", (!self.no_alsa_midi).to_string()),
+                                ],
+                            ));
+                        }
+                    });
                 });
-            });
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
