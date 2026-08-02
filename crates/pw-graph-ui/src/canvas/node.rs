@@ -1,7 +1,7 @@
 //! Rendering and interaction for a single node: header dragging, whole-node
 //! Easy-mode connect drags, and the port/group rows underneath.
 
-use crate::{CanvasAction, ConnectMode, GraphCanvas, PortId};
+use crate::{CanvasAction, ConnectMode, GraphCanvas, MeterReading, PortId};
 use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use pw_graph_core::{Direction, Graph, Node, Port, PortType};
 use pw_graph_i18n::I18n;
@@ -10,7 +10,9 @@ use std::collections::HashMap;
 
 use super::geometry::bezier_points;
 use super::names::{compact_label, display_node_name};
-use super::ports::{link_exists, pair_ports, port_color, port_role};
+use super::ports::{
+    display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role,
+};
 
 mod controls;
 mod helpers;
@@ -22,7 +24,13 @@ const NODE_WIDTH: f32 = 244.0;
 const NODE_HEADER_HEIGHT: f32 = 42.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
-const AUDIO_CONTROLS_HEIGHT: f32 = 68.0;
+const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
+
+pub(super) struct AudioInfo {
+    pub(super) port_id: PortId,
+    pub(super) port_help: String,
+    pub(super) meter: Option<MeterReading>,
+}
 
 pub(super) struct NodeDrawContext<'a> {
     pub rect: Rect,
@@ -59,6 +67,36 @@ impl GraphCanvas {
         let easy_connect = self.connect_mode == ConnectMode::Easy;
         let appearance = self.node_appearance(node.id);
         let visible_audio_controls = has_audio && !appearance.collapsed && !self.thumbnail_mode;
+        let monitor_port = ports
+            .iter()
+            .copied()
+            .filter(|port| port.port_type == PortType::Audio && port.direction == Direction::Source)
+            .max_by_key(|port| {
+                (
+                    matches!(port_role(port), super::ports::PortRole::Monitor),
+                    port.id,
+                )
+            })
+            .map(|port| port.id);
+        let audio_info = monitor_port.and_then(|port_id| {
+            let group = display_groups(self.connect_mode, ports.clone(), i18n)
+                .into_iter()
+                .find(|group| group.contains(port_id))?;
+            let meter = self
+                .port_meters
+                .get(&port_id)
+                .copied()
+                .or_else(|| self.meters.get(&node.id).copied());
+            Some(AudioInfo {
+                port_id,
+                port_help: port_group_tooltip(node, &group, i18n),
+                meter,
+            })
+        });
+        let audio_meter = audio_info
+            .as_ref()
+            .and_then(|audio_info| audio_info.meter)
+            .or_else(|| self.meters.get(&node.id).copied());
         let controls_height = if visible_audio_controls {
             AUDIO_CONTROLS_HEIGHT * self.zoom
         } else {
@@ -333,6 +371,7 @@ impl GraphCanvas {
             actions,
             i18n,
             &tooltip,
+            audio_info.as_ref(),
         );
 
         if visible_audio_controls {
@@ -349,25 +388,13 @@ impl GraphCanvas {
                 ],
                 Stroke::new(1.0_f32, Color32::from_rgb(52, 63, 78)),
             );
-            let monitor_port = ports
-                .iter()
-                .copied()
-                .filter(|port| port.port_type == PortType::Audio)
-                .max_by_key(|port| {
-                    (
-                        matches!(port_role(port), super::ports::PortRole::Monitor),
-                        port.direction.is_source(),
-                        port.id,
-                    )
-                })
-                .map(|port| port.id);
             self.draw_node_audio_controls(
                 ui,
                 node,
                 node_rect,
                 header,
-                monitor_port,
                 accent,
+                audio_meter,
                 actions,
                 i18n,
             );

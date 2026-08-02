@@ -8,14 +8,6 @@ pub(super) fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
 }
 
-pub(super) fn format_level_db(value: f32) -> String {
-    if !value.is_finite() || value <= 0.000001 {
-        "−∞ dB".into()
-    } else {
-        format!("{:.0} dB", level_db(value))
-    }
-}
-
 /// Convert a linear amplitude to a readable −60..0 dBFS meter position.
 /// Drawing the normalized sample value directly makes nearly every useful
 /// audio level look empty (for example −30 dBFS is only 3.2% linearly).
@@ -86,13 +78,12 @@ pub(super) fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_level_db, level_db, meter_fraction};
+    use super::{level_db, meter_fraction};
 
     #[test]
     fn converts_linear_amplitude_to_dbfs() {
         assert!((level_db(1.0) - 0.0).abs() < 0.001);
         assert!((level_db(0.1) + 20.0).abs() < 0.001);
-        assert_eq!(format_level_db(0.0), "−∞ dB");
     }
 
     #[test]

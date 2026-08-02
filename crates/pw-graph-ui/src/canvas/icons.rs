@@ -4,7 +4,6 @@ use egui::{include_image, Color32, Image, ImageSource, Vec2};
 pub(super) enum NodeIcon {
     Info,
     More,
-    Monitor,
     Volume,
     VolumeMuted,
 }
@@ -13,7 +12,6 @@ fn source(icon: NodeIcon) -> ImageSource<'static> {
     match icon {
         NodeIcon::Info => include_image!("../../assets/icons/info.svg"),
         NodeIcon::More => include_image!("../../assets/icons/more.svg"),
-        NodeIcon::Monitor => include_image!("../../assets/icons/monitor.svg"),
         NodeIcon::Volume => include_image!("../../assets/icons/volume.svg"),
         NodeIcon::VolumeMuted => include_image!("../../assets/icons/volume_muted.svg"),
     }

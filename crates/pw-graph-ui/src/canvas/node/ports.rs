@@ -1,15 +1,13 @@
 use crate::{GraphCanvas, PortId};
-use egui::{pos2, vec2, Color32, FontId, ProgressBar, Rect, RichText, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Color32, FontId, Rect, Sense, Stroke, Ui};
 use pw_graph_core::{Direction, Graph, Node, Port};
 use pw_graph_i18n::I18n;
-use std::cell::Cell;
 use std::collections::HashMap;
 
 use super::super::names::compact_label;
 use super::super::ports::{
     display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role,
 };
-use super::helpers::{level_db, meter_fraction};
 use super::{AUDIO_CONTROLS_HEIGHT, PORT_ROW_HEIGHT};
 
 impl GraphCanvas {
@@ -76,88 +74,9 @@ impl GraphCanvas {
                     .with(("graph-port", node.id, index, representative_id)),
                 Sense::click_and_drag(),
             );
-            let pin_requested = Cell::new(false);
             let port_help = port_group_tooltip(node, &group, i18n);
-            if group.port_type == pw_graph_core::PortType::Audio {
-                let meter = self
-                    .port_meters
-                    .get(&representative_id)
-                    .copied()
-                    .or_else(|| self.meters.get(&node.id).copied());
-                response = response.on_hover_ui(|ui| {
-                    ui.label(RichText::new(port_help.clone()).strong());
-                    ui.separator();
-                    ui.label(RichText::new(i18n.text("canvas.audio_meter_title")).strong());
-                    match meter {
-                        Some(reading) if reading.available => {
-                            let stale = reading.age_ms > 750;
-                            let state = if stale {
-                                i18n.text("canvas.audio_meter_stale")
-                            } else {
-                                i18n.text("canvas.audio_meter_live")
-                            };
-                            ui.label(RichText::new(state).weak());
-                            ui.add(
-                                ProgressBar::new(meter_fraction(reading.rms))
-                                    .desired_width(190.0)
-                                    .text(format!(
-                                        "{}  {:.1} dB",
-                                        i18n.text("canvas.audio_meter_rms"),
-                                        level_db(reading.rms)
-                                    )),
-                            );
-                            ui.add(
-                                ProgressBar::new(meter_fraction(
-                                    self.meter_peak_hold(node.id, reading.peak),
-                                ))
-                                .desired_width(190.0)
-                                .text(format!(
-                                    "{}  {:.1} dB",
-                                    i18n.text("canvas.audio_meter_peak_hold"),
-                                    level_db(self.meter_peak_hold(node.id, reading.peak))
-                                )),
-                            );
-                            ui.label(
-                                RichText::new(i18n.format(
-                                    "canvas.audio_meter_age",
-                                    &[("age", reading.age_ms.to_string())],
-                                ))
-                                .small()
-                                .weak(),
-                            );
-                        }
-                        Some(_) => {
-                            ui.label(
-                                RichText::new(i18n.text("canvas.audio_meter_unavailable")).weak(),
-                            );
-                        }
-                        None if self.metering_disabled => {
-                            ui.label(
-                                RichText::new(i18n.text("canvas.audio_meter_disabled")).weak(),
-                            );
-                        }
-                        None => {
-                            ui.label(
-                                RichText::new(i18n.text("canvas.audio_meter_starting")).weak(),
-                            );
-                        }
-                    }
-                    if ui
-                        .button(if self.pinned_meter == Some(representative_id) {
-                            i18n.text("canvas.audio_meter_pinned")
-                        } else {
-                            i18n.text("canvas.audio_meter_pin")
-                        })
-                        .clicked()
-                    {
-                        pin_requested.set(true);
-                    }
-                });
-            } else {
+            if group.port_type != pw_graph_core::PortType::Audio {
                 response = response.on_hover_text(port_help);
-            }
-            if pin_requested.get() {
-                self.pinned_meter = Some(representative_id);
             }
             let pending = self
                 .pending_outputs

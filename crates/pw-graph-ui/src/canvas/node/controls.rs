@@ -1,12 +1,14 @@
-use crate::{CanvasAction, GraphCanvas, NodeAppearance, PortId};
+use crate::{CanvasAction, GraphCanvas, MeterReading, NodeAppearance};
 use egui::{
     pos2, vec2, Color32, Key, ProgressBar, Rect, Response, RichText, Sense, Stroke, Ui, WidgetInfo,
 };
 use pw_graph_core::Node;
 use pw_graph_i18n::I18n;
+use std::cell::Cell;
 
 use super::super::icons::{self, NodeIcon};
-use super::helpers::{format_level_db, meter_fraction};
+use super::helpers::{level_db, meter_fraction};
+use super::AudioInfo;
 
 const MAX_VOLUME: f32 = 1.5;
 const UNITY_TRACK_POSITION: f32 = 0.9;
@@ -32,7 +34,13 @@ fn volume_from_track_position(position: f32) -> f32 {
     }
 }
 
-fn volume_slider(ui: &mut Ui, volume: &mut f32, size: egui::Vec2, label: &str) -> Response {
+fn volume_slider(
+    ui: &mut Ui,
+    volume: &mut f32,
+    size: egui::Vec2,
+    label: &str,
+    meter: Option<MeterReading>,
+) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let scale = (size.y / 26.0).max(0.1);
     let thumb_radius = 6.0 * scale;
@@ -83,20 +91,29 @@ fn volume_slider(ui: &mut Ui, volume: &mut f32, size: egui::Vec2, label: &str) -
         Stroke::new(3.0 * scale, Color32::from_rgb(42, 169, 244)),
     );
 
-    // The fixed colored scale mirrors the reference: cool levels dominate,
-    // with a short amber/red boost region near the right edge.
+    // Reuse the colored scale as the live level indicator. The volume fader
+    // remains the blue line and white thumb above it; only the colored ticks
+    // respond to the node's audio level.
+    let meter_level = meter
+        .filter(|reading| reading.available)
+        .map(|reading| meter_fraction(reading.peak));
     let tick_top = rect.top() + 18.0 * scale;
     let tick_bottom = rect.top() + 22.0 * scale;
     for index in 0..=30 {
         let tick_position = index as f32 / 30.0;
-        let x = egui::lerp(track.x_range(), tick_position);
-        let color = if tick_position < 0.72 {
+        let base_color = if tick_position < 0.72 {
             Color32::from_rgb(57, 166, 224)
         } else if tick_position < 0.9 {
             Color32::from_rgb(220, 164, 76)
         } else {
             Color32::from_rgb(221, 75, 72)
         };
+        let color = if meter_level.is_some_and(|level| tick_position <= level) {
+            base_color
+        } else {
+            base_color.gamma_multiply(0.22)
+        };
+        let x = egui::lerp(track.x_range(), tick_position);
         painter.line_segment(
             [pos2(x, tick_top), pos2(x, tick_bottom)],
             Stroke::new(1.35 * scale, color),
@@ -138,6 +155,7 @@ impl GraphCanvas {
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
         info: &str,
+        audio_info: Option<&AudioInfo>,
     ) {
         let mut name_draft = self
             .node_name_drafts
@@ -158,23 +176,103 @@ impl GraphCanvas {
             ),
             vec2(20.0, 22.0) * self.zoom,
         );
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(info_rect)
-                .id_salt(("node-info", node.id)),
-            |ui| {
-                ui.add_sized(
-                    info_rect.size(),
-                    egui::Button::image(icons::image(
-                        NodeIcon::Info,
-                        vec2(14.0, 14.0) * self.zoom,
-                        Color32::from_rgb(192, 204, 219),
-                    ))
-                    .frame(false),
-                )
-                .on_hover_text(info);
-            },
-        );
+        let pin_requested = Cell::new(false);
+        let info_response = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(info_rect)
+                    .id_salt(("node-info", node.id)),
+                |ui| {
+                    ui.add_sized(
+                        info_rect.size(),
+                        egui::Button::image(icons::image(
+                            NodeIcon::Info,
+                            vec2(14.0, 14.0) * self.zoom,
+                            Color32::from_rgb(192, 204, 219),
+                        ))
+                        .frame(false),
+                    )
+                },
+            )
+            .inner;
+        if let Some(audio_info) = audio_info {
+            let meter = audio_info.meter;
+            let peak_hold = meter
+                .filter(|reading| reading.available)
+                .map(|reading| self.meter_peak_hold(node.id, reading.peak));
+            let monitor_pinned = self.pinned_meter == Some(audio_info.port_id);
+            info_response.on_hover_ui(|ui| {
+                ui.label(RichText::new(&audio_info.port_help).strong());
+                ui.separator();
+                ui.label(RichText::new(i18n.text("canvas.audio_meter_title")).strong());
+                match meter {
+                    Some(reading) if reading.available => {
+                        let state = if reading.age_ms > 750 {
+                            i18n.text("canvas.audio_meter_stale")
+                        } else {
+                            i18n.text("canvas.audio_meter_live")
+                        };
+                        ui.label(RichText::new(state).weak());
+                        ui.add(
+                            ProgressBar::new(meter_fraction(reading.rms))
+                                .desired_width(190.0)
+                                .text(format!(
+                                    "{}  {:.1} dB",
+                                    i18n.text("canvas.audio_meter_rms"),
+                                    level_db(reading.rms)
+                                )),
+                        );
+                        if let Some(peak_hold) = peak_hold {
+                            ui.add(
+                                ProgressBar::new(meter_fraction(peak_hold))
+                                    .desired_width(190.0)
+                                    .text(format!(
+                                        "{}  {:.1} dB",
+                                        i18n.text("canvas.audio_meter_peak_hold"),
+                                        level_db(peak_hold)
+                                    )),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(i18n.format(
+                                "canvas.audio_meter_age",
+                                &[("age", reading.age_ms.to_string())],
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    Some(_) => {
+                        ui.label(RichText::new(i18n.text("canvas.audio_meter_unavailable")).weak());
+                    }
+                    None if self.metering_disabled => {
+                        ui.label(RichText::new(i18n.text("canvas.audio_meter_disabled")).weak());
+                    }
+                    None => {
+                        ui.label(RichText::new(i18n.text("canvas.audio_meter_starting")).weak());
+                    }
+                }
+                if ui
+                    .button(if monitor_pinned {
+                        i18n.text("canvas.audio_meter_pinned")
+                    } else {
+                        i18n.text("canvas.audio_meter_pin")
+                    })
+                    .clicked()
+                {
+                    pin_requested.set(true);
+                }
+            });
+            if pin_requested.get() {
+                self.pinned_meter = if monitor_pinned {
+                    None
+                } else {
+                    Some(audio_info.port_id)
+                };
+            }
+        } else {
+            info_response.on_hover_text(info);
+        }
 
         let menu_rect = Rect::from_min_size(
             pos2(
@@ -272,8 +370,8 @@ impl GraphCanvas {
         node: &Node,
         node_rect: Rect,
         header: Rect,
-        monitor_port: Option<PortId>,
         accent: Color32,
+        meter: Option<MeterReading>,
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
     ) {
@@ -292,11 +390,6 @@ impl GraphCanvas {
         // Controls must scale with their card. A separate minimum scale makes
         // them overlap the port rows when the canvas is zoomed out.
         let control_scale = self.zoom;
-        let meter = monitor_port
-            .and_then(|port| self.port_meters.get(&port).copied())
-            .or_else(|| self.meters.get(&node.id).copied());
-        let monitor_pinned = monitor_port.is_some_and(|port| self.pinned_meter == Some(port));
-
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(control_rect)
@@ -316,6 +409,7 @@ impl GraphCanvas {
                             &mut state.volume,
                             vec2(slider_width, 26.0 * control_scale),
                             &volume_label,
+                            meter,
                         );
                         volume_response
                             .on_hover_text(format!("{volume_label}: {:.0}%", state.volume * 100.0));
@@ -356,84 +450,6 @@ impl GraphCanvas {
                         if mute_response.clicked() {
                             state.muted = !state.muted;
                         }
-                    });
-
-                    ui.horizontal(|ui| {
-                        let (level, level_text, fill) = match meter {
-                            Some(reading) if reading.available => {
-                                let stale = reading.age_ms > 750;
-                                let value = meter_fraction(reading.peak);
-                                let text = format_level_db(reading.peak);
-                                let color = if stale {
-                                    Color32::from_rgb(204, 163, 90)
-                                } else {
-                                    accent
-                                };
-                                (value, text, color)
-                            }
-                            Some(_) => (0.0, "-- dB".into(), Color32::from_gray(100)),
-                            None => (0.0, "-- dB".into(), Color32::from_gray(100)),
-                        };
-                        let label_color = if meter.is_some_and(|reading| reading.available) {
-                            accent
-                        } else {
-                            Color32::from_rgb(158, 172, 189)
-                        };
-                        let pin_size = vec2(22.0, 20.0) * control_scale;
-                        let text_width = 44.0 * control_scale;
-                        let meter_width =
-                            (ui.available_width() - pin_size.x - text_width - 10.0 * control_scale)
-                                .max(24.0 * control_scale);
-                        let monitor_tooltip = i18n.text(if monitor_pinned {
-                            "canvas.audio_meter_unpin"
-                        } else {
-                            "canvas.audio_meter_pin"
-                        });
-                        let monitor_response = ui
-                            .add_enabled(
-                                monitor_port.is_some(),
-                                egui::Button::image(icons::image(
-                                    NodeIcon::Monitor,
-                                    vec2(13.0, 13.0) * control_scale,
-                                    if monitor_pinned {
-                                        accent
-                                    } else {
-                                        Color32::from_rgb(183, 196, 212)
-                                    },
-                                ))
-                                .fill(if monitor_pinned {
-                                    Color32::from_rgba_unmultiplied(
-                                        accent.r(),
-                                        accent.g(),
-                                        accent.b(),
-                                        38,
-                                    )
-                                } else {
-                                    Color32::from_rgb(31, 37, 46)
-                                })
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(69, 81, 98)))
-                                .rounding(5.0 * control_scale)
-                                .min_size(pin_size),
-                            )
-                            .on_hover_text(monitor_tooltip);
-                        if monitor_response.clicked() {
-                            if let Some(port) = monitor_port {
-                                self.pinned_meter = if monitor_pinned { None } else { Some(port) };
-                            }
-                        }
-                        ui.add_sized(
-                            vec2(meter_width, 12.0 * control_scale),
-                            ProgressBar::new(level).fill(fill),
-                        )
-                        .on_hover_text(i18n.text("canvas.audio_monitor"));
-                        ui.add_sized(
-                            vec2(text_width, 16.0 * control_scale),
-                            egui::Label::new(
-                                RichText::new(level_text)
-                                    .size(9.0 * control_scale)
-                                    .color(label_color),
-                            ),
-                        );
                     });
                 });
             },
