@@ -431,7 +431,21 @@ impl QpwgraphApp {
                 );
                 ui.push_id(("live-link", link.id), |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(link_summary);
+                        let row_height = ui.spacing().interact_size.y;
+                        let spacing = ui.spacing().item_spacing.x;
+                        let pinned_width = 78.0;
+                        let delete_width = 34.0;
+                        let label_width =
+                            (ui.available_width() - pinned_width - delete_width - spacing * 2.0)
+                                .max(48.0);
+                        let summary_response = ui.add_sized(
+                            [label_width, row_height],
+                            egui::Label::new(RichText::new(link_summary.clone()).weak()).truncate(),
+                        );
+                        summary_response.on_hover_ui(|ui| {
+                            ui.set_max_width(520.0);
+                            ui.add(egui::Label::new(link_summary.clone()).wrap());
+                        });
                         let mut pinned = self
                             .patchbay
                             .connections
@@ -442,7 +456,10 @@ impl QpwgraphApp {
                             })
                             .is_some_and(|connection| connection.pinned);
                         if ui
-                            .checkbox(&mut pinned, self.t("inspector.pinned"))
+                            .add_sized(
+                                [pinned_width, row_height],
+                                egui::Checkbox::new(&mut pinned, self.t("inspector.pinned")),
+                            )
                             .changed()
                         {
                             if let Some(connection) =
