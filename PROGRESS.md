@@ -45,8 +45,8 @@ Diagnostics screens instead of placing every option in one inspector column.
 ## Native/runtime notes
 
 - Native PipeWire and ALSA features require their development headers at build
-  time. The application falls back to the deterministic demo graph when a live
-  native backend cannot be initialized.
+  time. A normal launch shows an empty graph when no live backend can be
+  initialized; the deterministic demo graph is opt-in with `--demo`.
 - The tray is enabled by default on Linux when a StatusNotifier host is
   available; it disables itself cleanly on headless sessions or unsupported
   desktops. Build with `--no-default-features` to omit all optional backends and

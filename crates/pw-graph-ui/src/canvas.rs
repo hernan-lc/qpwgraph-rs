@@ -339,7 +339,7 @@ impl GraphCanvas {
             let radius = 6.0 * self.zoom.max(0.7);
             painter.circle_filled(anchor, radius, port_color(port.port_type));
             if response.hovered() {
-                painter.circle_stroke(anchor, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
+                painter.circle_stroke(anchor, radius + 3.0, Stroke::new(1.5_f32, Color32::WHITE));
             }
             let text_pos = if port.direction == Direction::Source {
                 anchor - vec2(10.0, 0.0)

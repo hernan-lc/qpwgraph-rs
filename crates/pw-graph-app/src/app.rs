@@ -6,7 +6,7 @@ use pw_graph_alsamidi::AlsaMidiDriver;
 use pw_graph_backend::{GraphDriver, InMemoryDriver, PipewireDriver};
 use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
-use pw_graph_core::{LinkId, NodeId};
+use pw_graph_core::{Graph, LinkId, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, GraphCanvas};
@@ -49,8 +49,9 @@ impl QpwgraphApp {
             .patchbay_path
             .clone()
             .unwrap_or_else(|| config_file.with_file_name("default.qpwgraph"));
-        let mut status = i18n.text("status.demo_ready");
+        let mut status = i18n.text("status.backend_unavailable");
         let (mut driver, backend_name): (Box<dyn GraphDriver>, String) = if args.demo {
+            status = i18n.text("status.demo_ready");
             (Box::new(InMemoryDriver::demo()), "in-memory".into())
         } else {
             let mut composite = CompositeDriver::default();
@@ -102,11 +103,17 @@ impl QpwgraphApp {
                     Err(error) => {
                         status =
                             i18n.format("status.backend_failed", &[("error", error.to_string())]);
-                        (Box::new(InMemoryDriver::demo()), "in-memory".into())
+                        (
+                            Box::new(InMemoryDriver::new(Graph::default())),
+                            "none".into(),
+                        )
                     }
                 }
             } else {
-                (Box::new(InMemoryDriver::demo()), "in-memory".into())
+                (
+                    Box::new(InMemoryDriver::new(Graph::default())),
+                    "none".into(),
+                )
             }
         };
         for (node_id, position) in &config.node_positions {

@@ -54,8 +54,9 @@ cargo build --release -p pw-graph-app --no-default-features --features pipewire
 The PipeWire backend uses a small C ABI shim over the installed PipeWire 0.3
 registry API to keep the Rust graph layer independent of the local PipeWire crate
 version. The ALSA backend uses the ALSA Sequencer API and namespaces its IDs so
-both graphs can be displayed together. The app automatically falls back to the
-demo graph when no native backend is available.
+both graphs can be displayed together. A normal launch does not invent a mock
+graph when no native backend is available; it shows an empty canvas with a clear
+status message. Use `--demo` when a deterministic sample graph is wanted.
 
 ## Patchbay files
 
