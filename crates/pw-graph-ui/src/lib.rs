@@ -14,6 +14,35 @@ pub enum CanvasAction {
     MoveNode { node: NodeId, position: [f32; 2] },
 }
 
+/// How dragging from a node's ports/body creates connections.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConnectMode {
+    /// Drag from a specific port to another specific port: one link at a time.
+    #[default]
+    Advanced,
+    /// Drag from one node onto another: every compatible port pair is linked
+    /// at once, matched in port order (e.g. stereo L/R).
+    Easy,
+}
+
+impl ConnectMode {
+    pub const ALL: [Self; 2] = [Self::Easy, Self::Advanced];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Easy => "easy",
+            Self::Advanced => "advanced",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "easy" => Self::Easy,
+            _ => Self::Advanced,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MediaFilter {
     #[default]
@@ -85,6 +114,7 @@ pub struct GraphCanvas {
     pub thumbnail_mode: bool,
     pub repel_overlapping_nodes: bool,
     pub connect_through_nodes: bool,
+    pub connect_mode: ConnectMode,
     pub media_filter: MediaFilter,
     pub meters: BTreeMap<NodeId, MeterReading>,
     pub pinned_meter: Option<PortId>,
@@ -96,6 +126,8 @@ pub struct GraphCanvas {
     pub metering_disabled: bool,
     peak_hold: BTreeMap<NodeId, f32>,
     pending_output: Option<PortId>,
+    /// Source node of an in-progress Easy-mode node-to-node connect drag.
+    pending_node_connect: Option<NodeId>,
     pub selected_node: Option<NodeId>,
     pub selected_nodes: BTreeSet<NodeId>,
     selected_link: Option<LinkId>,
@@ -117,6 +149,7 @@ impl Default for GraphCanvas {
             thumbnail_mode: false,
             repel_overlapping_nodes: false,
             connect_through_nodes: false,
+            connect_mode: ConnectMode::Advanced,
             media_filter: MediaFilter::All,
             meters: BTreeMap::new(),
             pinned_meter: None,
@@ -124,6 +157,7 @@ impl Default for GraphCanvas {
             metering_disabled: false,
             peak_hold: BTreeMap::new(),
             pending_output: None,
+            pending_node_connect: None,
             selected_node: None,
             selected_nodes: BTreeSet::new(),
             selected_link: None,

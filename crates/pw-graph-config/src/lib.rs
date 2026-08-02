@@ -40,6 +40,9 @@ pub struct AppConfig {
     pub audio_meters: String,
     pub repel_overlapping_nodes: bool,
     pub connect_through_nodes: bool,
+    /// Node connect drag mode: `easy` (whole-node, matches all compatible
+    /// ports) or `advanced` (precise, one port at a time).
+    pub connect_mode: String,
     pub statusbar: bool,
     pub toolbar: bool,
     pub patchbay_toolbar: bool,
@@ -69,6 +72,7 @@ impl Default for AppConfig {
             audio_meters: "on-demand".into(),
             repel_overlapping_nodes: true,
             connect_through_nodes: false,
+            connect_mode: "advanced".into(),
             statusbar: true,
             toolbar: true,
             patchbay_toolbar: true,

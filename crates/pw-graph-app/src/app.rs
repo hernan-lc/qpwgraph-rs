@@ -12,7 +12,7 @@ use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, LinkId, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-use pw_graph_ui::{CanvasAction, GraphCanvas, MediaFilter, MeterReading};
+use pw_graph_ui::{CanvasAction, ConnectMode, GraphCanvas, MediaFilter, MeterReading};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -48,7 +48,6 @@ pub(crate) struct QpwgraphApp {
     pub(crate) preferences_tab: PreferencesTab,
     /// Same purpose as `dock_scroll_epoch`, for the Preferences modal.
     pub(crate) preferences_scroll_epoch: u32,
-    pub(crate) show_diagnostics: bool,
     pub(crate) rename_node: Option<NodeId>,
     pub(crate) rename_buffer: String,
     pub(crate) last_meter_refresh: Instant,
@@ -186,6 +185,7 @@ impl QpwgraphApp {
         canvas.thumbnail_mode = config.thumbnail_view;
         canvas.repel_overlapping_nodes = config.repel_overlapping_nodes;
         canvas.connect_through_nodes = config.connect_through_nodes;
+        canvas.connect_mode = ConnectMode::parse(&config.connect_mode);
         canvas.media_filter = MediaFilter::parse(&config.media_filter);
         canvas.metering_disabled = meter_policy == MeterPolicy::Disabled;
         #[cfg(all(target_os = "linux", feature = "tray"))]
@@ -220,7 +220,6 @@ impl QpwgraphApp {
             show_preferences: false,
             preferences_tab: PreferencesTab::default(),
             preferences_scroll_epoch: 0,
-            show_diagnostics: false,
             rename_node: None,
             rename_buffer: String::new(),
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
@@ -262,7 +261,7 @@ impl QpwgraphApp {
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
-        self.show_shortcuts || self.show_preferences || self.show_diagnostics
+        self.show_shortcuts || self.show_preferences
     }
 
     pub(crate) fn toggle_shortcuts(&mut self) {
@@ -273,7 +272,6 @@ impl QpwgraphApp {
         }
         self.show_shortcuts = true;
         self.show_preferences = false;
-        self.show_diagnostics = false;
         self.shortcut_search.clear();
         self.shortcut_focus_search = true;
         self.shortcut_scroll_epoch = self.shortcut_scroll_epoch.wrapping_add(1);
@@ -309,7 +307,6 @@ impl QpwgraphApp {
             if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
                 self.close_shortcuts();
                 self.show_preferences = false;
-                self.show_diagnostics = false;
             }
             return;
         }
@@ -612,6 +609,7 @@ impl QpwgraphApp {
             "ascending".into()
         };
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
+        self.config.connect_mode = self.canvas.connect_mode.as_str().into();
         self.config.media_filter = self.canvas.media_filter.as_str().into();
         self.config.node_positions = self
             .driver
@@ -713,6 +711,7 @@ impl eframe::App for QpwgraphApp {
         self.canvas.repel_overlapping_nodes = self.config.repel_overlapping_nodes;
         self.canvas.connect_through_nodes = self.config.connect_through_nodes;
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
+        self.config.connect_mode = self.canvas.connect_mode.as_str().into();
 
         if self.config.statusbar {
             egui::TopBottomPanel::bottom("statusbar")
@@ -756,7 +755,6 @@ impl eframe::App for QpwgraphApp {
         self.request_visible_meters();
         self.show_shortcuts_modal(ctx);
         self.show_preferences_modal(ctx);
-        self.show_diagnostics_modal(ctx);
         self.autosave_config();
     }
 

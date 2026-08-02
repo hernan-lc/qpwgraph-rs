@@ -28,6 +28,8 @@ pub(crate) enum Icon {
 }
 
 const ICON_BUTTON_SIZE: Vec2 = vec2(34.0, 30.0);
+const SIDEBAR_ICON_BUTTON_SIZE: Vec2 = vec2(46.0, 42.0);
+const SIDEBAR_NAV_BUTTON_SIZE: Vec2 = vec2(52.0, 48.0);
 
 fn icon_source(icon: Icon) -> ImageSource<'static> {
     match icon {
@@ -75,13 +77,65 @@ pub(crate) fn icon_button_enabled(
     explanation: String,
     enabled: bool,
 ) -> bool {
+    icon_button_enabled_sized(
+        ui,
+        id,
+        icon,
+        label,
+        explanation,
+        enabled,
+        ICON_BUTTON_SIZE,
+        7.0,
+    )
+}
+
+pub(crate) fn sidebar_icon_button(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    label: String,
+    explanation: String,
+) -> bool {
+    sidebar_icon_button_enabled(ui, id, icon, label, explanation, true)
+}
+
+pub(crate) fn sidebar_icon_button_enabled(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    label: String,
+    explanation: String,
+    enabled: bool,
+) -> bool {
+    icon_button_enabled_sized(
+        ui,
+        id,
+        icon,
+        label,
+        explanation,
+        enabled,
+        SIDEBAR_ICON_BUTTON_SIZE,
+        9.0,
+    )
+}
+
+fn icon_button_enabled_sized(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    label: String,
+    explanation: String,
+    enabled: bool,
+    size: Vec2,
+    icon_inset: f32,
+) -> bool {
     ui.push_id(("icon-button", id), |ui| {
         let sense = if enabled {
             Sense::click()
         } else {
             Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(ICON_BUTTON_SIZE, sense);
+        let (rect, response) = ui.allocate_exact_size(size, sense);
         let response = response.on_hover_text(format!("{label}\n{explanation}"));
         let visuals = if enabled {
             ui.style().interact(&response)
@@ -90,7 +144,62 @@ pub(crate) fn icon_button_enabled(
         };
         ui.painter()
             .rect(rect, 4.0, visuals.bg_fill, visuals.bg_stroke);
-        paint_icon(ui, rect.shrink(7.0), icon, visuals.fg_stroke.color);
+        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
+        response.clicked()
+    })
+    .inner
+}
+
+/// Like [`icon_button`], but rendered in the "selected" style when `selected`
+/// is true. Used for toolbar toggles such as the Easy/Advanced connect mode.
+pub(crate) fn icon_toggle_button(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    selected: bool,
+    label: String,
+    explanation: String,
+) -> bool {
+    icon_toggle_button_sized(ui, id, icon, selected, label, explanation, ICON_BUTTON_SIZE, 7.0)
+}
+
+pub(crate) fn sidebar_icon_toggle_button(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    selected: bool,
+    label: String,
+    explanation: String,
+) -> bool {
+    icon_toggle_button_sized(
+        ui,
+        id,
+        icon,
+        selected,
+        label,
+        explanation,
+        SIDEBAR_ICON_BUTTON_SIZE,
+        9.0,
+    )
+}
+
+fn icon_toggle_button_sized(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    selected: bool,
+    label: String,
+    explanation: String,
+    size: Vec2,
+    icon_inset: f32,
+) -> bool {
+    ui.push_id(("icon-toggle-button", id), |ui| {
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let response = response.on_hover_text(format!("{label}\n{explanation}"));
+        let visuals = ui.style().interact_selectable(&response, selected);
+        ui.painter()
+            .rect(rect, 4.0, visuals.bg_fill, visuals.bg_stroke);
+        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
         response.clicked()
     })
     .inner
@@ -104,13 +213,46 @@ pub(crate) fn nav_icon_button(
     label: String,
     explanation: String,
 ) -> bool {
+    nav_icon_button_sized(ui, id, icon, selected, label, explanation, vec2(42.0, 38.0), 10.0)
+}
+
+pub(crate) fn sidebar_nav_icon_button(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    selected: bool,
+    label: String,
+    explanation: String,
+) -> bool {
+    nav_icon_button_sized(
+        ui,
+        id,
+        icon,
+        selected,
+        label,
+        explanation,
+        SIDEBAR_NAV_BUTTON_SIZE,
+        12.0,
+    )
+}
+
+fn nav_icon_button_sized(
+    ui: &mut Ui,
+    id: &str,
+    icon: Icon,
+    selected: bool,
+    label: String,
+    explanation: String,
+    size: Vec2,
+    icon_inset: f32,
+) -> bool {
     ui.push_id(("navigation-icon", id), |ui| {
-        let (rect, response) = ui.allocate_exact_size(vec2(42.0, 38.0), Sense::click());
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         let response = response.on_hover_text(format!("{label}\n{explanation}"));
         let visuals = ui.style().interact_selectable(&response, selected);
         ui.painter()
             .rect(rect, 5.0, visuals.bg_fill, visuals.bg_stroke);
-        paint_icon(ui, rect.shrink(10.0), icon, visuals.fg_stroke.color);
+        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
         response.clicked()
     })
     .inner

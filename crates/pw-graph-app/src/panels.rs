@@ -1,19 +1,19 @@
 use crate::app::QpwgraphApp;
 use crate::icons::{
-    icon_button, icon_button_enabled, icon_checkbox, icon_heading, icon_label, nav_icon_button,
-    Icon,
+    icon_button, icon_checkbox, icon_heading, icon_label, sidebar_icon_button,
+    sidebar_icon_button_enabled, sidebar_icon_toggle_button, sidebar_nav_icon_button, Icon,
 };
 use egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
 use pw_graph_command::RenameCommand;
 use pw_graph_core::{NodeId, PortId};
 use pw_graph_i18n::Locale;
-use pw_graph_ui::MediaFilter;
+use pw_graph_ui::{ConnectMode, MediaFilter};
 
 const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
 const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
-const NAV_RAIL_WIDTH: f32 = 64.0;
+const NAV_RAIL_WIDTH: f32 = 76.0;
 const FULL_PANEL_MARGIN: f32 = 8.0;
 
 fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
@@ -341,21 +341,27 @@ impl QpwgraphApp {
                     AppScreen::Patchbay => "help.navigation_patchbay",
                 };
                 let selected = self.dock_open && self.screen == screen;
-                if nav_icon_button(ui, label, icon, selected, self.t(label), self.t(help_key)) {
+                if sidebar_nav_icon_button(
+                    ui,
+                    label,
+                    icon,
+                    selected,
+                    self.t(label),
+                    self.t(help_key),
+                ) {
                     if selected {
                         self.dock_open = false;
                     } else {
                         self.screen = screen;
                         self.dock_open = true;
                         self.show_preferences = false;
-                        self.show_diagnostics = false;
                         self.show_shortcuts = false;
                         self.dock_scroll_epoch = self.dock_scroll_epoch.wrapping_add(1);
                     }
                 }
             }
             ui.separator();
-            if nav_icon_button(
+            if sidebar_nav_icon_button(
                 ui,
                 "nav.preferences",
                 Icon::Settings,
@@ -368,27 +374,10 @@ impl QpwgraphApp {
                 } else {
                     self.show_preferences = true;
                     self.show_shortcuts = false;
-                    self.show_diagnostics = false;
                     self.preferences_scroll_epoch = self.preferences_scroll_epoch.wrapping_add(1);
                 }
             }
-            if nav_icon_button(
-                ui,
-                "screen.diagnostics",
-                Icon::Diagnostics,
-                self.show_diagnostics,
-                self.t("screen.diagnostics"),
-                self.t("help.navigation_diagnostics"),
-            ) {
-                if self.show_diagnostics {
-                    self.show_diagnostics = false;
-                } else {
-                    self.show_diagnostics = true;
-                    self.show_shortcuts = false;
-                    self.show_preferences = false;
-                }
-            }
-            if nav_icon_button(
+            if sidebar_nav_icon_button(
                 ui,
                 "nav.shortcuts",
                 Icon::Help,
@@ -403,21 +392,8 @@ impl QpwgraphApp {
     }
 
     fn show_sidebar_actions(&mut self, ui: &mut Ui) {
-        if !self.config.toolbar && !self.config.patchbay_toolbar {
-            return;
-        }
-        ui.separator();
         if self.config.toolbar {
-            if icon_button(
-                ui,
-                "sidebar.refresh",
-                Icon::Refresh,
-                self.t("toolbar.refresh"),
-                self.t("help.refresh"),
-            ) {
-                self.refresh_graph();
-            }
-            if icon_button_enabled(
+            if sidebar_icon_button_enabled(
                 ui,
                 "sidebar.undo",
                 Icon::Undo,
@@ -427,7 +403,7 @@ impl QpwgraphApp {
             ) {
                 self.undo();
             }
-            if icon_button_enabled(
+            if sidebar_icon_button_enabled(
                 ui,
                 "sidebar.redo",
                 Icon::Redo,
@@ -437,9 +413,34 @@ impl QpwgraphApp {
             ) {
                 self.redo();
             }
+            let easy = self.canvas.connect_mode == ConnectMode::Easy;
+            let connect_mode_label = self.t(if easy {
+                "toolbar.connect_mode_easy"
+            } else {
+                "toolbar.connect_mode_advanced"
+            });
+            let connect_mode_help = self.t(if easy {
+                "help.connect_mode_easy"
+            } else {
+                "help.connect_mode_advanced"
+            });
+            if sidebar_icon_toggle_button(
+                ui,
+                "sidebar.connect_mode",
+                Icon::Connect,
+                easy,
+                connect_mode_label,
+                connect_mode_help,
+            ) {
+                self.canvas.connect_mode = if easy {
+                    ConnectMode::Advanced
+                } else {
+                    ConnectMode::Easy
+                };
+            }
         }
         if self.config.patchbay_toolbar {
-            if icon_button(
+            if sidebar_icon_button(
                 ui,
                 "sidebar.save",
                 Icon::Save,
@@ -448,7 +449,7 @@ impl QpwgraphApp {
             ) {
                 self.save_patchbay();
             }
-            if icon_button(
+            if sidebar_icon_button(
                 ui,
                 "sidebar.load",
                 Icon::Load,
@@ -457,7 +458,7 @@ impl QpwgraphApp {
             ) {
                 self.load_patchbay();
             }
-            if icon_button(
+            if sidebar_icon_button(
                 ui,
                 "sidebar.snapshot",
                 Icon::Snapshot,
@@ -466,7 +467,7 @@ impl QpwgraphApp {
             ) {
                 self.snapshot_patchbay();
             }
-            if icon_button(
+            if sidebar_icon_button(
                 ui,
                 "sidebar.activate",
                 Icon::Activate,
@@ -486,11 +487,6 @@ impl QpwgraphApp {
             self.t("screen.graph"),
             self.t("screen.graph_hint"),
         );
-        if !self.config.toolbar && !self.config.patchbay_toolbar {
-            panel_section(ui, self.t("inspector.filter_nodes"), |ui| {
-                self.show_media_filter_control(ui);
-            });
-        }
         let (node_count, port_count, link_count) = self.canvas.visible_counts(self.driver.graph());
         let node_count = node_count.to_string();
         let port_count = port_count.to_string();
@@ -584,34 +580,6 @@ impl QpwgraphApp {
                 .into();
             }
         });
-    }
-
-    fn show_media_filter_control(&mut self, ui: &mut Ui) {
-        ui.label(self.t("inspector.media_filter"));
-        self.show_media_filter_combo(ui, "inspector-media-filter");
-    }
-
-    fn show_media_filter_combo(&mut self, ui: &mut Ui, id: &str) {
-        let current_filter = MediaFilter::parse(&self.config.media_filter);
-        let mut selected_filter = current_filter;
-        let filter_response = egui::ComboBox::from_id_salt(id)
-            .selected_text(self.t(media_filter_key(current_filter)))
-            .show_ui(ui, |ui| {
-                for filter in MediaFilter::ALL {
-                    ui.selectable_value(
-                        &mut selected_filter,
-                        filter,
-                        self.t(media_filter_key(filter)),
-                    );
-                }
-            });
-        filter_response
-            .response
-            .on_hover_text(self.t("help.media_filter"));
-        if selected_filter != current_filter {
-            self.config.media_filter = selected_filter.as_str().into();
-            self.canvas.media_filter = selected_filter;
-        }
     }
 
     fn show_media_filter_sidebar(&mut self, ui: &mut Ui) {
@@ -753,16 +721,6 @@ impl QpwgraphApp {
         if selected != current {
             self.config.audio_meters = selected.as_str().to_owned();
         }
-        ui.label(
-            RichText::new(self.t(match selected {
-                MeterPolicy::Disabled => "meters.off_hint",
-                MeterPolicy::OnDemand => "meters.on_demand_hint",
-                MeterPolicy::Always => "meters.always_hint",
-            }))
-            .small()
-            .weak(),
-        );
-        ui.add_space(2.0);
         if icon_button(
             ui,
             "meters.reset",
@@ -772,6 +730,17 @@ impl QpwgraphApp {
         ) {
             self.reset_audio_config();
         }
+        ui.label(
+            RichText::new(self.t(match selected {
+                MeterPolicy::Disabled => "meters.off_hint",
+                MeterPolicy::OnDemand => "meters.on_demand_hint",
+                MeterPolicy::Always => "meters.always_hint",
+            }))
+            .small()
+            .weak(),
+        );
+
+        ui.add_space(2.0);
     }
 
     fn show_meter_monitor(&mut self, ui: &mut Ui, port_id: PortId) {
@@ -885,24 +854,6 @@ impl QpwgraphApp {
             self.t("screen.patchbay"),
             self.t("screen.patchbay_hint"),
         );
-        panel_section(ui, self.t("inspector.patchbay_options"), |ui| {
-            ui.label(RichText::new(self.t("inspector.patchbay_options_hint")).weak());
-            ui.add_space(2.0);
-            if icon_button(
-                ui,
-                "patchbay.open_preferences",
-                Icon::Settings,
-                self.t("inspector.open_patchbay_preferences"),
-                self.t("help.open_patchbay_preferences"),
-            ) {
-                self.preferences_tab = PreferencesTab::Patchbay;
-                self.show_preferences = true;
-                self.show_shortcuts = false;
-                self.show_diagnostics = false;
-                self.preferences_scroll_epoch = self.preferences_scroll_epoch.wrapping_add(1);
-            }
-        });
-
         panel_section(ui, self.t("inspector.live_links"), |ui| {
             let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
             if links.is_empty() {
@@ -1257,74 +1208,4 @@ impl QpwgraphApp {
         });
     }
 
-    pub(crate) fn show_diagnostics_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_diagnostics {
-            return;
-        }
-        if show_backdrop(ctx, "diagnostics") {
-            self.show_diagnostics = false;
-            return;
-        }
-        modal_window("diagnostics", self.t("screen.diagnostics"), 420.0).show(ctx, |ui| {
-            apply_panel_text_scale(ui, self.config.panel_text_scale);
-            self.show_diagnostics_content(ui);
-            ui.add_space(4.0);
-            if self.show_close_button(ui) {
-                self.show_diagnostics = false;
-            }
-        });
-    }
-
-    fn show_diagnostics_content(&mut self, ui: &mut Ui) {
-        panel_section(ui, self.t("inspector.runtime"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                stat_card(
-                    ui,
-                    self.t("inspector.nodes_short"),
-                    self.driver.graph().nodes.len().to_string(),
-                );
-                stat_card(
-                    ui,
-                    self.t("inspector.ports_short"),
-                    self.driver.graph().ports.len().to_string(),
-                );
-                stat_card(
-                    ui,
-                    self.t("inspector.links_short"),
-                    self.driver.graph().links.len().to_string(),
-                );
-            });
-            ui.add_space(6.0);
-            ui.label(self.tf(
-                "diagnostics.backend",
-                &[("name", self.backend_name.clone())],
-            ));
-            ui.label(
-                RichText::new(self.tf("diagnostics.status", &[("status", self.status.clone())]))
-                    .weak(),
-            );
-        });
-        panel_section(ui, self.t("inspector.port_colors"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                color_swatch(ui, Color32::from_rgb(87, 199, 133), self.t("port.audio"));
-                color_swatch(ui, Color32::from_rgb(78, 157, 230), self.t("port.video"));
-                color_swatch(ui, Color32::from_rgb(227, 93, 106), self.t("port.pw_midi"));
-                color_swatch(
-                    ui,
-                    Color32::from_rgb(169, 121, 209),
-                    self.t("port.alsa_midi"),
-                );
-            });
-        });
-        panel_section(ui, self.t("inspector.configuration"), |ui| {
-            ui.label(
-                RichText::new(self.tf(
-                    "inspector.config_path",
-                    &[("path", self.config_file.display().to_string())],
-                ))
-                .small()
-                .weak(),
-            );
-        });
-    }
 }

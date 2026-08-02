@@ -69,6 +69,7 @@ impl GraphCanvas {
 
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.pending_output = None;
+            self.pending_node_connect = None;
             self.selection_start = None;
             self.selection_current = None;
             self.selected_link = None;
@@ -349,6 +350,12 @@ impl GraphCanvas {
         }) {
             self.pending_output = None;
         }
+        if self
+            .pending_node_connect
+            .is_some_and(|node_id| !visible_node_ids.contains(&node_id))
+        {
+            self.pending_node_connect = None;
+        }
         if self.selected_link.is_some_and(|link_id| {
             graph.link(link_id).is_none_or(|link| {
                 let Some(source) = graph.port(link.output_port) else {
@@ -468,13 +475,24 @@ impl GraphCanvas {
             ),
         );
         let tooltip = node_tooltip(node, &ports, i18n);
+        let easy_connect = self.connect_mode == ConnectMode::Easy;
+        let body_sense = if easy_connect {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let body_tooltip = if easy_connect {
+            format!("{tooltip}\n\n{}", i18n.text("canvas.drag_body_connect"))
+        } else {
+            tooltip.clone()
+        };
         let body_response = ui
             .interact(
                 node_rect,
                 ui.id().with(("graph-node-body", node.id)),
-                Sense::click(),
+                body_sense,
             )
-            .on_hover_text(tooltip.clone());
+            .on_hover_text(body_tooltip);
         let header_response = ui
             .interact(
                 header,
@@ -513,6 +531,25 @@ impl GraphCanvas {
                             output: output_id,
                             input,
                         });
+                    }
+                }
+            }
+        }
+        if easy_connect && body_response.drag_started() {
+            self.pending_output = None;
+            self.pending_node_connect = Some(node.id);
+        }
+        if self.pending_node_connect == Some(node.id) && body_response.drag_stopped() {
+            self.pending_node_connect = None;
+            if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+                if let Some(target) = self.node_at(rect, graph, pointer, node.id) {
+                    if let Some(target_node) = graph.node(target) {
+                        for (output, input) in self.matching_port_pairs(graph, node, target_node)
+                        {
+                            if !link_exists(graph, output, input) {
+                                actions.push(CanvasAction::Connect { output, input });
+                            }
+                        }
                     }
                 }
             }
@@ -623,6 +660,44 @@ impl GraphCanvas {
             self.zoom,
             Color32::from_rgb(174, 189, 204),
         );
+
+        if let Some(source_id) = self.pending_node_connect {
+            if source_id == node.id {
+                if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+                    let start = node_rect.right_center();
+                    let points = bezier_points(start, pointer, 0.0);
+                    painter.add(Shape::line(
+                        points.clone(),
+                        Stroke::new(4.0_f32, Color32::BLACK),
+                    ));
+                    painter.add(Shape::line(
+                        points,
+                        Stroke::new(2.0_f32, Color32::LIGHT_GREEN),
+                    ));
+                    painter.text(
+                        start + vec2(8.0, -22.0),
+                        egui::Align2::LEFT_TOP,
+                        i18n.format(
+                            "canvas.pending_node_connection",
+                            &[
+                                ("action", i18n.text("canvas.connect_hint")),
+                                ("node", display_node_name(&node.name, i18n)),
+                            ],
+                        ),
+                        FontId::proportional(12.0 * self.zoom * text_scale),
+                        Color32::LIGHT_GREEN,
+                    );
+                }
+            } else if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+                if node_rect.contains(pointer) {
+                    painter.rect_stroke(
+                        node_rect,
+                        8.0,
+                        Stroke::new(2.5_f32, Color32::LIGHT_GREEN),
+                    );
+                }
+            }
+        }
 
         if self.thumbnail_mode {
             return;
@@ -875,6 +950,60 @@ impl GraphCanvas {
                 + (NODE_HEADER_HEIGHT + 13.0 + index as f32 * PORT_ROW_HEIGHT) * self.zoom,
         ))
     }
+
+    /// The topmost visible node (other than `exclude`) whose rect contains
+    /// `point`, used to find the drop target of an Easy-mode connect drag.
+    fn node_at(&self, rect: Rect, graph: &Graph, point: Pos2, exclude: NodeId) -> Option<NodeId> {
+        graph
+            .nodes
+            .values()
+            .filter(|node| node.id != exclude && self.media_filter.matches_node(graph, node.id))
+            .find(|node| self.node_rect(rect, graph, node).contains(point))
+            .map(|node| node.id)
+    }
+
+    /// Pairs `source`'s outputs with `target`'s inputs in port order, matching
+    /// compatible port types (e.g. stereo L/R landing on L/R in order).
+    fn matching_port_pairs(
+        &self,
+        graph: &Graph,
+        source: &Node,
+        target: &Node,
+    ) -> Vec<(PortId, PortId)> {
+        let outputs: Vec<&Port> = self
+            .ordered_ports(graph, source)
+            .into_iter()
+            .filter(|port| port.direction == Direction::Source)
+            .collect();
+        let inputs: Vec<&Port> = self
+            .ordered_ports(graph, target)
+            .into_iter()
+            .filter(|port| port.direction == Direction::Sink)
+            .collect();
+        let mut used = vec![false; inputs.len()];
+        let mut pairs = Vec::new();
+        for output in outputs {
+            let candidate = inputs.iter().enumerate().position(|(index, input)| {
+                !used[index] && ports_compatible(output.port_type, input.port_type)
+            });
+            if let Some(index) = candidate {
+                used[index] = true;
+                pairs.push((output.id, inputs[index].id));
+            }
+        }
+        pairs
+    }
+}
+
+fn ports_compatible(a: PortType, b: PortType) -> bool {
+    a == b || a == PortType::Unknown || b == PortType::Unknown
+}
+
+fn link_exists(graph: &Graph, output: PortId, input: PortId) -> bool {
+    graph
+        .links
+        .values()
+        .any(|link| link.output_port == output && link.input_port == input)
 }
 
 fn level_db(value: f32) -> f32 {
