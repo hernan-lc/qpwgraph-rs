@@ -2,7 +2,7 @@ use crate::app::QpwgraphApp;
 use crate::icons::{icon_button, icon_checkbox, icon_heading, icon_label, nav_icon_button, Icon};
 use egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_command::RenameCommand;
-use pw_graph_core::NodeId;
+use pw_graph_core::{NodeId, PortId};
 use pw_graph_i18n::Locale;
 
 const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
@@ -71,6 +71,10 @@ fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: Str
             ui.label(RichText::new(format!("{:.0}%", *value * 100.0)).weak());
         });
     });
+}
+
+fn level_db(value: f32) -> f32 {
+    (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -165,6 +169,12 @@ impl QpwgraphApp {
             });
         });
 
+        if let Some(pinned_port) = self.canvas.pinned_meter {
+            panel_section(ui, self.t("inspector.audio_monitor"), |ui| {
+                self.show_meter_monitor(ui, pinned_port);
+            });
+        }
+
         if let Some(selected_node) = self.canvas.selected_node {
             panel_section(ui, self.t("inspector.rename"), |ui| {
                 self.show_rename_control(ui, selected_node);
@@ -215,6 +225,73 @@ impl QpwgraphApp {
                 .into();
             }
         });
+    }
+
+    fn show_meter_monitor(&mut self, ui: &mut Ui, port_id: PortId) {
+        let Some(port) = self.driver.graph().port(port_id) else {
+            self.canvas.pinned_meter = None;
+            return;
+        };
+        let node_id = port.node_id;
+        let port_name = port.name.clone();
+        let node_name = self
+            .driver
+            .graph()
+            .node(node_id)
+            .map(|node| node.name.clone())
+            .unwrap_or_else(|| node_id.to_string());
+        ui.label(RichText::new(format!("{node_name} / {port_name}")).strong());
+        ui.label(RichText::new(self.t("canvas.audio_meter_node")).weak());
+        if let Some(reading) = self.canvas.meters.get(&node_id).copied() {
+            if reading.available {
+                let stale = reading.age_ms > 750;
+                ui.add(
+                    egui::ProgressBar::new(reading.rms.clamp(0.0, 1.0))
+                        .desired_width(ui.available_width())
+                        .text(format!(
+                            "{}  {:.1} dB",
+                            self.t("canvas.audio_meter_rms"),
+                            level_db(reading.rms)
+                        )),
+                );
+                ui.add(
+                    egui::ProgressBar::new(reading.peak.clamp(0.0, 1.0))
+                        .desired_width(ui.available_width())
+                        .text(format!(
+                            "{}  {:.1} dB",
+                            self.t("canvas.audio_meter_peak"),
+                            level_db(reading.peak)
+                        )),
+                );
+                ui.label(
+                    RichText::new(if stale {
+                        self.t("canvas.audio_meter_stale")
+                    } else {
+                        self.t("canvas.audio_meter_live")
+                    })
+                    .weak(),
+                );
+                ui.label(
+                    RichText::new(self.tf(
+                        "canvas.audio_meter_age",
+                        &[("age", reading.age_ms.to_string())],
+                    ))
+                    .small()
+                    .weak(),
+                );
+            } else {
+                ui.label(RichText::new(self.t("canvas.audio_meter_unavailable")).weak());
+            }
+        } else {
+            ui.label(RichText::new(self.t("canvas.audio_meter_unavailable")).weak());
+        }
+        if ui
+            .button(self.t("inspector.audio_monitor_unpin"))
+            .on_hover_text(self.t("help.audio_monitor_unpin"))
+            .clicked()
+        {
+            self.canvas.pinned_meter = None;
+        }
     }
 
     fn show_rename_control(&mut self, ui: &mut Ui, selected_node: NodeId) {

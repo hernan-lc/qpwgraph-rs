@@ -14,6 +14,16 @@ pub enum CanvasAction {
     MoveNode { node: NodeId, position: [f32; 2] },
 }
 
+/// Runtime audio data rendered by the canvas. The backend intentionally owns
+/// collection and conversion; the UI only needs normalized levels and age.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterReading {
+    pub rms: f32,
+    pub peak: f32,
+    pub age_ms: u32,
+    pub available: bool,
+}
+
 pub struct GraphCanvas {
     pub zoom: f32,
     pub node_text_scale: f32,
@@ -23,6 +33,8 @@ pub struct GraphCanvas {
     pub thumbnail_mode: bool,
     pub repel_overlapping_nodes: bool,
     pub connect_through_nodes: bool,
+    pub meters: BTreeMap<NodeId, MeterReading>,
+    pub pinned_meter: Option<PortId>,
     pending_output: Option<PortId>,
     pub selected_node: Option<NodeId>,
     pub selected_nodes: BTreeSet<NodeId>,
@@ -45,6 +57,8 @@ impl Default for GraphCanvas {
             thumbnail_mode: false,
             repel_overlapping_nodes: false,
             connect_through_nodes: false,
+            meters: BTreeMap::new(),
+            pinned_meter: None,
             pending_output: None,
             selected_node: None,
             selected_nodes: BTreeSet::new(),

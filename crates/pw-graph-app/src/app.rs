@@ -7,14 +7,15 @@ use eframe::egui;
 use pw_graph_alsamidi::AlsaMidiDriver;
 #[cfg(feature = "pipewire")]
 use pw_graph_backend::PipewireDriver;
-use pw_graph_backend::{GraphDriver, InMemoryDriver};
+use pw_graph_backend::{AudioMeter, GraphDriver, InMemoryDriver};
 use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, LinkId, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-use pw_graph_ui::{CanvasAction, GraphCanvas};
+use pw_graph_ui::{CanvasAction, GraphCanvas, MeterReading};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[cfg(all(target_os = "linux", feature = "tray"))]
 use crate::tray::tray_support;
@@ -36,6 +37,7 @@ pub(crate) struct QpwgraphApp {
     pub(crate) screen: AppScreen,
     pub(crate) rename_node: Option<NodeId>,
     pub(crate) rename_buffer: String,
+    pub(crate) last_meter_refresh: Instant,
     #[cfg(all(target_os = "linux", feature = "tray"))]
     pub(crate) tray: Option<tray_support::State>,
 }
@@ -186,6 +188,7 @@ impl QpwgraphApp {
             screen: AppScreen::default(),
             rename_node: None,
             rename_buffer: String::new(),
+            last_meter_refresh: Instant::now() - Duration::from_secs(1),
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         }
@@ -219,6 +222,37 @@ impl QpwgraphApp {
             Err(error) => {
                 self.status = self.tf("status.refresh_failed", &[("error", error.to_string())])
             }
+        }
+    }
+
+    fn refresh_audio_meters(&mut self) {
+        let readings = match self.driver.audio_meters() {
+            Ok(readings) => readings,
+            Err(_) => {
+                self.canvas.meters.clear();
+                return;
+            }
+        };
+        self.canvas.meters = readings
+            .into_iter()
+            .map(|meter: AudioMeter| {
+                (
+                    meter.node_id,
+                    MeterReading {
+                        rms: meter.rms,
+                        peak: meter.peak,
+                        age_ms: meter.age_ms,
+                        available: meter.available,
+                    },
+                )
+            })
+            .collect();
+        if self
+            .canvas
+            .pinned_meter
+            .is_some_and(|port| self.driver.graph().port(port).is_none())
+        {
+            self.canvas.pinned_meter = None;
         }
     }
 
@@ -418,6 +452,11 @@ impl QpwgraphApp {
 impl eframe::App for QpwgraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_ui_text_scale(ctx);
+        if self.last_meter_refresh.elapsed() >= Duration::from_millis(50) {
+            self.refresh_audio_meters();
+            self.last_meter_refresh = Instant::now();
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
         #[cfg(all(target_os = "linux", feature = "tray"))]
         self.poll_tray(ctx);
         if self.start_minimized {
@@ -588,6 +627,9 @@ pub(crate) fn run(args: Args) -> eframe::Result<()> {
     eframe::run_native(
         &window_title,
         options,
-        Box::new(move |_creation_context| Ok(Box::new(app))),
+        Box::new(move |creation_context| {
+            egui_extras::install_image_loaders(&creation_context.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
 }

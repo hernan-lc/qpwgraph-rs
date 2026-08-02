@@ -1,5 +1,5 @@
 use pw_graph_alsamidi::AlsaMidiDriver;
-use pw_graph_backend::{GraphDriver, PipewireDriver};
+use pw_graph_backend::{AudioMeter, GraphDriver, PipewireDriver};
 use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, PortId, PortType};
 
 #[derive(Default)]
@@ -166,5 +166,12 @@ impl GraphDriver for CompositeDriver {
                 .alsa
                 .as_ref()
                 .is_some_and(|driver| driver.is_port_type(port_type))
+    }
+
+    fn audio_meters(&mut self) -> pw_graph_backend::BackendResult<Vec<AudioMeter>> {
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver.audio_meters();
+        }
+        Ok(Vec::new())
     }
 }

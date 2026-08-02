@@ -14,6 +14,7 @@ tray = ["dep:ksni"]
 [dependencies]
 eframe.workspace = true
 egui.workspace = true
+egui_extras.workspace = true
 ksni = { version = "0.3.6", features = ["blocking"], optional = true }
 pw-graph-backend = { path = "../pw-graph-backend" }
 pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false }

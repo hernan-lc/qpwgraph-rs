@@ -67,6 +67,7 @@ struct pw_graph_meter_snapshot {
 };
 
 struct pw_graph_meter {
+    bool active;
     uint32_t node_id;
     char node_name[PW_GRAPH_NAME_SIZE];
     struct pw_stream *stream;
@@ -168,7 +169,7 @@ static int meter_index(struct pw_graph_shim *shim, uint32_t node_id)
 {
     size_t i;
     for (i = 0; i < shim->meter_count; ++i) {
-        if (shim->meters[i].node_id == node_id) {
+        if (shim->meters[i].active && shim->meters[i].node_id == node_id) {
             return (int)i;
         }
     }
@@ -254,10 +255,7 @@ static void destroy_meter(struct pw_graph_shim *shim, size_t index)
         pw_stream_destroy(meter->stream);
         meter->stream = NULL;
     }
-    if (index + 1 < shim->meter_count) {
-        shim->meters[index] = shim->meters[shim->meter_count - 1];
-    }
-    --shim->meter_count;
+    meter->active = false;
 }
 
 static bool node_has_audio_source(struct pw_graph_shim *shim, uint32_t node_id)
@@ -278,9 +276,18 @@ static int create_meter(struct pw_graph_shim *shim, const struct pw_graph_node *
     if (shim->meter_count >= PW_GRAPH_MAX_NODES) {
         return -ENOSPC;
     }
-    size_t meter_slot = shim->meter_count++;
+    size_t meter_slot;
+    for (meter_slot = 0; meter_slot < shim->meter_count; ++meter_slot) {
+        if (!shim->meters[meter_slot].active) {
+            break;
+        }
+    }
+    if (meter_slot == shim->meter_count) {
+        ++shim->meter_count;
+    }
     struct pw_graph_meter *meter = &shim->meters[meter_slot];
     memset(meter, 0, sizeof(*meter));
+    meter->active = true;
     meter->node_id = node->id;
     copy_text(meter->node_name, sizeof(meter->node_name), node->name, "PipeWire node");
     meter->format = SPA_AUDIO_FORMAT_F32;
@@ -526,6 +533,13 @@ void pw_graph_shim_free(struct pw_graph_shim *shim)
     if (shim == NULL) {
         return;
     }
+    pw_thread_loop_lock(shim->thread_loop);
+    for (size_t i = 0; i < shim->meter_count; ++i) {
+        if (shim->meters[i].active) {
+            destroy_meter(shim, i);
+        }
+    }
+    pw_thread_loop_unlock(shim->thread_loop);
     pw_thread_loop_stop(shim->thread_loop);
     spa_hook_remove(&shim->registry_listener);
     spa_hook_remove(&shim->core_listener);
@@ -544,6 +558,7 @@ int pw_graph_shim_snapshot(struct pw_graph_shim *shim, struct pw_graph_snapshot 
     pw_thread_loop_lock(shim->thread_loop);
     int result = do_sync(shim);
     if (result == 0) {
+        ensure_meters(shim);
         memset(snapshot, 0, sizeof(*snapshot));
         snapshot->node_count = (uint32_t)shim->node_count;
         snapshot->port_count = (uint32_t)shim->port_count;
@@ -551,6 +566,40 @@ int pw_graph_shim_snapshot(struct pw_graph_shim *shim, struct pw_graph_snapshot 
         for (i = 0; i < shim->node_count; ++i) snapshot->nodes[i] = shim->nodes[i];
         for (i = 0; i < shim->port_count; ++i) snapshot->ports[i] = shim->ports[i];
         for (i = 0; i < shim->link_count; ++i) snapshot->links[i] = shim->links[i];
+    }
+    pw_thread_loop_unlock(shim->thread_loop);
+    return result;
+}
+
+int pw_graph_shim_meter_snapshot(struct pw_graph_shim *shim,
+        struct pw_graph_meter_snapshot *snapshot)
+{
+    size_t i;
+    if (shim == NULL || snapshot == NULL) {
+        return -EINVAL;
+    }
+    pw_thread_loop_lock(shim->thread_loop);
+    int result = do_sync(shim);
+    if (result == 0) {
+        uint64_t now = monotonic_ns();
+        memset(snapshot, 0, sizeof(*snapshot));
+        for (i = 0; i < shim->meter_count && snapshot->meter_count < PW_GRAPH_MAX_NODES; ++i) {
+            struct pw_graph_meter *meter = &shim->meters[i];
+            if (!meter->active) {
+                continue;
+            }
+            struct pw_graph_meter_reading *reading =
+                    &snapshot->meters[snapshot->meter_count++];
+            uint64_t timestamp = atomic_load_explicit(&meter->timestamp_ns, memory_order_relaxed);
+            uint64_t age_ns = timestamp > 0 && now >= timestamp ? now - timestamp : UINT64_MAX;
+            reading->node_id = meter->node_id;
+            reading->rms = atomic_load_explicit(&meter->rms, memory_order_relaxed);
+            reading->peak = atomic_load_explicit(&meter->peak, memory_order_relaxed);
+            reading->age_ms = age_ns == UINT64_MAX ? UINT32_MAX :
+                    (uint32_t)((age_ns / 1000000ull) > UINT32_MAX ? UINT32_MAX :
+                    (age_ns / 1000000ull));
+            reading->available = atomic_load_explicit(&meter->connected, memory_order_relaxed) != 0;
+        }
     }
     pw_thread_loop_unlock(shim->thread_loop);
     return result;
