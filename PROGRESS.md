@@ -19,6 +19,10 @@ full node, port, and link tooltips without hiding the raw PipeWire names.
 The inspector was then redesigned with scrollable grouped sections, statistic
 cards, clearer panel headers, a wider responsive side panel, and independent
 text-size controls for application chrome, inspector panels, and graph nodes.
+Audio ports now have a real PipeWire-backed hover meter with RMS/peak and dB
+readouts, stale-data indication, and a pinned monitor card in the Graph panel;
+private helper streams are excluded from the visible graph and non-metering
+backends report unavailable data rather than rendering fake activity.
 
 The desktop shell is modularized: `main.rs` is a small entry point, while
 `app.rs`, `args.rs`, `backend.rs`, `panels.rs`, and `tray.rs` own application
@@ -42,6 +46,7 @@ Diagnostics screens instead of placing every option in one inspector column.
 | M7 – ALSA MIDI | Implemented | Native ALSA Sequencer enumeration, existing-subscription discovery, namespaced IDs, connect, disconnect, refresh, and composite PipeWire+ALSA routing are implemented. |
 | M8 – Extras | Implemented | `-m`, `-d`, `-n`, `--lang`, and `--demo` are available; thumbnail mode and Linux StatusNotifier tray Show/Hide/Quit actions are implemented. |
 | M9 – Packaging | Implemented | Desktop entry, AppStream metadata, Flatpak manifest, reproducible lockfile, and packaging instructions are included. |
+| M10 – Runtime meters | Implemented | PipeWire audio source streams provide normalized RMS/peak readings; audio-port hover popovers and a pinned Graph-panel monitor show live/stale state without platform-dependent symbols. |
 
 ## UI organization
 
@@ -65,6 +70,9 @@ Diagnostics screens instead of placing every option in one inspector column.
 - PipeWire and ALSA client names are externally owned, so rename is supported by
   the command/UI layer where the backend permits it; native clients report a
   clear unsupported error instead of changing external metadata.
+- Runtime audio meters are node-level readings associated with each audio port on
+  that node. They are intentionally optional: the UI shows a clear unavailable
+  message when a backend cannot provide live buffers.
 
 ## Verification
 

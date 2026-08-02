@@ -6,7 +6,7 @@ ALSA Sequencer MIDI support.
 The workspace provides:
 
 - `pw-graph-core`: serializable nodes, ports, links, validation, and graph operations.
-- `pw-graph-backend`: a driver trait, deterministic demo backend, and native PipeWire registry/link backend. The native driver is isolated in `pipewire.rs`.
+- `pw-graph-backend`: a driver trait, deterministic demo backend, native PipeWire registry/link backend, and optional normalized audio-meter stream channel. The native driver is isolated in `pipewire.rs`.
 - `pw-graph-alsamidi`: native ALSA Sequencer enumeration and connection backend.
 - `pw-graph-command`: connect, disconnect, and rename commands with undo/redo.
 - `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation. XML serialization/parsing is isolated in `xml.rs`.
@@ -33,6 +33,12 @@ the same commands are not repeated in a second menu row. Toolbar, navigation, an
 settings icons are drawn as platform-independent vector geometry rather than font
 glyphs. Use
 `--demo` to force the deterministic in-memory graph.
+
+Audio ports expose a hover monitor with RMS, peak, dB, freshness, and a pin action.
+Pinned monitors remain visible in the Graph inspector. Live meters are provided by
+PipeWire capture streams and their private helper nodes are filtered from the graph;
+backends without runtime audio data show an explicit unavailable state instead of
+simulated levels.
 
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
 support. PipeWire and ALSA are feature-gated so the application can still be
