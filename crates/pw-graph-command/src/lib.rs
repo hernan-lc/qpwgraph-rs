@@ -18,8 +18,15 @@ fn stable_pair(graph: &Graph, output: PortId, input: PortId) -> Option<(PortKey,
 
 pub trait Command {
     fn name(&self) -> &'static str;
+    fn description(&self) -> String {
+        self.name().to_owned()
+    }
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError>;
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError>;
+}
+
+fn port_description(port: &PortKey) -> String {
+    format!("{} / {}", port.node_name, port.port_name)
 }
 
 pub struct CommandStack {
@@ -91,6 +98,22 @@ impl CommandStack {
     pub fn redo_label(&self) -> Option<&'static str> {
         self.redo_stack.last().map(|command| command.name())
     }
+
+    pub fn undo_history(&self) -> Vec<String> {
+        self.undo_stack
+            .iter()
+            .rev()
+            .map(|command| command.description())
+            .collect()
+    }
+
+    pub fn redo_history(&self) -> Vec<String> {
+        self.redo_stack
+            .iter()
+            .rev()
+            .map(|command| command.description())
+            .collect()
+    }
 }
 
 pub struct ConnectCommand {
@@ -137,6 +160,14 @@ impl ConnectManyCommand {
 impl Command for ConnectManyCommand {
     fn name(&self) -> &'static str {
         "Connect group"
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "{} ({} pairs)",
+            self.name(),
+            self.keys.len().max(self.pairs.len())
+        )
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
@@ -209,6 +240,20 @@ impl ConnectCommand {
 impl Command for ConnectCommand {
     fn name(&self) -> &'static str {
         "Connect"
+    }
+
+    fn description(&self) -> String {
+        self.keys
+            .as_ref()
+            .map(|(output, input)| {
+                format!(
+                    "{}: {} → {}",
+                    self.name(),
+                    port_description(output),
+                    port_description(input)
+                )
+            })
+            .unwrap_or_else(|| self.name().to_owned())
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
@@ -286,6 +331,10 @@ impl Command for DisconnectManyCommand {
         "Disconnect group"
     }
 
+    fn description(&self) -> String {
+        format!("{} ({} links)", self.name(), self.keys.len())
+    }
+
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         driver.refresh()?;
         if self.keys.is_empty() {
@@ -339,6 +388,10 @@ impl Default for DisconnectAllCommand {
 impl Command for DisconnectAllCommand {
     fn name(&self) -> &'static str {
         "Disconnect all"
+    }
+
+    fn description(&self) -> String {
+        format!("{} ({} links)", self.name(), self.keys.len())
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
@@ -398,6 +451,20 @@ impl Command for DisconnectCommand {
         "Disconnect"
     }
 
+    fn description(&self) -> String {
+        self.keys
+            .as_ref()
+            .map(|(output, input)| {
+                format!(
+                    "{}: {} → {}",
+                    self.name(),
+                    port_description(output),
+                    port_description(input)
+                )
+            })
+            .unwrap_or_else(|| self.name().to_owned())
+    }
+
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         self.removed = false;
         driver.refresh()?;
@@ -450,6 +517,10 @@ impl MoveNodesCommand {
 impl Command for MoveNodesCommand {
     fn name(&self) -> &'static str {
         "Move nodes"
+    }
+
+    fn description(&self) -> String {
+        format!("{} ({})", self.name(), self.after.len())
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
@@ -509,9 +580,14 @@ mod tests {
             )
             .unwrap();
         assert!(commands.can_undo());
+        assert_eq!(commands.undo_history().len(), 1);
+        assert!(commands.undo_history()[0].starts_with("Connect:"));
+        assert!(commands.redo_history().is_empty());
         assert_eq!(driver.graph().links.len(), 1);
         commands.undo(&mut driver).unwrap();
         assert!(driver.graph().links.is_empty());
+        assert!(commands.undo_history().is_empty());
+        assert_eq!(commands.redo_history().len(), 1);
         commands.redo(&mut driver).unwrap();
         assert_eq!(driver.graph().links.len(), 1);
     }

@@ -40,6 +40,7 @@ pub(crate) struct QpwgraphApp {
     pub(crate) i18n: I18n,
     pub(crate) backend_name: String,
     pub(crate) show_shortcuts: bool,
+    pub(crate) show_history: bool,
     pub(crate) shortcut_search: String,
     pub(crate) shortcut_focus_search: bool,
     pub(crate) shortcut_scroll_epoch: u32,
@@ -211,6 +212,7 @@ impl QpwgraphApp {
             i18n,
             backend_name,
             show_shortcuts: false,
+            show_history: false,
             shortcut_search: String::new(),
             shortcut_focus_search: false,
             shortcut_scroll_epoch: 0,
@@ -276,7 +278,7 @@ impl QpwgraphApp {
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
-        self.show_shortcuts || self.show_preferences
+        self.show_shortcuts || self.show_history || self.show_preferences
     }
 
     pub(crate) fn toggle_shortcuts(&mut self) {
@@ -287,6 +289,7 @@ impl QpwgraphApp {
         }
         self.show_shortcuts = true;
         self.show_preferences = false;
+        self.show_history = false;
         self.shortcut_search.clear();
         self.shortcut_focus_search = true;
         self.shortcut_scroll_epoch = self.shortcut_scroll_epoch.wrapping_add(1);
@@ -295,6 +298,14 @@ impl QpwgraphApp {
     pub(crate) fn close_shortcuts(&mut self) {
         self.show_shortcuts = false;
         self.shortcut_focus_search = false;
+    }
+
+    pub(crate) fn toggle_history(&mut self) {
+        self.show_history = !self.show_history;
+        if self.show_history {
+            self.show_shortcuts = false;
+            self.show_preferences = false;
+        }
     }
 
     fn text_input_focused(&self, ctx: &egui::Context) -> bool {
@@ -319,6 +330,7 @@ impl QpwgraphApp {
         if self.any_modal_open() {
             if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
                 self.close_shortcuts();
+                self.show_history = false;
                 self.show_preferences = false;
             }
             return;
@@ -388,7 +400,7 @@ impl QpwgraphApp {
         }
     }
 
-    fn set_media_filter(&mut self, filter: MediaFilter) {
+    pub(crate) fn set_media_filter(&mut self, filter: MediaFilter) {
         self.canvas.media_filter = filter;
         self.config.media_filter = filter.as_str().into();
     }
@@ -1102,6 +1114,7 @@ impl eframe::App for QpwgraphApp {
         // Runs after the canvas so the request reflects what this frame drew.
         self.request_visible_meters();
         self.show_shortcuts_modal(ctx);
+        self.show_history_modal(ctx);
         self.show_preferences_modal(ctx);
         self.autosave_config();
     }

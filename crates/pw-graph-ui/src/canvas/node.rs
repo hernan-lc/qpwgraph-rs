@@ -50,6 +50,11 @@ impl GraphCanvas {
         );
         let tooltip = node_tooltip(node, &ports, i18n);
         let easy_connect = self.connect_mode == ConnectMode::Easy;
+        let disconnect_node_label = i18n.text(if easy_connect {
+            "canvas.disconnect_node_easy"
+        } else {
+            "canvas.disconnect_node_advanced"
+        });
         let body_sense = if easy_connect {
             Sense::click_and_drag()
         } else {
@@ -78,7 +83,7 @@ impl GraphCanvas {
         let disconnect_node_requested = Cell::new(false);
         let arrange_nodes_requested = Cell::new(false);
         body_response.context_menu(|ui| {
-            if ui.button(i18n.text("canvas.disconnect_node")).clicked() {
+            if ui.button(&disconnect_node_label).clicked() {
                 disconnect_node_requested.set(true);
                 ui.close_menu();
             }
@@ -95,7 +100,7 @@ impl GraphCanvas {
             )
             .on_hover_text(format!("{tooltip}\n\n{}", i18n.text("canvas.drag_header")));
         header_response.context_menu(|ui| {
-            if ui.button(i18n.text("canvas.disconnect_node")).clicked() {
+            if ui.button(&disconnect_node_label).clicked() {
                 disconnect_node_requested.set(true);
                 ui.close_menu();
             }

@@ -25,6 +25,11 @@ impl GraphCanvas {
         pointer_over_node: bool,
         actions: &mut Vec<CanvasAction>,
     ) {
+        let disconnect_label = if self.connect_mode == crate::ConnectMode::Easy {
+            i18n.text("canvas.disconnect_group")
+        } else {
+            i18n.text("toolbar.disconnect")
+        };
         for (link_index, link) in graph.links.values().enumerate() {
             let (Some(source), Some(destination)) = (
                 graph.ports.get(&link.output_port),
@@ -71,7 +76,7 @@ impl GraphCanvas {
                 response = response.on_hover_text(link_tooltip(graph, source, destination, i18n));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 response.context_menu(|ui| {
-                    if ui.button(i18n.text("toolbar.disconnect")).clicked() {
+                    if ui.button(&disconnect_label).clicked() {
                         disconnect_requested.set(true);
                         ui.close_menu();
                     }

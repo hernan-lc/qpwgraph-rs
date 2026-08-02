@@ -346,6 +346,15 @@ impl QpwgraphApp {
             ) {
                 self.redo();
             }
+            if sidebar_icon_button(
+                ui,
+                "sidebar.history",
+                Icon::Timer,
+                self.t("toolbar.history"),
+                self.t("help.history"),
+            ) {
+                self.toggle_history();
+            }
             let easy = self.canvas.connect_mode == ConnectMode::Easy;
             let connect_mode_label = self.t(if easy {
                 "toolbar.connect_mode_easy"
@@ -508,6 +517,29 @@ impl QpwgraphApp {
             self.config.media_filter = selected_filter.as_str().into();
             self.canvas.media_filter = selected_filter;
         }
+        ui.scope(|ui| {
+            // The navigation rail is narrow; keep all four shortcuts visible
+            // without letting the row stretch past its bounds.
+            ui.spacing_mut().item_spacing.x = 1.0;
+            ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
+            ui.spacing_mut().interact_size.x = 14.0;
+            ui.horizontal(|ui| {
+                for (key, filter) in [
+                    ("0", MediaFilter::All),
+                    ("1", MediaFilter::Audio),
+                    ("2", MediaFilter::Video),
+                    ("3", MediaFilter::Midi),
+                ] {
+                    let response = ui.selectable_label(current_filter == filter, key);
+                    if response
+                        .on_hover_text(format!("{}: {}", key, self.t(media_filter_key(filter))))
+                        .clicked()
+                    {
+                        self.set_media_filter(filter);
+                    }
+                }
+            });
+        });
     }
 
     pub(crate) fn show_shortcuts_modal(&mut self, ctx: &egui::Context) {
@@ -590,6 +622,43 @@ impl QpwgraphApp {
             ui.add_space(10.0);
             if self.show_close_button(ui) {
                 self.close_shortcuts();
+            }
+        });
+    }
+
+    pub(crate) fn show_history_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_history {
+            return;
+        }
+        if show_backdrop(ctx, "history") {
+            self.show_history = false;
+            return;
+        }
+        modal_window("history", self.t("history.title"), 520.0).show(ctx, |ui| {
+            ui.label(RichText::new(self.t("history.hint")).weak());
+            ui.add_space(8.0);
+            ui.label(RichText::new(self.t("history.undoable")).strong());
+            let undo_history = self.commands.undo_history();
+            if undo_history.is_empty() {
+                ui.label(RichText::new(self.t("history.empty")).weak());
+            } else {
+                for (index, entry) in undo_history.iter().enumerate() {
+                    ui.label(format!("{}. {}", index + 1, entry));
+                }
+            }
+            ui.add_space(8.0);
+            ui.label(RichText::new(self.t("history.redoable")).strong());
+            let redo_history = self.commands.redo_history();
+            if redo_history.is_empty() {
+                ui.label(RichText::new(self.t("history.empty")).weak());
+            } else {
+                for (index, entry) in redo_history.iter().enumerate() {
+                    ui.label(format!("{}. {}", index + 1, entry));
+                }
+            }
+            ui.add_space(10.0);
+            if self.show_close_button(ui) {
+                self.show_history = false;
             }
         });
     }
