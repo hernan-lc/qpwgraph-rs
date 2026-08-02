@@ -40,6 +40,19 @@ PipeWire capture streams and their private helper nodes are filtered from the gr
 backends without runtime audio data show an explicit unavailable state instead of
 simulated levels.
 
+Measuring a node means attaching a real capture stream to it, so metering is
+opt-in per node. The Graph panel exposes the policy as **Measure levels**:
+
+| Policy | Behavior |
+|---|---|
+| Off | No metering stream is ever created. |
+| On demand (default) | A stream is attached only while a meter is hovered or pinned, and released a few seconds after the last request. |
+| Always | Every audio node is measured continuously, which keeps devices awake. |
+
+The same panel has **Reset audio config**, which releases every metering stream
+so PipeWire can suspend those nodes again and restore their configured settings.
+The policy is persisted as `audio_meters` in `config.toml`.
+
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
 support. PipeWire and ALSA are feature-gated so the application can still be
 built without native development headers:
@@ -64,7 +77,11 @@ cargo build --release -p pw-graph-app --no-default-features --features pipewire
 The PipeWire backend is implemented entirely in Rust in `pipewire.rs`. It owns a
 PipeWire `ThreadLoop`, subscribes to registry globals, rebuilds the graph from
 nodes/ports/links, creates and destroys links through `link-factory`, and uses
-PipeWire capture streams for normalized audio meters. The project has no local
+PipeWire capture streams for normalized audio meters. Metering streams are marked
+`stream.monitor` and `node.passive`, never request a rate or channel count, target
+their node by `object.serial`, and set `stream.capture.sink` when the target is a
+sink, so attaching one neither resumes a suspended device, forces a graph-rate
+renegotiation, nor reroutes the capture to the default source. The project has no local
 C PipeWire shim or C build script anymore. The official Rust bindings still link
 to the system PipeWire and SPA libraries at runtime, so the native development
 packages remain a platform dependency when the `pipewire` feature is enabled.

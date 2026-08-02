@@ -122,9 +122,11 @@ mod tests {
     #[test]
     fn pinned_and_hovered_ports_request_their_nodes() {
         let graph = metering_graph();
-        let mut canvas = GraphCanvas::default();
-        canvas.pinned_meter = Some(PortId(10));
-        canvas.hovered_meter_node = Some(NodeId(4));
+        let canvas = GraphCanvas {
+            pinned_meter: Some(PortId(10)),
+            hovered_meter_node: Some(NodeId(4)),
+            ..GraphCanvas::default()
+        };
         assert_eq!(
             canvas.requested_meter_nodes(&graph),
             BTreeSet::from([NodeId(1), NodeId(4)])
@@ -133,8 +135,10 @@ mod tests {
 
     #[test]
     fn a_pinned_port_that_left_the_graph_requests_nothing() {
-        let mut canvas = GraphCanvas::default();
-        canvas.pinned_meter = Some(PortId(999));
+        let canvas = GraphCanvas {
+            pinned_meter: Some(PortId(999)),
+            ..GraphCanvas::default()
+        };
         assert!(canvas.requested_meter_nodes(&metering_graph()).is_empty());
     }
 }

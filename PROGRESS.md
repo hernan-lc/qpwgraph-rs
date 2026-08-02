@@ -53,7 +53,7 @@ Diagnostics screens instead of placing every option in one inspector column.
 | M7 – ALSA MIDI | Implemented | Native ALSA Sequencer enumeration, existing-subscription discovery, namespaced IDs, connect, disconnect, refresh, and composite PipeWire+ALSA routing are implemented. |
 | M8 – Extras | Implemented | `-m`, `-d`, `-n`, `--lang`, and `--demo` are available; thumbnail mode and Linux StatusNotifier tray Show/Hide/Quit actions are implemented. |
 | M9 – Packaging | Implemented | Desktop entry, AppStream metadata, Flatpak manifest, reproducible lockfile, and packaging instructions are included. |
-| M10 – Runtime meters | Implemented | PipeWire audio source streams provide normalized RMS/peak readings; audio-port hover popovers and a pinned Graph-panel monitor show live/stale state without platform-dependent symbols. |
+| M10 – Runtime meters | Implemented | PipeWire audio source streams provide normalized RMS/peak readings; audio-port hover popovers and a pinned Graph-panel monitor show live/stale state without platform-dependent symbols. Metering is opt-in per node and never runs on its own at startup. |
 | M11 – Rust PipeWire migration | Implemented | Registry lifecycle, round-trips, link mutation, SPA format negotiation, stream meters, and teardown use `pipewire`/`libspa`; the handwritten C shim and build script are gone. |
 
 ## UI organization
@@ -81,6 +81,24 @@ Diagnostics screens instead of placing every option in one inspector column.
 - Runtime audio meters are node-level readings associated with each audio port on
   that node. They are intentionally optional: the UI shows a clear unavailable
   message when a backend cannot provide live buffers.
+- Measuring a node requires attaching a real capture stream to it, which the
+  session manager links like any other client. Doing that for every audio node at
+  startup resumed suspended devices and made the daemon renegotiate their format,
+  which is visible to the user as their audio configuration changing when the
+  application launches. Metering is therefore governed by `MeterPolicy`
+  (`off` / `on-demand` / `always`, default `on-demand`): under the default the
+  driver attaches a stream only for nodes the UI explicitly asks about, keeps it
+  for a short linger window so pointer movement does not thrash streams, and
+  releases it afterwards. `GraphDriver::reset_audio_config` drops every metering
+  stream on demand.
+- Metering streams themselves are non-intrusive: `stream.monitor` and
+  `node.passive` keep them out of routing decisions and stop them from holding a
+  device awake, `node.dont-reconnect` prevents the session manager from moving
+  them, the negotiated format leaves rate and channel count unset so the node's
+  own values are used, `target.object` uses the node's `object.serial` rather
+  than its non-unique name, and `stream.capture.sink` is set for sink targets so
+  the stream reads the sink monitor instead of being routed to the default
+  source.
 
 ## Verification
 
@@ -93,11 +111,14 @@ cargo check --all-features
 LANG=es_ES.UTF-8 cargo run -p pw-graph-app -- --help
 PW_GRAPH_TEST_LINKS=1 cargo test -p pw-graph-backend --all-features native_backend_can_create_and_destroy_a_link_when_enabled
 PW_GRAPH_TEST_ALSA_LINKS=1 cargo test -p pw-graph-alsamidi --all-features native_backend_can_create_and_destroy_a_link_when_enabled
+PW_GRAPH_TEST_METERS=1 cargo test -p pw-graph-backend --all-features native_backend_attaches_and_releases_a_requested_meter
 ```
 
-The two environment-gated native mutation tests are opt-in because they create
-and immediately destroy a real live connection in the user’s PipeWire/ALSA
-session.
+The three environment-gated native mutation tests are opt-in because they create
+and immediately destroy a real live connection or metering stream in the user’s
+PipeWire/ALSA session. `native_backend_meters_nothing_until_it_is_asked_to` is
+not gated: it asserts that a plain launch attaches nothing at all, so it has no
+effect on the running session.
 
 The default native-driver smoke test is also conditional: it skips cleanly when
 the test process cannot reach a PipeWire daemon (for example in a headless or
