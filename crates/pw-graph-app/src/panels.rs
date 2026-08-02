@@ -221,9 +221,48 @@ impl QpwgraphApp {
         ui.heading(self.t("inspector.live_links"));
         let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
         for link in links {
+            let (output_node, output_port) = self
+                .driver
+                .graph()
+                .port(link.output_port)
+                .map(|port| {
+                    (
+                        self.driver
+                            .graph()
+                            .node(port.node_id)
+                            .map(|node| node.name.clone())
+                            .unwrap_or_else(|| port.node_id.to_string()),
+                        port.name.clone(),
+                    )
+                })
+                .unwrap_or_else(|| (link.output_port.to_string(), link.output_port.to_string()));
+            let (input_node, input_port) = self
+                .driver
+                .graph()
+                .port(link.input_port)
+                .map(|port| {
+                    (
+                        self.driver
+                            .graph()
+                            .node(port.node_id)
+                            .map(|node| node.name.clone())
+                            .unwrap_or_else(|| port.node_id.to_string()),
+                        port.name.clone(),
+                    )
+                })
+                .unwrap_or_else(|| (link.input_port.to_string(), link.input_port.to_string()));
+            let link_summary = self.tf(
+                "patchbay.link_summary",
+                &[
+                    ("output_node", output_node),
+                    ("output_port", output_port),
+                    ("input_node", input_node),
+                    ("input_port", input_port),
+                ],
+            );
             ui.push_id(("live-link", link.id), |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{} to {}", link.output_port, link.input_port));
+                    ui.label(link_summary);
                     let mut pinned = self
                         .patchbay
                         .connections

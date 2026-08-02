@@ -2125,6 +2125,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "pw-graph-core",
+ "pw-graph-i18n",
 ]
 
 [[package]]

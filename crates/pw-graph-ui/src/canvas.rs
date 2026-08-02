@@ -3,6 +3,7 @@
 use super::*;
 use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use pw_graph_core::{Direction, Graph, Node, NodeType, Port, PortType};
+use pw_graph_i18n::I18n;
 use std::collections::HashMap;
 
 const NODE_WIDTH: f32 = 244.0;
@@ -11,7 +12,7 @@ const PORT_ROW_HEIGHT: f32 = 25.0;
 const EDGE_HIT_DISTANCE: f32 = 9.0;
 
 impl GraphCanvas {
-    pub fn show(&mut self, ui: &mut Ui, graph: &Graph, connect_hint: &str) -> Vec<CanvasAction> {
+    pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
         let rect = ui.available_rect_before_wrap();
         let canvas_response = ui.allocate_rect(rect, Sense::drag());
         let painter = ui.painter_at(rect);
@@ -131,7 +132,8 @@ impl GraphCanvas {
                     ));
                     let mut response = ui.interact(hit_rect, link_widget_id, Sense::hover());
                     if hovered {
-                        response = response.on_hover_text(link_tooltip(graph, source, destination));
+                        response =
+                            response.on_hover_text(link_tooltip(graph, source, destination, i18n));
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     let clicked = hovered
@@ -153,6 +155,7 @@ impl GraphCanvas {
                 rect,
                 graph,
                 node,
+                i18n,
                 &mut anchors,
                 &mut actions,
             );
@@ -184,7 +187,13 @@ impl GraphCanvas {
                     painter.text(
                         start + vec2(8.0, -22.0),
                         egui::Align2::LEFT_TOP,
-                        format!("{connect_hint} {} to ...", output.name),
+                        i18n.format(
+                            "canvas.pending_connection",
+                            &[
+                                ("action", i18n.text("canvas.connect_hint")),
+                                ("port", display_port_name(&output.name, i18n)),
+                            ],
+                        ),
                         FontId::proportional(12.0),
                         Color32::LIGHT_GREEN,
                     );
@@ -246,6 +255,7 @@ impl GraphCanvas {
         rect: Rect,
         graph: &Graph,
         node: &Node,
+        i18n: &I18n,
         anchors: &mut HashMap<PortId, Pos2>,
         actions: &mut Vec<CanvasAction>,
     ) {
@@ -258,7 +268,7 @@ impl GraphCanvas {
                 node_rect.min.y + NODE_HEADER_HEIGHT * self.zoom,
             ),
         );
-        let tooltip = node_tooltip(node, &ports);
+        let tooltip = node_tooltip(node, &ports, i18n);
         let body_response = ui
             .interact(
                 node_rect,
@@ -272,7 +282,7 @@ impl GraphCanvas {
                 ui.id().with(("graph-node-header", node.id)),
                 Sense::click_and_drag(),
             )
-            .on_hover_text(format!("{tooltip}\n\nDrag this header to move the node."));
+            .on_hover_text(format!("{tooltip}\n\n{}", i18n.text("canvas.drag_header")));
         if body_response.clicked() || header_response.clicked() {
             let shift = ui.input(|input| input.modifiers.shift);
             if !shift {
@@ -385,7 +395,7 @@ impl GraphCanvas {
         painter.text(
             header.left_center() + vec2(12.0 * self.zoom, 0.0),
             egui::Align2::LEFT_CENTER,
-            compact_label(&display_node_name(&node.name), 22),
+            compact_label(&display_node_name(&node.name, i18n), 22),
             FontId::proportional(13.0 * self.zoom),
             Color32::WHITE,
         );
@@ -430,7 +440,7 @@ impl GraphCanvas {
                     ui.id().with(("graph-port", node.id, index, port.id)),
                     Sense::click_and_drag(),
                 )
-                .on_hover_text(port_tooltip(node, port));
+                .on_hover_text(port_tooltip(node, port, i18n));
             let pending = self.pending_output == Some(port.id);
             if response.hovered() || pending {
                 painter.rect_filled(
@@ -456,7 +466,7 @@ impl GraphCanvas {
                 } else {
                     egui::Align2::LEFT_CENTER
                 },
-                compact_label(&display_port_name(&port.name), 25),
+                compact_label(&display_port_name(&port.name, i18n), 25),
                 FontId::proportional(11.5 * self.zoom),
                 Color32::from_rgb(215, 220, 227),
             );
@@ -571,7 +581,7 @@ fn node_color(node_type: NodeType) -> Color32 {
     }
 }
 
-fn node_tooltip(node: &Node, ports: &[&Port]) -> String {
+fn node_tooltip(node: &Node, ports: &[&Port], i18n: &I18n) -> String {
     let inputs = ports
         .iter()
         .filter(|port| port.direction == Direction::Sink)
@@ -580,96 +590,112 @@ fn node_tooltip(node: &Node, ports: &[&Port]) -> String {
         .iter()
         .filter(|port| port.direction == Direction::Source)
         .count();
-    format!(
-        "{}\n{}\n{} inputs, {} outputs\n\nDrag the header to move. Click the body to select. Shift-click to add or remove it from the selection.",
-        node_type_label(node.node_type),
-        node.name,
-        inputs,
-        outputs
+    i18n.format(
+        "canvas.node_tooltip",
+        &[
+            ("type", node_type_label(node.node_type, i18n)),
+            ("name", node.name.clone()),
+            ("inputs", inputs.to_string()),
+            ("outputs", outputs.to_string()),
+        ],
     )
 }
 
-fn link_tooltip(graph: &Graph, source: &Port, destination: &Port) -> String {
+fn link_tooltip(graph: &Graph, source: &Port, destination: &Port, i18n: &I18n) -> String {
     let source_node = graph
         .node(source.node_id)
-        .map(|node| node.name.as_str())
-        .unwrap_or("Unknown node");
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| i18n.text("canvas.unknown_node"));
     let destination_node = graph
         .node(destination.node_id)
-        .map(|node| node.name.as_str())
-        .unwrap_or("Unknown node");
-    format!(
-        "{} connection\n\nFrom: {} / {}\nTo: {} / {}\n\nClick to select. Press Delete to disconnect it.",
-        port_type_label(source.port_type),
-        source_node,
-        source.name,
-        destination_node,
-        destination.name
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| i18n.text("canvas.unknown_node"));
+    i18n.format(
+        "canvas.link_tooltip",
+        &[
+            ("type", port_type_label(source.port_type, i18n)),
+            ("source_node", source_node),
+            ("source_port", source.name.clone()),
+            ("destination_node", destination_node),
+            ("destination_port", destination.name.clone()),
+        ],
     )
 }
 
-fn port_tooltip(node: &Node, port: &Port) -> String {
+fn port_tooltip(node: &Node, port: &Port, i18n: &I18n) -> String {
     let direction = if port.direction == Direction::Source {
-        "Output"
+        i18n.text("canvas.output")
     } else {
-        "Input"
+        i18n.text("canvas.input")
     };
-    format!(
-        "{} {}\n{}\nNode: {}\n\n{}",
-        direction,
-        port_type_label(port.port_type),
-        port.name,
-        node.name,
-        if port.direction == Direction::Source {
-            "Click or drag from this port, then choose a compatible input."
-        } else {
-            "Choose this port after selecting an output to create a connection."
-        }
+    i18n.format(
+        "canvas.port_tooltip",
+        &[
+            ("direction", direction),
+            ("type", port_type_label(port.port_type, i18n)),
+            ("port", port.name.clone()),
+            ("node", node.name.clone()),
+            (
+                "help",
+                if port.direction == Direction::Source {
+                    i18n.text("canvas.output_help")
+                } else {
+                    i18n.text("canvas.input_help")
+                },
+            ),
+        ],
     )
 }
 
-fn node_type_label(node_type: NodeType) -> &'static str {
+fn node_type_label(node_type: NodeType, i18n: &I18n) -> String {
     match node_type {
-        NodeType::PipeWire => "PipeWire node",
-        NodeType::AlsaMidi => "ALSA MIDI node",
-        NodeType::Unknown => "Unknown node type",
+        NodeType::PipeWire => i18n.text("canvas.node_type_pipewire"),
+        NodeType::AlsaMidi => i18n.text("canvas.node_type_alsa_midi"),
+        NodeType::Unknown => i18n.text("canvas.node_type_unknown"),
     }
 }
 
-fn port_type_label(port_type: PortType) -> &'static str {
+fn port_type_label(port_type: PortType, i18n: &I18n) -> String {
     match port_type {
-        PortType::Audio => "Audio",
-        PortType::Video => "Video",
-        PortType::MidiJack => "PW/JACK MIDI",
-        PortType::MidiAlsa => "ALSA MIDI",
-        PortType::Unknown => "Unknown",
+        PortType::Audio => i18n.text("port.audio"),
+        PortType::Video => i18n.text("port.video"),
+        PortType::MidiJack => i18n.text("port.pw_midi"),
+        PortType::MidiAlsa => i18n.text("port.alsa_midi"),
+        PortType::Unknown => i18n.text("canvas.unknown"),
     }
 }
 
-fn display_node_name(name: &str) -> String {
-    let (kind, detail) = if let Some(detail) = name.strip_prefix("alsa_input.") {
-        ("ALSA Input", short_device_name(detail))
+fn display_node_name(name: &str, i18n: &I18n) -> String {
+    let (kind_key, detail) = if let Some(detail) = name.strip_prefix("alsa_input.") {
+        ("canvas.node_name_alsa_input", short_device_name(detail))
     } else if let Some(detail) = name.strip_prefix("alsa_output.") {
-        ("ALSA Output", short_device_name(detail))
+        ("canvas.node_name_alsa_output", short_device_name(detail))
     } else if let Some(detail) = name.strip_prefix("bluez_input.") {
-        ("Bluetooth Input", bluetooth_suffix(detail))
+        ("canvas.node_name_bluetooth_input", bluetooth_suffix(detail))
     } else if let Some(detail) = name.strip_prefix("bluez_output.") {
-        ("Bluetooth Output", bluetooth_suffix(detail))
+        (
+            "canvas.node_name_bluetooth_output",
+            bluetooth_suffix(detail),
+        )
     } else if let Some(detail) = name.strip_prefix("bluez_capture_internal.") {
-        ("Bluetooth Capture", bluetooth_suffix(detail))
+        (
+            "canvas.node_name_bluetooth_capture",
+            bluetooth_suffix(detail),
+        )
     } else if name.starts_with("bluez_midi.") {
-        ("Bluetooth MIDI", None)
+        ("canvas.node_name_bluetooth_midi", None)
     } else if name.starts_with("v4l2_input.") {
-        ("Camera Input", None)
+        ("canvas.node_name_camera_input", None)
     } else if name.starts_with("Midi Through:") {
-        ("MIDI Through", None)
+        ("canvas.node_name_midi_through", None)
     } else {
         return name.replace(['_', '-'], " ");
     };
+    let kind = i18n.text(kind_key);
     detail
         .filter(|detail| !detail.is_empty())
         .map(|detail| format!("{kind} - {detail}"))
-        .unwrap_or_else(|| kind.to_owned())
+        .unwrap_or(kind)
 }
 
 fn short_device_name(detail: &str) -> Option<String> {
@@ -699,11 +725,11 @@ fn bluetooth_suffix(detail: &str) -> Option<String> {
     })
 }
 
-fn display_port_name(name: &str) -> String {
+fn display_port_name(name: &str, i18n: &I18n) -> String {
     let name = name.rsplit(": ").next().unwrap_or(name);
     let name = name
-        .replace("(capture)", "Capture")
-        .replace("(playback)", "Playback")
+        .replace("(capture)", &i18n.text("canvas.capture"))
+        .replace("(playback)", &i18n.text("canvas.playback"))
         .replace(['_', '-'], " ");
     let mut characters = name.chars();
     let Some(first) = characters.next() else {
@@ -787,14 +813,28 @@ mod tests {
 
     #[test]
     fn display_names_hide_transport_prefixes_without_losing_device_identity() {
-        assert_eq!(display_node_name("Dummy-Driver"), "Dummy Driver");
+        let i18n = I18n::default();
+        assert_eq!(display_node_name("Dummy-Driver", &i18n), "Dummy Driver");
         assert_eq!(
-            display_node_name("bluez_output.B0:F0:0C:5E:99:5A"),
+            display_node_name("bluez_output.B0:F0:0C:5E:99:5A", &i18n),
             "Bluetooth Output - 99:5A"
         );
         assert_eq!(
-            display_port_name("Midi Through: Port-0 (capture)"),
+            display_port_name("Midi Through: Port-0 (capture)", &i18n),
             "Port 0 Capture"
+        );
+    }
+
+    #[test]
+    fn display_names_use_the_selected_locale() {
+        let i18n = I18n::from_language("es");
+        assert_eq!(
+            display_node_name("bluez_input.B0:F0:0C:5E:99:5A", &i18n),
+            "Entrada Bluetooth - 99:5A"
+        );
+        assert_eq!(
+            display_port_name("Midi Through: Port-0 (capture)", &i18n),
+            "Port 0 Captura"
         );
     }
 

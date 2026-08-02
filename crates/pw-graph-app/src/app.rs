@@ -529,8 +529,7 @@ impl eframe::App for QpwgraphApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let connect_hint = self.t("canvas.connect_hint");
-            let actions = self.canvas.show(ui, self.driver.graph(), &connect_hint);
+            let actions = self.canvas.show(ui, self.driver.graph(), &self.i18n);
             self.handle_canvas_actions(actions);
         });
     }
