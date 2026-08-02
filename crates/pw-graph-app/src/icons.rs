@@ -4,7 +4,6 @@ use egui::{include_image, vec2, Color32, Image, ImageSource, Rect, Sense, Ui, Ve
 pub(crate) enum Icon {
     Activate,
     AutoDisconnect,
-    Brand,
     Connect,
     Delete,
     Diagnostics,
@@ -34,7 +33,6 @@ fn icon_source(icon: Icon) -> ImageSource<'static> {
     match icon {
         Icon::Activate => include_image!("../assets/icons/activate.svg"),
         Icon::AutoDisconnect => include_image!("../assets/icons/auto_disconnect.svg"),
-        Icon::Brand => include_image!("../assets/icons/brand.svg"),
         Icon::Connect => include_image!("../assets/icons/connect.svg"),
         Icon::Delete => include_image!("../assets/icons/delete.svg"),
         Icon::Diagnostics => include_image!("../assets/icons/diagnostics.svg"),

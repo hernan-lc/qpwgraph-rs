@@ -90,6 +90,7 @@
   "inspector.nodes_short": "Nodos",
   "inspector.ports_short": "Puertos",
   "inspector.links_short": "Enlaces",
+  "inspector.selected_link": "Enlace seleccionado",
   "inspector.rename": "Renombrar nodo",
   "inspector.layout": "Diseño",
   "inspector.filter_nodes": "Filtrar nodos",

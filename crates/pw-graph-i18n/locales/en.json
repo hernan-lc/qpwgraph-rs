@@ -90,6 +90,7 @@
   "inspector.nodes_short": "Nodes",
   "inspector.ports_short": "Ports",
   "inspector.links_short": "Links",
+  "inspector.selected_link": "Selected link",
   "inspector.rename": "Rename node",
   "inspector.layout": "Layout",
   "inspector.filter_nodes": "Filter nodes",

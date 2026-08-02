@@ -166,9 +166,6 @@ impl QpwgraphApp {
 
     fn show_navigation(&mut self, ui: &mut Ui) {
         ui.vertical_centered(|ui| {
-            ui.add_space(8.0);
-            icon_label(ui, Icon::Brand, self.t("app.title"));
-            ui.separator();
             let docks = [
                 (AppScreen::Graph, Icon::Graph, "screen.graph"),
                 (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
@@ -245,6 +242,19 @@ impl QpwgraphApp {
                 stat_card(ui, self.t("inspector.links_short"), link_count);
             });
         });
+        if let Some(selected_link) = self.canvas.selected_link() {
+            panel_section(ui, self.t("inspector.selected_link"), |ui| {
+                if icon_button(
+                    ui,
+                    "graph.disconnect-selected",
+                    Icon::Delete,
+                    self.t("toolbar.disconnect"),
+                    self.t("help.disconnect_link"),
+                ) {
+                    self.disconnect(selected_link);
+                }
+            });
+        }
 
         panel_section(ui, self.t("inspector.audio_metering"), |ui| {
             self.show_meter_controls(ui);

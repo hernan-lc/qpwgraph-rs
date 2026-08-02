@@ -60,12 +60,6 @@ impl GraphCanvas {
             self.selection_current = None;
             self.selected_link = None;
         }
-        if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
-            if let Some(link) = self.selected_link.take() {
-                actions.push(CanvasAction::Disconnect { link });
-            }
-        }
-
         if canvas_response.drag_started() && self.dragging_node.is_none() && !pointer_over_node {
             self.selection_start = ui.input(|input| input.pointer.interact_pos());
             self.selection_current = self.selection_start;
@@ -154,19 +148,30 @@ impl GraphCanvas {
                         link.output_port,
                         link.input_port,
                     ));
-                    let mut response = ui.interact(hit_rect, link_widget_id, Sense::hover());
+                    let mut response = ui.interact(hit_rect, link_widget_id, Sense::click());
+                    let disconnect_requested = Cell::new(false);
                     if hovered {
                         response =
                             response.on_hover_text(link_tooltip(graph, source, destination, i18n));
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        response.context_menu(|ui| {
+                            if ui.button(i18n.text("toolbar.disconnect")).clicked() {
+                                disconnect_requested.set(true);
+                                ui.close_menu();
+                            }
+                        });
                     }
-                    let clicked = hovered
-                        && !pointer_over_node
-                        && ui.input(|input| input.pointer.primary_clicked());
+                    let clicked = hovered && !pointer_over_node && response.clicked();
                     if clicked {
                         self.selected_link = Some(link.id);
                         self.selected_nodes.clear();
                         self.selected_node = None;
+                    }
+                    if disconnect_requested.get() {
+                        self.selected_link = Some(link.id);
+                        self.selected_nodes.clear();
+                        self.selected_node = None;
+                        actions.push(CanvasAction::Disconnect { link: link.id });
                     }
                 }
             }
@@ -239,6 +244,10 @@ impl GraphCanvas {
             .filter(|node| self.media_filter.matches_node(graph, node.id))
             .map(|node| node.id)
             .collect()
+    }
+
+    pub fn selected_link(&self) -> Option<LinkId> {
+        self.selected_link
     }
 
     pub fn visible_counts(&self, graph: &Graph) -> (usize, usize, usize) {
