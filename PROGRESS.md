@@ -1,6 +1,6 @@
 # qpwgraph-rs progress report
 
-The requested i18n and roadmap implementation is complete through M10 for the
+The requested i18n and roadmap implementation is complete through M11 for the
 current Rust/egui implementation. English and Spanish are bundled catalogs with
 English fallback, runtime language switching, localized CLI help, status text,
 panel controls, patchbay actions, tray labels, and configuration help
@@ -24,6 +24,13 @@ readouts, stale-data indication, and a pinned monitor card in the Graph panel;
 private helper streams are excluded from the visible graph and non-metering
 backends report unavailable data rather than rendering fake activity.
 
+The PipeWire backend was migrated from the handwritten C shim to the official
+`pipewire`/`libspa` Rust bindings. Registry enumeration, round-trips, link
+creation/destruction, stream-based meters, SPA format negotiation, and cleanup
+now live in `crates/pw-graph-backend/src/pipewire.rs`. The local C shim and its
+Cargo build script were removed; the Rust bindings still use the system
+PipeWire/SPA libraries at runtime.
+
 The desktop shell is modularized: `main.rs` is a small entry point, while
 `app.rs`, `args.rs`, `backend.rs`, `panels.rs`, and `tray.rs` own application
 state, CLI parsing, backend composition, screen panels, and tray integration.
@@ -36,7 +43,7 @@ Diagnostics screens instead of placing every option in one inspector column.
 
 | Milestone | Status | Notes |
 |---|---|---|
-| M0 – PipeWire FFI/data model | Implemented | Native PipeWire 0.3 registry shim enumerates nodes, ports, media types, and links; graph positions are retained across refreshes. |
+| M0 – PipeWire FFI/data model | Implemented | Native PipeWire Rust bindings enumerate nodes, ports, media types, and links; graph positions are retained across refreshes. |
 | M1 – Connect/disconnect | Implemented | PipeWire `link-factory` creation and registry destruction are wired and integration-tested against the running daemon. |
 | M2 – Minimal GUI | Implemented | egui desktop shell renders nodes, ports, links, zoom, pan, and color-coded media types. |
 | M3 – Interactive connections | Implemented | Source-to-sink click/drag, link selection/deletion, rectangle and multi-selection, node movement, port sorting, overlap repulsion, connect-through-node mode, and thumbnail view are present. |
@@ -47,6 +54,7 @@ Diagnostics screens instead of placing every option in one inspector column.
 | M8 – Extras | Implemented | `-m`, `-d`, `-n`, `--lang`, and `--demo` are available; thumbnail mode and Linux StatusNotifier tray Show/Hide/Quit actions are implemented. |
 | M9 – Packaging | Implemented | Desktop entry, AppStream metadata, Flatpak manifest, reproducible lockfile, and packaging instructions are included. |
 | M10 – Runtime meters | Implemented | PipeWire audio source streams provide normalized RMS/peak readings; audio-port hover popovers and a pinned Graph-panel monitor show live/stale state without platform-dependent symbols. |
+| M11 – Rust PipeWire migration | Implemented | Registry lifecycle, round-trips, link mutation, SPA format negotiation, stream meters, and teardown use `pipewire`/`libspa`; the handwritten C shim and build script are gone. |
 
 ## UI organization
 
@@ -90,3 +98,8 @@ PW_GRAPH_TEST_ALSA_LINKS=1 cargo test -p pw-graph-alsamidi --all-features native
 The two environment-gated native mutation tests are opt-in because they create
 and immediately destroy a real live connection in the user’s PipeWire/ALSA
 session.
+
+The default native-driver smoke test is also conditional: it skips cleanly when
+the test process cannot reach a PipeWire daemon (for example in a headless or
+sandboxed test namespace), while the application still reports the connection
+error instead of falling back to demo data.

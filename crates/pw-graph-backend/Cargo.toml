@@ -4,17 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-build = "build.rs"
-
 [features]
 default = ["in-memory"]
 in-memory = []
-pipewire = []
+pipewire = ["dep:pipewire"]
 
 [dependencies]
 pw-graph-core = { path = "../pw-graph-core" }
 thiserror.workspace = true
-
-[build-dependencies]
-cc = "1.2"
-pkg-config = "0.3"
+pipewire = { workspace = true, optional = true }

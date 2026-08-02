@@ -6,7 +6,7 @@ ALSA Sequencer MIDI support.
 The workspace provides:
 
 - `pw-graph-core`: serializable nodes, ports, links, validation, and graph operations.
-- `pw-graph-backend`: a driver trait, deterministic demo backend, native PipeWire registry/link backend, and optional normalized audio-meter stream channel. The native driver is isolated in `pipewire.rs`.
+- `pw-graph-backend`: a driver trait, deterministic demo backend, native PipeWire registry/link backend, and optional normalized audio-meter stream channel. The native driver is isolated in `pipewire.rs` and uses the official Rust bindings.
 - `pw-graph-alsamidi`: native ALSA Sequencer enumeration and connection backend.
 - `pw-graph-command`: connect, disconnect, and rename commands with undo/redo.
 - `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation. XML serialization/parsing is isolated in `xml.rs`.
@@ -61,19 +61,19 @@ cargo build --release -p pw-graph-app --no-default-features --features pipewire
 
 ## Native backends
 
-The PipeWire backend uses a small C ABI shim over the installed PipeWire 0.3
-registry API to keep the Rust graph layer independent of the local PipeWire crate
-version. The ALSA backend uses the ALSA Sequencer API and namespaces its IDs so
-both graphs can be displayed together. A normal launch does not invent a mock
-graph when no native backend is available; it shows an empty canvas with a clear
-status message. Use `--demo` when a deterministic sample graph is wanted.
+The PipeWire backend is implemented entirely in Rust in `pipewire.rs`. It owns a
+PipeWire `ThreadLoop`, subscribes to registry globals, rebuilds the graph from
+nodes/ports/links, creates and destroys links through `link-factory`, and uses
+PipeWire capture streams for normalized audio meters. The project has no local
+C PipeWire shim or C build script anymore. The official Rust bindings still link
+to the system PipeWire and SPA libraries at runtime, so the native development
+packages remain a platform dependency when the `pipewire` feature is enabled.
 
-For C editing, the repository includes a `.clangd` configuration matching the
-PipeWire and SPA include roots used by the Cargo build script. The official
-`pipewire` and `libspa` Rust bindings are also suitable for a future all-Rust
-source migration, including registry, links, streams, and SPA buffer handling;
-they still link to the native PipeWire libraries at runtime, so that migration
-would remove handwritten C but would not remove the system PipeWire dependency.
+The ALSA backend continues to use the small native ALSA Sequencer interface and
+namespaces its IDs so both graphs can be displayed together. A normal launch
+does not invent a mock graph when no native backend is available; it shows an
+empty canvas with a clear status message. Use `--demo` when a deterministic
+sample graph is wanted.
 
 ## Patchbay files
 

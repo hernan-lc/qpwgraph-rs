@@ -1,211 +1,415 @@
-//! Native PipeWire graph driver implementation.
+//! Native PipeWire graph driver implemented with the official Rust bindings.
+//!
+//! PipeWire objects are deliberately kept on a dedicated `ThreadLoop`. The
+//! public driver remains synchronous for the rest of the application, while
+//! every registry, link, and stream operation is protected by the loop lock.
 
 use super::*;
-use std::ffi::{c_char, c_void, CStr};
+use ::pipewire as pw;
+use pw::proxy::ProxyT;
+use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
+use pw::spa::param::ParamType;
+use pw::spa::pod::serialize::PodSerializer;
+use pw::spa::pod::{Pod, Value};
+use pw::spa::utils::Direction as SpaDirection;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
+use std::io::Cursor;
+use std::rc::Rc;
+use std::time::Instant;
 
-const MAX_NODES: usize = 4096;
-const MAX_PORTS: usize = 16384;
-const MAX_LINKS: usize = 16384;
-const MAX_METERS: usize = 4096;
+const NODE_NAME: &str = "node.name";
+const NODE_DESCRIPTION: &str = "node.description";
+const MEDIA_CLASS: &str = "media.class";
+const MEDIA_TYPE: &str = "media.type";
+const FORMAT_DSP: &str = "format.dsp";
+const NODE_ID: &str = "node.id";
+const PORT_NAME: &str = "port.name";
+const PORT_DIRECTION: &str = "port.direction";
+const LINK_OUTPUT_PORT: &str = "link.output.port";
+const LINK_INPUT_PORT: &str = "link.input.port";
 
-#[repr(C)]
-struct RawNode {
-    id: u32,
-    name: [c_char; 256],
-    media_class: [c_char; 64],
+#[derive(Clone, Debug, Default)]
+struct NodeRecord {
+    name: String,
+    media_class: String,
 }
 
-#[repr(C)]
-struct RawPort {
-    id: u32,
+#[derive(Clone, Debug, Default)]
+struct PortRecord {
     node_id: u32,
-    direction: u32,
-    name: [c_char; 256],
-    media_type: [c_char; 64],
+    name: String,
+    direction: Direction,
+    media_type: String,
 }
 
-#[repr(C)]
-struct RawLink {
-    id: u32,
+#[derive(Clone, Debug, Default)]
+struct LinkRecord {
     output_port: u32,
     input_port: u32,
 }
 
-#[repr(C)]
-struct RawSnapshot {
-    node_count: u32,
-    port_count: u32,
-    link_count: u32,
-    nodes: [RawNode; MAX_NODES],
-    ports: [RawPort; MAX_PORTS],
-    links: [RawLink; MAX_LINKS],
-}
-
-#[repr(C)]
-struct RawMeter {
-    node_id: u32,
-    rms: f32,
-    peak: f32,
-    age_ms: u32,
-    available: u32,
-}
-
-#[repr(C)]
-struct RawMeterSnapshot {
-    meter_count: u32,
-    meters: [RawMeter; MAX_METERS],
-}
-
-unsafe extern "C" {
-    fn pw_graph_shim_new() -> *mut c_void;
-    fn pw_graph_shim_free(shim: *mut c_void);
-    fn pw_graph_shim_snapshot(shim: *mut c_void, snapshot: *mut RawSnapshot) -> i32;
-    fn pw_graph_shim_create_link(
-        shim: *mut c_void,
-        output_node: u32,
-        output_port: u32,
-        input_node: u32,
-        input_port: u32,
-        link_id: *mut u32,
-    ) -> i32;
-    fn pw_graph_shim_destroy_link(shim: *mut c_void, link_id: u32) -> i32;
-    fn pw_graph_shim_meter_snapshot(shim: *mut c_void, snapshot: *mut RawMeterSnapshot) -> i32;
-}
-
-fn raw_text(value: &[c_char]) -> String {
-    unsafe { CStr::from_ptr(value.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn native_error(operation: &str, code: i32) -> BackendError {
-    BackendError::Native(format!("{operation} failed with code {code}"))
-}
-
-fn is_private_meter_node(name: &str) -> bool {
-    name.starts_with("qpwgraph-rs audio meter:")
+#[derive(Clone, Debug, Default)]
+struct RegistryState {
+    nodes: BTreeMap<u32, NodeRecord>,
+    ports: BTreeMap<u32, PortRecord>,
+    links: BTreeMap<u32, LinkRecord>,
 }
 
 #[derive(Debug)]
+struct MeterReadingState {
+    rms: f32,
+    peak: f32,
+    connected: bool,
+    updated_at: Option<Instant>,
+}
+
+impl Default for MeterReadingState {
+    fn default() -> Self {
+        Self {
+            rms: 0.0,
+            peak: 0.0,
+            connected: false,
+            updated_at: None,
+        }
+    }
+}
+
+struct MeterCallbackState {
+    shared: Rc<RefCell<MeterReadingState>>,
+    format: AudioInfoRaw,
+}
+
+struct MeterHandle {
+    _stream: pw::stream::Stream,
+    _listener: pw::stream::StreamListener<MeterCallbackState>,
+    shared: Rc<RefCell<MeterReadingState>>,
+}
+
 pub struct PipewireDriver {
-    native: *mut c_void,
+    thread_loop: pw::thread_loop::ThreadLoop,
+    context: Option<pw::context::Context>,
+    core: Option<pw::core::Core>,
+    registry: Option<pw::registry::Registry>,
+    registry_listener: Option<pw::registry::Listener>,
+    state: Rc<RefCell<RegistryState>>,
+    meters: BTreeMap<NodeId, MeterHandle>,
     graph: Graph,
-    positions: std::collections::BTreeMap<NodeId, [f32; 2]>,
+    positions: BTreeMap<NodeId, [f32; 2]>,
 }
 
 impl PipewireDriver {
     pub fn new() -> BackendResult<Self> {
-        let native = unsafe { pw_graph_shim_new() };
-        if native.is_null() {
-            return Err(BackendError::Native(
-                "could not connect to the PipeWire daemon".into(),
-            ));
-        }
-        Ok(Self {
-            native,
+        pw::init();
+
+        let thread_loop = unsafe { pw::thread_loop::ThreadLoop::new(Some("qpwgraph-rs"), None) }
+            .map_err(|error| native_error("PipeWire thread loop creation", error))?;
+        let context = pw::context::Context::new(&thread_loop)
+            .map_err(|error| native_error("PipeWire context creation", error))?;
+        let core = context
+            .connect(None)
+            .map_err(|error| native_error("PipeWire core connection", error))?;
+        let registry = core
+            .get_registry()
+            .map_err(|error| native_error("PipeWire registry creation", error))?;
+        let state = Rc::new(RefCell::new(RegistryState::default()));
+
+        let state_for_globals = state.clone();
+        let state_for_removals = state.clone();
+        let registry_listener = registry
+            .add_listener_local()
+            .global(move |global| {
+                let Some(props) = global.props else {
+                    return;
+                };
+                let mut state = state_for_globals.borrow_mut();
+                match &global.type_ {
+                    pw::types::ObjectType::Node => {
+                        let name = props
+                            .get(NODE_NAME)
+                            .or_else(|| props.get(NODE_DESCRIPTION))
+                            .unwrap_or("PipeWire node")
+                            .to_owned();
+                        let media_class = props.get(MEDIA_CLASS).unwrap_or_default().to_owned();
+                        state
+                            .nodes
+                            .insert(global.id, NodeRecord { name, media_class });
+                    }
+                    pw::types::ObjectType::Port => {
+                        let media_type = props
+                            .get(MEDIA_TYPE)
+                            .or_else(|| props.get(FORMAT_DSP))
+                            .unwrap_or_default()
+                            .to_owned();
+                        let direction = if props.get(PORT_DIRECTION) == Some("out") {
+                            Direction::Source
+                        } else {
+                            Direction::Sink
+                        };
+                        let node_id = props
+                            .get(NODE_ID)
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or_default();
+                        state.ports.insert(
+                            global.id,
+                            PortRecord {
+                                node_id,
+                                name: props.get(PORT_NAME).unwrap_or("PipeWire port").to_owned(),
+                                direction,
+                                media_type,
+                            },
+                        );
+                    }
+                    pw::types::ObjectType::Link => {
+                        let output_port = props
+                            .get(LINK_OUTPUT_PORT)
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or_default();
+                        let input_port = props
+                            .get(LINK_INPUT_PORT)
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or_default();
+                        state.links.insert(
+                            global.id,
+                            LinkRecord {
+                                output_port,
+                                input_port,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            })
+            .global_remove(move |id| {
+                let mut state = state_for_removals.borrow_mut();
+                state.nodes.remove(&id);
+                state.ports.remove(&id);
+                state.links.remove(&id);
+            })
+            .register();
+
+        thread_loop.start();
+
+        let driver = Self {
+            thread_loop,
+            context: Some(context),
+            core: Some(core),
+            registry: Some(registry),
+            registry_listener: Some(registry_listener),
+            state,
+            meters: BTreeMap::new(),
             graph: Graph::default(),
-            positions: std::collections::BTreeMap::new(),
-        })
+            positions: BTreeMap::new(),
+        };
+
+        let loop_for_initial_sync = driver.thread_loop.clone();
+        let _guard = loop_for_initial_sync.lock();
+        driver.roundtrip_locked()?;
+        Ok(driver)
     }
 
-    fn snapshot(&mut self) -> BackendResult<()> {
-        let mut snapshot = Box::<RawSnapshot>::new_uninit();
-        let result = unsafe { pw_graph_shim_snapshot(self.native, snapshot.as_mut_ptr()) };
-        if result < 0 {
-            return Err(native_error("PipeWire registry snapshot", result));
-        }
-        let snapshot = unsafe { snapshot.assume_init() };
+    fn core(&self) -> BackendResult<&pw::core::Core> {
+        self.core
+            .as_ref()
+            .ok_or_else(|| BackendError::Native("PipeWire core is closed".into()))
+    }
 
+    fn registry(&self) -> BackendResult<&pw::registry::Registry> {
+        self.registry
+            .as_ref()
+            .ok_or_else(|| BackendError::Native("PipeWire registry is closed".into()))
+    }
+
+    /// Wait for all registry events queued before the sync request.
+    /// The caller must hold the thread-loop lock.
+    fn roundtrip_locked(&self) -> BackendResult<()> {
+        let core = self.core()?.clone();
+        let pending = core
+            .sync(0)
+            .map_err(|error| native_error("PipeWire registry synchronization", error))?;
+        let done = Rc::new(Cell::new(false));
+        let failure = Rc::new(RefCell::new(None::<String>));
+        let done_for_callback = done.clone();
+        let loop_for_done_callback = self.thread_loop.clone();
+        let loop_for_error_callback = self.thread_loop.clone();
+        let failure_for_callback = failure.clone();
+        let listener = core
+            .add_listener_local()
+            .done(move |id, sequence| {
+                if id == pw::core::PW_ID_CORE && sequence == pending {
+                    done_for_callback.set(true);
+                    loop_for_done_callback.signal(false);
+                }
+            })
+            .error(move |_id, _sequence, result, message| {
+                *failure_for_callback.borrow_mut() = Some(format!("{message} ({result})"));
+                loop_for_error_callback.signal(false);
+            })
+            .register();
+
+        while !done.get() && failure.borrow().is_none() {
+            self.thread_loop.wait();
+        }
+        drop(listener);
+
+        if let Some(error) = failure.borrow_mut().take() {
+            return Err(BackendError::Native(format!(
+                "PipeWire registry synchronization failed: {error}"
+            )));
+        }
+        if !done.get() {
+            return Err(BackendError::Native(
+                "PipeWire registry synchronization ended unexpectedly".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn rebuild_graph_locked(&mut self) -> BackendResult<()> {
+        let state = self.state.borrow().clone();
         let mut graph = Graph::default();
-        let mut node_media_class = std::collections::HashMap::new();
-        for (index, raw) in snapshot.nodes[..(snapshot.node_count as usize).min(MAX_NODES)]
-            .iter()
-            .enumerate()
-        {
-            let id = NodeId(raw.id as u64);
-            let node_name = raw_text(&raw.name);
-            if is_private_meter_node(&node_name) {
+        let mut node_media_classes = HashMap::new();
+
+        for (index, (id, record)) in state.nodes.iter().enumerate() {
+            let node_id = NodeId(*id as u64);
+            if record.name.starts_with("qpwgraph-rs audio meter:") {
                 continue;
             }
-            node_media_class.insert(id, raw_text(&raw.media_class).to_ascii_lowercase());
-            let mut node = Node::new(id, node_name, NodeType::PipeWire);
-            node.position = self.positions.get(&id).copied().unwrap_or_else(|| {
+            node_media_classes.insert(node_id, record.media_class.to_ascii_lowercase());
+            let mut node = Node::new(node_id, &record.name, NodeType::PipeWire);
+            node.position = self.positions.get(&node_id).copied().unwrap_or_else(|| {
                 let column = (index % 4) as f32;
                 let row = (index / 4) as f32;
                 [40.0 + column * 280.0, 40.0 + row * 180.0]
             });
-            self.positions.insert(id, node.position);
+            self.positions.insert(node_id, node.position);
             graph.add_node(node)?;
         }
-        for raw in snapshot.ports[..(snapshot.port_count as usize).min(MAX_PORTS)].iter() {
-            let node_id = NodeId(raw.node_id as u64);
+
+        for (id, record) in state.ports {
+            let node_id = NodeId(record.node_id as u64);
             if graph.node(node_id).is_none() {
                 continue;
             }
-            let mut port_type = match raw_text(&raw.media_type).to_ascii_lowercase().as_str() {
-                "audio" => PortType::Audio,
-                "video" => PortType::Video,
-                "midi" => PortType::MidiJack,
-                _ => PortType::Unknown,
-            };
-            // The port itself frequently has no usable media type/format hint
-            // (bluetooth, camera, and application-stream ports commonly
-            // don't). Fall back to the owning node's media.class, which
-            // PipeWire nearly always sets (e.g. "Audio/Source",
-            // "Video/Source", "Midi/Bridge").
-            if port_type == PortType::Unknown {
-                if let Some(class) = node_media_class.get(&node_id) {
-                    port_type = if class.contains("midi") {
-                        PortType::MidiJack
-                    } else if class.contains("video") {
-                        PortType::Video
-                    } else if class.contains("audio") {
-                        PortType::Audio
-                    } else {
-                        PortType::Unknown
-                    };
-                }
-            }
+            let port_type = classify_port_type(
+                &record.media_type,
+                node_media_classes.get(&node_id).map(String::as_str),
+            );
             graph.add_port(Port::new(
-                PortId(raw.id as u64),
+                PortId(id as u64),
                 node_id,
-                raw_text(&raw.name),
-                if raw.direction == 1 {
-                    Direction::Source
-                } else {
-                    Direction::Sink
-                },
+                record.name,
+                record.direction,
                 port_type,
             ))?;
         }
-        for raw in snapshot.links[..(snapshot.link_count as usize).min(MAX_LINKS)].iter() {
+
+        for (id, record) in state.links {
             let _ = graph.insert_existing_link(Link {
-                id: LinkId(raw.id as u64),
-                output_port: PortId(raw.output_port as u64),
-                input_port: PortId(raw.input_port as u64),
+                id: LinkId(id as u64),
+                output_port: PortId(record.output_port as u64),
+                input_port: PortId(record.input_port as u64),
             });
         }
+
         self.graph = graph;
+        self.ensure_meters_locked();
         Ok(())
     }
-}
 
-impl Drop for PipewireDriver {
-    fn drop(&mut self) {
-        if !self.native.is_null() {
-            unsafe { pw_graph_shim_free(self.native) };
-            self.native = std::ptr::null_mut();
+    fn ensure_meters_locked(&mut self) {
+        let audio_nodes: BTreeMap<NodeId, String> = self
+            .graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let has_audio_source = node.ports.iter().any(|port_id| {
+                    self.graph.port(*port_id).is_some_and(|port| {
+                        port.direction.is_source() && port.port_type == PortType::Audio
+                    })
+                });
+                has_audio_source.then(|| (node.id, node.name.clone()))
+            })
+            .collect();
+
+        self.meters
+            .retain(|node_id, _| audio_nodes.contains_key(node_id));
+        for (node_id, name) in audio_nodes {
+            if self.meters.contains_key(&node_id) {
+                continue;
+            }
+            if let Ok(handle) = self.create_meter_locked(node_id, &name) {
+                self.meters.insert(node_id, handle);
+            }
         }
     }
-}
 
-impl GraphDriver for PipewireDriver {
-    fn refresh(&mut self) -> BackendResult<Vec<Node>> {
-        self.snapshot()?;
-        Ok(self.graph.nodes.values().cloned().collect())
+    fn create_meter_locked(&self, node_id: NodeId, node_name: &str) -> BackendResult<MeterHandle> {
+        let core = self.core()?.clone();
+        let stream_name = format!("qpwgraph-rs audio meter: {node_name}");
+        let properties = pw::properties::properties! {
+            "media.type" => "Audio",
+            "media.category" => "Monitor",
+            "media.role" => "DSP",
+            "target.object" => node_name,
+        };
+        let stream = pw::stream::Stream::new(&core, &stream_name, properties)
+            .map_err(|error| native_error("PipeWire audio meter stream creation", error))?;
+        let shared = Rc::new(RefCell::new(MeterReadingState::default()));
+        let callback_shared = shared.clone();
+        let mut callback_format = AudioInfoRaw::new();
+        callback_format.set_format(AudioFormat::F32LE);
+        let listener = stream
+            .add_local_listener_with_user_data(MeterCallbackState {
+                shared: callback_shared,
+                format: callback_format,
+            })
+            .state_changed(|_, data, _old, new| {
+                data.shared.borrow_mut().connected =
+                    matches!(new, pw::stream::StreamState::Streaming);
+            })
+            .param_changed(|_stream, data, id, param| {
+                if id != ParamType::Format.as_raw() {
+                    return;
+                }
+                let Some(param) = param else {
+                    return;
+                };
+                let mut format = AudioInfoRaw::new();
+                if format.parse(param).is_ok() {
+                    data.format = format;
+                }
+            })
+            .process(|stream, data| process_meter_buffer(stream, data))
+            .register()
+            .map_err(|error| native_error("PipeWire audio meter listener", error))?;
+
+        let pod_bytes = audio_format_pod()?;
+        let pod = Pod::from_bytes(&pod_bytes).ok_or_else(|| {
+            BackendError::Native("could not serialize PipeWire audio meter format".into())
+        })?;
+        let mut params = [pod];
+        stream
+            .connect(
+                SpaDirection::Input,
+                None,
+                pw::stream::StreamFlags::AUTOCONNECT
+                    | pw::stream::StreamFlags::MAP_BUFFERS
+                    | pw::stream::StreamFlags::RT_PROCESS
+                    | pw::stream::StreamFlags::DONT_RECONNECT,
+                &mut params,
+            )
+            .map_err(|error| native_error("PipeWire audio meter stream connection", error))?;
+
+        let _ = node_id;
+        Ok(MeterHandle {
+            _stream: stream,
+            _listener: listener,
+            shared,
+        })
     }
 
-    fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+    fn connect_locked(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
         let output = self.graph.port(src).ok_or(GraphError::MissingPort(src))?;
         let input = self.graph.port(dst).ok_or(GraphError::MissingPort(dst))?;
         if !output.direction.is_source() {
@@ -220,21 +424,31 @@ impl GraphDriver for PipewireDriver {
         {
             return Err(GraphError::IncompatiblePorts(src, dst).into());
         }
-        let mut link_id = 0;
-        let result = unsafe {
-            pw_graph_shim_create_link(
-                self.native,
-                output.node_id.0 as u32,
-                src.0 as u32,
-                input.node_id.0 as u32,
-                dst.0 as u32,
-                &mut link_id,
-            )
+
+        let properties = pw::properties::properties! {
+            "link.output.node" => output.node_id.0.to_string(),
+            "link.output.port" => src.0.to_string(),
+            "link.input.node" => input.node_id.0.to_string(),
+            "link.input.port" => dst.0.to_string(),
+            "object.linger" => "1",
         };
-        if result < 0 {
-            return Err(native_error("PipeWire link creation", result));
-        }
-        self.snapshot()?;
+        let proxy = self
+            .core()?
+            .create_object::<pw::link::Link>("link-factory", &properties)
+            .map_err(|error| native_error("PipeWire link creation", error))?;
+        let proxy_id = proxy.upcast_ref().id();
+        drop(proxy);
+        self.roundtrip_locked()?;
+
+        let link_id = self
+            .state
+            .borrow()
+            .links
+            .iter()
+            .find(|(_, link)| link.output_port == src.0 as u32 && link.input_port == dst.0 as u32)
+            .map(|(id, _)| *id)
+            .unwrap_or(proxy_id);
+        self.rebuild_graph_locked()?;
         Ok(self
             .graph
             .link(LinkId(link_id as u64))
@@ -246,18 +460,54 @@ impl GraphDriver for PipewireDriver {
             }))
     }
 
-    fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
+    fn disconnect_locked(&mut self, link: LinkId) -> BackendResult<Link> {
         let existing = self
             .graph
             .link(link)
             .cloned()
             .ok_or(GraphError::MissingLink(link))?;
-        let result = unsafe { pw_graph_shim_destroy_link(self.native, link.0 as u32) };
-        if result < 0 {
-            return Err(native_error("PipeWire link destruction", result));
-        }
-        self.snapshot()?;
+        self.registry()?
+            .destroy_global(link.0 as u32)
+            .into_result()
+            .map_err(|error| native_error("PipeWire link destruction", error))?;
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
         Ok(existing)
+    }
+}
+
+impl Drop for PipewireDriver {
+    fn drop(&mut self) {
+        let guard = self.thread_loop.lock();
+        self.meters.clear();
+        self.registry_listener.take();
+        self.registry.take();
+        self.core.take();
+        self.context.take();
+        drop(guard);
+        self.thread_loop.stop();
+    }
+}
+
+impl GraphDriver for PipewireDriver {
+    fn refresh(&mut self) -> BackendResult<Vec<Node>> {
+        let loop_for_refresh = self.thread_loop.clone();
+        let _guard = loop_for_refresh.lock();
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
+        Ok(self.graph.nodes.values().cloned().collect())
+    }
+
+    fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+        let loop_for_connect = self.thread_loop.clone();
+        let _guard = loop_for_connect.lock();
+        self.connect_locked(src, dst)
+    }
+
+    fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
+        let loop_for_disconnect = self.thread_loop.clone();
+        let _guard = loop_for_disconnect.lock();
+        self.disconnect_locked(link)
     }
 
     fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
@@ -268,12 +518,12 @@ impl GraphDriver for PipewireDriver {
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
         self.positions.insert(node, position);
-        if let Some(node_data) = self.graph.nodes.get_mut(&node) {
-            node_data.position = position;
-            Ok(())
-        } else {
-            Err(GraphError::MissingNode(node).into())
-        }
+        self.graph
+            .nodes
+            .get_mut(&node)
+            .ok_or(GraphError::MissingNode(node))?
+            .position = position;
+        Ok(())
     }
 
     fn graph(&self) -> &Graph {
@@ -292,24 +542,151 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
-        let mut snapshot = Box::<RawMeterSnapshot>::new_uninit();
-        let result = unsafe { pw_graph_shim_meter_snapshot(self.native, snapshot.as_mut_ptr()) };
-        if result < 0 {
-            return Err(native_error("PipeWire audio meter snapshot", result));
-        }
-        let snapshot = unsafe { snapshot.assume_init() };
-        Ok(
-            snapshot.meters[..(snapshot.meter_count as usize).min(MAX_METERS)]
-                .iter()
-                .filter(|meter| meter.available != 0)
-                .map(|meter| AudioMeter {
-                    node_id: NodeId(meter.node_id as u64),
-                    rms: meter.rms.clamp(0.0, 1.0),
-                    peak: meter.peak.clamp(0.0, 1.0),
-                    age_ms: meter.age_ms,
+        let loop_for_meters = self.thread_loop.clone();
+        let _guard = loop_for_meters.lock();
+        self.roundtrip_locked()?;
+        let now = Instant::now();
+        Ok(self
+            .meters
+            .iter()
+            .filter_map(|(node_id, meter)| {
+                let reading = meter.shared.borrow();
+                if !reading.connected {
+                    return None;
+                }
+                let age_ms = reading
+                    .updated_at
+                    .map(|updated| now.saturating_duration_since(updated).as_millis())
+                    .unwrap_or(u128::from(u32::MAX))
+                    .min(u128::from(u32::MAX)) as u32;
+                Some(AudioMeter {
+                    node_id: *node_id,
+                    rms: reading.rms.clamp(0.0, 1.0),
+                    peak: reading.peak.clamp(0.0, 1.0),
+                    age_ms,
                     available: true,
                 })
-                .collect(),
-        )
+            })
+            .collect())
+    }
+}
+
+fn classify_port_type(media_type: &str, node_media_class: Option<&str>) -> PortType {
+    let media_type = media_type.to_ascii_lowercase();
+    let node_media_class = node_media_class.unwrap_or_default().to_ascii_lowercase();
+    if media_type.contains("midi") {
+        PortType::MidiJack
+    } else if media_type.contains("video") {
+        PortType::Video
+    } else if media_type.contains("audio") {
+        PortType::Audio
+    } else if node_media_class.contains("midi") {
+        PortType::MidiJack
+    } else if node_media_class.contains("video") {
+        PortType::Video
+    } else if node_media_class.contains("audio") {
+        PortType::Audio
+    } else {
+        PortType::Unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_port_type;
+    use pw_graph_core::PortType;
+
+    #[test]
+    fn classifies_media_types_without_case_sensitive_metadata() {
+        assert_eq!(classify_port_type("Audio", None), PortType::Audio);
+        assert_eq!(classify_port_type("video/raw", None), PortType::Video);
+        assert_eq!(
+            classify_port_type("", Some("Midi/Source")),
+            PortType::MidiJack
+        );
+    }
+
+    #[test]
+    fn prefers_explicit_port_media_metadata() {
+        assert_eq!(
+            classify_port_type("audio/raw", Some("Video/Source")),
+            PortType::Audio
+        );
+        assert_eq!(
+            classify_port_type("midi/raw", Some("Audio/Source")),
+            PortType::MidiJack
+        );
+        assert_eq!(
+            classify_port_type("", Some("Stream/Output")),
+            PortType::Unknown
+        );
+    }
+}
+
+fn native_error(operation: &str, error: impl std::fmt::Display) -> BackendError {
+    BackendError::Native(format!("{operation} failed: {error}"))
+}
+
+fn audio_format_pod() -> BackendResult<Vec<u8>> {
+    let mut audio_info = AudioInfoRaw::new();
+    audio_info.set_format(AudioFormat::F32LE);
+    let object = pw::spa::pod::Object {
+        type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties: audio_info.into(),
+    };
+    PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(object))
+        .map(|success| success.0.into_inner())
+        .map_err(|error| native_error("PipeWire audio format serialization", error))
+}
+
+fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut MeterCallbackState) {
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return;
+    };
+    let format = data.format.format();
+    if !matches!(
+        format,
+        AudioFormat::F32LE | AudioFormat::F32BE | AudioFormat::F32P
+    ) {
+        return;
+    }
+
+    let mut peak = 0.0_f32;
+    let mut sum = 0.0_f64;
+    let mut samples = 0_u64;
+    for block in buffer.datas_mut() {
+        let offset = block.chunk().offset() as usize;
+        let size = block.chunk().size() as usize;
+        let Some(bytes) = block.data() else {
+            continue;
+        };
+        let end = offset.saturating_add(size).min(bytes.len());
+        if offset >= end {
+            continue;
+        }
+        for chunk in bytes[offset..end].chunks_exact(std::mem::size_of::<f32>()) {
+            let mut raw = [0_u8; 4];
+            raw.copy_from_slice(chunk);
+            let value = if format == AudioFormat::F32BE {
+                f32::from_be_bytes(raw)
+            } else {
+                f32::from_le_bytes(raw)
+            };
+            if !value.is_finite() {
+                continue;
+            }
+            let absolute = value.abs();
+            peak = peak.max(absolute);
+            sum += f64::from(absolute) * f64::from(absolute);
+            samples += 1;
+        }
+    }
+
+    if samples > 0 {
+        let mut reading = data.shared.borrow_mut();
+        reading.rms = (sum / samples as f64).sqrt().min(1.0) as f32;
+        reading.peak = peak.min(1.0);
+        reading.updated_at = Some(Instant::now());
     }
 }
