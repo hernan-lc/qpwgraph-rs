@@ -20,6 +20,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod links;
+mod metering;
+mod properties;
+mod registry;
+
+use metering::{process_meter_buffer, MeterCallbackState, MeterHandle, MeterReadingState};
+use registry::{classify_port_type, LinkRecord, NodeRecord, PortRecord, RegistryState};
+
 const NODE_NAME: &str = "node.name";
 const NODE_DESCRIPTION: &str = "node.description";
 const MEDIA_CLASS: &str = "media.class";
@@ -42,115 +50,6 @@ const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
 /// grace period, minimizing and immediately restoring the window would tear
 /// down and rebuild every visible stream.
 const METER_LINGER: Duration = Duration::from_secs(5);
-
-#[derive(Clone, Debug, Default)]
-struct NodeRecord {
-    name: String,
-    media_class: String,
-    /// `object.serial` is unique for the lifetime of the daemon, while node
-    /// names are not. Targeting by serial keeps a meter pinned to the node the
-    /// user actually asked about when several share a name.
-    serial: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct PortRecord {
-    node_id: u32,
-    name: String,
-    channel: Option<String>,
-    direction: Direction,
-    media_type: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct LinkRecord {
-    output_port: u32,
-    input_port: u32,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RegistryState {
-    nodes: BTreeMap<u32, NodeRecord>,
-    ports: BTreeMap<u32, PortRecord>,
-    links: BTreeMap<u32, LinkRecord>,
-}
-
-/// Sentinel for "no buffer has been measured yet".
-const NEVER_MEASURED: u64 = u64::MAX;
-
-/// Live meter values shared between PipeWire's realtime data thread and the
-/// thread that drives the UI.
-///
-/// The stream is connected with `RT_PROCESS`, so `process` is dispatched on the
-/// realtime data thread rather than on the thread loop. Holding the thread-loop
-/// lock therefore does *not* exclude it, which makes `Rc<RefCell<_>>` wrong
-/// twice over: the borrows race, and because the callback is an `extern "C"`
-/// frame that cannot unwind, the resulting "already borrowed" panic aborts the
-/// process instead of failing gracefully. All state here is consequently
-/// lock-free, which also keeps the realtime writer free of locks and allocation.
-#[derive(Debug)]
-struct MeterReadingState {
-    /// `f32` bit patterns; there is no atomic float.
-    rms_bits: AtomicU32,
-    peak_bits: AtomicU32,
-    /// Negotiated [`AudioFormat`], published by `param_changed`.
-    format: AtomicU32,
-    connected: AtomicBool,
-    /// Milliseconds since the driver epoch, or [`NEVER_MEASURED`].
-    updated_at_ms: AtomicU64,
-}
-
-impl Default for MeterReadingState {
-    fn default() -> Self {
-        Self {
-            rms_bits: AtomicU32::new(0),
-            peak_bits: AtomicU32::new(0),
-            // Only F32LE is offered during negotiation, so this is also the
-            // value `param_changed` is expected to confirm.
-            format: AtomicU32::new(AudioFormat::F32LE.as_raw()),
-            connected: AtomicBool::new(false),
-            updated_at_ms: AtomicU64::new(NEVER_MEASURED),
-        }
-    }
-}
-
-impl MeterReadingState {
-    fn store_levels(&self, rms: f32, peak: f32, at_ms: u64) {
-        self.rms_bits.store(rms.to_bits(), Ordering::Relaxed);
-        self.peak_bits.store(peak.to_bits(), Ordering::Relaxed);
-        // Released last so a reader that observes this timestamp also observes
-        // the levels it belongs to.
-        self.updated_at_ms.store(at_ms, Ordering::Release);
-    }
-
-    /// Levels plus their age in milliseconds, or `None` until the first buffer
-    /// has been measured.
-    fn levels(&self, now_ms: u64) -> Option<(f32, f32, u32)> {
-        let at_ms = self.updated_at_ms.load(Ordering::Acquire);
-        if at_ms == NEVER_MEASURED {
-            return None;
-        }
-        let age_ms = now_ms.saturating_sub(at_ms).min(u64::from(u32::MAX)) as u32;
-        Some((
-            f32::from_bits(self.rms_bits.load(Ordering::Relaxed)),
-            f32::from_bits(self.peak_bits.load(Ordering::Relaxed)),
-            age_ms,
-        ))
-    }
-}
-
-struct MeterCallbackState {
-    shared: Arc<MeterReadingState>,
-    /// Shared zero point, so the realtime thread can publish a plain `u64`
-    /// instead of a non-atomic `Instant`.
-    epoch: Instant,
-}
-
-struct MeterHandle {
-    _stream: pw::stream::Stream,
-    _listener: pw::stream::StreamListener<MeterCallbackState>,
-    shared: Arc<MeterReadingState>,
-}
 
 pub struct PipewireDriver {
     thread_loop: pw::thread_loop::ThreadLoop,
@@ -548,7 +447,7 @@ impl PipewireDriver {
     }
 
     fn elapsed_ms(&self) -> u64 {
-        elapsed_ms_since(self.epoch)
+        metering::elapsed_ms_since(self.epoch)
     }
 
     /// Drop request entries that have outlived [`METER_LINGER`].
@@ -678,155 +577,6 @@ impl PipewireDriver {
             _listener: listener,
             shared,
         })
-    }
-
-    fn connect_locked(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
-        let output = self
-            .graph
-            .port(src)
-            .cloned()
-            .ok_or(GraphError::MissingPort(src))?;
-        let input = self
-            .graph
-            .port(dst)
-            .cloned()
-            .ok_or(GraphError::MissingPort(dst))?;
-        if let (Some(output_key), Some(input_key)) =
-            (self.graph.port_key(src), self.graph.port_key(dst))
-        {
-            self.allow_blocked_connection(&output_key, &input_key);
-        }
-        if !output.direction.is_source() {
-            return Err(GraphError::NotSource(src).into());
-        }
-        if !input.direction.is_sink() {
-            return Err(GraphError::NotSink(dst).into());
-        }
-        if output.port_type != input.port_type
-            && output.port_type != PortType::Unknown
-            && input.port_type != PortType::Unknown
-        {
-            return Err(GraphError::IncompatiblePorts(src, dst).into());
-        }
-        if self
-            .graph
-            .links
-            .values()
-            .any(|link| link.output_port == src && link.input_port == dst)
-        {
-            return Err(GraphError::DuplicateConnection(src, dst).into());
-        }
-
-        let properties = pw::properties::properties! {
-            "link.output.node" => output.node_id.0.to_string(),
-            "link.output.port" => src.0.to_string(),
-            "link.input.node" => input.node_id.0.to_string(),
-            "link.input.port" => dst.0.to_string(),
-            "object.linger" => "1",
-        };
-        let proxy = self
-            .core()?
-            .create_object::<pw::link::Link>("link-factory", &properties)
-            .map_err(|error| native_error("PipeWire link creation", error))?;
-        let proxy_id = proxy.upcast_ref().id();
-        drop(proxy);
-        self.roundtrip_locked()?;
-
-        let link_id = self
-            .state
-            .borrow()
-            .links
-            .iter()
-            .find(|(_, link)| link.output_port == src.0 as u32 && link.input_port == dst.0 as u32)
-            .map(|(id, _)| *id)
-            .unwrap_or(proxy_id);
-        self.rebuild_graph_locked()?;
-        Ok(self
-            .graph
-            .link(LinkId(link_id as u64))
-            .cloned()
-            .unwrap_or(Link {
-                id: LinkId(link_id as u64),
-                output_port: src,
-                input_port: dst,
-            }))
-    }
-
-    fn disconnect_locked(&mut self, link: LinkId) -> BackendResult<Link> {
-        let existing = self
-            .graph
-            .link(link)
-            .cloned()
-            .ok_or(GraphError::MissingLink(link))?;
-        self.block_connection(&existing);
-        self.registry()?
-            .destroy_global(link.0 as u32)
-            .into_result()
-            .map_err(|error| native_error("PipeWire link destruction", error))?;
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        Ok(existing)
-    }
-
-    fn set_node_props_locked(
-        &self,
-        node: NodeId,
-        properties: Vec<pw::spa::pod::Property>,
-    ) -> BackendResult<()> {
-        let object = pw::registry::GlobalObject {
-            id: node.0 as u32,
-            permissions: pw::permissions::PermissionFlags::empty(),
-            type_: pw::types::ObjectType::Node,
-            // pipewire-rs keeps ObjectType::client_version private; version 3
-            // is the public node interface version used by pipewire 0.8.
-            version: NODE_INTERFACE_VERSION,
-            props: None::<pw::properties::Properties>,
-        };
-        let proxy = self
-            .registry()?
-            .bind::<pw::node::Node, _>(&object)
-            .map_err(|error| native_error("PipeWire node binding", error))?;
-        let value = pw::spa::pod::Value::Object(pw::spa::pod::Object {
-            type_: pw::spa::utils::SpaTypes::ObjectParamProps.as_raw(),
-            id: ParamType::Props.as_raw(),
-            properties,
-        });
-        let pod_bytes = PodSerializer::serialize(Cursor::new(Vec::new()), &value)
-            .map_err(|error| native_error("PipeWire node properties serialization", error))?
-            .0
-            .into_inner();
-        let pod = Pod::from_bytes(&pod_bytes).ok_or_else(|| {
-            BackendError::Native("could not serialize PipeWire node properties".into())
-        })?;
-        proxy.set_param(ParamType::Props, 0, pod);
-        drop(proxy);
-        self.roundtrip_locked()
-    }
-
-    fn set_node_mute_locked(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
-        self.set_node_props_locked(
-            node,
-            vec![pw::spa::pod::Property::new(
-                pw::spa::sys::SPA_PROP_mute,
-                pw::spa::pod::Value::Bool(muted),
-            )],
-        )?;
-        self.audio_controls.entry(node).or_default().muted = muted;
-        Ok(())
-    }
-
-    fn set_node_volume_locked(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
-        let volume = volume.clamp(0.0, 1.5);
-        let spa_volume = ui_volume_to_spa_volume(volume);
-        self.set_node_props_locked(
-            node,
-            vec![pw::spa::pod::Property::new(
-                pw::spa::sys::SPA_PROP_volume,
-                pw::spa::pod::Value::Float(spa_volume),
-            )],
-        )?;
-        self.audio_controls.entry(node).or_default().volume = volume;
-        Ok(())
     }
 }
 
@@ -1015,26 +765,6 @@ impl GraphDriver for PipewireDriver {
     }
 }
 
-fn classify_port_type(media_type: &str, node_media_class: Option<&str>) -> PortType {
-    let media_type = media_type.to_ascii_lowercase();
-    let node_media_class = node_media_class.unwrap_or_default().to_ascii_lowercase();
-    if media_type.contains("midi") {
-        PortType::MidiJack
-    } else if media_type.contains("video") {
-        PortType::Video
-    } else if media_type.contains("audio") {
-        PortType::Audio
-    } else if node_media_class.contains("midi") {
-        PortType::MidiJack
-    } else if node_media_class.contains("video") {
-        PortType::Video
-    } else if node_media_class.contains("audio") {
-        PortType::Audio
-    } else {
-        PortType::Unknown
-    }
-}
-
 fn native_error(operation: &str, error: impl std::fmt::Display) -> BackendError {
     BackendError::Native(format!("{operation} failed: {error}"))
 }
@@ -1060,63 +790,6 @@ fn audio_format_pod() -> BackendResult<Vec<u8>> {
 /// directly made the control much louder than its displayed value implied.
 fn ui_volume_to_spa_volume(volume: f32) -> f32 {
     volume.clamp(0.0, 1.5).powi(3)
-}
-
-fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut MeterCallbackState) {
-    let Some(mut buffer) = stream.dequeue_buffer() else {
-        return;
-    };
-    let format = AudioFormat::from_raw(data.shared.format.load(Ordering::Relaxed));
-    if !matches!(
-        format,
-        AudioFormat::F32LE | AudioFormat::F32BE | AudioFormat::F32P
-    ) {
-        return;
-    }
-
-    let mut peak = 0.0_f32;
-    let mut sum = 0.0_f64;
-    let mut samples = 0_u64;
-    for block in buffer.datas_mut() {
-        let offset = block.chunk().offset() as usize;
-        let size = block.chunk().size() as usize;
-        let Some(bytes) = block.data() else {
-            continue;
-        };
-        let end = offset.saturating_add(size).min(bytes.len());
-        if offset >= end {
-            continue;
-        }
-        for chunk in bytes[offset..end].chunks_exact(std::mem::size_of::<f32>()) {
-            let mut raw = [0_u8; 4];
-            raw.copy_from_slice(chunk);
-            let value = if format == AudioFormat::F32BE {
-                f32::from_be_bytes(raw)
-            } else {
-                f32::from_le_bytes(raw)
-            };
-            if !value.is_finite() {
-                continue;
-            }
-            let absolute = value.abs();
-            peak = peak.max(absolute);
-            sum += f64::from(absolute) * f64::from(absolute);
-            samples += 1;
-        }
-    }
-
-    if samples > 0 {
-        data.shared.store_levels(
-            (sum / samples as f64).sqrt().min(1.0) as f32,
-            peak.min(1.0),
-            elapsed_ms_since(data.epoch),
-        );
-    }
-}
-
-/// Milliseconds since `epoch`, saturating rather than wrapping.
-fn elapsed_ms_since(epoch: Instant) -> u64 {
-    epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
