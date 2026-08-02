@@ -185,6 +185,17 @@ impl QpwgraphApp {
         self.i18n.format(key, variables)
     }
 
+    fn refresh_graph(&mut self) {
+        match self.driver.refresh() {
+            Ok(nodes) => {
+                self.status = self.tf("status.refreshed", &[("count", nodes.len().to_string())])
+            }
+            Err(error) => {
+                self.status = self.tf("status.refresh_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
     fn handle_canvas_actions(&mut self, actions: Vec<CanvasAction>) {
         for action in actions {
             match action {
@@ -399,103 +410,56 @@ impl eframe::App for QpwgraphApp {
             self.config.window_height = rect.height();
         }
 
-        if self.config.menubar {
-            egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
+        if self.config.toolbar || self.config.patchbay_toolbar {
+            egui::TopBottomPanel::top("action_toolbar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if icon_button(
-                        ui,
-                        "menubar.refresh",
-                        "⟳",
-                        self.t("toolbar.refresh"),
-                        self.t("help.refresh"),
-                    ) {
-                        match self.driver.refresh() {
-                            Ok(nodes) => {
-                                self.status = self
-                                    .tf("status.refreshed", &[("count", nodes.len().to_string())])
-                            }
-                            Err(error) => {
-                                self.status = self
-                                    .tf("status.refresh_failed", &[("error", error.to_string())])
-                            }
+                    if self.config.toolbar {
+                        if icon_button(
+                            ui,
+                            "toolbar.refresh",
+                            "↻",
+                            self.t("toolbar.refresh"),
+                            self.t("help.refresh"),
+                        ) {
+                            self.refresh_graph();
                         }
-                    }
-                    if icon_button(
-                        ui,
-                        "menubar.save",
-                        "▣",
-                        self.t("toolbar.save_patchbay"),
-                        self.t("help.save_patchbay"),
-                    ) {
-                        self.save_patchbay();
-                    }
-                    if icon_button(
-                        ui,
-                        "menubar.load",
-                        "□",
-                        self.t("toolbar.load_patchbay"),
-                        self.t("help.load_patchbay"),
-                    ) {
-                        self.load_patchbay();
-                    }
-                    if icon_button(
-                        ui,
-                        "menubar.activate",
-                        "▶",
-                        self.t("toolbar.activate"),
-                        self.t("help.activate"),
-                    ) {
-                        self.activate_patchbay();
-                    }
-                });
-            });
-        }
-
-        if self.config.toolbar {
-            egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if icon_button(
-                        ui,
-                        "toolbar.refresh",
-                        "⟳",
-                        self.t("toolbar.refresh"),
-                        self.t("help.refresh"),
-                    ) {
-                        match self.driver.refresh() {
-                            Ok(nodes) => {
-                                self.status = self
-                                    .tf("status.refreshed", &[("count", nodes.len().to_string())])
-                            }
-                            Err(error) => {
-                                self.status = self
-                                    .tf("status.refresh_failed", &[("error", error.to_string())])
-                            }
+                        let undo_response = ui
+                            .add_enabled(
+                                self.commands.can_undo(),
+                                egui::Button::new(egui::RichText::new("↶").size(18.0))
+                                    .min_size(egui::vec2(34.0, 30.0)),
+                            )
+                            .on_hover_text(format!(
+                                "{}\n{}",
+                                self.t("toolbar.undo"),
+                                self.t("help.undo")
+                            ));
+                        if undo_response.clicked() {
+                            self.undo();
                         }
-                    }
-                    let undo_response = ui
-                        .add_enabled(
-                            self.commands.can_undo(),
-                            egui::Button::new(format!("↶ {}", self.t("toolbar.undo"))),
-                        )
-                        .on_hover_text(self.t("help.undo"));
-                    if undo_response.clicked() {
-                        self.undo();
-                    }
-                    let redo_response = ui
-                        .add_enabled(
-                            self.commands.can_redo(),
-                            egui::Button::new(format!("↷ {}", self.t("toolbar.redo"))),
-                        )
-                        .on_hover_text(self.t("help.redo"));
-                    if redo_response.clicked() {
-                        self.redo();
+                        let redo_response = ui
+                            .add_enabled(
+                                self.commands.can_redo(),
+                                egui::Button::new(egui::RichText::new("↷").size(18.0))
+                                    .min_size(egui::vec2(34.0, 30.0)),
+                            )
+                            .on_hover_text(format!(
+                                "{}\n{}",
+                                self.t("toolbar.redo"),
+                                self.t("help.redo")
+                            ));
+                        if redo_response.clicked() {
+                            self.redo();
+                        }
                     }
                     if self.config.patchbay_toolbar {
-                        ui.separator();
+                        if self.config.toolbar {
+                            ui.separator();
+                        }
                         if icon_button(
                             ui,
                             "toolbar.save",
-                            "▣",
+                            "⇩",
                             self.t("toolbar.save_patchbay"),
                             self.t("help.save_patchbay"),
                         ) {
@@ -504,7 +468,7 @@ impl eframe::App for QpwgraphApp {
                         if icon_button(
                             ui,
                             "toolbar.load",
-                            "□",
+                            "⇧",
                             self.t("toolbar.load_patchbay"),
                             self.t("help.load_patchbay"),
                         ) {

@@ -21,9 +21,13 @@ pub(crate) fn icon_button(
     explanation: String,
 ) -> bool {
     ui.push_id(("action", id), |ui| {
-        ui.button(format!("{icon} {label}"))
-            .on_hover_text(explanation)
-            .clicked()
+        let tooltip = format!("{label}\n{explanation}");
+        ui.add(
+            egui::Button::new(egui::RichText::new(icon).size(18.0))
+                .min_size(egui::vec2(34.0, 30.0)),
+        )
+        .on_hover_text(tooltip)
+        .clicked()
     })
     .inner
 }
@@ -38,7 +42,12 @@ pub(crate) fn icon_checkbox(
 ) -> bool {
     ui.push_id(("configuration", id), |ui| {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(icon).color(egui::Color32::LIGHT_BLUE));
+            ui.label(
+                egui::RichText::new(icon)
+                    .size(16.0)
+                    .color(egui::Color32::LIGHT_BLUE),
+            )
+            .on_hover_text(explanation.clone());
             let response = ui.checkbox(value, label);
             let changed = response.changed();
             response.on_hover_text(explanation);
@@ -68,7 +77,9 @@ impl QpwgraphApp {
 
     fn show_navigation(&mut self, ui: &mut Ui) {
         ui.vertical_centered(|ui| {
-            ui.heading("≡");
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Q").size(22.0).strong())
+                .on_hover_text(self.t("app.title"));
             ui.separator();
             let screens = [
                 (AppScreen::Graph, "⌘", "screen.graph"),
@@ -77,10 +88,20 @@ impl QpwgraphApp {
                 (AppScreen::Diagnostics, "ⓘ", "screen.diagnostics"),
             ];
             for (screen, icon, label) in screens {
+                let help_key = match screen {
+                    AppScreen::Graph => "help.navigation_graph",
+                    AppScreen::Patchbay => "help.navigation_patchbay",
+                    AppScreen::Interface => "help.navigation_interface",
+                    AppScreen::Diagnostics => "help.navigation_diagnostics",
+                };
                 let button = egui::Button::new(egui::RichText::new(icon).size(20.0))
                     .min_size(egui::vec2(42.0, 38.0))
                     .selected(self.screen == screen);
-                if ui.add(button).on_hover_text(self.t(label)).clicked() {
+                if ui
+                    .add(button)
+                    .on_hover_text(format!("{}\n{}", self.t(label), self.t(help_key)))
+                    .clicked()
+                {
                     self.screen = screen;
                 }
             }
@@ -347,17 +368,6 @@ impl QpwgraphApp {
             patchbay_toolbar_label,
             patchbay_toolbar_help,
         );
-        let menubar_label = self.t("inspector.menubar_visible");
-        let menubar_help = self.t("help.menubar_visible");
-        icon_checkbox(
-            ui,
-            "interface.menubar",
-            &mut self.config.menubar,
-            "☰",
-            menubar_label,
-            menubar_help,
-        );
-
         ui.separator();
         ui.heading(self.t("inspector.behavior"));
         let repel_label = self.t("inspector.repel_overlaps");

@@ -25,7 +25,9 @@ Use `--lang es` to start in Spanish. The language can also be changed from the
 Interface screen and is persisted in the application config. The right-side
 panel is split into Graph, Patchbay, Interface, and Diagnostics screens so
 layout, routing, presentation, and status options remain separate. Hover any
-icon for an explanation and use Save configuration to write immediately. Use
+icon for its label and explanation, and use Save configuration to write immediately. The
+single action toolbar contains graph history controls and optional patchbay actions;
+the same commands are not repeated in a second menu row. Use
 `--demo` to force the deterministic in-memory graph.
 
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray

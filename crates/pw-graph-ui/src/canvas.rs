@@ -103,7 +103,9 @@ impl GraphCanvas {
                         link.output_port,
                         link.input_port,
                     ));
-                    let response = ui.interact(hit_rect, link_widget_id, Sense::click());
+                    let response = ui
+                        .interact(hit_rect, link_widget_id, Sense::click())
+                        .on_hover_text(format!("{} → {}", source.name, destination.name));
                     if response.clicked() {
                         self.selected_link = Some(link.id);
                         self.selected_nodes.clear();
@@ -210,11 +212,13 @@ impl GraphCanvas {
     ) {
         let ports = self.ordered_ports(graph, node);
         let node_rect = self.node_rect(rect, graph, node);
-        let response = ui.interact(
-            node_rect,
-            ui.id().with(("graph-node", node.id)),
-            Sense::click_and_drag(),
-        );
+        let response = ui
+            .interact(
+                node_rect,
+                ui.id().with(("graph-node", node.id)),
+                Sense::click_and_drag(),
+            )
+            .on_hover_text(format!("{}\nDrag to move · click to select", node.name));
         if response.clicked() {
             let shift = ui.input(|input| input.modifiers.shift);
             if !shift {
@@ -306,7 +310,7 @@ impl GraphCanvas {
         painter.text(
             header.left_center() + vec2(10.0, 0.0),
             egui::Align2::LEFT_CENTER,
-            &node.name,
+            compact_label(&node.name, 27),
             FontId::proportional(14.0 * self.zoom),
             Color32::WHITE,
         );
@@ -325,12 +329,18 @@ impl GraphCanvas {
             let anchor = pos2(x, y);
             anchors.insert(port.id, anchor);
             let hit_rect = Rect::from_center_size(anchor, vec2(22.0, 22.0) * self.zoom.max(0.7));
-            let response = ui.interact(
-                hit_rect,
-                ui.id().with(("graph-port", node.id, index, port.id)),
-                Sense::click_and_drag(),
-            );
-            painter.circle_filled(anchor, 6.0 * self.zoom.max(0.7), port_color(port.port_type));
+            let response = ui
+                .interact(
+                    hit_rect,
+                    ui.id().with(("graph-port", node.id, index, port.id)),
+                    Sense::click_and_drag(),
+                )
+                .on_hover_text(port_tooltip(port));
+            let radius = 6.0 * self.zoom.max(0.7);
+            painter.circle_filled(anchor, radius, port_color(port.port_type));
+            if response.hovered() {
+                painter.circle_stroke(anchor, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
+            }
             let text_pos = if port.direction == Direction::Source {
                 anchor - vec2(10.0, 0.0)
             } else {
@@ -343,7 +353,7 @@ impl GraphCanvas {
                 } else {
                     egui::Align2::LEFT_CENTER
                 },
-                &port.name,
+                compact_label(&port.name, 27),
                 FontId::proportional(12.0 * self.zoom),
                 Color32::from_rgb(215, 220, 227),
             );
@@ -432,5 +442,39 @@ fn port_color(port_type: PortType) -> Color32 {
         PortType::MidiJack => Color32::from_rgb(227, 93, 106),
         PortType::MidiAlsa => Color32::from_rgb(169, 121, 209),
         PortType::Unknown => Color32::from_rgb(165, 165, 165),
+    }
+}
+
+fn port_tooltip(port: &Port) -> String {
+    let direction = if port.direction == Direction::Source {
+        "Output"
+    } else {
+        "Input"
+    };
+    format!(
+        "{} · {} · {}",
+        port.name,
+        direction,
+        port_type_label(port.port_type)
+    )
+}
+
+fn port_type_label(port_type: PortType) -> &'static str {
+    match port_type {
+        PortType::Audio => "Audio",
+        PortType::Video => "Video",
+        PortType::MidiJack => "PW/JACK MIDI",
+        PortType::MidiAlsa => "ALSA MIDI",
+        PortType::Unknown => "Unknown",
+    }
+}
+
+fn compact_label(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let compact: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{compact}…")
+    } else {
+        compact
     }
 }
