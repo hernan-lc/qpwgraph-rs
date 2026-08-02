@@ -51,6 +51,7 @@
   "toolbar.activate": "Activar",
   "toolbar.snapshot": "Capturar enlaces",
   "toolbar.disconnect": "Desconectar",
+  "toolbar.media_filter": "Filtro",
   "help.refresh": "Actualiza el registro nativo y redibuja nodos, puertos y enlaces.",
   "help.undo": "Deshace la última conexión, desconexión o renombrado.",
   "help.redo": "Rehace el último comando deshecho.",

@@ -51,6 +51,7 @@
   "toolbar.activate": "Activate",
   "toolbar.snapshot": "Snapshot links",
   "toolbar.disconnect": "Disconnect",
+  "toolbar.media_filter": "Filter",
   "help.refresh": "Refresh the native graph registry and redraw nodes, ports, and links.",
   "help.undo": "Undo the last connection, disconnection, or rename.",
   "help.redo": "Redo the last undone command.",

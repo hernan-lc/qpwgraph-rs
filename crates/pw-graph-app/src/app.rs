@@ -697,6 +697,7 @@ impl eframe::App for QpwgraphApp {
                                 self.activate_patchbay();
                             }
                         }
+                        self.show_media_filter_toolbar(ui);
                     });
                 });
         }

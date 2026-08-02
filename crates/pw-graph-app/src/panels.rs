@@ -183,9 +183,11 @@ impl QpwgraphApp {
             self.t("screen.graph"),
             self.t("screen.graph_hint"),
         );
-        panel_section(ui, self.t("inspector.filter_nodes"), |ui| {
-            self.show_media_filter_control(ui);
-        });
+        if !self.config.toolbar && !self.config.patchbay_toolbar {
+            panel_section(ui, self.t("inspector.filter_nodes"), |ui| {
+                self.show_media_filter_control(ui);
+            });
+        }
         let (node_count, port_count, link_count) = self.canvas.visible_counts(self.driver.graph());
         let node_count = node_count.to_string();
         let port_count = port_count.to_string();
@@ -269,9 +271,20 @@ impl QpwgraphApp {
     }
 
     fn show_media_filter_control(&mut self, ui: &mut Ui) {
+        ui.label(self.t("inspector.media_filter"));
+        self.show_media_filter_combo(ui, "inspector-media-filter");
+    }
+
+    pub(crate) fn show_media_filter_toolbar(&mut self, ui: &mut Ui) {
+        ui.separator();
+        ui.label(RichText::new(self.t("toolbar.media_filter")).strong());
+        self.show_media_filter_combo(ui, "toolbar-media-filter");
+    }
+
+    fn show_media_filter_combo(&mut self, ui: &mut Ui, id: &str) {
         let current_filter = MediaFilter::parse(&self.config.media_filter);
         let mut selected_filter = current_filter;
-        let filter_response = egui::ComboBox::from_label(self.t("inspector.media_filter"))
+        let filter_response = egui::ComboBox::from_id_salt(id)
             .selected_text(self.t(media_filter_key(current_filter)))
             .show_ui(ui, |ui| {
                 for filter in MediaFilter::ALL {
