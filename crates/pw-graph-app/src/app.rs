@@ -1,7 +1,7 @@
 use crate::args::Args;
 use crate::backend::CompositeDriver;
 use crate::icons::{icon_button, icon_button_enabled, Icon};
-use crate::panels::AppScreen;
+use crate::panels::{AppScreen, PreferencesTab};
 use eframe::egui;
 #[cfg(feature = "alsa")]
 use pw_graph_alsamidi::AlsaMidiDriver;
@@ -37,7 +37,11 @@ pub(crate) struct QpwgraphApp {
     pub(crate) i18n: I18n,
     pub(crate) backend_name: String,
     pub(crate) screen: AppScreen,
+    pub(crate) dock_open: bool,
     pub(crate) show_shortcuts: bool,
+    pub(crate) show_preferences: bool,
+    pub(crate) preferences_tab: PreferencesTab,
+    pub(crate) show_diagnostics: bool,
     pub(crate) rename_node: Option<NodeId>,
     pub(crate) rename_buffer: String,
     pub(crate) last_meter_refresh: Instant,
@@ -200,7 +204,11 @@ impl QpwgraphApp {
             i18n,
             backend_name,
             screen: AppScreen::default(),
+            dock_open: false,
             show_shortcuts: false,
+            show_preferences: false,
+            preferences_tab: PreferencesTab::default(),
+            show_diagnostics: false,
             rename_node: None,
             rename_buffer: String::new(),
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
@@ -241,6 +249,10 @@ impl QpwgraphApp {
         }
     }
 
+    pub(crate) fn any_modal_open(&self) -> bool {
+        self.show_shortcuts || self.show_preferences || self.show_diagnostics
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let f1_pressed = ctx.input(|input| input.key_pressed(egui::Key::F1));
         if f1_pressed {
@@ -248,9 +260,11 @@ impl QpwgraphApp {
             return;
         }
 
-        if self.show_shortcuts {
+        if self.any_modal_open() {
             if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
                 self.show_shortcuts = false;
+                self.show_preferences = false;
+                self.show_diagnostics = false;
             }
             return;
         }
@@ -767,7 +781,7 @@ impl eframe::App for QpwgraphApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let actions = if self.show_shortcuts {
+            let actions = if self.any_modal_open() {
                 Vec::new()
             } else {
                 self.canvas.show(ui, self.driver.graph(), &self.i18n)
@@ -778,6 +792,8 @@ impl eframe::App for QpwgraphApp {
         // Runs after the canvas so the request reflects what this frame drew.
         self.request_visible_meters();
         self.show_shortcuts_modal(ctx);
+        self.show_preferences_modal(ctx);
+        self.show_diagnostics_modal(ctx);
         self.autosave_config();
     }
 

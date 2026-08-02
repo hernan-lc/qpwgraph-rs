@@ -102,13 +102,36 @@ fn meter_policy_key(policy: MeterPolicy) -> &'static str {
     }
 }
 
+/// The two panels that live docked next to the canvas because their content
+/// is live data you want visible while working, not a one-off setting.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AppScreen {
     #[default]
     Graph,
     Patchbay,
+}
+
+/// Tabs inside the Preferences modal, which holds the settings you configure
+/// once rather than watch while working the canvas.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PreferencesTab {
+    #[default]
     Interface,
-    Diagnostics,
+    Patchbay,
+}
+
+fn show_backdrop(ctx: &egui::Context, id_source: &str) -> bool {
+    let screen_rect = ctx.screen_rect();
+    egui::Area::new(egui::Id::new(("modal-backdrop", id_source)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen_rect.min)
+        .show(ctx, |ui| {
+            let (response, painter) = ui.allocate_painter(screen_rect.size(), egui::Sense::click());
+            painter.rect_filled(response.rect, 0.0, Color32::from_black_alpha(120));
+            response
+        })
+        .inner
+        .clicked()
 }
 
 impl QpwgraphApp {
@@ -122,6 +145,9 @@ impl QpwgraphApp {
                 self.show_navigation(ui)
             });
 
+        if !self.dock_open {
+            return;
+        }
         egui::SidePanel::right("screen_panel")
             .default_width(370.0)
             .width_range(310.0..=520.0)
@@ -134,8 +160,6 @@ impl QpwgraphApp {
                     .show(ui, |ui| match self.screen {
                         AppScreen::Graph => self.show_graph_screen(ui),
                         AppScreen::Patchbay => self.show_patchbay_screen(ui),
-                        AppScreen::Interface => self.show_interface_screen(ui),
-                        AppScreen::Diagnostics => self.show_diagnostics_screen(ui),
                     });
             });
     }
@@ -145,33 +169,55 @@ impl QpwgraphApp {
             ui.add_space(8.0);
             icon_label(ui, Icon::Brand, self.t("app.title"));
             ui.separator();
-            let screens = [
+            let docks = [
                 (AppScreen::Graph, Icon::Graph, "screen.graph"),
                 (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
-                (AppScreen::Interface, Icon::Settings, "screen.interface"),
-                (
-                    AppScreen::Diagnostics,
-                    Icon::Diagnostics,
-                    "screen.diagnostics",
-                ),
             ];
-            for (screen, icon, label) in screens {
+            for (screen, icon, label) in docks {
                 let help_key = match screen {
                     AppScreen::Graph => "help.navigation_graph",
                     AppScreen::Patchbay => "help.navigation_patchbay",
-                    AppScreen::Interface => "help.navigation_interface",
-                    AppScreen::Diagnostics => "help.navigation_diagnostics",
                 };
-                if nav_icon_button(
-                    ui,
-                    label,
-                    icon,
-                    self.screen == screen,
-                    self.t(label),
-                    self.t(help_key),
-                ) {
-                    self.screen = screen;
+                let selected = self.dock_open && self.screen == screen;
+                if nav_icon_button(ui, label, icon, selected, self.t(label), self.t(help_key)) {
+                    if selected {
+                        self.dock_open = false;
+                    } else {
+                        self.screen = screen;
+                        self.dock_open = true;
+                    }
                 }
+            }
+            ui.separator();
+            if nav_icon_button(
+                ui,
+                "nav.preferences",
+                Icon::Settings,
+                self.show_preferences,
+                self.t("nav.preferences"),
+                self.t("help.navigation_preferences"),
+            ) {
+                self.show_preferences = !self.show_preferences;
+            }
+            if nav_icon_button(
+                ui,
+                "screen.diagnostics",
+                Icon::Diagnostics,
+                self.show_diagnostics,
+                self.t("screen.diagnostics"),
+                self.t("help.navigation_diagnostics"),
+            ) {
+                self.show_diagnostics = !self.show_diagnostics;
+            }
+            if nav_icon_button(
+                ui,
+                "nav.shortcuts",
+                Icon::Help,
+                self.show_shortcuts,
+                self.t("nav.shortcuts"),
+                self.t("help.navigation_shortcuts"),
+            ) {
+                self.show_shortcuts = !self.show_shortcuts;
             }
         });
     }
@@ -308,18 +354,7 @@ impl QpwgraphApp {
         if !self.show_shortcuts {
             return;
         }
-        let screen_rect = ctx.screen_rect();
-        let backdrop_response = egui::Area::new(egui::Id::new("shortcuts-backdrop"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(screen_rect.min)
-            .show(ctx, |ui| {
-                let (response, painter) =
-                    ui.allocate_painter(screen_rect.size(), egui::Sense::click());
-                painter.rect_filled(response.rect, 0.0, Color32::from_black_alpha(120));
-                response
-            })
-            .inner;
-        if backdrop_response.clicked() {
+        if show_backdrop(ctx, "shortcuts") {
             self.show_shortcuts = false;
             return;
         }
@@ -508,49 +543,17 @@ impl QpwgraphApp {
             self.t("screen.patchbay_hint"),
         );
         panel_section(ui, self.t("inspector.patchbay_options"), |ui| {
-            let exclusive_label = self.t("inspector.exclusive");
-            let exclusive_help = self.t("help.exclusive");
-            icon_checkbox(
+            ui.label(RichText::new(self.t("inspector.patchbay_options_hint")).weak());
+            ui.add_space(2.0);
+            if icon_button(
                 ui,
-                "patchbay.exclusive",
-                &mut self.config.patchbay_exclusive,
-                Icon::Exclusive,
-                exclusive_label,
-                exclusive_help,
-            );
-            let auto_disconnect_label = self.t("inspector.auto_disconnect");
-            let auto_disconnect_help = self.t("help.auto_disconnect");
-            icon_checkbox(
-                ui,
-                "patchbay.auto_disconnect",
-                &mut self.config.patchbay_auto_disconnect,
-                Icon::AutoDisconnect,
-                auto_disconnect_label,
-                auto_disconnect_help,
-            );
-            let auto_pin_label = self.t("inspector.auto_pin");
-            let auto_pin_help = self.t("help.auto_pin");
-            icon_checkbox(
-                ui,
-                "patchbay.auto_pin",
-                &mut self.config.patchbay_auto_pin,
-                Icon::Pin,
-                auto_pin_label,
-                auto_pin_help,
-            );
-            let patchbay_activated_before = self.config.patchbay_activated;
-            let patchbay_activated_label = self.t("inspector.patchbay_activated");
-            let patchbay_activated_help = self.t("help.patchbay_activated");
-            icon_checkbox(
-                ui,
-                "patchbay.activated",
-                &mut self.config.patchbay_activated,
-                Icon::Timer,
-                patchbay_activated_label,
-                patchbay_activated_help,
-            );
-            if self.config.patchbay_activated && !patchbay_activated_before {
-                self.activate_patchbay();
+                "patchbay.open_preferences",
+                Icon::Settings,
+                self.t("inspector.open_patchbay_preferences"),
+                self.t("help.open_patchbay_preferences"),
+            ) {
+                self.preferences_tab = PreferencesTab::Patchbay;
+                self.show_preferences = true;
             }
         });
 
@@ -665,13 +668,111 @@ impl QpwgraphApp {
         });
     }
 
-    fn show_interface_screen(&mut self, ui: &mut Ui) {
-        panel_header(
-            ui,
-            Icon::Settings,
-            self.t("screen.interface"),
-            self.t("screen.interface_hint"),
-        );
+    pub(crate) fn show_preferences_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_preferences {
+            return;
+        }
+        if show_backdrop(ctx, "preferences") {
+            self.show_preferences = false;
+            return;
+        }
+        egui::Window::new(self.t("preferences.title"))
+            .id(egui::Id::new("preferences-window"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                apply_panel_text_scale(ui, self.config.panel_text_scale);
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(
+                            self.preferences_tab == PreferencesTab::Interface,
+                            self.t("screen.interface"),
+                        )
+                        .clicked()
+                    {
+                        self.preferences_tab = PreferencesTab::Interface;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.preferences_tab == PreferencesTab::Patchbay,
+                            self.t("inspector.patchbay_options"),
+                        )
+                        .clicked()
+                    {
+                        self.preferences_tab = PreferencesTab::Patchbay;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("preferences-scroll")
+                    .max_height(460.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| match self.preferences_tab {
+                        PreferencesTab::Interface => self.show_preferences_interface_tab(ui),
+                        PreferencesTab::Patchbay => self.show_preferences_patchbay_tab(ui),
+                    });
+                ui.add_space(8.0);
+                if ui.button(self.t("shortcuts.close")).clicked() {
+                    self.show_preferences = false;
+                }
+            });
+    }
+
+    fn show_preferences_patchbay_tab(&mut self, ui: &mut Ui) {
+        panel_section(ui, self.t("inspector.patchbay_options"), |ui| {
+            let exclusive_label = self.t("inspector.exclusive");
+            let exclusive_help = self.t("help.exclusive");
+            icon_checkbox(
+                ui,
+                "patchbay.exclusive",
+                &mut self.config.patchbay_exclusive,
+                Icon::Exclusive,
+                exclusive_label,
+                exclusive_help,
+            );
+            let auto_disconnect_label = self.t("inspector.auto_disconnect");
+            let auto_disconnect_help = self.t("help.auto_disconnect");
+            icon_checkbox(
+                ui,
+                "patchbay.auto_disconnect",
+                &mut self.config.patchbay_auto_disconnect,
+                Icon::AutoDisconnect,
+                auto_disconnect_label,
+                auto_disconnect_help,
+            );
+            let auto_pin_label = self.t("inspector.auto_pin");
+            let auto_pin_help = self.t("help.auto_pin");
+            icon_checkbox(
+                ui,
+                "patchbay.auto_pin",
+                &mut self.config.patchbay_auto_pin,
+                Icon::Pin,
+                auto_pin_label,
+                auto_pin_help,
+            );
+            let patchbay_activated_before = self.config.patchbay_activated;
+            let patchbay_activated_label = self.t("inspector.patchbay_activated");
+            let patchbay_activated_help = self.t("help.patchbay_activated");
+            icon_checkbox(
+                ui,
+                "patchbay.activated",
+                &mut self.config.patchbay_activated,
+                Icon::Timer,
+                patchbay_activated_label,
+                patchbay_activated_help,
+            );
+            if self.config.patchbay_activated && !patchbay_activated_before {
+                self.activate_patchbay();
+            }
+        });
+    }
+
+    fn show_preferences_interface_tab(&mut self, ui: &mut Ui) {
         let current_locale = self.i18n.locale();
         let mut selected_locale = current_locale;
         panel_section(ui, self.t("inspector.configuration"), |ui| {
@@ -817,13 +918,34 @@ impl QpwgraphApp {
         });
     }
 
-    fn show_diagnostics_screen(&mut self, ui: &mut Ui) {
-        panel_header(
-            ui,
-            Icon::Diagnostics,
-            self.t("screen.diagnostics"),
-            self.t("screen.diagnostics_hint"),
-        );
+    pub(crate) fn show_diagnostics_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_diagnostics {
+            return;
+        }
+        if show_backdrop(ctx, "diagnostics") {
+            self.show_diagnostics = false;
+            return;
+        }
+        egui::Window::new(self.t("screen.diagnostics"))
+            .id(egui::Id::new("diagnostics-window"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                apply_panel_text_scale(ui, self.config.panel_text_scale);
+                ui.label(RichText::new(self.t("screen.diagnostics_hint")).weak());
+                ui.add_space(6.0);
+                self.show_diagnostics_content(ui);
+                ui.add_space(4.0);
+                if ui.button(self.t("shortcuts.close")).clicked() {
+                    self.show_diagnostics = false;
+                }
+            });
+    }
+
+    fn show_diagnostics_content(&mut self, ui: &mut Ui) {
         panel_section(ui, self.t("inspector.runtime"), |ui| {
             ui.label(self.tf(
                 "diagnostics.backend",
