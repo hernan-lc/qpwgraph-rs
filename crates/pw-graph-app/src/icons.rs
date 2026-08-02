@@ -6,7 +6,6 @@ pub(crate) enum Icon {
     AutoDisconnect,
     Connect,
     Delete,
-    Diagnostics,
     Exclusive,
     Graph,
     Help,
@@ -37,7 +36,6 @@ fn icon_source(icon: Icon) -> ImageSource<'static> {
         Icon::AutoDisconnect => include_image!("../assets/icons/auto_disconnect.svg"),
         Icon::Connect => include_image!("../assets/icons/connect.svg"),
         Icon::Delete => include_image!("../assets/icons/delete.svg"),
-        Icon::Diagnostics => include_image!("../assets/icons/diagnostics.svg"),
         Icon::Exclusive => include_image!("../assets/icons/exclusive.svg"),
         Icon::Graph => include_image!("../assets/icons/graph.svg"),
         Icon::Help => include_image!("../assets/icons/help.svg"),
@@ -150,19 +148,6 @@ fn icon_button_enabled_sized(
     .inner
 }
 
-/// Like [`icon_button`], but rendered in the "selected" style when `selected`
-/// is true. Used for toolbar toggles such as the Easy/Advanced connect mode.
-pub(crate) fn icon_toggle_button(
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    selected: bool,
-    label: String,
-    explanation: String,
-) -> bool {
-    icon_toggle_button_sized(ui, id, icon, selected, label, explanation, ICON_BUTTON_SIZE, 7.0)
-}
-
 pub(crate) fn sidebar_icon_toggle_button(
     ui: &mut Ui,
     id: &str,
@@ -203,17 +188,6 @@ fn icon_toggle_button_sized(
         response.clicked()
     })
     .inner
-}
-
-pub(crate) fn nav_icon_button(
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    selected: bool,
-    label: String,
-    explanation: String,
-) -> bool {
-    nav_icon_button_sized(ui, id, icon, selected, label, explanation, vec2(42.0, 38.0), 10.0)
 }
 
 pub(crate) fn sidebar_nav_icon_button(

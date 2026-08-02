@@ -544,8 +544,7 @@ impl GraphCanvas {
             if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
                 if let Some(target) = self.node_at(rect, graph, pointer, node.id) {
                     if let Some(target_node) = graph.node(target) {
-                        for (output, input) in self.matching_port_pairs(graph, node, target_node)
-                        {
+                        for (output, input) in self.matching_port_pairs(graph, node, target_node) {
                             if !link_exists(graph, output, input) {
                                 actions.push(CanvasAction::Connect { output, input });
                             }
@@ -690,11 +689,7 @@ impl GraphCanvas {
                 }
             } else if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
                 if node_rect.contains(pointer) {
-                    painter.rect_stroke(
-                        node_rect,
-                        8.0,
-                        Stroke::new(2.5_f32, Color32::LIGHT_GREEN),
-                    );
+                    painter.rect_stroke(node_rect, 8.0, Stroke::new(2.5_f32, Color32::LIGHT_GREEN));
                 }
             }
         }
@@ -1306,6 +1301,106 @@ mod tests {
             display_port_name("Midi Through: Port-0 (capture)", &i18n),
             "Port 0 Captura"
         );
+    }
+
+    fn stereo_pair_graph() -> Graph {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(NodeId(1), "Source", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_node(Node::new(NodeId(2), "Sink", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(10),
+                NodeId(1),
+                "out_L",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(11),
+                NodeId(1),
+                "out_R",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(20),
+                NodeId(2),
+                "in_L",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(21),
+                NodeId(2),
+                "in_R",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+    }
+
+    #[test]
+    fn matching_port_pairs_zips_outputs_to_inputs_in_order() {
+        let graph = stereo_pair_graph();
+        let canvas = GraphCanvas::default();
+        let source = graph.node(NodeId(1)).unwrap();
+        let target = graph.node(NodeId(2)).unwrap();
+        assert_eq!(
+            canvas.matching_port_pairs(&graph, source, target),
+            vec![(PortId(10), PortId(20)), (PortId(11), PortId(21))]
+        );
+    }
+
+    #[test]
+    fn matching_port_pairs_stops_at_the_shorter_side_and_ignores_direction_mismatches() {
+        let mut graph = stereo_pair_graph();
+        // A stray sink port on the source node must not be treated as an
+        // output, and the extra input on the target has nothing left to pair.
+        graph
+            .add_port(Port::new(
+                PortId(12),
+                NodeId(1),
+                "aux_in",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(22),
+                NodeId(2),
+                "in_C",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        let canvas = GraphCanvas::default();
+        let source = graph.node(NodeId(1)).unwrap();
+        let target = graph.node(NodeId(2)).unwrap();
+        assert_eq!(
+            canvas.matching_port_pairs(&graph, source, target),
+            vec![(PortId(10), PortId(20)), (PortId(11), PortId(21))]
+        );
+    }
+
+    #[test]
+    fn link_exists_matches_only_the_exact_output_input_pair() {
+        let mut graph = stereo_pair_graph();
+        graph.add_link(LinkId(1), PortId(10), PortId(20)).unwrap();
+        assert!(link_exists(&graph, PortId(10), PortId(20)));
+        assert!(!link_exists(&graph, PortId(11), PortId(20)));
+        assert!(!link_exists(&graph, PortId(10), PortId(21)));
     }
 
     #[test]

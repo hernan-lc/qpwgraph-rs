@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn spanish_translates_and_falls_back() {
         let i18n = I18n::new(Locale::Spanish);
-        assert_eq!(i18n.text("toolbar.refresh"), "Actualizar");
+        assert_eq!(i18n.text("toolbar.undo"), "Deshacer");
         assert_eq!(i18n.text("missing.key"), "missing.key");
     }
 

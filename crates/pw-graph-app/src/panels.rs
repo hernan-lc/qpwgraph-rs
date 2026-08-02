@@ -67,21 +67,6 @@ fn stat_card(ui: &mut Ui, label: String, value: String) {
         });
 }
 
-fn color_swatch(ui: &mut Ui, color: Color32, label: String) {
-    egui::Frame::none()
-        .fill(Color32::from_rgb(36, 43, 53))
-        .rounding(5.0)
-        .inner_margin(egui::Margin::symmetric(9.0, 6.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _response) =
-                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.5, color);
-                ui.label(label);
-            });
-        });
-}
-
 fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: String) {
     ui.push_id(("text-scale", id), |ui| {
         ui.horizontal(|ui| {
@@ -272,10 +257,8 @@ fn full_panel_window(id_source: &str, title: String, rect: egui::Rect) -> egui::
         .order(egui::Order::Foreground)
 }
 
-/// Shared chrome for every dialog: fixed size, centered, non-collapsible,
-/// always on top. Individual dialogs only supply their title, width, and
-/// body — keeps the three modals (shortcuts, preferences, diagnostics) from
-/// re-declaring the same half-dozen builder calls each.
+/// Shared chrome for the remaining compact dialog: fixed size, centered,
+/// non-collapsible, and always on top.
 fn modal_window(id_source: &str, title: String, default_width: f32) -> egui::Window<'static> {
     egui::Window::new(title)
         .id(egui::Id::new(("modal-window", id_source)))
@@ -707,6 +690,15 @@ impl QpwgraphApp {
     fn show_meter_controls(&mut self, ui: &mut Ui) {
         let current = MeterPolicy::parse(&self.config.audio_meters);
         let mut selected = current;
+        if icon_button(
+            ui,
+            "meters.reset",
+            Icon::Refresh,
+            self.t("inspector.audio_reset"),
+            self.t("help.audio_reset"),
+        ) {
+            self.reset_audio_config();
+        }
         let response = egui::ComboBox::from_label(self.t("inspector.audio_metering_policy"))
             .selected_text(self.t(meter_policy_key(current)))
             .show_ui(ui, |ui| {
@@ -721,15 +713,7 @@ impl QpwgraphApp {
         if selected != current {
             self.config.audio_meters = selected.as_str().to_owned();
         }
-        if icon_button(
-            ui,
-            "meters.reset",
-            Icon::Refresh,
-            self.t("inspector.audio_reset"),
-            self.t("help.audio_reset"),
-        ) {
-            self.reset_audio_config();
-        }
+
         ui.label(
             RichText::new(self.t(match selected {
                 MeterPolicy::Disabled => "meters.off_hint",
@@ -1207,5 +1191,4 @@ impl QpwgraphApp {
             );
         });
     }
-
 }

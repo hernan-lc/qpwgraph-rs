@@ -38,8 +38,8 @@ The desktop shell is modularized: `main.rs` is a small entry point, while
 state, CLI parsing, backend composition, screen panels, and tray integration.
 The backend’s PipeWire implementation, patchbay XML support, and canvas
 rendering are also separated into `pipewire.rs`, `xml.rs`, and `canvas.rs`.
-The GUI uses a navigation rail with separate Graph, Patchbay, Interface, and
-Diagnostics screens instead of placing every option in one inspector column.
+The GUI uses a navigation rail with Graph and Patchbay screens plus a full-area
+Preferences panel instead of duplicating common controls in the inspector.
 
 ## Roadmap status
 
@@ -66,7 +66,6 @@ Diagnostics screens instead of placing every option in one inspector column.
 - Interface: language selection, configuration save, sidebar action toggles,
   visibility toggles, graph presentation behavior, and independent typography
   controls for application, panel, and node text.
-- Diagnostics: active backend, status, graph counts, and port color legend.
 
 ## Native/runtime notes
 

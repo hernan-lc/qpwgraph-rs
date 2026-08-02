@@ -23,10 +23,10 @@ cargo run -p pw-graph-app
 
 Use `--lang es` to start in Spanish. The language can also be changed from the
 Interface screen and is persisted in the application config. The right-side
-panel is split into Graph, Patchbay, Interface, and Diagnostics screens so
-layout, routing, presentation, and status options remain separate. Each screen
-uses scrollable grouped sections and compact statistic cards; the Interface
-screen exposes independent application, panel, and node text-size controls.
+panel is split into Graph and Patchbay screens, while Preferences owns
+interface, behavior, and presentation settings. Each panel uses scrollable
+grouped sections; Preferences exposes independent application, panel, and node
+text-size controls.
 Hover any icon for its label and explanation, and use Save configuration to write immediately. The
 left navigation rail contains shared graph/history controls, optional patchbay
 actions, and the media filter, so common actions remain available while
