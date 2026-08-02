@@ -148,4 +148,13 @@ mod tests {
             spanish.keys().collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn refresh_tooltips_are_translated_in_every_locale() {
+        for locale in Locale::ALL {
+            let i18n = I18n::new(locale);
+            assert_ne!(i18n.text("toolbar.refresh"), "toolbar.refresh");
+            assert_ne!(i18n.text("help.refresh"), "help.refresh");
+        }
+    }
 }

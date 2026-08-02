@@ -25,6 +25,7 @@
   "status.arranged": "{count} nœuds organisés",
   "search.placeholder": "Rechercher…",
   "search.help": "Filtrer les nœuds et ports par nom.",
+  "help.refresh": "Actualiser le graphique en direct.",
   "patchbay.connections": "Règles de connexion",
   "patchbay.no_connections": "Aucune règle enregistrée.",
   "patchbay.remove_rule": "Supprimer",
