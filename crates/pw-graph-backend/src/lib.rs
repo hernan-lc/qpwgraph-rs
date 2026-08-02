@@ -7,6 +7,47 @@ use pw_graph_core::{
 use std::collections::BTreeSet;
 use thiserror::Error;
 
+/// How freely a backend may open helper streams to measure audio levels.
+///
+/// Measuring a PipeWire node means connecting a real capture stream to it. The
+/// session manager links that stream like any other client, which resumes
+/// suspended devices and can make the daemon renegotiate the graph rate. Doing
+/// that for every audio node the moment the window opens visibly rewrites the
+/// user's audio configuration, so metering defaults to [`MeterPolicy::OnDemand`]
+/// and a plain launch leaves the running graph untouched.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MeterPolicy {
+    /// Never open helper streams. Meters report unavailable.
+    Disabled,
+    /// Only measure nodes the UI is actively showing a meter for.
+    #[default]
+    OnDemand,
+    /// Measure every audio node continuously.
+    Always,
+}
+
+impl MeterPolicy {
+    pub const ALL: [Self; 3] = [Self::Disabled, Self::OnDemand, Self::Always];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "off",
+            Self::OnDemand => "on-demand",
+            Self::Always => "always",
+        }
+    }
+
+    /// Unknown values fall back to the safe default rather than failing a load,
+    /// so a hand-edited or older config file still starts the application.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => Self::Disabled,
+            "always" | "all" => Self::Always,
+            _ => Self::OnDemand,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BackendError {
     #[error(transparent)]
@@ -57,6 +98,32 @@ pub trait GraphDriver {
     fn is_port_type(&self, port_type: PortType) -> bool;
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
         Ok(Vec::new())
+    }
+
+    /// Choose how aggressively the backend may attach metering streams.
+    fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {
+        let _ = policy;
+        Ok(())
+    }
+
+    /// Declare the nodes the UI currently wants a meter for.
+    ///
+    /// Under [`MeterPolicy::OnDemand`] this is the only thing that makes a
+    /// backend open a helper stream. Callers are expected to repeat the request
+    /// while the meter stays visible; backends may keep a stream alive briefly
+    /// after the last request so pointer movement does not thrash streams.
+    fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
+        let _ = nodes;
+        Ok(())
+    }
+
+    /// Release every helper stream this backend owns.
+    ///
+    /// This is the escape hatch for a session whose devices were resumed or
+    /// renegotiated by metering: dropping the streams lets the session manager
+    /// suspend and restore the nodes to their configured defaults.
+    fn reset_audio_config(&mut self) -> BackendResult<()> {
+        Ok(())
     }
 }
 

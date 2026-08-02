@@ -13,10 +13,10 @@ use pw::spa::pod::serialize::PodSerializer;
 use pw::spa::pod::{Pod, Value};
 use pw::spa::utils::Direction as SpaDirection;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const NODE_NAME: &str = "node.name";
 const NODE_DESCRIPTION: &str = "node.description";
@@ -24,15 +24,29 @@ const MEDIA_CLASS: &str = "media.class";
 const MEDIA_TYPE: &str = "media.type";
 const FORMAT_DSP: &str = "format.dsp";
 const NODE_ID: &str = "node.id";
+const OBJECT_SERIAL: &str = "object.serial";
 const PORT_NAME: &str = "port.name";
 const PORT_DIRECTION: &str = "port.direction";
 const LINK_OUTPUT_PORT: &str = "link.output.port";
 const LINK_INPUT_PORT: &str = "link.input.port";
 
+/// Node name given to our own metering streams. They are helper objects, so
+/// they are filtered back out of the graph the UI renders.
+const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
+
+/// How long a metering stream outlives the last request for it. Hovering a port
+/// asks for a meter every frame; without a grace period, moving the pointer
+/// between two ports would tear down and rebuild streams continuously.
+const METER_LINGER: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug, Default)]
 struct NodeRecord {
     name: String,
     media_class: String,
+    /// `object.serial` is unique for the lifetime of the daemon, while node
+    /// names are not. Targeting by serial keeps a meter pinned to the node the
+    /// user actually asked about when several share a name.
+    serial: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -94,6 +108,10 @@ pub struct PipewireDriver {
     registry_listener: Option<pw::registry::Listener>,
     state: Rc<RefCell<RegistryState>>,
     meters: BTreeMap<NodeId, MeterHandle>,
+    meter_policy: MeterPolicy,
+    /// Nodes the UI asked to measure, with the time of the last request so a
+    /// stream can linger briefly instead of dying the moment a tooltip closes.
+    meter_requests: BTreeMap<NodeId, Instant>,
     graph: Graph,
     positions: BTreeMap<NodeId, [f32; 2]>,
 }
@@ -131,9 +149,15 @@ impl PipewireDriver {
                             .unwrap_or("PipeWire node")
                             .to_owned();
                         let media_class = props.get(MEDIA_CLASS).unwrap_or_default().to_owned();
-                        state
-                            .nodes
-                            .insert(global.id, NodeRecord { name, media_class });
+                        let serial = props.get(OBJECT_SERIAL).and_then(|value| value.parse().ok());
+                        state.nodes.insert(
+                            global.id,
+                            NodeRecord {
+                                name,
+                                media_class,
+                                serial,
+                            },
+                        );
                     }
                     pw::types::ObjectType::Port => {
                         let media_type = props
@@ -198,6 +222,8 @@ impl PipewireDriver {
             registry_listener: Some(registry_listener),
             state,
             meters: BTreeMap::new(),
+            meter_policy: MeterPolicy::default(),
+            meter_requests: BTreeMap::new(),
             graph: Graph::default(),
             positions: BTreeMap::new(),
         };
@@ -272,7 +298,7 @@ impl PipewireDriver {
 
         for (index, (id, record)) in state.nodes.iter().enumerate() {
             let node_id = NodeId(*id as u64);
-            if record.name.starts_with("qpwgraph-rs audio meter:") {
+            if record.name.starts_with(METER_NODE_PREFIX) {
                 continue;
             }
             node_media_classes.insert(node_id, record.media_class.to_ascii_lowercase());
@@ -317,42 +343,114 @@ impl PipewireDriver {
         Ok(())
     }
 
-    fn ensure_meters_locked(&mut self) {
-        let audio_nodes: BTreeMap<NodeId, String> = self
-            .graph
+    /// Nodes that can be measured: they expose at least one audio source port.
+    fn measurable_nodes(&self) -> BTreeSet<NodeId> {
+        self.graph
             .nodes
             .values()
-            .filter_map(|node| {
-                let has_audio_source = node.ports.iter().any(|port_id| {
+            .filter(|node| {
+                node.ports.iter().any(|port_id| {
                     self.graph.port(*port_id).is_some_and(|port| {
                         port.direction.is_source() && port.port_type == PortType::Audio
                     })
-                });
-                has_audio_source.then(|| (node.id, node.name.clone()))
+                })
             })
-            .collect();
+            .map(|node| node.id)
+            .collect()
+    }
 
-        self.meters
-            .retain(|node_id, _| audio_nodes.contains_key(node_id));
-        for (node_id, name) in audio_nodes {
-            if self.meters.contains_key(&node_id) {
-                continue;
-            }
-            if let Ok(handle) = self.create_meter_locked(node_id, &name) {
+    /// Nodes that should currently own a metering stream.
+    ///
+    /// Under [`MeterPolicy::OnDemand`] this is driven purely by what the UI
+    /// asked for, so an idle window holds no streams and never nudges the
+    /// daemon into resuming or renegotiating a device.
+    fn wanted_meter_nodes(&self) -> BTreeSet<NodeId> {
+        let measurable = self.measurable_nodes();
+        match self.meter_policy {
+            MeterPolicy::Disabled => BTreeSet::new(),
+            MeterPolicy::Always => measurable,
+            MeterPolicy::OnDemand => self
+                .meter_requests
+                .keys()
+                .copied()
+                .filter(|node_id| measurable.contains(node_id))
+                .collect(),
+        }
+    }
+
+    /// Drop request entries that have outlived [`METER_LINGER`].
+    fn expire_meter_requests(&mut self) {
+        let now = Instant::now();
+        self.meter_requests
+            .retain(|_, requested_at| now.saturating_duration_since(*requested_at) < METER_LINGER);
+    }
+
+    fn ensure_meters_locked(&mut self) {
+        self.expire_meter_requests();
+        let wanted = self.wanted_meter_nodes();
+        self.meters.retain(|node_id, _| wanted.contains(node_id));
+
+        let missing: Vec<(NodeId, NodeRecord)> = {
+            let state = self.state.borrow();
+            wanted
+                .into_iter()
+                .filter(|node_id| !self.meters.contains_key(node_id))
+                .filter_map(|node_id| {
+                    state
+                        .nodes
+                        .get(&(node_id.0 as u32))
+                        .map(|record| (node_id, record.clone()))
+                })
+                .collect()
+        };
+        for (node_id, record) in missing {
+            if let Ok(handle) = self.create_meter_locked(node_id, &record) {
                 self.meters.insert(node_id, handle);
             }
         }
     }
 
-    fn create_meter_locked(&self, node_id: NodeId, node_name: &str) -> BackendResult<MeterHandle> {
+    fn create_meter_locked(
+        &self,
+        node_id: NodeId,
+        record: &NodeRecord,
+    ) -> BackendResult<MeterHandle> {
         let core = self.core()?.clone();
-        let stream_name = format!("qpwgraph-rs audio meter: {node_name}");
-        let properties = pw::properties::properties! {
+        // Node names are not unique; the daemon-assigned serial is. Falling back
+        // to the name only matters for objects that predate `object.serial`.
+        let target = record
+            .serial
+            .map(|serial| serial.to_string())
+            .unwrap_or_else(|| record.name.clone());
+        let stream_name = format!("{METER_NODE_PREFIX} {}", node_id.0);
+        let description = format!("Level meter: {}", record.name);
+        let mut properties = pw::properties::properties! {
+            "node.name" => stream_name.as_str(),
+            "node.description" => description.as_str(),
             "media.type" => "Audio",
-            "media.category" => "Monitor",
+            "media.category" => "Capture",
             "media.role" => "DSP",
-            "target.object" => node_name,
+            "media.class" => "Stream/Input/Audio",
+            // Tells the session manager this client only observes. Monitoring
+            // streams are excluded from routing decisions such as switching the
+            // default device or counting active streams on a node.
+            "stream.monitor" => "true",
+            // Passive links never make our stream a driver and never keep the
+            // target awake, so devices can still suspend while we are attached.
+            "node.passive" => "true",
+            // Never let the session manager move us to another node; without
+            // this a meter can silently follow the default device instead.
+            "node.dont-reconnect" => "true",
+            "stream.dont-remix" => "true",
+            "target.object" => target.as_str(),
         };
+        // A capture stream aimed at a sink must be told to read that sink's
+        // monitor ports. Otherwise the session manager treats it as an ordinary
+        // recording client and routes it to the default *source* -- which would
+        // open the user's microphone instead of metering the sink.
+        if record.media_class.to_ascii_lowercase().contains("sink") {
+            properties.insert("stream.capture.sink", "true");
+        }
         let stream = pw::stream::Stream::new(&core, &stream_name, properties)
             .map_err(|error| native_error("PipeWire audio meter stream creation", error))?;
         let shared = Rc::new(RefCell::new(MeterReadingState::default()));
@@ -401,7 +499,6 @@ impl PipewireDriver {
             )
             .map_err(|error| native_error("PipeWire audio meter stream connection", error))?;
 
-        let _ = node_id;
         Ok(MeterHandle {
             _stream: stream,
             _listener: listener,
@@ -542,9 +639,11 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
+        // Readings are written by the stream's process callback, so holding the
+        // loop lock is enough. A registry round-trip here would cost a full
+        // core sync on every UI frame for data the sync does not affect.
         let loop_for_meters = self.thread_loop.clone();
         let _guard = loop_for_meters.lock();
-        self.roundtrip_locked()?;
         let now = Instant::now();
         Ok(self
             .meters
@@ -568,6 +667,49 @@ impl GraphDriver for PipewireDriver {
                 })
             })
             .collect())
+    }
+
+    fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {
+        if self.meter_policy == policy {
+            return Ok(());
+        }
+        self.meter_policy = policy;
+        if policy != MeterPolicy::OnDemand {
+            self.meter_requests.clear();
+        }
+        let loop_for_policy = self.thread_loop.clone();
+        let _guard = loop_for_policy.lock();
+        self.ensure_meters_locked();
+        Ok(())
+    }
+
+    fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
+        if self.meter_policy != MeterPolicy::OnDemand {
+            return Ok(());
+        }
+        let now = Instant::now();
+        for node_id in nodes {
+            self.meter_requests.insert(*node_id, now);
+        }
+        self.expire_meter_requests();
+        // The UI repeats this every frame. Only take the loop lock when the set
+        // of live streams actually has to change.
+        let wanted = self.wanted_meter_nodes();
+        if wanted.iter().eq(self.meters.keys()) {
+            return Ok(());
+        }
+        let loop_for_request = self.thread_loop.clone();
+        let _guard = loop_for_request.lock();
+        self.ensure_meters_locked();
+        Ok(())
+    }
+
+    fn reset_audio_config(&mut self) -> BackendResult<()> {
+        self.meter_requests.clear();
+        let loop_for_reset = self.thread_loop.clone();
+        let _guard = loop_for_reset.lock();
+        self.meters.clear();
+        Ok(())
     }
 }
 
@@ -628,6 +770,9 @@ fn native_error(operation: &str, error: impl std::fmt::Display) -> BackendError 
 }
 
 fn audio_format_pod() -> BackendResult<Vec<u8>> {
+    // Rate and channel count are deliberately left unset: a zeroed field is
+    // omitted from the pod, so the daemon negotiates the node's own values
+    // instead of asking it to resample or reconfigure for the meter.
     let mut audio_info = AudioInfoRaw::new();
     audio_info.set_format(AudioFormat::F32LE);
     let object = pw::spa::pod::Object {
