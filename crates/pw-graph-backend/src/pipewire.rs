@@ -168,6 +168,10 @@ pub struct PipewireDriver {
     epoch: Instant,
     graph: Graph,
     positions: BTreeMap<NodeId, [f32; 2]>,
+    /// Manual disconnects are kept as stable endpoint pairs. WirePlumber may
+    /// recreate an application's link when it resumes; the next synchronized
+    /// snapshot removes only those links the user explicitly deleted.
+    blocked_connections: Vec<(PortKey, PortKey)>,
 }
 
 impl PipewireDriver {
@@ -290,6 +294,7 @@ impl PipewireDriver {
             epoch: Instant::now(),
             graph: Graph::default(),
             positions: BTreeMap::new(),
+            blocked_connections: Vec::new(),
         };
 
         let loop_for_initial_sync = driver.thread_loop.clone();
@@ -355,8 +360,7 @@ impl PipewireDriver {
         Ok(())
     }
 
-    fn rebuild_graph_locked(&mut self) -> BackendResult<()> {
-        let state = self.state.borrow().clone();
+    fn build_graph_from_state(&mut self, state: RegistryState) -> BackendResult<Graph> {
         let mut graph = Graph::default();
         let mut node_media_classes = HashMap::new();
 
@@ -367,6 +371,9 @@ impl PipewireDriver {
             }
             node_media_classes.insert(node_id, record.media_class.to_ascii_lowercase());
             let mut node = Node::new(node_id, &record.name, NodeType::PipeWire);
+            if let Some(serial) = record.serial {
+                node = node.with_serial(serial);
+            }
             node.position = self.positions.get(&node_id).copied().unwrap_or([0.0, 0.0]);
             graph.add_node(node)?;
         }
@@ -412,9 +419,87 @@ impl PipewireDriver {
             });
         }
 
-        self.graph = graph;
-        self.ensure_meters_locked();
+        Ok(graph)
+    }
+
+    fn rebuild_graph_locked(&mut self) -> BackendResult<()> {
+        // A session manager can race us by recreating a deleted link while a
+        // stream resumes. Bound the cleanup passes so a broken policy cannot
+        // make a refresh loop forever.
+        for pass in 0..3 {
+            let state = self.state.borrow().clone();
+            self.graph = self.build_graph_from_state(state)?;
+            let suppressed: Vec<LinkId> = self
+                .graph
+                .links
+                .values()
+                .filter(|link| self.connection_is_blocked(link))
+                .map(|link| link.id)
+                .collect();
+            if suppressed.is_empty() || pass == 2 {
+                self.ensure_meters_locked();
+                return Ok(());
+            }
+            for link_id in suppressed {
+                self.registry()?
+                    .destroy_global(link_id.0 as u32)
+                    .into_result()
+                    .map_err(|error| native_error("PipeWire suppressed link destruction", error))?;
+            }
+            self.roundtrip_locked()?;
+        }
         Ok(())
+    }
+
+    fn port_keys_equal(left: &PortKey, right: &PortKey) -> bool {
+        left.node_name == right.node_name
+            && left.node_type == right.node_type
+            && left.port_name == right.port_name
+            && left.channel == right.channel
+            && left.direction == right.direction
+            && left.port_type == right.port_type
+    }
+
+    fn connection_is_blocked(&self, link: &Link) -> bool {
+        let Some(output) = self.graph.port_key(link.output_port) else {
+            return false;
+        };
+        let Some(input) = self.graph.port_key(link.input_port) else {
+            return false;
+        };
+        self.blocked_connections
+            .iter()
+            .any(|(blocked_output, blocked_input)| {
+                Self::port_keys_equal(blocked_output, &output)
+                    && Self::port_keys_equal(blocked_input, &input)
+            })
+    }
+
+    fn allow_blocked_connection(&mut self, output: &PortKey, input: &PortKey) {
+        self.blocked_connections
+            .retain(|(blocked_output, blocked_input)| {
+                !(Self::port_keys_equal(blocked_output, output)
+                    && Self::port_keys_equal(blocked_input, input))
+            });
+    }
+
+    fn block_connection(&mut self, link: &Link) {
+        let (Some(output), Some(input)) = (
+            self.graph.port_key(link.output_port),
+            self.graph.port_key(link.input_port),
+        ) else {
+            return;
+        };
+        if !self
+            .blocked_connections
+            .iter()
+            .any(|(blocked_output, blocked_input)| {
+                Self::port_keys_equal(blocked_output, &output)
+                    && Self::port_keys_equal(blocked_input, &input)
+            })
+        {
+            self.blocked_connections.push((output, input));
+        }
     }
 
     /// Nodes that can be measured: they expose at least one audio source port.
@@ -593,8 +678,21 @@ impl PipewireDriver {
     }
 
     fn connect_locked(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
-        let output = self.graph.port(src).ok_or(GraphError::MissingPort(src))?;
-        let input = self.graph.port(dst).ok_or(GraphError::MissingPort(dst))?;
+        let output = self
+            .graph
+            .port(src)
+            .cloned()
+            .ok_or(GraphError::MissingPort(src))?;
+        let input = self
+            .graph
+            .port(dst)
+            .cloned()
+            .ok_or(GraphError::MissingPort(dst))?;
+        if let (Some(output_key), Some(input_key)) =
+            (self.graph.port_key(src), self.graph.port_key(dst))
+        {
+            self.allow_blocked_connection(&output_key, &input_key);
+        }
         if !output.direction.is_source() {
             return Err(GraphError::NotSource(src).into());
         }
@@ -657,6 +755,7 @@ impl PipewireDriver {
             .link(link)
             .cloned()
             .ok_or(GraphError::MissingLink(link))?;
+        self.block_connection(&existing);
         self.registry()?
             .destroy_global(link.0 as u32)
             .into_result()
@@ -693,13 +792,35 @@ impl GraphDriver for PipewireDriver {
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
         let loop_for_connect = self.thread_loop.clone();
         let _guard = loop_for_connect.lock();
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
         self.connect_locked(src, dst)
     }
 
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
         let loop_for_disconnect = self.thread_loop.clone();
         let _guard = loop_for_disconnect.lock();
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
         self.disconnect_locked(link)
+    }
+
+    fn allow_connection(&mut self, output: &PortKey, input: &PortKey) {
+        self.allow_blocked_connection(output, input);
+    }
+
+    fn suppress_connection(&mut self, output: &PortKey, input: &PortKey) {
+        if !self
+            .blocked_connections
+            .iter()
+            .any(|(blocked_output, blocked_input)| {
+                Self::port_keys_equal(blocked_output, output)
+                    && Self::port_keys_equal(blocked_input, input)
+            })
+        {
+            self.blocked_connections
+                .push((output.clone(), input.clone()));
+        }
     }
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {

@@ -259,15 +259,20 @@ impl QpwgraphApp {
     }
 
     fn refresh_graph_if_dirty(&mut self) {
-        if self.last_graph_refresh.elapsed() < Duration::from_millis(500)
+        if self.last_graph_refresh.elapsed() < Duration::from_millis(100)
             || !self.driver.graph_dirty()
         {
             return;
         }
-        if let Err(error) = self.driver.refresh() {
-            self.status = self.tf("status.refresh_failed", &[("error", error.to_string())]);
+        match self.driver.refresh() {
+            Ok(_) => self.last_graph_refresh = Instant::now(),
+            Err(error) => {
+                // Keep the dirty bit eligible for the next frame. A failed
+                // retry must not hide a short-lived PipeWire transition for
+                // another half second.
+                self.status = self.tf("status.refresh_failed", &[("error", error.to_string())]);
+            }
         }
-        self.last_graph_refresh = Instant::now();
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
@@ -463,15 +468,27 @@ impl QpwgraphApp {
         for action in actions {
             match action {
                 CanvasAction::Connect { output, input } => {
+                    let stable_pair = self
+                        .driver
+                        .graph()
+                        .port_key(output)
+                        .zip(self.driver.graph().port_key(input));
                     let command = Box::new(ConnectCommand::new(output, input));
                     match self.commands.execute(command, self.driver.as_mut()) {
                         Ok(()) => {
-                            self.patchbay.add_graph_connection(
-                                self.driver.graph(),
-                                output,
-                                input,
-                                self.config.patchbay_auto_pin,
-                            );
+                            if let Some((output_key, input_key)) = stable_pair {
+                                if let (Some(output), Some(input)) = (
+                                    self.driver.graph().resolve_port_key(&output_key),
+                                    self.driver.graph().resolve_port_key(&input_key),
+                                ) {
+                                    self.patchbay.add_graph_connection(
+                                        self.driver.graph(),
+                                        output,
+                                        input,
+                                        self.config.patchbay_auto_pin,
+                                    );
+                                }
+                            }
                             self.status = self.tf(
                                 "status.connected",
                                 &[("output", output.to_string()), ("input", input.to_string())],
@@ -506,18 +523,32 @@ impl QpwgraphApp {
             return;
         }
         let count = pairs.len();
+        let stable_pairs: Vec<_> = pairs
+            .iter()
+            .filter_map(|(output, input)| {
+                self.driver
+                    .graph()
+                    .port_key(*output)
+                    .zip(self.driver.graph().port_key(*input))
+            })
+            .collect();
         match self.commands.execute(
             Box::new(ConnectManyCommand::new(pairs.clone())),
             self.driver.as_mut(),
         ) {
             Ok(()) => {
-                for (output, input) in pairs {
-                    self.patchbay.add_graph_connection(
-                        self.driver.graph(),
-                        output,
-                        input,
-                        self.config.patchbay_auto_pin,
-                    );
+                for (output_key, input_key) in stable_pairs {
+                    if let (Some(output), Some(input)) = (
+                        self.driver.graph().resolve_port_key(&output_key),
+                        self.driver.graph().resolve_port_key(&input_key),
+                    ) {
+                        self.patchbay.add_graph_connection(
+                            self.driver.graph(),
+                            output,
+                            input,
+                            self.config.patchbay_auto_pin,
+                        );
+                    }
                 }
                 self.status = self.tf("status.connected_many", &[("count", count.to_string())]);
             }
@@ -552,7 +583,10 @@ impl QpwgraphApp {
         }
         let count = ids.len();
         match self.commands.execute(
-            Box::new(DisconnectManyCommand::new(ids)),
+            Box::new(DisconnectManyCommand::from_links(
+                self.driver.graph(),
+                links.clone(),
+            )),
             self.driver.as_mut(),
         ) {
             Ok(()) => {
@@ -602,10 +636,13 @@ impl QpwgraphApp {
         let Some(existing) = self.driver.graph().link(link).cloned() else {
             return;
         };
-        match self
-            .commands
-            .execute(Box::new(DisconnectCommand::new(link)), self.driver.as_mut())
-        {
+        match self.commands.execute(
+            Box::new(DisconnectCommand::from_link(
+                self.driver.graph(),
+                existing.clone(),
+            )),
+            self.driver.as_mut(),
+        ) {
             Ok(()) => {
                 self.patchbay
                     .remove_connection(existing.output_port, existing.input_port);
@@ -630,7 +667,10 @@ impl QpwgraphApp {
         }
         let count = links.len();
         match self.commands.execute(
-            Box::new(DisconnectManyCommand::new(link_ids)),
+            Box::new(DisconnectManyCommand::from_links(
+                self.driver.graph(),
+                links.clone(),
+            )),
             self.driver.as_mut(),
         ) {
             Ok(()) => {

@@ -172,22 +172,94 @@ pub(crate) fn ports_compatible(a: PortType, b: PortType) -> bool {
     a == b || a == PortType::Unknown || b == PortType::Unknown
 }
 
-/// Greedily pairs `outputs` with `inputs` in order, matching compatible
-/// port types. Shared by whole-node connects, single-group-row connects,
-/// and the "connect through nodes" click shortcut.
+/// Pairs outputs and inputs by channel position when PipeWire exposes it. A
+/// channel-aware score prevents a reversed registry order from wiring FL to
+/// FR; only ports without channel metadata fall back to display order.
 pub(crate) fn pair_ports(outputs: &[&Port], inputs: &[&Port]) -> Vec<(PortId, PortId)> {
     let mut used = vec![false; inputs.len()];
     let mut pairs = Vec::new();
     for output in outputs {
-        let candidate = inputs.iter().enumerate().position(|(index, input)| {
-            !used[index] && ports_compatible(output.port_type, input.port_type)
-        });
+        let candidate = inputs
+            .iter()
+            .enumerate()
+            .filter(|(index, input)| {
+                !used[*index]
+                    && ports_compatible(output.port_type, input.port_type)
+                    && channels_can_pair(output, input)
+            })
+            .max_by_key(|(index, input)| {
+                (
+                    channel_pair_score(output, input),
+                    name_pair_score(output, input),
+                    std::cmp::Reverse(*index),
+                )
+            })
+            .map(|(index, _)| index);
         if let Some(index) = candidate {
             used[index] = true;
             pairs.push((output.id, inputs[index].id));
         }
     }
     pairs
+}
+
+fn channels_can_pair(output: &Port, input: &Port) -> bool {
+    match (channel_identity(output), channel_identity(input)) {
+        (Some(output), Some(input)) => output == input,
+        _ => true,
+    }
+}
+
+fn channel_pair_score(output: &Port, input: &Port) -> u8 {
+    match (channel_identity(output), channel_identity(input)) {
+        (Some(output), Some(input)) if output == input => 100,
+        (Some(_), Some(_)) => 0,
+        (Some(_), None) | (None, Some(_)) => 20,
+        (None, None) => 10,
+    }
+}
+
+fn name_pair_score(output: &Port, input: &Port) -> u8 {
+    match (channel_base_name(output), channel_base_name(input)) {
+        (Some(output), Some(input)) if !output.is_empty() && output.eq_ignore_ascii_case(input) => {
+            10
+        }
+        _ => 0,
+    }
+}
+
+fn channel_identity(port: &Port) -> Option<String> {
+    let raw = port
+        .channel
+        .as_deref()
+        .filter(|channel| is_backend_channel_position(channel))
+        .or_else(|| trailing_channel_token(&port.name))?;
+    Some(normalize_channel(raw))
+}
+
+fn trailing_channel_token(name: &str) -> Option<&str> {
+    let position = name.rfind(|character: char| CHANNEL_DELIMITERS.contains(&character))?;
+    let token = &name[position + 1..];
+    is_channel_token(token).then_some(token)
+}
+
+fn normalize_channel(channel: &str) -> String {
+    let compact: String = channel
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect();
+    match compact.as_str() {
+        "FRONTLEFT" | "LEFT" | "L" => "FL".into(),
+        "FRONTRIGHT" | "RIGHT" | "R" => "FR".into(),
+        "REARLEFT" | "BACKLEFT" => "RL".into(),
+        "REARRIGHT" | "BACKRIGHT" => "RR".into(),
+        "SIDELEFT" => "SL".into(),
+        "SIDERIGHT" => "SR".into(),
+        "CENTER" | "FC" | "C" => "C".into(),
+        "LOWFREQUENCY" => "LFE".into(),
+        _ => compact,
+    }
 }
 
 pub(crate) fn link_exists(graph: &Graph, output: PortId, input: PortId) -> bool {

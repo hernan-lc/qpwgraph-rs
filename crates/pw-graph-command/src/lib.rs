@@ -1,7 +1,7 @@
 //! Undoable graph operations.
 
 use pw_graph_backend::{BackendError, GraphDriver};
-use pw_graph_core::{Link, LinkId, NodeId, PortId};
+use pw_graph_core::{Graph, Link, LinkId, NodeId, PortId, PortKey};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -10,6 +10,10 @@ pub enum CommandError {
     Backend(#[from] BackendError),
     #[error("command has no link to undo")]
     MissingUndoLink,
+}
+
+fn stable_pair(graph: &Graph, output: PortId, input: PortId) -> Option<(PortKey, PortKey)> {
+    Some((graph.port_key(output)?, graph.port_key(input)?))
 }
 
 pub trait Command {
@@ -93,19 +97,24 @@ pub struct ConnectCommand {
     src: PortId,
     dst: PortId,
     link: Option<Link>,
+    keys: Option<(PortKey, PortKey)>,
 }
 
 /// Connects a group of compatible ports as one undoable action.
 pub struct ConnectManyCommand {
     pairs: Vec<(PortId, PortId)>,
+    keys: Vec<(PortKey, PortKey)>,
     links: Vec<Link>,
+    created_keys: Vec<(PortKey, PortKey)>,
 }
 
 impl ConnectManyCommand {
     pub fn new(pairs: Vec<(PortId, PortId)>) -> Self {
         Self {
             pairs,
+            keys: Vec::new(),
             links: Vec::new(),
+            created_keys: Vec::new(),
         }
     }
 }
@@ -116,15 +125,35 @@ impl Command for ConnectManyCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        driver.refresh()?;
+        if self.keys.is_empty() {
+            self.keys = self
+                .pairs
+                .iter()
+                .filter_map(|(src, dst)| stable_pair(driver.graph(), *src, *dst))
+                .fold(Vec::new(), |mut keys, pair| {
+                    if !keys.contains(&pair) {
+                        keys.push(pair);
+                    }
+                    keys
+                });
+        }
         self.links.clear();
-        for (src, dst) in &self.pairs {
-            match driver.connect(*src, *dst) {
-                Ok(link) => self.links.push(link),
+        self.created_keys.clear();
+        for (output, input) in &self.keys {
+            match driver.connect_by_key_if_missing(output, input) {
+                Ok(Some(link)) => {
+                    self.links.push(link);
+                    self.created_keys.push((output.clone(), input.clone()));
+                }
+                Ok(None) => {}
                 Err(error) => {
-                    for link in self.links.iter().rev() {
-                        let _ = driver.disconnect(link.id);
+                    for (created_output, created_input) in self.created_keys.iter().rev() {
+                        let _ = driver.disconnect_by_key_if_present(created_output, created_input);
+                        driver.allow_connection(created_output, created_input);
                     }
                     self.links.clear();
+                    self.created_keys.clear();
                     return Err(error.into());
                 }
             }
@@ -133,9 +162,11 @@ impl Command for ConnectManyCommand {
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        for link in self.links.iter().rev() {
-            driver.disconnect(link.id)?;
+        for (output, input) in self.created_keys.iter().rev() {
+            let _ = driver.disconnect_by_key_if_present(output, input)?;
         }
+        self.links.clear();
+        self.created_keys.clear();
         Ok(())
     }
 }
@@ -146,6 +177,7 @@ impl ConnectCommand {
             src,
             dst,
             link: None,
+            keys: None,
         }
     }
 }
@@ -156,13 +188,26 @@ impl Command for ConnectCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        self.link = Some(driver.connect(self.src, self.dst)?);
+        driver.refresh()?;
+        let keys = self
+            .keys
+            .clone()
+            .or_else(|| stable_pair(driver.graph(), self.src, self.dst));
+        let Some((output, input)) = keys else {
+            return Ok(());
+        };
+        self.keys = Some((output.clone(), input.clone()));
+        self.link = driver.connect_by_key_if_missing(&output, &input)?;
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        let link = self.link.take().ok_or(CommandError::MissingUndoLink)?;
-        driver.disconnect(link.id)?;
+        if self.link.is_none() {
+            return Ok(());
+        }
+        let (output, input) = self.keys.as_ref().ok_or(CommandError::MissingUndoLink)?;
+        let _ = driver.disconnect_by_key_if_present(output, input)?;
+        self.link = None;
         Ok(())
     }
 }
@@ -170,15 +215,18 @@ impl Command for ConnectCommand {
 pub struct DisconnectCommand {
     link: Option<Link>,
     link_id: LinkId,
+    keys: Option<(PortKey, PortKey)>,
 }
 
 /// Disconnect every live link as one undoable operation.
 pub struct DisconnectAllCommand {
     links: Vec<Link>,
+    keys: Vec<(PortKey, PortKey)>,
 }
 
 pub struct DisconnectManyCommand {
     link_ids: Vec<LinkId>,
+    keys: Vec<(PortKey, PortKey)>,
     links: Vec<Link>,
 }
 
@@ -186,7 +234,20 @@ impl DisconnectManyCommand {
     pub fn new(link_ids: Vec<LinkId>) -> Self {
         Self {
             link_ids,
+            keys: Vec::new(),
             links: Vec::new(),
+        }
+    }
+
+    pub fn from_links(graph: &Graph, links: Vec<Link>) -> Self {
+        let keys = links
+            .iter()
+            .filter_map(|link| stable_pair(graph, link.output_port, link.input_port))
+            .collect();
+        Self {
+            link_ids: links.iter().map(|link| link.id).collect(),
+            keys,
+            links,
         }
     }
 }
@@ -197,37 +258,19 @@ impl Command for DisconnectManyCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        self.links = if self.links.is_empty() {
-            self.link_ids
+        driver.refresh()?;
+        if self.keys.is_empty() {
+            self.keys = self
+                .link_ids
                 .iter()
-                .filter_map(|id| driver.graph().link(*id).cloned())
-                .collect()
-        } else {
-            self.links
-                .iter()
-                .filter_map(|saved| {
-                    driver
-                        .graph()
-                        .links
-                        .values()
-                        .find(|live| {
-                            live.output_port == saved.output_port
-                                && live.input_port == saved.input_port
-                        })
-                        .cloned()
-                })
-                .collect()
-        };
-        let mut disconnected = Vec::with_capacity(self.links.len());
-        for link in &self.links {
-            match driver.disconnect(link.id) {
-                Ok(link) => disconnected.push(link),
-                Err(error) => {
-                    for restored in disconnected.iter().rev() {
-                        let _ = driver.connect(restored.output_port, restored.input_port);
-                    }
-                    return Err(error.into());
-                }
+                .filter_map(|id| driver.graph().link(*id))
+                .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
+                .collect();
+        }
+        let mut disconnected = Vec::with_capacity(self.keys.len());
+        for (output, input) in &self.keys {
+            if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
+                disconnected.push(link);
             }
         }
         self.links = disconnected;
@@ -236,15 +279,9 @@ impl Command for DisconnectManyCommand {
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         let mut restored = Vec::with_capacity(self.links.len());
-        for link in &self.links {
-            match driver.connect(link.output_port, link.input_port) {
-                Ok(link) => restored.push(link),
-                Err(error) => {
-                    for restored_link in restored.iter().rev() {
-                        let _ = driver.disconnect(restored_link.id);
-                    }
-                    return Err(error.into());
-                }
+        for (output, input) in &self.keys {
+            if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
+                restored.push(link);
             }
         }
         self.links = restored;
@@ -254,7 +291,10 @@ impl Command for DisconnectManyCommand {
 
 impl DisconnectAllCommand {
     pub fn new() -> Self {
-        Self { links: Vec::new() }
+        Self {
+            links: Vec::new(),
+            keys: Vec::new(),
+        }
     }
 }
 
@@ -270,19 +310,17 @@ impl Command for DisconnectAllCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        // Re-snapshot on every execution because reconnecting during undo may
-        // allocate different backend link IDs.
-        self.links = driver.graph().links.values().cloned().collect();
-        let mut disconnected = Vec::with_capacity(self.links.len());
-        for link in &self.links {
-            match driver.disconnect(link.id) {
-                Ok(link) => disconnected.push(link),
-                Err(error) => {
-                    for restored in disconnected.iter().rev() {
-                        let _ = driver.connect(restored.output_port, restored.input_port);
-                    }
-                    return Err(error.into());
-                }
+        driver.refresh()?;
+        self.keys = driver
+            .graph()
+            .links
+            .values()
+            .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
+            .collect();
+        let mut disconnected = Vec::with_capacity(self.keys.len());
+        for (output, input) in &self.keys {
+            if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
+                disconnected.push(link);
             }
         }
         self.links = disconnected;
@@ -291,15 +329,9 @@ impl Command for DisconnectAllCommand {
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         let mut restored = Vec::with_capacity(self.links.len());
-        for link in &self.links {
-            match driver.connect(link.output_port, link.input_port) {
-                Ok(link) => restored.push(link),
-                Err(error) => {
-                    for restored_link in restored.iter().rev() {
-                        let _ = driver.disconnect(restored_link.id);
-                    }
-                    return Err(error.into());
-                }
+        for (output, input) in &self.keys {
+            if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
+                restored.push(link);
             }
         }
         self.links = restored;
@@ -312,6 +344,15 @@ impl DisconnectCommand {
         Self {
             link: None,
             link_id,
+            keys: None,
+        }
+    }
+
+    pub fn from_link(graph: &Graph, link: Link) -> Self {
+        Self {
+            link_id: link.id,
+            keys: stable_pair(graph, link.output_port, link.input_port),
+            link: Some(link),
         }
     }
 }
@@ -322,19 +363,32 @@ impl Command for DisconnectCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        self.link = Some(driver.disconnect(self.link_id)?);
+        driver.refresh()?;
+        if self.keys.is_none() {
+            self.keys = driver
+                .graph()
+                .link(self.link_id)
+                .and_then(|link| stable_pair(driver.graph(), link.output_port, link.input_port));
+        }
+        let Some((output, input)) = self.keys.as_ref() else {
+            return Ok(());
+        };
+        if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
+            self.link_id = link.id;
+            self.link = Some(link);
+        }
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        let link = self
-            .link
-            .as_ref()
-            .ok_or(CommandError::MissingUndoLink)?
-            .clone();
-        let restored = driver.connect(link.output_port, link.input_port)?;
-        self.link_id = restored.id;
-        self.link = Some(restored);
+        let (output, input) = self.keys.as_ref().ok_or(CommandError::MissingUndoLink)?;
+        if let Some(restored) = driver.connect_by_key_if_missing(output, input)? {
+            self.link_id = restored.id;
+            self.link = Some(restored);
+        } else if let Some(restored) = driver.graph().find_link_by_keys(output, input) {
+            self.link_id = restored.id;
+            self.link = Some(restored);
+        }
         Ok(())
     }
 }

@@ -3,7 +3,7 @@
 //! live registry.
 
 use pw_graph_core::{
-    Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
+    Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortKey, PortType,
 };
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -86,6 +86,77 @@ pub trait GraphDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>>;
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
+
+    /// Connect a stable pair, returning `None` when it is already present.
+    /// The refresh is deliberately part of this helper: a UI action can be
+    /// based on the previous frame while a PipeWire stream is being recreated.
+    fn connect_by_key_if_missing(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> BackendResult<Option<Link>> {
+        self.refresh()?;
+        self.allow_connection(output, input);
+        if self.graph().find_link_by_keys(output, input).is_some() {
+            return Ok(None);
+        }
+        let output_id = self.graph().resolve_port_key(output).ok_or_else(|| {
+            BackendError::Native(format!(
+                "source port {}:{} is no longer available",
+                output.node_name, output.port_name
+            ))
+        })?;
+        let input_id = self.graph().resolve_port_key(input).ok_or_else(|| {
+            BackendError::Native(format!(
+                "destination port {}:{} is no longer available",
+                input.node_name, input.port_name
+            ))
+        })?;
+        match self.connect(output_id, input_id) {
+            Ok(link) => Ok(Some(link)),
+            Err(BackendError::Graph(GraphError::DuplicateConnection(_, _))) => {
+                self.refresh()?;
+                if self.graph().find_link_by_keys(output, input).is_some() {
+                    Ok(None)
+                } else {
+                    Err(BackendError::Graph(GraphError::DuplicateConnection(
+                        output_id, input_id,
+                    )))
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Disconnect a stable pair, returning `None` when it already vanished.
+    fn disconnect_by_key_if_present(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> BackendResult<Option<Link>> {
+        self.refresh()?;
+        let link = self.graph().find_link_by_keys(output, input);
+        let Some(link) = link else {
+            self.suppress_connection(output, input);
+            return Ok(None);
+        };
+        match self.disconnect(link.id) {
+            Ok(link) => Ok(Some(link)),
+            Err(BackendError::Graph(GraphError::MissingLink(_))) => {
+                self.suppress_connection(output, input);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Native drivers may keep a short-lived suppression rule after a manual
+    /// disconnect. An explicit connect/undo clears that rule.
+    fn allow_connection(&mut self, _output: &PortKey, _input: &PortKey) {}
+
+    /// Remember a manual deletion even if the link vanished during the
+    /// refresh that preceded the operation.
+    fn suppress_connection(&mut self, _output: &PortKey, _input: &PortKey) {}
     fn set_node_position(
         &mut self,
         node: pw_graph_core::NodeId,

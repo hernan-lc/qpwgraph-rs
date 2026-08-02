@@ -89,6 +89,11 @@ pub struct Node {
     pub id: NodeId,
     pub name: String,
     pub node_type: NodeType,
+    /// Backend-provided identity that survives global-ID churn when possible.
+    /// PipeWire exposes this as `object.serial`; demo and ALSA nodes leave it
+    /// unset and are resolved by their names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<u64>,
     pub ports: Vec<PortId>,
     /// Canvas position in logical scene coordinates.
     pub position: [f32; 2],
@@ -100,9 +105,15 @@ impl Node {
             id,
             name: name.into(),
             node_type,
+            serial: None,
             ports: Vec::new(),
             position: [0.0, 0.0],
         }
+    }
+
+    pub fn with_serial(mut self, serial: u64) -> Self {
+        self.serial = Some(serial);
+        self
     }
 }
 
@@ -114,6 +125,23 @@ pub struct Port {
     /// Optional backend-provided channel position (for example `FL` or
     /// `FR`). Backends that do not expose channel metadata leave this unset,
     /// allowing presentation code to use a conservative name-based fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub direction: Direction,
+    pub port_type: PortType,
+}
+
+/// Stable description of a port used when PipeWire recreates a stream and
+/// assigns it a new global ID. The numeric [`PortId`] remains useful for the
+/// current graph, while this key is used by commands and patchbay operations
+/// that can outlive one registry snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PortKey {
+    pub node_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_serial: Option<u64>,
+    pub node_type: NodeType,
+    pub port_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     pub direction: Direction,
@@ -219,6 +247,63 @@ impl Graph {
 
     pub fn port(&self, port_id: PortId) -> Option<&Port> {
         self.ports.get(&port_id)
+    }
+
+    pub fn port_key(&self, port_id: PortId) -> Option<PortKey> {
+        let port = self.port(port_id)?;
+        let node = self.node(port.node_id)?;
+        Some(PortKey {
+            node_name: node.name.clone(),
+            node_serial: node.serial,
+            node_type: node.node_type,
+            port_name: port.name.clone(),
+            channel: port.channel.clone(),
+            direction: port.direction,
+            port_type: port.port_type,
+        })
+    }
+
+    /// Resolve a stable port key against the current registry snapshot.
+    /// Serial is preferred, but a name fallback is intentional: a playback
+    /// stream often receives a new serial when it is resumed.
+    pub fn resolve_port_key(&self, key: &PortKey) -> Option<PortId> {
+        self.ports
+            .values()
+            .filter(|port| port.name == key.port_name)
+            .filter(|port| port.direction == key.direction)
+            .filter(|port| {
+                port.port_type == key.port_type
+                    || port.port_type == PortType::Unknown
+                    || key.port_type == PortType::Unknown
+            })
+            .filter_map(|port| {
+                let node = self.node(port.node_id)?;
+                if node.name != key.node_name || node.node_type != key.node_type {
+                    return None;
+                }
+                if key.channel.is_some() && port.channel != key.channel {
+                    return None;
+                }
+                let serial_score = match (key.node_serial, node.serial) {
+                    (Some(expected), Some(actual)) if expected == actual => 100,
+                    (Some(_), Some(_)) => 0,
+                    (None, None) => 20,
+                    (None, Some(_)) => 10,
+                    (Some(_), None) => 5,
+                };
+                Some((serial_score, port.id))
+            })
+            .max_by_key(|(score, id)| (*score, *id))
+            .map(|(_, id)| id)
+    }
+
+    pub fn find_link_by_keys(&self, output: &PortKey, input: &PortKey) -> Option<Link> {
+        let output_id = self.resolve_port_key(output)?;
+        let input_id = self.resolve_port_key(input)?;
+        self.links
+            .values()
+            .find(|link| link.output_port == output_id && link.input_port == input_id)
+            .cloned()
     }
 
     pub fn node(&self, node_id: NodeId) -> Option<&Node> {

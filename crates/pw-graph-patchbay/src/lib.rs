@@ -4,10 +4,9 @@
 //! JSON remains supported as a convenient machine-readable format for tooling
 //! and for compatibility with the first Rust prototype.
 
-use pw_graph_backend::{existing_connections, BackendError, GraphDriver};
-use pw_graph_core::{Direction, Graph, LinkId, NodeType, PortId, PortType};
+use pw_graph_backend::{BackendError, GraphDriver};
+use pw_graph_core::{Direction, Graph, LinkId, NodeType, PortId, PortKey, PortType};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::path::Path;
 use thiserror::Error;
 
@@ -189,32 +188,49 @@ impl Patchbay {
         exclusive: bool,
         auto_disconnect: bool,
     ) -> Result<ActivationReport, PatchbayError> {
+        driver.refresh()?;
         let mut report = ActivationReport::default();
-        let resolved: Vec<(PortId, PortId)> = self
+        let resolved: Vec<(PortKey, PortKey)> = self
             .connections
             .iter()
-            .filter_map(|connection| self.resolve_connection(driver.graph(), connection))
+            .filter_map(|connection| {
+                let (output, input) = self.resolve_connection(driver.graph(), connection)?;
+                Some((
+                    driver.graph().port_key(output)?,
+                    driver.graph().port_key(input)?,
+                ))
+            })
             .collect();
-        let saved: BTreeSet<_> = resolved.iter().copied().collect();
 
         if exclusive {
             let live: Vec<_> = driver.graph().links.values().cloned().collect();
             for link in live {
-                if !saved.contains(&(link.output_port, link.input_port)) {
+                let saved = resolved.iter().any(|(output, input)| {
+                    driver
+                        .graph()
+                        .find_link_by_keys(output, input)
+                        .is_some_and(|saved_link| {
+                            saved_link.output_port == link.output_port
+                                && saved_link.input_port == link.input_port
+                        })
+                });
+                if !saved {
                     driver.disconnect(link.id)?;
                     report.disconnected += 1;
                 }
             }
         }
 
-        for (output_port, input_port) in resolved {
-            let current = existing_connections(driver);
-            if current.contains(&(output_port, input_port)) {
+        for (output, input) in resolved {
+            if driver.graph().find_link_by_keys(&output, &input).is_some() {
                 report.already_present += 1;
                 continue;
             }
 
             if auto_disconnect {
+                let Some(input_port) = driver.graph().resolve_port_key(&input) else {
+                    continue;
+                };
                 let stale: Vec<LinkId> = driver
                     .graph()
                     .links_for_port(input_port)
@@ -227,8 +243,9 @@ impl Patchbay {
                 }
             }
 
-            match driver.connect(output_port, input_port) {
-                Ok(_) => report.connected += 1,
+            match driver.connect_by_key_if_missing(&output, &input) {
+                Ok(Some(_)) => report.connected += 1,
+                Ok(None) => report.already_present += 1,
                 Err(error) => report.failed.push(error.to_string()),
             }
         }
@@ -240,28 +257,42 @@ impl Patchbay {
         graph: &Graph,
         connection: &PatchConnection,
     ) -> Option<(PortId, PortId)> {
-        if graph.port(connection.output_port).is_some()
-            && graph.port(connection.input_port).is_some()
-        {
-            return Some((connection.output_port, connection.input_port));
+        let has_names = !connection.output_node.is_empty()
+            && !connection.output_name.is_empty()
+            && !connection.input_node.is_empty()
+            && !connection.input_name.is_empty();
+        if has_names {
+            let output_node = graph.nodes.values().find(|node| {
+                node.node_type == connection.node_type && node.name == connection.output_node
+            })?;
+            let input_node = graph.nodes.values().find(|node| {
+                node.node_type == connection.node_type && node.name == connection.input_node
+            })?;
+            let output = output_node.ports.iter().find_map(|id| {
+                let port = graph.port(*id)?;
+                (port.name == connection.output_name
+                    && port.direction == Direction::Source
+                    && (connection.port_type == PortType::Unknown
+                        || port.port_type == connection.port_type))
+                    .then_some(port.id)
+            })?;
+            let input = input_node.ports.iter().find_map(|id| {
+                let port = graph.port(*id)?;
+                (port.name == connection.input_name
+                    && port.direction == Direction::Sink
+                    && (connection.port_type == PortType::Unknown
+                        || port.port_type == connection.port_type))
+                    .then_some(port.id)
+            })?;
+            return Some((output, input));
         }
-        let output_node = graph.nodes.values().find(|node| {
-            node.node_type == connection.node_type && node.name == connection.output_node
-        })?;
-        let input_node = graph.nodes.values().find(|node| {
-            node.node_type == connection.node_type && node.name == connection.input_node
-        })?;
-        let output = output_node.ports.iter().find_map(|id| {
-            let port = graph.port(*id)?;
-            (port.name == connection.output_name && port.direction == Direction::Source)
-                .then_some(port.id)
-        })?;
-        let input = input_node.ports.iter().find_map(|id| {
-            let port = graph.port(*id)?;
-            (port.name == connection.input_name && port.direction == Direction::Sink)
-                .then_some(port.id)
-        })?;
-        Some((output, input))
+
+        // Legacy files may contain only numeric IDs. Keep that fallback, but
+        // never let an old numeric ID override a complete name-based rule.
+        let output = graph.port(connection.output_port)?;
+        let input = graph.port(connection.input_port)?;
+        (output.direction == Direction::Source && input.direction == Direction::Sink)
+            .then_some((output.id, input.id))
     }
 }
 
