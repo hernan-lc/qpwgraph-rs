@@ -98,11 +98,6 @@ impl QpwgraphApp {
         // default on-demand policy never attaches a metering stream on its own.
         let meter_policy = MeterPolicy::parse(&config.audio_meters);
         let _ = driver.set_meter_policy(meter_policy);
-        let effect_to_add = driver
-            .effect_descriptors()
-            .first()
-            .map(|descriptor| descriptor.id.clone())
-            .unwrap_or_else(|| pw_graph_effects::NOISE_GATE_ID.into());
         layout::restore_node_positions(driver.as_mut(), &config);
         let patchbay = Patchbay::load_from(&patchbay_file).unwrap_or_else(|_| {
             Patchbay::new(
@@ -112,28 +107,6 @@ impl QpwgraphApp {
                     .unwrap_or("default"),
             )
         });
-        if config.patchbay_activated {
-            match patchbay.activate(
-                driver.as_mut(),
-                config.patchbay_exclusive,
-                config.patchbay_auto_disconnect,
-            ) {
-                Ok(report) => {
-                    status = i18n.format(
-                        "status.activated",
-                        &[
-                            ("connected", report.connected.to_string()),
-                            ("present", report.already_present.to_string()),
-                            ("disconnected", report.disconnected.to_string()),
-                        ],
-                    );
-                }
-                Err(error) => {
-                    status =
-                        i18n.format("status.activation_failed", &[("error", error.to_string())]);
-                }
-            }
-        }
         let mut canvas = GraphCanvas::default();
         canvas.zoom = config.zoom;
         canvas.node_text_scale = config.node_text_scale;
@@ -182,14 +155,40 @@ impl QpwgraphApp {
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
             last_graph_refresh: Instant::now(),
             meter_policy,
-            effect_to_add,
+            effect_gallery: None,
+            effect_gallery_scroll_epoch: 0,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         };
-        // Restore after the initial graph/patchbay snapshot is available. A
-        // missing module or endpoint is retained in config and reported by
-        // the effect layer instead of preventing application startup.
-        app.restore_effects();
+        // Free-standing effects must exist before Patchbay resolves saved
+        // manual links to their ports. Effects inserted into a saved direct
+        // route are restored after activation, so they can replace that route
+        // instead of being bypassed by it.
+        app.restore_standalone_effects();
+        if app.config.patchbay_activated {
+            match app.patchbay.activate(
+                app.driver.as_mut(),
+                app.config.patchbay_exclusive,
+                app.config.patchbay_auto_disconnect,
+            ) {
+                Ok(report) => {
+                    app.status = app.i18n.format(
+                        "status.activated",
+                        &[
+                            ("connected", report.connected.to_string()),
+                            ("present", report.already_present.to_string()),
+                            ("disconnected", report.disconnected.to_string()),
+                        ],
+                    );
+                }
+                Err(error) => {
+                    app.status = app
+                        .i18n
+                        .format("status.activation_failed", &[("error", error.to_string())]);
+                }
+            }
+        }
+        app.restore_inserted_effects();
         app
     }
 }

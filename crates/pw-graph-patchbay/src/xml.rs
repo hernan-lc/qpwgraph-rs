@@ -24,11 +24,26 @@ impl Patchbay {
             .write_event(Event::Start(BytesStart::new("items")))
             .map_err(PatchbayError::XmlWrite)?;
         for connection in &self.connections {
+            let output_node_type = connection.effective_output_node_type();
+            let input_node_type = connection.effective_input_node_type();
             let mut item = BytesStart::new("item");
-            item.push_attribute(("node-type", node_type_text(connection.node_type)));
+            // `node-type` is the native qpwgraph field and can only describe
+            // its broad PipeWire/ALSA family. Preserve it for interoperability
+            // and add our optional endpoint fields only when that shared type
+            // would lose information about an Effect endpoint.
+            item.push_attribute(("node-type", node_type_text(output_node_type)));
+            if !matches!(output_node_type, NodeType::PipeWire | NodeType::AlsaMidi) {
+                item.push_attribute((
+                    "output-node-type",
+                    endpoint_node_type_text(output_node_type),
+                ));
+            }
+            if input_node_type != output_node_type {
+                item.push_attribute(("input-node-type", endpoint_node_type_text(input_node_type)));
+            }
             item.push_attribute((
                 "port-type",
-                port_type_text(connection.node_type, connection.port_type),
+                port_type_text(output_node_type, connection.port_type),
             ));
             writer
                 .write_event(Event::Start(item))
@@ -75,8 +90,22 @@ impl Patchbay {
                 }
                 Event::Start(element) if element.name().as_ref() == b"item" => {
                     let attributes = attributes(&reader, &element)?;
+                    let output_node_type =
+                        endpoint_node_type_from_text(attributes.get("output-node-type"));
+                    let node_type = output_node_type
+                        .unwrap_or_else(|| node_type_from_text(attributes.get("node-type")));
+                    // When our output-side extension is present and no input
+                    // extension is needed, both endpoints have that same
+                    // precise type. Retain the explicitness so a missing
+                    // Effect cannot fall back to an unrelated same-named
+                    // PipeWire node during activation.
+                    let input_node_type =
+                        endpoint_node_type_from_text(attributes.get("input-node-type"))
+                            .or_else(|| output_node_type.map(|_| node_type));
                     current = Some(PatchConnection {
-                        node_type: node_type_from_text(attributes.get("node-type")),
+                        node_type,
+                        output_node_type,
+                        input_node_type,
                         port_type: port_type_from_text(attributes.get("port-type")),
                         ..PatchConnection::default()
                     });
@@ -156,7 +185,28 @@ fn node_type_from_text(value: Option<&String>) -> NodeType {
     match value.map(String::as_str) {
         Some("alsa") => NodeType::AlsaMidi,
         Some("pipewire") => NodeType::PipeWire,
+        Some("effect") => NodeType::Effect,
+        Some("unknown") => NodeType::Unknown,
         _ => NodeType::Unknown,
+    }
+}
+
+fn endpoint_node_type_text(node_type: NodeType) -> &'static str {
+    match node_type {
+        NodeType::PipeWire => "pipewire",
+        NodeType::Effect => "effect",
+        NodeType::AlsaMidi => "alsa",
+        NodeType::Unknown => "unknown",
+    }
+}
+
+fn endpoint_node_type_from_text(value: Option<&String>) -> Option<NodeType> {
+    match value.map(String::as_str) {
+        Some("pipewire") => Some(NodeType::PipeWire),
+        Some("effect") => Some(NodeType::Effect),
+        Some("alsa") => Some(NodeType::AlsaMidi),
+        Some("unknown") => Some(NodeType::Unknown),
+        _ => None,
     }
 }
 

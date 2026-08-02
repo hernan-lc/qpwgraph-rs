@@ -491,6 +491,7 @@ impl GraphCanvas {
         let Some(control) = self.effect_controls.get(&node.id).cloned() else {
             return;
         };
+        let controls_height = self.effect_controls_height(node);
         let control_rect = Rect::from_min_size(
             pos2(
                 node_rect.left() + 8.0 * self.zoom,
@@ -498,7 +499,7 @@ impl GraphCanvas {
             ),
             vec2(
                 node_rect.width() - 16.0 * self.zoom,
-                (super::EFFECT_CONTROLS_HEIGHT - 10.0) * self.zoom,
+                (controls_height - super::EFFECT_CONTROLS_VERTICAL_PADDING) * self.zoom,
             ),
         );
         ui.scope_builder(
@@ -506,6 +507,10 @@ impl GraphCanvas {
                 .max_rect(control_rect)
                 .id_salt(("node-effect-controls", node.id)),
             |ui| {
+                // `UiBuilder::max_rect` constrains layout but does not clip
+                // painting. Clip the panel as a final safety net at unusual
+                // zoom levels, so no widget can ever cover the port rows.
+                ui.shrink_clip_rect(control_rect);
                 ui.spacing_mut().item_spacing.y = 2.0 * self.zoom;
                 let mut enabled = control.enabled;
                 if ui
@@ -553,11 +558,11 @@ impl GraphCanvas {
             [
                 pos2(
                     node_rect.left() + 8.0 * self.zoom,
-                    header.bottom() + super::EFFECT_CONTROLS_HEIGHT * self.zoom,
+                    header.bottom() + controls_height * self.zoom,
                 ),
                 pos2(
                     node_rect.right() - 8.0 * self.zoom,
-                    header.bottom() + super::EFFECT_CONTROLS_HEIGHT * self.zoom,
+                    header.bottom() + controls_height * self.zoom,
                 ),
             ],
             Stroke::new(1.0_f32, Color32::from_rgb(52, 63, 78)),

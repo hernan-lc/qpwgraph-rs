@@ -3,7 +3,6 @@
 use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, media_filter_key, NAV_RAIL_WIDTH, PANEL_FILL,
 };
-use crate::app::effects::available_descriptors;
 use crate::app::QpwgraphApp;
 use crate::icons::{
     sidebar_icon_button, sidebar_icon_button_enabled, sidebar_icon_toggle_button,
@@ -43,6 +42,7 @@ impl QpwgraphApp {
                     } else {
                         self.show_preferences = true;
                         self.show_shortcuts = false;
+                        self.effect_gallery = None;
                         self.preferences_scroll_epoch =
                             self.preferences_scroll_epoch.wrapping_add(1);
                     }
@@ -222,44 +222,14 @@ impl QpwgraphApp {
     }
 
     fn show_effect_controls(&mut self, ui: &mut Ui) {
-        let descriptors = available_descriptors(self.driver.as_ref());
-        let mut selected = self.effect_to_add.clone();
-        let selected_name = descriptors
-            .iter()
-            .find(|descriptor| descriptor.id == selected)
-            .map(|descriptor| descriptor.name.clone())
-            .unwrap_or_else(|| self.t("effects.no_available"));
-        let choose_effect_help = self.t("effects.choose_effect");
-        let add_label = self.t("effects.add");
-        let add_help = self.t("effects.add_help");
-        let mut add = false;
-        ui.horizontal(|ui| {
-            let combo = egui::ComboBox::from_id_salt("sidebar-effect-select")
-                .selected_text(selected_name)
-                .width(42.0)
-                .show_ui(ui, |ui| {
-                    for descriptor in &descriptors {
-                        ui.selectable_value(
-                            &mut selected,
-                            descriptor.id.clone(),
-                            format!("{} — {}", descriptor.name, descriptor.vendor),
-                        );
-                    }
-                });
-            combo.response.on_hover_text(choose_effect_help);
-            if sidebar_icon_button(
-                ui,
-                "sidebar.effects-add",
-                Icon::Effects,
-                add_label,
-                add_help,
-            ) {
-                add = true;
-            }
-        });
-        self.effect_to_add = selected;
-        if add {
-            self.add_selected_effect();
+        if sidebar_icon_button(
+            ui,
+            "sidebar.effects-add",
+            Icon::Effects,
+            self.t("effects.add"),
+            self.t("effects.add_help"),
+        ) {
+            self.open_effect_gallery();
         }
     }
 

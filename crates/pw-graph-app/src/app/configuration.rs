@@ -65,6 +65,21 @@ impl QpwgraphApp {
         self.config.node_positions = node_positions;
         self.config.node_positions_by_name = node_positions_by_name;
         self.config.node_view_by_name = node_view_by_name;
+        let effect_positions: BTreeMap<_, _> = self
+            .driver
+            .effect_instances()
+            .into_iter()
+            .filter_map(|instance| {
+                graph
+                    .node(instance.node_id)
+                    .map(|node| (instance.config.instance_id, node.position))
+            })
+            .collect();
+        for effect in &mut self.config.effects {
+            if let Some(position) = effect_positions.get(&effect.instance.instance_id) {
+                effect.position = *position;
+            }
+        }
         self.config.patchbay_path = Some(self.patchbay_file.clone());
         self.config.patchbay_profiles.insert(
             self.config.active_patchbay_profile.clone(),

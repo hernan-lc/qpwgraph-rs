@@ -251,4 +251,20 @@ mod tests {
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn legacy_effect_without_routing_or_position_loads_as_a_standalone_node() {
+        let config: AppConfig = toml::from_str(
+            r#"
+effects = [{ instance = { instance_id = "legacy-effect", effect_id = "builtin.noise-gate" } }]
+"#,
+        )
+        .unwrap();
+
+        let effect = config.effects.first().unwrap();
+        assert_eq!(effect.instance.instance_id, "legacy-effect");
+        assert_eq!(effect.source, None);
+        assert_eq!(effect.destination, None);
+        assert_eq!(effect.position, [260.0, 180.0]);
+    }
 }

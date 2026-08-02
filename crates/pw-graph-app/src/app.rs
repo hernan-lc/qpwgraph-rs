@@ -57,7 +57,8 @@ pub(crate) struct QpwgraphApp {
     /// Mirrors `config.audio_meters` so a change in the panel is pushed to the
     /// driver exactly once instead of on every frame.
     pub(crate) meter_policy: MeterPolicy,
-    pub(crate) effect_to_add: String,
+    pub(crate) effect_gallery: Option<effects::EffectGalleryState>,
+    pub(crate) effect_gallery_scroll_epoch: u32,
     #[cfg(all(target_os = "linux", feature = "tray"))]
     pub(crate) tray: Option<tray_support::State>,
 }

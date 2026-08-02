@@ -126,10 +126,7 @@ pub trait EffectDriver {
 
     /// Create an unconnected effect node which can be linked through normal
     /// graph operations.
-    fn create_effect_node(
-        &mut self,
-        _request: EffectNodeRequest,
-    ) -> BackendResult<EffectInstance> {
+    fn create_effect_node(&mut self, _request: EffectNodeRequest) -> BackendResult<EffectInstance> {
         Err(BackendError::Unsupported(
             "effect processing is not available for this backend".into(),
         ))

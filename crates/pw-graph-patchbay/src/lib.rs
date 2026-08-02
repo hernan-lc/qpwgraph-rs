@@ -45,8 +45,21 @@ pub struct PatchConnection {
     pub input_port: PortId,
     #[serde(default)]
     pub pinned: bool,
+    /// Legacy output-side type used by the qpwgraph-compatible format.
+    ///
+    /// Older files have a single node type for both endpoints. Keep this
+    /// field so those files remain readable, while the optional endpoint
+    /// fields below retain the real type of each side for new files.
     #[serde(default)]
     pub node_type: NodeType,
+    /// Explicit type of the output node. `None` denotes a legacy rule whose
+    /// single `node_type` applied to both endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_node_type: Option<NodeType>,
+    /// Explicit type of the input node. `None` denotes a legacy rule whose
+    /// single `node_type` applied to both endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_node_type: Option<NodeType>,
     #[serde(default)]
     pub port_type: PortType,
     #[serde(default)]
@@ -57,6 +70,16 @@ pub struct PatchConnection {
     pub input_node: String,
     #[serde(default)]
     pub input_name: String,
+}
+
+impl PatchConnection {
+    fn effective_output_node_type(&self) -> NodeType {
+        self.output_node_type.unwrap_or(self.node_type)
+    }
+
+    fn effective_input_node_type(&self) -> NodeType {
+        self.input_node_type.unwrap_or(self.node_type)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -124,6 +147,14 @@ impl Patchbay {
             connection.pinned |= pinned;
             connection.output_port = output_port;
             connection.input_port = input_port;
+            connection.node_type = output_node.node_type;
+            connection.output_node_type = Some(output_node.node_type);
+            connection.input_node_type = Some(input_node.node_type);
+            connection.port_type = output.port_type;
+            connection.output_node = output_node.name.clone();
+            connection.output_name = output.name.clone();
+            connection.input_node = input_node.name.clone();
+            connection.input_name = input.name.clone();
             return;
         }
         self.connections.push(PatchConnection {
@@ -131,6 +162,8 @@ impl Patchbay {
             input_port,
             pinned,
             node_type: output_node.node_type,
+            output_node_type: Some(output_node.node_type),
+            input_node_type: Some(input_node.node_type),
             port_type: output.port_type,
             output_node: output_node.name.clone(),
             output_name: output.name.clone(),
@@ -300,28 +333,24 @@ impl Patchbay {
             && !connection.input_node.is_empty()
             && !connection.input_name.is_empty();
         if has_names {
-            let output_node = graph.nodes.values().find(|node| {
-                node.node_type == connection.node_type && node.name == connection.output_node
-            })?;
-            let input_node = graph.nodes.values().find(|node| {
-                node.node_type == connection.node_type && node.name == connection.input_node
-            })?;
-            let output = output_node.ports.iter().find_map(|id| {
-                let port = graph.port(*id)?;
-                (port.name == connection.output_name
-                    && port.direction == Direction::Source
-                    && (connection.port_type == PortType::Unknown
-                        || port.port_type == connection.port_type))
-                    .then_some(port.id)
-            })?;
-            let input = input_node.ports.iter().find_map(|id| {
-                let port = graph.port(*id)?;
-                (port.name == connection.input_name
-                    && port.direction == Direction::Sink
-                    && (connection.port_type == PortType::Unknown
-                        || port.port_type == connection.port_type))
-                    .then_some(port.id)
-            })?;
+            let output = resolve_named_port(
+                graph,
+                &connection.output_node,
+                &connection.output_name,
+                Direction::Source,
+                connection.port_type,
+                connection.effective_output_node_type(),
+                connection.output_node_type.is_none(),
+            )?;
+            let input = resolve_named_port(
+                graph,
+                &connection.input_node,
+                &connection.input_name,
+                Direction::Sink,
+                connection.port_type,
+                connection.effective_input_node_type(),
+                connection.input_node_type.is_none(),
+            )?;
             return Some((output, input));
         }
 
@@ -334,10 +363,107 @@ impl Patchbay {
     }
 }
 
+/// Resolve an endpoint by its durable node/port identity. Newer patchbay
+/// rules carry an explicit endpoint type and must match it exactly. For a
+/// legacy rule, first prefer the original shared type, then fall back to the
+/// saved name/port shape when that type is no longer sufficient (for example
+/// an old PipeWire-to-Effect rule saved before Effect had its own type).
+fn resolve_named_port(
+    graph: &Graph,
+    node_name: &str,
+    port_name: &str,
+    direction: Direction,
+    port_type: PortType,
+    node_type: NodeType,
+    allow_legacy_type_fallback: bool,
+) -> Option<PortId> {
+    let strict_type = (node_type != NodeType::Unknown).then_some(node_type);
+    if let Some(port) = find_named_port(
+        graph,
+        node_name,
+        port_name,
+        direction,
+        port_type,
+        strict_type,
+    ) {
+        return Some(port);
+    }
+
+    allow_legacy_type_fallback
+        .then(|| find_named_port(graph, node_name, port_name, direction, port_type, None))
+        .flatten()
+}
+
+fn find_named_port(
+    graph: &Graph,
+    node_name: &str,
+    port_name: &str,
+    direction: Direction,
+    port_type: PortType,
+    node_type: Option<NodeType>,
+) -> Option<PortId> {
+    graph
+        .nodes
+        .values()
+        .filter(|node| node.name == node_name)
+        .filter(|node| node_type.is_none_or(|expected| node.node_type == expected))
+        .find_map(|node| {
+            node.ports.iter().find_map(|id| {
+                let port = graph.port(*id)?;
+                (port.name == port_name
+                    && port.direction == direction
+                    && (port_type == PortType::Unknown || port.port_type == port_type))
+                    .then_some(port.id)
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pw_graph_backend::InMemoryDriver;
+
+    fn graph_with_named_audio_edge(
+        output_node_type: NodeType,
+        input_node_type: NodeType,
+        node_offset: u64,
+        port_offset: u64,
+    ) -> Graph {
+        let mut graph = Graph::default();
+        graph
+            .add_node(pw_graph_core::Node::new(
+                pw_graph_core::NodeId(node_offset + 1),
+                "Capture",
+                output_node_type,
+            ))
+            .unwrap();
+        graph
+            .add_node(pw_graph_core::Node::new(
+                pw_graph_core::NodeId(node_offset + 2),
+                "Noise Gate (gate-1)",
+                input_node_type,
+            ))
+            .unwrap();
+        graph
+            .add_port(pw_graph_core::Port::new(
+                PortId(port_offset + 1),
+                pw_graph_core::NodeId(node_offset + 1),
+                "output",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(pw_graph_core::Port::new(
+                PortId(port_offset + 2),
+                pw_graph_core::NodeId(node_offset + 2),
+                "input",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+    }
 
     #[test]
     fn activates_and_is_idempotent() {
@@ -423,5 +549,145 @@ mod tests {
             .links
             .values()
             .any(|link| link.output_port == PortId(201) && link.input_port == PortId(203)));
+    }
+
+    #[test]
+    fn restores_effect_connections_with_independent_endpoint_types() {
+        for (output_node_type, input_node_type) in [
+            (NodeType::PipeWire, NodeType::Effect),
+            (NodeType::Effect, NodeType::PipeWire),
+        ] {
+            let original = graph_with_named_audio_edge(output_node_type, input_node_type, 10, 20);
+            let mut patchbay = Patchbay::new("effects");
+            patchbay.add_graph_connection(&original, PortId(21), PortId(22), true);
+
+            let connection = &patchbay.connections[0];
+            assert_eq!(connection.node_type, output_node_type);
+            assert_eq!(connection.output_node_type, Some(output_node_type));
+            assert_eq!(connection.input_node_type, Some(input_node_type));
+
+            let mut current = InMemoryDriver::new(graph_with_named_audio_edge(
+                output_node_type,
+                input_node_type,
+                100,
+                200,
+            ));
+            let report = patchbay.activate(&mut current, false, false).unwrap();
+            assert_eq!(report.connected, 1);
+            assert!(current
+                .graph()
+                .links
+                .values()
+                .any(|link| { link.output_port == PortId(201) && link.input_port == PortId(202) }));
+        }
+    }
+
+    #[test]
+    fn legacy_single_type_rule_can_restore_an_effect_endpoint() {
+        let mut patchbay = Patchbay::new("legacy-effects");
+        patchbay.connections.push(PatchConnection {
+            node_type: NodeType::PipeWire,
+            port_type: PortType::Audio,
+            output_node: "Capture".into(),
+            output_name: "output".into(),
+            input_node: "Noise Gate (gate-1)".into(),
+            input_name: "input".into(),
+            ..PatchConnection::default()
+        });
+
+        let mut current = InMemoryDriver::new(graph_with_named_audio_edge(
+            NodeType::PipeWire,
+            NodeType::Effect,
+            100,
+            200,
+        ));
+        let report = patchbay.activate(&mut current, false, false).unwrap();
+        assert_eq!(report.connected, 1);
+        assert_eq!(report.failed, Vec::<String>::new());
+    }
+
+    #[test]
+    fn qpwgraph_xml_round_trip_preserves_effect_endpoint_types() {
+        let original = graph_with_named_audio_edge(NodeType::Effect, NodeType::PipeWire, 10, 20);
+        let mut patchbay = Patchbay::new("effects");
+        patchbay.add_graph_connection(&original, PortId(21), PortId(22), true);
+
+        let xml = patchbay.to_xml().unwrap();
+        assert!(xml.contains("output-node-type=\"effect\""));
+        assert!(xml.contains("input-node-type=\"pipewire\""));
+
+        let loaded = Patchbay::from_xml(&xml).unwrap();
+        let connection = &loaded.connections[0];
+        assert_eq!(connection.effective_output_node_type(), NodeType::Effect);
+        assert_eq!(connection.effective_input_node_type(), NodeType::PipeWire);
+
+        let same_type = graph_with_named_audio_edge(NodeType::Effect, NodeType::Effect, 30, 40);
+        let mut same_type_patchbay = Patchbay::new("effects");
+        same_type_patchbay.add_graph_connection(&same_type, PortId(41), PortId(42), true);
+        let same_type_xml = same_type_patchbay.to_xml().unwrap();
+        assert!(!same_type_xml.contains("input-node-type"));
+        let same_type_loaded = Patchbay::from_xml(&same_type_xml).unwrap();
+        assert_eq!(
+            same_type_loaded.connections[0].output_node_type,
+            Some(NodeType::Effect)
+        );
+        assert_eq!(
+            same_type_loaded.connections[0].input_node_type,
+            Some(NodeType::Effect)
+        );
+    }
+
+    #[test]
+    fn json_round_trip_preserves_effect_endpoint_types() {
+        let original = graph_with_named_audio_edge(NodeType::PipeWire, NodeType::Effect, 10, 20);
+        let mut patchbay = Patchbay::new("effects");
+        patchbay.add_graph_connection(&original, PortId(21), PortId(22), true);
+
+        let loaded: Patchbay =
+            serde_json::from_str(&serde_json::to_string(&patchbay).unwrap()).unwrap();
+        let connection = &loaded.connections[0];
+        assert_eq!(connection.output_node_type, Some(NodeType::PipeWire));
+        assert_eq!(connection.input_node_type, Some(NodeType::Effect));
+
+        let mut current = InMemoryDriver::new(graph_with_named_audio_edge(
+            NodeType::PipeWire,
+            NodeType::Effect,
+            100,
+            200,
+        ));
+        assert_eq!(
+            loaded
+                .activate(&mut current, false, false)
+                .unwrap()
+                .connected,
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_json_without_endpoint_types_still_loads() {
+        let patchbay: Patchbay = serde_json::from_str(
+            r#"{
+                "version": 1,
+                "name": "legacy",
+                "connections": [{
+                    "output_port": 1,
+                    "input_port": 3,
+                    "pinned": true,
+                    "node_type": "PipeWire",
+                    "port_type": "Audio",
+                    "output_node": "Audio Capture",
+                    "output_name": "capture_FL",
+                    "input_node": "Audio Playback",
+                    "input_name": "playback_FL"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let connection = &patchbay.connections[0];
+        assert_eq!(connection.output_node_type, None);
+        assert_eq!(connection.input_node_type, None);
+        assert_eq!(connection.effective_output_node_type(), NodeType::PipeWire);
+        assert_eq!(connection.effective_input_node_type(), NodeType::PipeWire);
     }
 }

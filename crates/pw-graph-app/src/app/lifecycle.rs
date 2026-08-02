@@ -122,6 +122,7 @@ impl eframe::App for QpwgraphApp {
         self.request_visible_meters(ctx);
         self.show_shortcuts_modal(ctx);
         self.show_history_modal(ctx);
+        self.show_effect_gallery_modal(ctx);
         self.show_preferences_modal(ctx);
         self.autosave_config();
     }

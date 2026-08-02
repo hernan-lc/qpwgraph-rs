@@ -25,7 +25,16 @@ const NODE_HEADER_HEIGHT: f32 = 42.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
-pub(super) const EFFECT_CONTROLS_HEIGHT: f32 = 154.0;
+/// The vertical space reserved around the effect control rows.
+///
+/// The controls themselves are native egui widgets, so they need enough
+/// screen-space room even when the canvas is zoomed out. `layout.rs` uses
+/// these values to reserve a row for the enabled checkbox and every effect
+/// parameter before it places ports beneath the panel.
+pub(super) const EFFECT_CONTROLS_VERTICAL_PADDING: f32 = 10.0;
+pub(super) const EFFECT_CONTROLS_MIN_HEIGHT: f32 = 42.0;
+pub(super) const EFFECT_CONTROL_ROW_HEIGHT: f32 = 26.0;
+pub(super) const EFFECT_CONTROL_MIN_SCREEN_ROW_HEIGHT: f32 = 24.0;
 
 pub(super) struct AudioInfo {
     pub(super) port_id: PortId,
@@ -110,7 +119,7 @@ impl GraphCanvas {
         } else {
             0.0
         } + if visible_effect_controls {
-            EFFECT_CONTROLS_HEIGHT
+            self.effect_controls_height(node)
         } else {
             0.0
         }) * self.zoom;

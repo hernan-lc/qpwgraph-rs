@@ -139,13 +139,19 @@ impl DemoDriver {
         pw_graph_effects::apply_parameters(&mut *processor, &request.parameters)
             .map_err(|error| BackendError::Native(error.to_string()))?;
 
+        // `PortKey` identifies a saved/manual connection by node name and
+        // port name. Use the stable instance id in the visible node name so
+        // several copies of the same effect never collapse into one routing
+        // target when a patchbay or undo command is restored.
+        let node_name = format!("{} ({})", processor.descriptor().name, request.instance_id);
+
         let node_id = NodeId(self.next_effect_id);
         self.next_effect_id += 1;
         let input_port = PortId(self.next_effect_id);
         self.next_effect_id += 1;
         let output_port = PortId(self.next_effect_id);
         self.next_effect_id += 1;
-        let mut node = Node::new(node_id, request.effect_id.clone(), NodeType::Effect)
+        let mut node = Node::new(node_id, node_name, NodeType::Effect)
             .with_effect_instance(request.instance_id.clone());
         node.position = request.position;
         self.graph.add_node(node)?;

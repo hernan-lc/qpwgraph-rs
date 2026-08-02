@@ -21,11 +21,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod effects;
 mod links;
 mod metering;
 mod properties;
 mod registry;
 
+use effects::NativeEffect;
 use metering::{process_meter_buffer, MeterCallbackState, MeterHandle, MeterReadingState};
 use registry::{classify_port_type, LinkRecord, NodeRecord, PortRecord, RegistryState};
 
@@ -71,6 +73,10 @@ pub struct PipewireDriver {
     positions: BTreeMap<NodeId, [f32; 2]>,
     audio_controls: BTreeMap<NodeId, NodeAudioControl>,
     effect_host: EffectHost,
+    /// Live `pw_filter` owners.  Keeping them in the driver makes their
+    /// lifecycle match the PipeWire thread loop and lets graph snapshots map
+    /// transient global IDs back to stable effect instance IDs.
+    effects: BTreeMap<String, NativeEffect>,
     /// Manual disconnects are kept as stable endpoint pairs. WirePlumber may
     /// recreate an application's link when it resumes; the next synchronized
     /// snapshot removes only those links the user explicitly deleted.
@@ -199,6 +205,7 @@ impl PipewireDriver {
             positions: BTreeMap::new(),
             audio_controls: BTreeMap::new(),
             effect_host: EffectHost::new(),
+            effects: BTreeMap::new(),
             blocked_connections: Vec::new(),
         };
 
@@ -265,9 +272,89 @@ impl PipewireDriver {
         Ok(())
     }
 
+    /// Reattach backend-owned effect instances to the global IDs PipeWire is
+    /// currently using. A `pw_filter` has a stable Rust-side instance ID, but
+    /// its node and port globals are assigned asynchronously and may change
+    /// while a client reconnects. The registry remains the source of truth for
+    /// graph IDs, while the filter's unique friendly node name is the fallback
+    /// identity until `pw_filter_get_node_id` is available.
+    ///
+    /// The caller must hold the ThreadLoop lock because `runtime_node_id`
+    /// touches the raw `pw_filter` object.
+    fn reconcile_effects_locked(&mut self) {
+        let state = self.state.borrow().clone();
+        let resolutions: Vec<(String, NodeId, PortId, PortId)> = self
+            .effects
+            .iter()
+            .filter_map(|(instance_id, effect)| {
+                let raw_node = effect.runtime_node_id().filter(|node_id| {
+                    state
+                        .nodes
+                        .get(&(node_id.0 as u32))
+                        .is_some_and(|record| record.name == effect.node_name())
+                });
+                let node_id = raw_node.or_else(|| {
+                    state
+                        .nodes
+                        .iter()
+                        .find(|(_, record)| record.name == effect.node_name())
+                        .map(|(id, _)| NodeId(*id as u64))
+                })?;
+                let input_port = state
+                    .ports
+                    .iter()
+                    .find(|(_, port)| {
+                        port.node_id == node_id.0 as u32
+                            && port.direction.is_sink()
+                            && port.name == "input"
+                    })
+                    .map(|(id, _)| PortId(*id as u64))?;
+                let output_port = state
+                    .ports
+                    .iter()
+                    .find(|(_, port)| {
+                        port.node_id == node_id.0 as u32
+                            && port.direction.is_source()
+                            && port.name == "output"
+                    })
+                    .map(|(id, _)| PortId(*id as u64))?;
+                Some((instance_id.clone(), node_id, input_port, output_port))
+            })
+            .collect();
+
+        for (instance_id, node_id, input_port, output_port) in resolutions {
+            let Some(effect) = self.effects.get_mut(&instance_id) else {
+                continue;
+            };
+            let old_node_id = effect.instance.node_id;
+            let position = self
+                .positions
+                .get(&old_node_id)
+                .copied()
+                .unwrap_or_else(|| effect.position());
+            effect.set_identity(node_id, input_port, output_port);
+            effect.set_position(position);
+            if old_node_id != node_id {
+                self.positions.remove(&old_node_id);
+            }
+            self.positions.insert(node_id, position);
+        }
+    }
+
     fn build_graph_from_state(&mut self, state: RegistryState) -> BackendResult<Graph> {
         let mut graph = Graph::default();
         let mut node_media_classes = HashMap::new();
+        let effect_nodes: HashMap<NodeId, String> = self
+            .effects
+            .values()
+            .filter(|effect| effect.resolved())
+            .map(|effect| {
+                (
+                    effect.instance.node_id,
+                    effect.instance.config.instance_id.clone(),
+                )
+            })
+            .collect();
 
         for (id, record) in state.nodes.iter() {
             let node_id = NodeId(*id as u64);
@@ -275,9 +362,21 @@ impl PipewireDriver {
                 continue;
             }
             node_media_classes.insert(node_id, record.media_class.to_ascii_lowercase());
-            let mut node = Node::new(node_id, &record.name, NodeType::PipeWire);
+            let effect_instance_id = effect_nodes.get(&node_id);
+            let mut node = Node::new(
+                node_id,
+                &record.name,
+                if effect_instance_id.is_some() {
+                    NodeType::Effect
+                } else {
+                    NodeType::PipeWire
+                },
+            );
             if let Some(serial) = record.serial {
                 node = node.with_serial(serial);
+            }
+            if let Some(instance_id) = effect_instance_id {
+                node = node.with_effect_instance(instance_id.clone());
             }
             node.position = self.positions.get(&node_id).copied().unwrap_or([0.0, 0.0]);
             graph.add_node(node)?;
@@ -332,6 +431,7 @@ impl PipewireDriver {
         // stream resumes. Bound the cleanup passes so a broken policy cannot
         // make a refresh loop forever.
         for pass in 0..3 {
+            self.reconcile_effects_locked();
             let state = self.state.borrow().clone();
             self.graph = self.build_graph_from_state(state)?;
             let suppressed: Vec<LinkId> = self
@@ -581,12 +681,260 @@ impl PipewireDriver {
             shared,
         })
     }
+
+    /// Create a live `pw_filter` and wait until the registry has published its
+    /// node and both ports. Callers hold the ThreadLoop lock for the entire
+    /// transaction, which makes callback-data destruction safe on rollback.
+    fn create_effect_node_locked(
+        &mut self,
+        request: EffectNodeRequest,
+    ) -> BackendResult<EffectInstance> {
+        if self.effects.contains_key(&request.instance_id) {
+            return Err(BackendError::Native(format!(
+                "effect instance {} already exists",
+                request.instance_id
+            )));
+        }
+        let instance_id = request.instance_id.clone();
+        let effect = NativeEffect::create(&self.effect_host, &self.thread_loop, request)?;
+        self.effects.insert(instance_id.clone(), effect);
+
+        let result = (|| {
+            // `pw_filter_new_simple` owns a small client connection of its
+            // own. One round-trip from this driver's core normally observes
+            // its globals, but a bounded second synchronization covers the
+            // cross-client publication race without ever waiting in a loop.
+            for _ in 0..2 {
+                self.roundtrip_locked()?;
+                self.rebuild_graph_locked()?;
+                let effect = self.effects.get(&instance_id).ok_or_else(|| {
+                    BackendError::Native("new PipeWire effect disappeared during creation".into())
+                })?;
+                if effect.resolved()
+                    && self.graph.node(effect.instance.node_id).is_some()
+                    && self.graph.port(effect.instance.input_port).is_some()
+                    && self.graph.port(effect.instance.output_port).is_some()
+                {
+                    return Ok(effect.snapshot());
+                }
+            }
+            Err(BackendError::Native(
+                "PipeWire did not publish the effect node and both DSP ports".into(),
+            ))
+        })();
+
+        if result.is_err() {
+            // Dropping the raw filter removes its links/ports. Best-effort
+            // synchronization prevents a failed creation from lingering as an
+            // unclassified node in the next UI frame.
+            if let Some(effect) = self.effects.remove(&instance_id) {
+                self.positions.remove(&effect.instance.node_id);
+                drop(effect);
+            }
+            let _ = self.roundtrip_locked();
+            let _ = self.rebuild_graph_locked();
+        }
+        result
+    }
+
+    fn effect_link_endpoints_locked(
+        &self,
+        source: &PortKey,
+        destination: &PortKey,
+    ) -> BackendResult<(PortId, PortId, Link)> {
+        let output = self
+            .graph
+            .resolve_port_key(source)
+            .ok_or_else(|| BackendError::Native("effect source port is unavailable".into()))?;
+        let input = self
+            .graph
+            .resolve_port_key(destination)
+            .ok_or_else(|| BackendError::Native("effect destination port is unavailable".into()))?;
+        let output_port = self
+            .graph
+            .port(output)
+            .ok_or(GraphError::MissingPort(output))?;
+        let input_port = self
+            .graph
+            .port(input)
+            .ok_or(GraphError::MissingPort(input))?;
+        if !output_port.direction.is_source() {
+            return Err(GraphError::NotSource(output).into());
+        }
+        if !input_port.direction.is_sink() {
+            return Err(GraphError::NotSink(input).into());
+        }
+        if output_port.port_type != PortType::Audio || input_port.port_type != PortType::Audio {
+            return Err(BackendError::Native(
+                "PipeWire effects can only be inserted into audio links".into(),
+            ));
+        }
+        let link = self
+            .graph
+            .links
+            .values()
+            .find(|link| link.output_port == output && link.input_port == input)
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::Native("effect source and destination are not linked".into())
+            })?;
+        Ok((output, input, link))
+    }
+
+    /// Remove only the filter node. PipeWire removes all links touching a
+    /// destroyed filter, so this is the rollback primitive for a failed insert
+    /// as well as the standalone-node removal path.
+    fn destroy_effect_node_locked(&mut self, instance_id: &str) -> BackendResult<EffectInstance> {
+        let effect = self.effects.remove(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        let snapshot = effect.snapshot();
+        self.positions.remove(&snapshot.node_id);
+        drop(effect);
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
+        Ok(snapshot)
+    }
+
+    /// Restore a direct connection after an inserted filter has gone away.
+    /// A user may already have recreated it manually, in which case keeping
+    /// that link is the successful, idempotent result.
+    fn restore_direct_connection_locked(
+        &mut self,
+        source: &PortKey,
+        destination: &PortKey,
+    ) -> BackendResult<()> {
+        let output = self.graph.resolve_port_key(source).ok_or_else(|| {
+            BackendError::Native("effect source disappeared while restoring routing".into())
+        })?;
+        let input = self.graph.resolve_port_key(destination).ok_or_else(|| {
+            BackendError::Native("effect destination disappeared while restoring routing".into())
+        })?;
+        if self
+            .graph
+            .links
+            .values()
+            .any(|link| link.output_port == output && link.input_port == input)
+        {
+            self.allow_blocked_connection(source, destination);
+            return Ok(());
+        }
+        self.connect_locked(output, input)?;
+        Ok(())
+    }
+
+    fn insert_effect_locked(
+        &mut self,
+        request: EffectInsertRequest,
+    ) -> BackendResult<EffectInstance> {
+        let source = request.source.clone();
+        let destination = request.destination.clone();
+        // Verify the selected link before publishing a new node. It can still
+        // disappear while the effect initializes, so we resolve it once more
+        // immediately before disconnecting it below.
+        self.effect_link_endpoints_locked(&source, &destination)?;
+        let instance_id = request.instance_id.clone();
+        let instance = self.create_effect_node_locked(EffectNodeRequest {
+            instance_id: request.instance_id,
+            effect_id: request.effect_id,
+            module_path: request.module_path,
+            enabled: request.enabled,
+            parameters: request.parameters,
+            position: request.position,
+        })?;
+
+        let result = (|| {
+            let (output, input, direct_link) =
+                self.effect_link_endpoints_locked(&source, &destination)?;
+            self.disconnect_locked(direct_link.id)?;
+            self.connect_locked(output, instance.input_port)?;
+            self.connect_locked(instance.output_port, input)?;
+            let effect = self.effects.get_mut(&instance_id).ok_or_else(|| {
+                BackendError::Native("effect disappeared while committing insertion".into())
+            })?;
+            effect.instance.source = Some(source.clone());
+            effect.instance.destination = Some(destination.clone());
+            Ok(effect.snapshot())
+        })();
+
+        if let Err(error) = result {
+            // The direct link is restored after filter destruction. This also
+            // cleans up either half of a partially connected insertion.
+            let cleanup = self.destroy_effect_node_locked(&instance_id);
+            let restore = self.restore_direct_connection_locked(&source, &destination);
+            if let Err(restore_error) = restore {
+                return Err(BackendError::Native(format!(
+                    "{error}; additionally failed to restore the original link: {restore_error}"
+                )));
+            }
+            if let Err(cleanup_error) = cleanup {
+                return Err(BackendError::Native(format!(
+                    "{error}; additionally failed to clean up the effect node: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
+        result
+    }
+
+    fn remove_effect_locked(&mut self, instance_id: &str) -> BackendResult<()> {
+        let instance = self
+            .effects
+            .get(instance_id)
+            .ok_or_else(|| BackendError::Native(format!("unknown effect instance {instance_id}")))?
+            .snapshot();
+        let endpoints = match (&instance.source, &instance.destination) {
+            (Some(source), Some(destination)) => {
+                // Refuse to destroy an inserted effect if the persisted
+                // endpoints have already vanished; otherwise its original
+                // routing could not honestly be restored.
+                let output = self.graph.resolve_port_key(source).ok_or_else(|| {
+                    BackendError::Native("effect source disappeared while removing effect".into())
+                })?;
+                let input = self.graph.resolve_port_key(destination).ok_or_else(|| {
+                    BackendError::Native(
+                        "effect destination disappeared while removing effect".into(),
+                    )
+                })?;
+                let output_port = self
+                    .graph
+                    .port(output)
+                    .ok_or(GraphError::MissingPort(output))?;
+                let input_port = self
+                    .graph
+                    .port(input)
+                    .ok_or(GraphError::MissingPort(input))?;
+                if !output_port.direction.is_source() {
+                    return Err(GraphError::NotSource(output).into());
+                }
+                if !input_port.direction.is_sink() {
+                    return Err(GraphError::NotSink(input).into());
+                }
+                Some((source.clone(), destination.clone()))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(BackendError::Native(
+                    "effect routing is incomplete and cannot be restored".into(),
+                ));
+            }
+        };
+
+        self.destroy_effect_node_locked(instance_id)?;
+        if let Some((source, destination)) = endpoints {
+            self.restore_direct_connection_locked(&source, &destination)?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for PipewireDriver {
     fn drop(&mut self) {
         let guard = self.thread_loop.lock();
         self.meters.clear();
+        // Each raw `pw_filter` owns callbacks on this loop, so destroy them
+        // before releasing the registry/core that created their globals.
+        self.effects.clear();
         self.registry_listener.take();
         self.registry.take();
         self.core.take();
@@ -645,6 +993,13 @@ impl GraphDriver for PipewireDriver {
             return Err(GraphError::MissingNode(node).into());
         }
         self.positions.insert(node, position);
+        if let Some(effect) = self
+            .effects
+            .values_mut()
+            .find(|effect| effect.instance.node_id == node)
+        {
+            effect.set_position(position);
+        }
         self.graph
             .nodes
             .get_mut(&node)
@@ -682,7 +1037,7 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn is_node_type(&self, node_type: NodeType) -> bool {
-        matches!(node_type, NodeType::PipeWire)
+        matches!(node_type, NodeType::PipeWire | NodeType::Effect)
     }
 
     fn is_port_type(&self, port_type: PortType) -> bool {
@@ -772,6 +1127,58 @@ impl EffectDriver for PipewireDriver {
     fn effect_descriptors(&self) -> Vec<EffectDescriptor> {
         self.effect_host.descriptors()
     }
+
+    fn effect_instances(&self) -> Vec<EffectInstance> {
+        self.effects.values().map(NativeEffect::snapshot).collect()
+    }
+
+    fn supports_effect_nodes(&self) -> bool {
+        true
+    }
+
+    fn create_effect_node(&mut self, request: EffectNodeRequest) -> BackendResult<EffectInstance> {
+        let loop_for_create = self.thread_loop.clone();
+        let _guard = loop_for_create.lock();
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
+        self.create_effect_node_locked(request)
+    }
+
+    fn insert_effect(&mut self, request: EffectInsertRequest) -> BackendResult<EffectInstance> {
+        let loop_for_insert = self.thread_loop.clone();
+        let _guard = loop_for_insert.lock();
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
+        self.insert_effect_locked(request)
+    }
+
+    fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
+        let effect = self.effects.get_mut(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        effect.set_enabled(enabled);
+        Ok(())
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        instance_id: &str,
+        parameter: &str,
+        value: f32,
+    ) -> BackendResult<()> {
+        let effect = self.effects.get_mut(instance_id).ok_or_else(|| {
+            BackendError::Native(format!("unknown effect instance {instance_id}"))
+        })?;
+        effect.set_parameter(parameter, value)
+    }
+
+    fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
+        let loop_for_remove = self.thread_loop.clone();
+        let _guard = loop_for_remove.lock();
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()?;
+        self.remove_effect_locked(instance_id)
+    }
 }
 
 fn native_error(operation: &str, error: impl std::fmt::Display) -> BackendError {
@@ -803,8 +1210,10 @@ fn ui_volume_to_spa_volume(volume: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_port_type, ui_volume_to_spa_volume};
-    use pw_graph_core::PortType;
+    use super::{classify_port_type, ui_volume_to_spa_volume, PipewireDriver};
+    use crate::{EffectDriver, EffectNodeRequest, GraphDriver};
+    use pw_graph_core::{NodeType, PortType};
+    use std::collections::BTreeMap;
 
     #[test]
     fn classifies_media_types_without_case_sensitive_metadata() {
@@ -837,5 +1246,50 @@ mod tests {
         assert!((ui_volume_to_spa_volume(1.0) - 1.0).abs() < f32::EPSILON);
         assert!((ui_volume_to_spa_volume(0.5) - 0.125).abs() < f32::EPSILON);
         assert!((ui_volume_to_spa_volume(1.5) - 3.375).abs() < f32::EPSILON);
+    }
+
+    /// Opt-in because it creates a real PipeWire node in the user's session.
+    /// The node has no links, so it cannot alter a live audio route; the test
+    /// exists to exercise the raw `pw_filter` lifetime and registry mapping on
+    /// a machine with PipeWire available.
+    #[test]
+    fn native_backend_creates_and_removes_a_standalone_effect_when_enabled() {
+        if std::env::var_os("PW_GRAPH_TEST_EFFECTS").is_none() {
+            return;
+        }
+        let mut driver = PipewireDriver::new().expect("PipeWire daemon should be available");
+        driver
+            .refresh()
+            .expect("PipeWire registry snapshot should succeed");
+        let instance = driver
+            .create_effect_node(EffectNodeRequest {
+                instance_id: "qpwgraph-rs-test-effect".into(),
+                effect_id: pw_graph_effects::NOISE_GATE_ID.into(),
+                module_path: None,
+                enabled: true,
+                parameters: BTreeMap::new(),
+                position: [12.0, 34.0],
+            })
+            .expect("the raw PipeWire filter should publish a node and ports");
+        let node = driver
+            .graph()
+            .node(instance.node_id)
+            .expect("effect node should be present in the rebuilt graph");
+        assert_eq!(node.node_type, NodeType::Effect);
+        assert_eq!(
+            node.effect_instance_id.as_deref(),
+            Some("qpwgraph-rs-test-effect")
+        );
+        assert!(driver.graph().port(instance.input_port).is_some());
+        assert!(driver.graph().port(instance.output_port).is_some());
+
+        driver
+            .set_effect_enabled("qpwgraph-rs-test-effect", false)
+            .expect("bypass should update the callback-safe state");
+        driver
+            .remove_effect("qpwgraph-rs-test-effect")
+            .expect("destroying the raw filter should remove its node");
+        assert!(driver.effect_instances().is_empty());
+        assert!(driver.graph().node(instance.node_id).is_none());
     }
 }

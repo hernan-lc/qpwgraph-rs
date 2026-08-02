@@ -1,11 +1,56 @@
 use super::QpwgraphApp;
-use pw_graph_backend::{EffectInsertRequest, GraphDriver};
+use pw_graph_backend::{EffectInsertRequest, EffectInstance, EffectNodeRequest, GraphDriver};
 use pw_graph_config::PersistedEffect;
-use pw_graph_core::{NodeId, PortType};
+use pw_graph_core::{LinkId, NodeId, PortType};
 use pw_graph_effects::EffectDescriptor;
 use pw_graph_ui::{EffectNodeControl, EffectNodeParameter};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static EFFECT_INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// How the effect chosen in the gallery should enter the graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EffectPlacement {
+    /// Add an unconnected input/output node. The user can patch it through the
+    /// same port-drag interaction as every other graph node.
+    NewNode,
+    /// Replace one existing audio link with source → effect → destination.
+    InsertOnLink,
+}
+
+/// Transient state for the effect gallery. It deliberately never aliases the
+/// saved configuration, so dismissing the dialog cannot change an effect.
+#[derive(Clone, Debug)]
+pub(crate) struct EffectGalleryState {
+    pub(crate) effect_id: String,
+    pub(crate) placement: EffectPlacement,
+    pub(crate) link_id: Option<LinkId>,
+    pub(crate) enabled: bool,
+    pub(crate) parameters: BTreeMap<String, f32>,
+    pub(crate) scroll_epoch: u32,
+}
+
+impl EffectGalleryState {
+    fn new(descriptor: &EffectDescriptor, link_id: Option<LinkId>, scroll_epoch: u32) -> Self {
+        Self {
+            effect_id: descriptor.id.clone(),
+            placement: EffectPlacement::NewNode,
+            link_id,
+            enabled: true,
+            parameters: default_parameters(descriptor),
+            scroll_epoch,
+        }
+    }
+
+    pub(crate) fn select_effect(&mut self, descriptor: &EffectDescriptor) {
+        if self.effect_id != descriptor.id {
+            self.effect_id = descriptor.id.clone();
+            self.parameters = default_parameters(descriptor);
+        }
+    }
+}
 
 pub(crate) fn default_parameters(descriptor: &EffectDescriptor) -> BTreeMap<String, f32> {
     descriptor
@@ -24,7 +69,55 @@ pub(crate) fn available_descriptors(driver: &dyn GraphDriver) -> Vec<EffectDescr
     }
 }
 
+pub(crate) fn audio_link_options(driver: &dyn GraphDriver) -> Vec<(LinkId, String)> {
+    driver
+        .graph()
+        .links
+        .values()
+        .filter_map(|link| {
+            let source = driver.graph().port_key(link.output_port)?;
+            let destination = driver.graph().port_key(link.input_port)?;
+            (source.port_type == PortType::Audio && destination.port_type == PortType::Audio).then(
+                || {
+                    (
+                        link.id,
+                        format!(
+                            "{} / {}  →  {} / {}",
+                            source.node_name,
+                            source.port_name,
+                            destination.node_name,
+                            destination.port_name
+                        ),
+                    )
+                },
+            )
+        })
+        .collect()
+}
+
 impl QpwgraphApp {
+    pub(crate) fn open_effect_gallery(&mut self) {
+        let descriptors = available_descriptors(self.driver.as_ref());
+        let Some(descriptor) = descriptors.first() else {
+            self.status = self.t("effects.no_available");
+            return;
+        };
+        let links = audio_link_options(self.driver.as_ref());
+        let selected_link = self
+            .canvas
+            .selected_link()
+            .filter(|link_id| links.iter().any(|(id, _)| id == link_id));
+        self.show_shortcuts = false;
+        self.show_history = false;
+        self.show_preferences = false;
+        self.effect_gallery_scroll_epoch = self.effect_gallery_scroll_epoch.wrapping_add(1);
+        self.effect_gallery = Some(EffectGalleryState::new(
+            descriptor,
+            selected_link,
+            self.effect_gallery_scroll_epoch,
+        ));
+    }
+
     /// Copy backend effect metadata into the canvas model so effect nodes can
     /// render their controls without opening a second editor window.
     pub(crate) fn sync_effect_controls(&mut self) {
@@ -67,57 +160,89 @@ impl QpwgraphApp {
         self.canvas.set_effect_controls(controls);
     }
 
-    pub(crate) fn add_selected_effect(&mut self) {
-        let Some(link_id) = self.canvas.selected_link() else {
-            self.status = self.t("effects.select_link");
-            return;
-        };
-        let Some(link) = self.driver.graph().link(link_id).cloned() else {
-            self.status = self.t("effects.link_unavailable");
-            return;
-        };
-        let Some(source) = self.driver.graph().port_key(link.output_port) else {
-            self.status = self.t("effects.link_unavailable");
-            return;
-        };
-        let Some(destination) = self.driver.graph().port_key(link.input_port) else {
-            self.status = self.t("effects.link_unavailable");
-            return;
-        };
-        if source.port_type != PortType::Audio || destination.port_type != PortType::Audio {
-            self.status = self.t("effects.audio_only");
-            return;
+    /// Apply the gallery state. Returns `true` only when an effect was added,
+    /// allowing the modal caller to stay open and show an error on failure.
+    pub(crate) fn create_effect_from_gallery(&mut self, gallery: &EffectGalleryState) -> bool {
+        if !self.driver.supports_effect_nodes() {
+            self.status = self.t("effects.backend_unavailable");
+            return false;
         }
         let descriptors = available_descriptors(self.driver.as_ref());
         let Some(descriptor) = descriptors
             .iter()
-            .find(|descriptor| descriptor.id == self.effect_to_add)
-            .or_else(|| descriptors.first())
+            .find(|descriptor| descriptor.id == gallery.effect_id)
         else {
             self.status = self.t("effects.no_available");
-            return;
+            return false;
         };
-        let request = EffectInsertRequest {
-            instance_id: unique_effect_id(),
-            effect_id: descriptor.id.clone(),
-            module_path: None,
-            source,
-            destination,
-            enabled: true,
-            parameters: default_parameters(descriptor),
+
+        let instance_id = unique_effect_id();
+        let result = match gallery.placement {
+            EffectPlacement::NewNode => {
+                let position = self.preferred_effect_position();
+                self.driver.create_effect_node(EffectNodeRequest {
+                    instance_id,
+                    effect_id: descriptor.id.clone(),
+                    module_path: None,
+                    enabled: gallery.enabled,
+                    parameters: gallery.parameters.clone(),
+                    position,
+                })
+            }
+            EffectPlacement::InsertOnLink => {
+                let Some(link_id) = gallery.link_id else {
+                    self.status = self.t("effects.select_link");
+                    return false;
+                };
+                let Some(link) = self.driver.graph().link(link_id).cloned() else {
+                    self.status = self.t("effects.link_unavailable");
+                    return false;
+                };
+                let Some(source) = self.driver.graph().port_key(link.output_port) else {
+                    self.status = self.t("effects.link_unavailable");
+                    return false;
+                };
+                let Some(destination) = self.driver.graph().port_key(link.input_port) else {
+                    self.status = self.t("effects.link_unavailable");
+                    return false;
+                };
+                if source.port_type != PortType::Audio || destination.port_type != PortType::Audio {
+                    self.status = self.t("effects.audio_only");
+                    return false;
+                }
+                let position = self.effect_position_between(link.output_port, link.input_port);
+                self.driver.insert_effect(EffectInsertRequest {
+                    instance_id,
+                    effect_id: descriptor.id.clone(),
+                    module_path: None,
+                    source,
+                    destination,
+                    enabled: gallery.enabled,
+                    parameters: gallery.parameters.clone(),
+                    position,
+                })
+            }
         };
-        match self.driver.insert_effect(request) {
+
+        match result {
             Ok(instance) => {
-                self.config.effects.push(PersistedEffect {
-                    instance: instance.config,
-                    source: instance.source,
-                    destination: instance.destination,
+                self.persist_effect(instance);
+                self.status = self.t(match gallery.placement {
+                    EffectPlacement::NewNode => "effects.created",
+                    EffectPlacement::InsertOnLink => "effects.inserted",
                 });
-                self.status = self.t("effects.inserted");
                 self.canvas.clear_selected_link();
+                true
             }
             Err(error) => {
-                self.status = self.tf("effects.insert_failed", &[("error", error.to_string())]);
+                self.status = self.tf(
+                    match gallery.placement {
+                        EffectPlacement::NewNode => "effects.create_failed",
+                        EffectPlacement::InsertOnLink => "effects.insert_failed",
+                    },
+                    &[("error", error.to_string())],
+                );
+                false
             }
         }
     }
@@ -195,6 +320,85 @@ impl QpwgraphApp {
         }
     }
 
+    /// Restore free-standing nodes before Patchbay activation. Their ports
+    /// have no implicit route to rebuild, so they must exist while Patchbay
+    /// resolves any saved manual connections to them.
+    pub(crate) fn restore_standalone_effects(&mut self) {
+        let saved = self
+            .config
+            .effects
+            .iter()
+            .filter(|effect| effect.source.is_none() && effect.destination.is_none())
+            .cloned()
+            .collect();
+        self.restore_saved_effects(saved);
+    }
+
+    /// Restore routed insertions after Patchbay activation. An insertion
+    /// deliberately replaces the direct source → destination link, so doing
+    /// it first would let Patchbay recreate an unprocessed parallel route.
+    pub(crate) fn restore_inserted_effects(&mut self) {
+        let saved = self
+            .config
+            .effects
+            .iter()
+            .filter(|effect| effect.source.is_some() || effect.destination.is_some())
+            .cloned()
+            .collect();
+        self.restore_saved_effects(saved);
+    }
+
+    fn restore_saved_effects(&mut self, saved: Vec<PersistedEffect>) {
+        for effect in saved {
+            let result = match (&effect.source, &effect.destination) {
+                (Some(source), Some(destination)) => {
+                    self.driver.insert_effect(EffectInsertRequest {
+                        instance_id: effect.instance.instance_id.clone(),
+                        effect_id: effect.instance.effect_id.clone(),
+                        module_path: effect.instance.module_path.clone(),
+                        source: source.clone(),
+                        destination: destination.clone(),
+                        enabled: effect.instance.enabled,
+                        parameters: effect.instance.parameters.clone(),
+                        position: effect.position,
+                    })
+                }
+                (None, None) => self.driver.create_effect_node(EffectNodeRequest {
+                    instance_id: effect.instance.instance_id.clone(),
+                    effect_id: effect.instance.effect_id.clone(),
+                    module_path: effect.instance.module_path.clone(),
+                    enabled: effect.instance.enabled,
+                    parameters: effect.instance.parameters.clone(),
+                    position: effect.position,
+                }),
+                _ => Err(pw_graph_backend::BackendError::Native(
+                    "effect routing is incomplete".into(),
+                )),
+            };
+            if let Err(error) = result {
+                self.status = self.tf("effects.restore_failed", &[("error", error.to_string())]);
+            }
+        }
+    }
+
+    fn persist_effect(&mut self, instance: EffectInstance) {
+        let position = self
+            .driver
+            .graph()
+            .node(instance.node_id)
+            .map(|node| node.position)
+            .unwrap_or([260.0, 180.0]);
+        self.config
+            .effects
+            .retain(|effect| effect.instance.instance_id != instance.config.instance_id);
+        self.config.effects.push(PersistedEffect {
+            instance: instance.config,
+            source: instance.source,
+            destination: instance.destination,
+            position,
+        });
+    }
+
     fn effect_instance_id(&self, node_id: NodeId) -> Option<String> {
         self.driver
             .effect_instances()
@@ -203,21 +407,44 @@ impl QpwgraphApp {
             .map(|instance| instance.config.instance_id)
     }
 
-    pub(crate) fn restore_effects(&mut self) {
-        let saved = self.config.effects.clone();
-        for effect in saved {
-            let request = EffectInsertRequest {
-                instance_id: effect.instance.instance_id.clone(),
-                effect_id: effect.instance.effect_id.clone(),
-                module_path: effect.instance.module_path.clone(),
-                source: effect.source,
-                destination: effect.destination,
-                enabled: effect.instance.enabled,
-                parameters: effect.instance.parameters,
-            };
-            if let Err(error) = self.driver.insert_effect(request) {
-                self.status = self.tf("effects.restore_failed", &[("error", error.to_string())]);
-            }
+    fn preferred_effect_position(&self) -> [f32; 2] {
+        if let Some(node) = self
+            .canvas
+            .selected_node
+            .and_then(|node_id| self.driver.graph().node(node_id))
+        {
+            return [node.position[0] + 290.0, node.position[1]];
+        }
+        let rightmost = self
+            .driver
+            .graph()
+            .nodes
+            .values()
+            .map(|node| node.position[0])
+            .fold(0.0_f32, f32::max);
+        [rightmost + 290.0, 180.0]
+    }
+
+    fn effect_position_between(
+        &self,
+        output: pw_graph_core::PortId,
+        input: pw_graph_core::PortId,
+    ) -> [f32; 2] {
+        let graph = self.driver.graph();
+        let source_position = graph
+            .port(output)
+            .and_then(|port| graph.node(port.node_id))
+            .map(|node| node.position);
+        let destination_position = graph
+            .port(input)
+            .and_then(|port| graph.node(port.node_id))
+            .map(|node| node.position);
+        match (source_position, destination_position) {
+            (Some(source), Some(destination)) => [
+                (source[0] + destination[0]) * 0.5,
+                (source[1] + destination[1]) * 0.5,
+            ],
+            _ => self.preferred_effect_position(),
         }
     }
 }
@@ -227,5 +454,21 @@ fn unique_effect_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    format!("effect-{nanos:x}")
+    let sequence = EFFECT_INSTANCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("effect-{nanos:x}-{sequence:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_parameters, EffectGalleryState, EffectPlacement};
+    use pw_graph_effects::EffectHost;
+
+    #[test]
+    fn gallery_starts_with_a_standalone_node_and_default_parameters() {
+        let descriptor = EffectHost::new().descriptors().remove(0);
+        let state = EffectGalleryState::new(&descriptor, None, 4);
+        assert_eq!(state.placement, EffectPlacement::NewNode);
+        assert_eq!(state.parameters, default_parameters(&descriptor));
+        assert_eq!(state.scroll_epoch, 4);
+    }
 }

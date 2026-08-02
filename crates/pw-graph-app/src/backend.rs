@@ -23,6 +23,33 @@ impl CompositeDriver {
         }
         Ok(())
     }
+
+    /// Rebuild the graph exposed to the app from the children’s already
+    /// synchronized snapshots. Unlike [`GraphDriver::refresh`], this does not
+    /// start another PipeWire round-trip, which matters after a native effect
+    /// operation has already committed its filter or link rewrite.
+    fn rebuild_merged_graph(&mut self) -> Result<(), GraphError> {
+        let mut graph = Graph::default();
+        if let Some(driver) = self.pipewire.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        if let Some(driver) = self.alsa.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        self.graph = graph;
+        Ok(())
+    }
+
+    /// An effect operation has succeeded by the time this is called. Do not
+    /// turn a subsequent UI-snapshot merge failure into a false operation
+    /// failure — doing so would leave a live but unpersisted native effect.
+    /// Backend IDs are namespaced, so a merge error would indicate a bug; the
+    /// normal refresh path will retry on the next graph update.
+    fn rebuild_after_effect_mutation(&mut self) {
+        if let Err(error) = self.rebuild_merged_graph() {
+            eprintln!("could not rebuild merged graph after effect mutation: {error}");
+        }
+    }
 }
 
 impl GraphDriver for CompositeDriver {
@@ -33,14 +60,7 @@ impl GraphDriver for CompositeDriver {
         if let Some(driver) = self.alsa.as_mut() {
             driver.refresh()?;
         }
-        let mut graph = Graph::default();
-        if let Some(driver) = self.pipewire.as_ref() {
-            Self::merge_graph(&mut graph, driver.graph())?;
-        }
-        if let Some(driver) = self.alsa.as_ref() {
-            Self::merge_graph(&mut graph, driver.graph())?;
-        }
-        self.graph = graph;
+        self.rebuild_merged_graph()?;
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
@@ -232,16 +252,42 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
             .unwrap_or_default()
     }
 
-    fn insert_effect(
-        &mut self,
-        request: pw_graph_backend::EffectInsertRequest,
-    ) -> pw_graph_backend::BackendResult<pw_graph_backend::EffectInstance> {
+    fn supports_effect_nodes(&self) -> bool {
         self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.supports_effect_nodes())
+    }
+
+    fn create_effect_node(
+        &mut self,
+        request: pw_graph_backend::EffectNodeRequest,
+    ) -> pw_graph_backend::BackendResult<pw_graph_backend::EffectInstance> {
+        let instance = self
+            .pipewire
             .as_mut()
             .ok_or_else(|| {
                 pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
             })?
-            .insert_effect(request)
+            .create_effect_node(request)?;
+        // `PipewireDriver` has already rebuilt its native registry snapshot;
+        // mirror it into the composite without a second round-trip.
+        self.rebuild_after_effect_mutation();
+        Ok(instance)
+    }
+
+    fn insert_effect(
+        &mut self,
+        request: pw_graph_backend::EffectInsertRequest,
+    ) -> pw_graph_backend::BackendResult<pw_graph_backend::EffectInstance> {
+        let instance = self
+            .pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .insert_effect(request)?;
+        self.rebuild_after_effect_mutation();
+        Ok(instance)
     }
 
     fn set_effect_enabled(
@@ -277,6 +323,8 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
             .ok_or_else(|| {
                 pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
             })?
-            .remove_effect(instance_id)
+            .remove_effect(instance_id)?;
+        self.rebuild_after_effect_mutation();
+        Ok(())
     }
 }

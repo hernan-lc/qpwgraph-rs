@@ -8,7 +8,7 @@ use super::super::names::compact_label;
 use super::super::ports::{
     display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role,
 };
-use super::{AUDIO_CONTROLS_HEIGHT, PORT_ROW_HEIGHT};
+use super::PORT_ROW_HEIGHT;
 
 impl GraphCanvas {
     #[allow(clippy::too_many_arguments)]
@@ -36,12 +36,8 @@ impl GraphCanvas {
         }
         let mut group_label_seen: HashMap<(Direction, String), usize> = HashMap::new();
 
+        let controls_offset = self.node_controls_height(node, has_audio);
         for (index, group) in groups.into_iter().enumerate() {
-            let controls_offset = if has_audio {
-                AUDIO_CONTROLS_HEIGHT
-            } else {
-                0.0
-            };
             let y = node_rect.top()
                 + (super::NODE_HEADER_HEIGHT
                     + controls_offset
