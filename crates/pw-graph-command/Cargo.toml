@@ -1,0 +1,12 @@
+[package]
+name = "pw-graph-command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+pw-graph-backend = { path = "../pw-graph-backend" }
+pw-graph-core = { path = "../pw-graph-core" }
+thiserror.workspace = true
+

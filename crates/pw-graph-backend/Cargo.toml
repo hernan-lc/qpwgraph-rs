@@ -1,0 +1,15 @@
+[package]
+name = "pw-graph-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["in-memory"]
+in-memory = []
+pipewire = []
+
+[dependencies]
+pw-graph-core = { path = "../pw-graph-core" }
+thiserror.workspace = true
