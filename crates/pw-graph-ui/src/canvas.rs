@@ -444,9 +444,7 @@ impl GraphCanvas {
         let mut port_name_totals: HashMap<(Direction, String), usize> = HashMap::new();
         for port in &ports {
             let name = display_port_name(&port.name, i18n);
-            *port_name_totals
-                .entry((port.direction, name))
-                .or_insert(0) += 1;
+            *port_name_totals.entry((port.direction, name)).or_insert(0) += 1;
         }
         let mut port_name_seen: HashMap<(Direction, String), usize> = HashMap::new();
 

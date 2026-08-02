@@ -68,6 +68,13 @@ both graphs can be displayed together. A normal launch does not invent a mock
 graph when no native backend is available; it shows an empty canvas with a clear
 status message. Use `--demo` when a deterministic sample graph is wanted.
 
+For C editing, the repository includes a `.clangd` configuration matching the
+PipeWire and SPA include roots used by the Cargo build script. The official
+`pipewire` and `libspa` Rust bindings are also suitable for a future all-Rust
+source migration, including registry, links, streams, and SPA buffer handling;
+they still link to the native PipeWire libraries at runtime, so that migration
+would remove handwritten C but would not remove the system PipeWire dependency.
+
 ## Patchbay files
 
 Files ending in `.qpwgraph` or `.xml` use the qpwgraph XML shape and resolve rules

@@ -1,0 +1,9 @@
+# Keep clangd in sync with the flags used by crates/pw-graph-backend/build.rs.
+# The PipeWire feature is Linux-only in this workspace and pkg-config resolves
+# these same include roots for the actual C compilation.
+CompileFlags:
+  Add:
+    - -std=c11
+    - -D_REENTRANT
+    - -I/usr/include/pipewire-0.3
+    - -I/usr/include/spa-0.2
