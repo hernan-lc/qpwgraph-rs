@@ -16,6 +16,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const NODE_NAME: &str = "node.name";
@@ -70,34 +72,81 @@ struct RegistryState {
     links: BTreeMap<u32, LinkRecord>,
 }
 
+/// Sentinel for "no buffer has been measured yet".
+const NEVER_MEASURED: u64 = u64::MAX;
+
+/// Live meter values shared between PipeWire's realtime data thread and the
+/// thread that drives the UI.
+///
+/// The stream is connected with `RT_PROCESS`, so `process` is dispatched on the
+/// realtime data thread rather than on the thread loop. Holding the thread-loop
+/// lock therefore does *not* exclude it, which makes `Rc<RefCell<_>>` wrong
+/// twice over: the borrows race, and because the callback is an `extern "C"`
+/// frame that cannot unwind, the resulting "already borrowed" panic aborts the
+/// process instead of failing gracefully. All state here is consequently
+/// lock-free, which also keeps the realtime writer free of locks and allocation.
 #[derive(Debug)]
 struct MeterReadingState {
-    rms: f32,
-    peak: f32,
-    connected: bool,
-    updated_at: Option<Instant>,
+    /// `f32` bit patterns; there is no atomic float.
+    rms_bits: AtomicU32,
+    peak_bits: AtomicU32,
+    /// Negotiated [`AudioFormat`], published by `param_changed`.
+    format: AtomicU32,
+    connected: AtomicBool,
+    /// Milliseconds since the driver epoch, or [`NEVER_MEASURED`].
+    updated_at_ms: AtomicU64,
 }
 
 impl Default for MeterReadingState {
     fn default() -> Self {
         Self {
-            rms: 0.0,
-            peak: 0.0,
-            connected: false,
-            updated_at: None,
+            rms_bits: AtomicU32::new(0),
+            peak_bits: AtomicU32::new(0),
+            // Only F32LE is offered during negotiation, so this is also the
+            // value `param_changed` is expected to confirm.
+            format: AtomicU32::new(AudioFormat::F32LE.as_raw()),
+            connected: AtomicBool::new(false),
+            updated_at_ms: AtomicU64::new(NEVER_MEASURED),
         }
     }
 }
 
+impl MeterReadingState {
+    fn store_levels(&self, rms: f32, peak: f32, at_ms: u64) {
+        self.rms_bits.store(rms.to_bits(), Ordering::Relaxed);
+        self.peak_bits.store(peak.to_bits(), Ordering::Relaxed);
+        // Released last so a reader that observes this timestamp also observes
+        // the levels it belongs to.
+        self.updated_at_ms.store(at_ms, Ordering::Release);
+    }
+
+    /// Levels plus their age in milliseconds, or `None` until the first buffer
+    /// has been measured.
+    fn levels(&self, now_ms: u64) -> Option<(f32, f32, u32)> {
+        let at_ms = self.updated_at_ms.load(Ordering::Acquire);
+        if at_ms == NEVER_MEASURED {
+            return None;
+        }
+        let age_ms = now_ms.saturating_sub(at_ms).min(u64::from(u32::MAX)) as u32;
+        Some((
+            f32::from_bits(self.rms_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.peak_bits.load(Ordering::Relaxed)),
+            age_ms,
+        ))
+    }
+}
+
 struct MeterCallbackState {
-    shared: Rc<RefCell<MeterReadingState>>,
-    format: AudioInfoRaw,
+    shared: Arc<MeterReadingState>,
+    /// Shared zero point, so the realtime thread can publish a plain `u64`
+    /// instead of a non-atomic `Instant`.
+    epoch: Instant,
 }
 
 struct MeterHandle {
     _stream: pw::stream::Stream,
     _listener: pw::stream::StreamListener<MeterCallbackState>,
-    shared: Rc<RefCell<MeterReadingState>>,
+    shared: Arc<MeterReadingState>,
 }
 
 pub struct PipewireDriver {
@@ -112,6 +161,8 @@ pub struct PipewireDriver {
     /// Nodes the UI asked to measure, with the time of the last request so a
     /// stream can linger briefly instead of dying the moment a tooltip closes.
     meter_requests: BTreeMap<NodeId, Instant>,
+    /// Zero point for the millisecond timestamps meters publish atomically.
+    epoch: Instant,
     graph: Graph,
     positions: BTreeMap<NodeId, [f32; 2]>,
 }
@@ -226,6 +277,7 @@ impl PipewireDriver {
             meters: BTreeMap::new(),
             meter_policy: MeterPolicy::default(),
             meter_requests: BTreeMap::new(),
+            epoch: Instant::now(),
             graph: Graph::default(),
             positions: BTreeMap::new(),
         };
@@ -392,6 +444,10 @@ impl PipewireDriver {
         self.meters.len()
     }
 
+    fn elapsed_ms(&self) -> u64 {
+        elapsed_ms_since(self.epoch)
+    }
+
     /// Drop request entries that have outlived [`METER_LINGER`].
     fn expire_meter_requests(&mut self) {
         let now = Instant::now();
@@ -467,18 +523,17 @@ impl PipewireDriver {
         }
         let stream = pw::stream::Stream::new(&core, &stream_name, properties)
             .map_err(|error| native_error("PipeWire audio meter stream creation", error))?;
-        let shared = Rc::new(RefCell::new(MeterReadingState::default()));
-        let callback_shared = shared.clone();
-        let mut callback_format = AudioInfoRaw::new();
-        callback_format.set_format(AudioFormat::F32LE);
+        let shared = Arc::new(MeterReadingState::default());
         let listener = stream
             .add_local_listener_with_user_data(MeterCallbackState {
-                shared: callback_shared,
-                format: callback_format,
+                shared: shared.clone(),
+                epoch: self.epoch,
             })
             .state_changed(|_, data, _old, new| {
-                data.shared.borrow_mut().connected =
-                    matches!(new, pw::stream::StreamState::Streaming);
+                data.shared.connected.store(
+                    matches!(new, pw::stream::StreamState::Streaming),
+                    Ordering::Relaxed,
+                );
             })
             .param_changed(|_stream, data, id, param| {
                 if id != ParamType::Format.as_raw() {
@@ -489,7 +544,9 @@ impl PipewireDriver {
                 };
                 let mut format = AudioInfoRaw::new();
                 if format.parse(param).is_ok() {
-                    data.format = format;
+                    data.shared
+                        .format
+                        .store(format.format().as_raw(), Ordering::Relaxed);
                 }
             })
             .process(process_meter_buffer)
@@ -653,29 +710,24 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
-        // Readings are written by the stream's process callback, so holding the
-        // loop lock is enough. A registry round-trip here would cost a full
-        // core sync on every UI frame for data the sync does not affect.
-        let loop_for_meters = self.thread_loop.clone();
-        let _guard = loop_for_meters.lock();
-        let now = Instant::now();
+        // Readings are published through atomics by the realtime data thread and
+        // `self.meters` is only ever mutated from this thread, so no lock is
+        // needed. Taking the thread-loop lock here would stall the loop on every
+        // UI frame, and a registry round-trip would cost a full core sync for
+        // data the sync does not affect.
+        let now_ms = self.elapsed_ms();
         Ok(self
             .meters
             .iter()
             .filter_map(|(node_id, meter)| {
-                let reading = meter.shared.borrow();
-                if !reading.connected {
+                if !meter.shared.connected.load(Ordering::Relaxed) {
                     return None;
                 }
-                let age_ms = reading
-                    .updated_at
-                    .map(|updated| now.saturating_duration_since(updated).as_millis())
-                    .unwrap_or(u128::from(u32::MAX))
-                    .min(u128::from(u32::MAX)) as u32;
+                let (rms, peak, age_ms) = meter.shared.levels(now_ms)?;
                 Some(AudioMeter {
                     node_id: *node_id,
-                    rms: reading.rms.clamp(0.0, 1.0),
-                    peak: reading.peak.clamp(0.0, 1.0),
+                    rms: rms.clamp(0.0, 1.0),
+                    peak: peak.clamp(0.0, 1.0),
                     age_ms,
                     available: true,
                 })
@@ -771,7 +823,7 @@ fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut MeterCallback
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
-    let format = data.format.format();
+    let format = AudioFormat::from_raw(data.shared.format.load(Ordering::Relaxed));
     if !matches!(
         format,
         AudioFormat::F32LE | AudioFormat::F32BE | AudioFormat::F32P
@@ -811,11 +863,17 @@ fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut MeterCallback
     }
 
     if samples > 0 {
-        let mut reading = data.shared.borrow_mut();
-        reading.rms = (sum / samples as f64).sqrt().min(1.0) as f32;
-        reading.peak = peak.min(1.0);
-        reading.updated_at = Some(Instant::now());
+        data.shared.store_levels(
+            (sum / samples as f64).sqrt().min(1.0) as f32,
+            peak.min(1.0),
+            elapsed_ms_since(data.epoch),
+        );
     }
+}
+
+/// Milliseconds since `epoch`, saturating rather than wrapping.
+fn elapsed_ms_since(epoch: Instant) -> u64 {
+    epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

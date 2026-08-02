@@ -35,6 +35,7 @@ pub(crate) struct QpwgraphApp {
     pub(crate) i18n: I18n,
     pub(crate) backend_name: String,
     pub(crate) screen: AppScreen,
+    pub(crate) show_shortcuts: bool,
     pub(crate) rename_node: Option<NodeId>,
     pub(crate) rename_buffer: String,
     pub(crate) last_meter_refresh: Instant,
@@ -195,6 +196,7 @@ impl QpwgraphApp {
             i18n,
             backend_name,
             screen: AppScreen::default(),
+            show_shortcuts: false,
             rename_node: None,
             rename_buffer: String::new(),
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
@@ -233,6 +235,90 @@ impl QpwgraphApp {
                 self.status = self.tf("status.refresh_failed", &[("error", error.to_string())])
             }
         }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let f1_pressed = ctx.input(|input| input.key_pressed(egui::Key::F1));
+        if f1_pressed {
+            self.show_shortcuts = !self.show_shortcuts;
+            return;
+        }
+
+        if self.show_shortcuts {
+            if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+                self.show_shortcuts = false;
+            }
+            return;
+        }
+
+        let (command, shift, undo, redo, save, load) = ctx.input(|input| {
+            (
+                input.modifiers.command,
+                input.modifiers.shift,
+                input.key_pressed(egui::Key::Z),
+                input.key_pressed(egui::Key::Y),
+                input.key_pressed(egui::Key::S),
+                input.key_pressed(egui::Key::O),
+            )
+        });
+        if command && undo {
+            if shift {
+                self.redo();
+            } else {
+                self.undo();
+            }
+            return;
+        }
+        if command && redo {
+            self.redo();
+            return;
+        }
+        if command && save {
+            if shift {
+                self.save_patchbay();
+            } else {
+                self.save_config_now();
+            }
+            return;
+        }
+        if command && load {
+            self.load_patchbay();
+            return;
+        }
+
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::R)) {
+            self.refresh_graph();
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::A)) {
+            self.arrange_nodes();
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::T)) {
+            self.canvas.thumbnail_mode = !self.canvas.thumbnail_mode;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Num0)) {
+            self.set_media_filter(MediaFilter::All);
+        } else if ctx.input(|input| input.key_pressed(egui::Key::Num1)) {
+            self.set_media_filter(MediaFilter::Audio);
+        } else if ctx.input(|input| input.key_pressed(egui::Key::Num2)) {
+            self.set_media_filter(MediaFilter::Video);
+        } else if ctx.input(|input| input.key_pressed(egui::Key::Num3)) {
+            self.set_media_filter(MediaFilter::Midi);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Plus)) {
+            self.canvas.zoom = (self.canvas.zoom * 1.1).clamp(0.35, 2.5);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Minus)) {
+            self.canvas.zoom = (self.canvas.zoom / 1.1).clamp(0.35, 2.5);
+        }
+    }
+
+    fn set_media_filter(&mut self, filter: MediaFilter) {
+        self.canvas.media_filter = filter;
+        self.config.media_filter = filter.as_str().into();
     }
 
     /// Push a metering-policy change from the panel down to the driver.
@@ -523,13 +609,7 @@ impl eframe::App for QpwgraphApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.start_minimized = false;
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::Z) && input.modifiers.command) {
-            if ctx.input(|input| input.modifiers.shift) {
-                self.redo();
-            } else {
-                self.undo();
-            }
-        }
+        self.handle_shortcuts(ctx);
 
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
             self.config.window_width = rect.width();
@@ -656,12 +736,17 @@ impl eframe::App for QpwgraphApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let actions = self.canvas.show(ui, self.driver.graph(), &self.i18n);
+            let actions = if self.show_shortcuts {
+                Vec::new()
+            } else {
+                self.canvas.show(ui, self.driver.graph(), &self.i18n)
+            };
             self.handle_canvas_actions(actions);
         });
 
         // Runs after the canvas so the request reflects what this frame drew.
         self.request_visible_meters();
+        self.show_shortcuts_modal(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

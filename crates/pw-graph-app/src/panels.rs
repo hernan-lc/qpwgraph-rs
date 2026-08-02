@@ -177,6 +177,9 @@ impl QpwgraphApp {
             self.t("screen.graph"),
             self.t("screen.graph_hint"),
         );
+        panel_section(ui, self.t("inspector.media_filter"), |ui| {
+            self.show_media_filter_control(ui);
+        });
         let (node_count, port_count, link_count) = self.canvas.visible_counts(self.driver.graph());
         let node_count = node_count.to_string();
         let port_count = port_count.to_string();
@@ -206,26 +209,6 @@ impl QpwgraphApp {
         }
 
         panel_section(ui, self.t("inspector.layout"), |ui| {
-            let current_filter = MediaFilter::parse(&self.config.media_filter);
-            let mut selected_filter = current_filter;
-            let filter_response = egui::ComboBox::from_label(self.t("inspector.media_filter"))
-                .selected_text(self.t(media_filter_key(current_filter)))
-                .show_ui(ui, |ui| {
-                    for filter in MediaFilter::ALL {
-                        ui.selectable_value(
-                            &mut selected_filter,
-                            filter,
-                            self.t(media_filter_key(filter)),
-                        );
-                    }
-                });
-            filter_response
-                .response
-                .on_hover_text(self.t("help.media_filter"));
-            if selected_filter != current_filter {
-                self.config.media_filter = selected_filter.as_str().into();
-            }
-
             if ui
                 .button(self.t("inspector.arrange_nodes"))
                 .on_hover_text(self.t("help.arrange_nodes"))
@@ -277,6 +260,74 @@ impl QpwgraphApp {
                 .into();
             }
         });
+    }
+
+    fn show_media_filter_control(&mut self, ui: &mut Ui) {
+        let current_filter = MediaFilter::parse(&self.config.media_filter);
+        let mut selected_filter = current_filter;
+        let filter_response = egui::ComboBox::from_label(self.t("inspector.media_filter"))
+            .selected_text(self.t(media_filter_key(current_filter)))
+            .show_ui(ui, |ui| {
+                for filter in MediaFilter::ALL {
+                    ui.selectable_value(
+                        &mut selected_filter,
+                        filter,
+                        self.t(media_filter_key(filter)),
+                    );
+                }
+            });
+        filter_response
+            .response
+            .on_hover_text(self.t("help.media_filter"));
+        if selected_filter != current_filter {
+            self.config.media_filter = selected_filter.as_str().into();
+            self.canvas.media_filter = selected_filter;
+        }
+    }
+
+    pub(crate) fn show_shortcuts_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_shortcuts {
+            return;
+        }
+        egui::Window::new(self.t("shortcuts.title"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(self.t("shortcuts.hint")).weak());
+                ui.add_space(8.0);
+                egui::Grid::new("shortcuts-grid")
+                    .num_columns(2)
+                    .spacing(egui::vec2(18.0, 7.0))
+                    .show(ui, |ui| {
+                        shortcut_row(ui, "F1", self.t("shortcuts.help"));
+                        shortcut_row(ui, "Esc", self.t("shortcuts.close_cancel"));
+                        shortcut_row(ui, "Delete", self.t("shortcuts.delete_link"));
+                        shortcut_row(ui, "Ctrl/Cmd+Z", self.t("shortcuts.undo"));
+                        shortcut_row(ui, "Ctrl/Cmd+Shift+Z", self.t("shortcuts.redo"));
+                        shortcut_row(ui, "Ctrl/Cmd+Y", self.t("shortcuts.redo"));
+                        shortcut_row(ui, "Ctrl/Cmd+S", self.t("shortcuts.save_config"));
+                        shortcut_row(
+                            ui,
+                            "Ctrl/Cmd+Shift+S",
+                            self.t("shortcuts.save_patchbay"),
+                        );
+                        shortcut_row(ui, "Ctrl/Cmd+O", self.t("shortcuts.load_patchbay"));
+                        shortcut_row(ui, "R", self.t("shortcuts.refresh"));
+                        shortcut_row(ui, "A", self.t("shortcuts.arrange"));
+                        shortcut_row(ui, "T", self.t("shortcuts.thumbnail"));
+                        shortcut_row(ui, "0", self.t("shortcuts.filter_all"));
+                        shortcut_row(ui, "1", self.t("shortcuts.filter_audio"));
+                        shortcut_row(ui, "2", self.t("shortcuts.filter_video"));
+                        shortcut_row(ui, "3", self.t("shortcuts.filter_midi"));
+                        shortcut_row(ui, "+ / -", self.t("shortcuts.zoom"));
+                    });
+                ui.add_space(10.0);
+                if ui.button(self.t("shortcuts.close")).clicked() {
+                    self.show_shortcuts = false;
+                }
+            });
     }
 
     fn show_meter_controls(&mut self, ui: &mut Ui) {
