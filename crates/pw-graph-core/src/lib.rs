@@ -111,6 +111,11 @@ pub struct Port {
     pub id: PortId,
     pub node_id: NodeId,
     pub name: String,
+    /// Optional backend-provided channel position (for example `FL` or
+    /// `FR`). Backends that do not expose channel metadata leave this unset,
+    /// allowing presentation code to use a conservative name-based fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     pub direction: Direction,
     pub port_type: PortType,
 }
@@ -127,9 +132,16 @@ impl Port {
             id,
             node_id,
             name: name.into(),
+            channel: None,
             direction,
             port_type,
         }
+    }
+
+    /// Attach an optional backend-provided channel position to this port.
+    pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
+        self.channel = Some(channel.into());
+        self
     }
 }
 

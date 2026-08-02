@@ -9,8 +9,9 @@ install -Dm644 packaging/qpwgraph-rs.desktop ~/.local/share/applications/qpwgrap
 install -Dm644 packaging/io.github.qpwgraph_rs.metainfo.xml ~/.local/share/metainfo/io.github.qpwgraph_rs.metainfo.xml
 ```
 
-Native builds need Rust, PipeWire development headers and libraries, and ALSA
-Sequencer development headers and libraries. Build without either native backend
+Native builds need Rust, PipeWire development headers and libraries, ALSA
+Sequencer development headers and libraries, and the native file-dialog
+dependencies used by `rfd`. Build without either native backend
 when those libraries are unavailable:
 
 ```bash
@@ -19,6 +20,7 @@ cargo build --release -p pw-graph-app --no-default-features --features pipewire
 ```
 
 The Flatpak manifest is in `io.github.qpwgraph_rs.yml`. It expects a Flatpak
-SDK/runtime and uses the workspace lockfile for reproducible dependency
-resolution. Linux desktop environments without a StatusNotifier host can still
-run the application; the tray integration simply disables itself.
+SDK/runtime, grants PipeWire/session-bus access, and uses the workspace lockfile
+for reproducible dependency resolution. Linux desktop environments without a
+StatusNotifier host can still run the application; the tray integration simply
+disables itself.

@@ -5,8 +5,12 @@
 
 use pw_graph_backend::{BackendError, BackendResult, GraphDriver};
 #[cfg(feature = "alsa")]
+use pw_graph_core::NodeId;
+#[cfg(feature = "alsa")]
 use pw_graph_core::{Direction, GraphError, Port};
-use pw_graph_core::{Graph, Link, LinkId, Node, NodeId, NodeType, PortId, PortType};
+use pw_graph_core::{Graph, Link, LinkId, Node, NodeType, PortId, PortType};
+#[cfg(feature = "alsa")]
+use std::collections::BTreeMap;
 #[cfg(feature = "alsa")]
 use std::ffi::{c_void, CStr};
 
@@ -74,6 +78,7 @@ fn raw_text(value: &[std::ffi::c_char]) -> String {
 pub struct AlsaMidiDriver {
     native: *mut c_void,
     graph: Graph,
+    positions: BTreeMap<NodeId, [f32; 2]>,
 }
 
 #[cfg(feature = "alsa")]
@@ -88,6 +93,7 @@ impl AlsaMidiDriver {
         Ok(Self {
             native,
             graph: Graph::default(),
+            positions: BTreeMap::new(),
         })
     }
 
@@ -124,7 +130,7 @@ impl AlsaMidiDriver {
         let default_positions = graph.default_node_positions();
         for (node_id, position) in default_positions {
             if let Some(node) = graph.nodes.get_mut(&node_id) {
-                node.position = position;
+                node.position = self.positions.get(&node_id).copied().unwrap_or(position);
             }
         }
         for raw in snapshot.links[..(snapshot.link_count as usize).min(MAX_PORTS)].iter() {
@@ -199,18 +205,13 @@ impl GraphDriver for AlsaMidiDriver {
         Ok(existing)
     }
 
-    fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "ALSA client names are external metadata".into(),
-        ))
-    }
-
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
         self.graph
             .nodes
             .get_mut(&node)
             .ok_or(GraphError::MissingNode(node))?
             .position = position;
+        self.positions.insert(node, position);
         Ok(())
     }
 
@@ -306,9 +307,6 @@ impl GraphDriver for AlsaMidiDriver {
         Err(BackendError::Unsupported("ALSA feature is disabled".into()))
     }
     fn disconnect(&mut self, _link: LinkId) -> BackendResult<Link> {
-        Err(BackendError::Unsupported("ALSA feature is disabled".into()))
-    }
-    fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
         Err(BackendError::Unsupported("ALSA feature is disabled".into()))
     }
     fn graph(&self) -> &Graph {

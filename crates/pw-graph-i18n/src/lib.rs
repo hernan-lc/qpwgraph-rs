@@ -8,15 +8,18 @@ pub enum Locale {
     #[default]
     English,
     Spanish,
+    French,
 }
 
 impl Locale {
-    pub const ALL: [Self; 2] = [Self::English, Self::Spanish];
+    pub const ALL: [Self; 3] = [Self::English, Self::Spanish, Self::French];
 
     pub fn parse(value: &str) -> Self {
         let language = value.trim().to_ascii_lowercase();
         if language == "es" || language.starts_with("es-") || language.starts_with("es_") {
             Self::Spanish
+        } else if language == "fr" || language.starts_with("fr-") || language.starts_with("fr_") {
+            Self::French
         } else {
             Self::English
         }
@@ -26,6 +29,7 @@ impl Locale {
         match self {
             Self::English => "en",
             Self::Spanish => "es",
+            Self::French => "fr",
         }
     }
 
@@ -33,6 +37,7 @@ impl Locale {
         match self {
             Self::English => "English",
             Self::Spanish => "Español",
+            Self::French => "Français",
         }
     }
 }
@@ -56,7 +61,11 @@ impl I18n {
         let current = if locale == Locale::English {
             english.clone()
         } else {
-            load_catalog(include_str!("../locales/es.json"))
+            load_catalog(match locale {
+                Locale::Spanish => include_str!("../locales/es.json"),
+                Locale::French => include_str!("../locales/fr.json"),
+                Locale::English => unreachable!(),
+            })
         };
         Self {
             locale,
@@ -78,7 +87,11 @@ impl I18n {
         self.current = if locale == Locale::English {
             self.english.clone()
         } else {
-            load_catalog(include_str!("../locales/es.json"))
+            load_catalog(match locale {
+                Locale::Spanish => include_str!("../locales/es.json"),
+                Locale::French => include_str!("../locales/fr.json"),
+                Locale::English => unreachable!(),
+            })
         };
     }
 

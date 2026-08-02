@@ -307,6 +307,14 @@ impl QpwgraphApp {
     }
 
     fn show_sidebar_actions(&mut self, ui: &mut Ui) {
+        let search_placeholder = self.t("search.placeholder");
+        let search = ui.add(
+            egui::TextEdit::singleline(&mut self.config.graph_search)
+                .desired_width(58.0)
+                .hint_text(search_placeholder),
+        );
+        search.on_hover_text(self.t("search.help"));
+        ui.add_space(4.0);
         if self.config.toolbar {
             if sidebar_icon_button(
                 ui,
@@ -382,6 +390,17 @@ impl QpwgraphApp {
                 ) {
                     self.disconnect(selected_link);
                 }
+            }
+            if !self.driver.graph().links.is_empty()
+                && sidebar_icon_button(
+                    ui,
+                    "sidebar.disconnect-all",
+                    Icon::Delete,
+                    self.t("toolbar.disconnect_all"),
+                    self.t("help.disconnect_all"),
+                )
+            {
+                self.disconnect_all();
             }
         }
         if self.config.patchbay_toolbar {
@@ -717,6 +736,108 @@ impl QpwgraphApp {
             );
             if self.config.patchbay_activated && !patchbay_activated_before {
                 self.activate_patchbay();
+            }
+        });
+
+        let current_path = self.patchbay_file.display().to_string();
+        let choose_directory = self.t("patchbay.choose_directory");
+        let recent_label = self.t("patchbay.recent_files");
+        let profile_label = self.t("patchbay.profile");
+        let save_profile_label = self.t("patchbay.save_profile");
+        panel_section(ui, self.t("patchbay.file_options"), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(profile_label.clone());
+                ui.text_edit_singleline(&mut self.profile_name);
+                if ui.button(save_profile_label.clone()).clicked() {
+                    let name = self.profile_name.trim().to_owned();
+                    if !name.is_empty() {
+                        self.config.active_patchbay_profile = name.clone();
+                        self.config
+                            .patchbay_profiles
+                            .insert(name, self.patchbay_file.clone());
+                    }
+                }
+            });
+            let mut selected_profile = self.config.active_patchbay_profile.clone();
+            let profiles: Vec<_> = self.config.patchbay_profiles.keys().cloned().collect();
+            if !profiles.is_empty() {
+                egui::ComboBox::from_id_salt("patchbay-profile-list")
+                    .selected_text(selected_profile.clone())
+                    .show_ui(ui, |ui| {
+                        for profile in &profiles {
+                            ui.selectable_value(&mut selected_profile, profile.clone(), profile);
+                        }
+                    });
+                if selected_profile != self.config.active_patchbay_profile {
+                    self.config.active_patchbay_profile = selected_profile.clone();
+                    self.profile_name = selected_profile.clone();
+                    if let Some(path) = self
+                        .config
+                        .patchbay_profiles
+                        .get(&selected_profile)
+                        .cloned()
+                    {
+                        self.select_patchbay_path(path);
+                        let _ = self.load_patchbay_from_current();
+                    }
+                }
+            }
+            ui.label(self.tf("patchbay.current_path", &[("path", current_path.clone())]));
+            if ui.button(choose_directory.clone()).clicked() {
+                self.choose_patchbay_directory();
+            }
+            if !self.config.recent_patchbay_paths.is_empty() {
+                let mut selected = self.patchbay_file.clone();
+                egui::ComboBox::from_label(recent_label.clone())
+                    .selected_text(selected.display().to_string())
+                    .show_ui(ui, |ui| {
+                        for path in &self.config.recent_patchbay_paths {
+                            ui.selectable_value(
+                                &mut selected,
+                                path.clone(),
+                                path.display().to_string(),
+                            );
+                        }
+                    });
+                if selected != self.patchbay_file {
+                    self.use_recent_patchbay(selected);
+                }
+            }
+        });
+
+        let remove_rule = self.t("patchbay.remove_rule");
+        let output_label = self.t("patchbay.output");
+        let input_label = self.t("patchbay.input");
+        let pinned_label = self.t("inspector.pinned");
+        panel_section(ui, self.t("patchbay.connections"), |ui| {
+            if self.patchbay.connections.is_empty() {
+                ui.label(RichText::new(self.t("patchbay.no_connections")).weak());
+            }
+            let mut remove_index = None;
+            for (index, connection) in self.patchbay.connections.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(output_label.clone());
+                        ui.text_edit_singleline(&mut connection.output_node);
+                        ui.label("/");
+                        ui.text_edit_singleline(&mut connection.output_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(input_label.clone());
+                        ui.text_edit_singleline(&mut connection.input_node);
+                        ui.label("/");
+                        ui.text_edit_singleline(&mut connection.input_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut connection.pinned, pinned_label.clone());
+                        if ui.button(remove_rule.clone()).clicked() {
+                            remove_index = Some(index);
+                        }
+                    });
+                });
+            }
+            if let Some(index) = remove_index {
+                self.patchbay.connections.remove(index);
             }
         });
     }

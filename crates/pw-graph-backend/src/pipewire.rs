@@ -28,6 +28,7 @@ const FORMAT_DSP: &str = "format.dsp";
 const NODE_ID: &str = "node.id";
 const OBJECT_SERIAL: &str = "object.serial";
 const PORT_NAME: &str = "port.name";
+const AUDIO_CHANNEL: &str = "audio.channel";
 const PORT_DIRECTION: &str = "port.direction";
 const LINK_OUTPUT_PORT: &str = "link.output.port";
 const LINK_INPUT_PORT: &str = "link.input.port";
@@ -55,6 +56,7 @@ struct NodeRecord {
 struct PortRecord {
     node_id: u32,
     name: String,
+    channel: Option<String>,
     direction: Direction,
     media_type: String,
 }
@@ -156,6 +158,7 @@ pub struct PipewireDriver {
     registry: Option<pw::registry::Registry>,
     registry_listener: Option<pw::registry::Listener>,
     state: Rc<RefCell<RegistryState>>,
+    registry_dirty: Rc<Cell<bool>>,
     meters: BTreeMap<NodeId, MeterHandle>,
     meter_policy: MeterPolicy,
     /// Nodes the UI asked to measure, with the time of the last request so a
@@ -182,9 +185,12 @@ impl PipewireDriver {
             .get_registry()
             .map_err(|error| native_error("PipeWire registry creation", error))?;
         let state = Rc::new(RefCell::new(RegistryState::default()));
+        let registry_dirty = Rc::new(Cell::new(true));
 
         let state_for_globals = state.clone();
         let state_for_removals = state.clone();
+        let dirty_for_globals = registry_dirty.clone();
+        let dirty_for_removals = registry_dirty.clone();
         let registry_listener = registry
             .add_listener_local()
             .global(move |global| {
@@ -232,6 +238,7 @@ impl PipewireDriver {
                             PortRecord {
                                 node_id,
                                 name: props.get(PORT_NAME).unwrap_or("PipeWire port").to_owned(),
+                                channel: props.get(AUDIO_CHANNEL).map(str::to_owned),
                                 direction,
                                 media_type,
                             },
@@ -256,12 +263,14 @@ impl PipewireDriver {
                     }
                     _ => {}
                 }
+                dirty_for_globals.set(true);
             })
             .global_remove(move |id| {
                 let mut state = state_for_removals.borrow_mut();
                 state.nodes.remove(&id);
                 state.ports.remove(&id);
                 state.links.remove(&id);
+                dirty_for_removals.set(true);
             })
             .register();
 
@@ -274,6 +283,7 @@ impl PipewireDriver {
             registry: Some(registry),
             registry_listener: Some(registry_listener),
             state,
+            registry_dirty,
             meters: BTreeMap::new(),
             meter_policy: MeterPolicy::default(),
             meter_requests: BTreeMap::new(),
@@ -370,13 +380,18 @@ impl PipewireDriver {
                 &record.media_type,
                 node_media_classes.get(&node_id).map(String::as_str),
             );
-            graph.add_port(Port::new(
+            let port = Port::new(
                 PortId(id as u64),
                 node_id,
                 record.name,
                 record.direction,
                 port_type,
-            ))?;
+            );
+            let port = match record.channel {
+                Some(channel) => port.with_channel(channel),
+                None => port,
+            };
+            graph.add_port(port)?;
         }
 
         let default_positions = graph.default_node_positions();
@@ -663,6 +678,7 @@ impl GraphDriver for PipewireDriver {
         let _guard = loop_for_refresh.lock();
         self.roundtrip_locked()?;
         self.rebuild_graph_locked()?;
+        self.registry_dirty.set(false);
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
@@ -678,12 +694,6 @@ impl GraphDriver for PipewireDriver {
         self.disconnect_locked(link)
     }
 
-    fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "PipeWire node names are owned by the producing client".into(),
-        ))
-    }
-
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
         self.positions.insert(node, position);
         self.graph
@@ -696,6 +706,10 @@ impl GraphDriver for PipewireDriver {
 
     fn graph(&self) -> &Graph {
         &self.graph
+    }
+
+    fn graph_dirty(&self) -> bool {
+        self.registry_dirty.get()
     }
 
     fn is_node_type(&self, node_type: NodeType) -> bool {
@@ -724,8 +738,14 @@ impl GraphDriver for PipewireDriver {
                     return None;
                 }
                 let (rms, peak, age_ms) = meter.shared.levels(now_ms)?;
+                // A helper stream currently aggregates the target node's
+                // buffer, so it cannot honestly report independent levels for
+                // each port. Keep the optional port association in the public
+                // API for backends that can provide it and use node fallback
+                // here until PipeWire per-port capture is implemented.
                 Some(AudioMeter {
                     node_id: *node_id,
+                    port_id: None,
                     rms: rms.clamp(0.0, 1.0),
                     peak: peak.clamp(0.0, 1.0),
                     age_ms,

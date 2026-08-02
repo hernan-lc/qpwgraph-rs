@@ -95,6 +95,51 @@ pub struct ConnectCommand {
     link: Option<Link>,
 }
 
+/// Connects a group of compatible ports as one undoable action.
+pub struct ConnectManyCommand {
+    pairs: Vec<(PortId, PortId)>,
+    links: Vec<Link>,
+}
+
+impl ConnectManyCommand {
+    pub fn new(pairs: Vec<(PortId, PortId)>) -> Self {
+        Self {
+            pairs,
+            links: Vec::new(),
+        }
+    }
+}
+
+impl Command for ConnectManyCommand {
+    fn name(&self) -> &'static str {
+        "Connect group"
+    }
+
+    fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        self.links.clear();
+        for (src, dst) in &self.pairs {
+            match driver.connect(*src, *dst) {
+                Ok(link) => self.links.push(link),
+                Err(error) => {
+                    for link in self.links.iter().rev() {
+                        let _ = driver.disconnect(link.id);
+                    }
+                    self.links.clear();
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        for link in self.links.iter().rev() {
+            driver.disconnect(link.id)?;
+        }
+        Ok(())
+    }
+}
+
 impl ConnectCommand {
     pub fn new(src: PortId, dst: PortId) -> Self {
         Self {
@@ -125,6 +170,141 @@ impl Command for ConnectCommand {
 pub struct DisconnectCommand {
     link: Option<Link>,
     link_id: LinkId,
+}
+
+/// Disconnect every live link as one undoable operation.
+pub struct DisconnectAllCommand {
+    links: Vec<Link>,
+}
+
+pub struct DisconnectManyCommand {
+    link_ids: Vec<LinkId>,
+    links: Vec<Link>,
+}
+
+impl DisconnectManyCommand {
+    pub fn new(link_ids: Vec<LinkId>) -> Self {
+        Self {
+            link_ids,
+            links: Vec::new(),
+        }
+    }
+}
+
+impl Command for DisconnectManyCommand {
+    fn name(&self) -> &'static str {
+        "Disconnect group"
+    }
+
+    fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        self.links = if self.links.is_empty() {
+            self.link_ids
+                .iter()
+                .filter_map(|id| driver.graph().link(*id).cloned())
+                .collect()
+        } else {
+            self.links
+                .iter()
+                .filter_map(|saved| {
+                    driver
+                        .graph()
+                        .links
+                        .values()
+                        .find(|live| {
+                            live.output_port == saved.output_port
+                                && live.input_port == saved.input_port
+                        })
+                        .cloned()
+                })
+                .collect()
+        };
+        let mut disconnected = Vec::with_capacity(self.links.len());
+        for link in &self.links {
+            match driver.disconnect(link.id) {
+                Ok(link) => disconnected.push(link),
+                Err(error) => {
+                    for restored in disconnected.iter().rev() {
+                        let _ = driver.connect(restored.output_port, restored.input_port);
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        self.links = disconnected;
+        Ok(())
+    }
+
+    fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        let mut restored = Vec::with_capacity(self.links.len());
+        for link in &self.links {
+            match driver.connect(link.output_port, link.input_port) {
+                Ok(link) => restored.push(link),
+                Err(error) => {
+                    for restored_link in restored.iter().rev() {
+                        let _ = driver.disconnect(restored_link.id);
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        self.links = restored;
+        Ok(())
+    }
+}
+
+impl DisconnectAllCommand {
+    pub fn new() -> Self {
+        Self { links: Vec::new() }
+    }
+}
+
+impl Default for DisconnectAllCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for DisconnectAllCommand {
+    fn name(&self) -> &'static str {
+        "Disconnect all"
+    }
+
+    fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        // Re-snapshot on every execution because reconnecting during undo may
+        // allocate different backend link IDs.
+        self.links = driver.graph().links.values().cloned().collect();
+        let mut disconnected = Vec::with_capacity(self.links.len());
+        for link in &self.links {
+            match driver.disconnect(link.id) {
+                Ok(link) => disconnected.push(link),
+                Err(error) => {
+                    for restored in disconnected.iter().rev() {
+                        let _ = driver.connect(restored.output_port, restored.input_port);
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        self.links = disconnected;
+        Ok(())
+    }
+
+    fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        let mut restored = Vec::with_capacity(self.links.len());
+        for link in &self.links {
+            match driver.connect(link.output_port, link.input_port) {
+                Ok(link) => restored.push(link),
+                Err(error) => {
+                    for restored_link in restored.iter().rev() {
+                        let _ = driver.disconnect(restored_link.id);
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        self.links = restored;
+        Ok(())
+    }
 }
 
 impl DisconnectCommand {
@@ -159,34 +339,60 @@ impl Command for DisconnectCommand {
     }
 }
 
-pub struct RenameCommand {
-    node: NodeId,
-    before: String,
-    after: String,
+/// Applies a node-position transaction, used for drag and arrange undo.
+pub struct MoveNodesCommand {
+    before: Vec<(NodeId, [f32; 2])>,
+    after: Vec<(NodeId, [f32; 2])>,
 }
 
-impl RenameCommand {
-    pub fn new(node: NodeId, before: impl Into<String>, after: impl Into<String>) -> Self {
-        Self {
-            node,
-            before: before.into(),
-            after: after.into(),
-        }
+impl MoveNodesCommand {
+    pub fn new(before: Vec<(NodeId, [f32; 2])>, after: Vec<(NodeId, [f32; 2])>) -> Self {
+        Self { before, after }
     }
 }
 
-impl Command for RenameCommand {
+impl Command for MoveNodesCommand {
     fn name(&self) -> &'static str {
-        "Rename"
+        "Move nodes"
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        driver.rename_node(self.node, self.after.clone())?;
+        let mut applied = Vec::new();
+        for (node, position) in &self.after {
+            match driver.set_node_position(*node, *position) {
+                Ok(()) => applied.push(*node),
+                Err(error) => {
+                    for applied_node in applied.iter().rev() {
+                        if let Some((_, before)) =
+                            self.before.iter().find(|(id, _)| id == applied_node)
+                        {
+                            let _ = driver.set_node_position(*applied_node, *before);
+                        }
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        driver.rename_node(self.node, self.before.clone())?;
+        let mut applied = Vec::new();
+        for (node, position) in &self.before {
+            match driver.set_node_position(*node, *position) {
+                Ok(()) => applied.push(*node),
+                Err(error) => {
+                    for applied_node in applied.iter().rev() {
+                        if let Some((_, after)) =
+                            self.after.iter().find(|(id, _)| id == applied_node)
+                        {
+                            let _ = driver.set_node_position(*applied_node, *after);
+                        }
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -227,5 +433,82 @@ mod tests {
         assert_eq!(driver.graph().links.len(), 1);
         commands.redo(&mut driver).unwrap();
         assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn disconnect_all_undo_redo_round_trip() {
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.connect(PortId(2), PortId(4)).unwrap();
+        let mut commands = CommandStack::new();
+
+        commands
+            .execute(Box::new(DisconnectAllCommand::new()), &mut driver)
+            .unwrap();
+        assert!(driver.graph().links.is_empty());
+        commands.undo(&mut driver).unwrap();
+        assert_eq!(driver.graph().links.len(), 2);
+        commands.redo(&mut driver).unwrap();
+        assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn disconnect_many_is_one_undoable_operation() {
+        let mut driver = InMemoryDriver::demo();
+        let first = driver.connect(PortId(1), PortId(3)).unwrap();
+        let second = driver.connect(PortId(2), PortId(4)).unwrap();
+        let mut commands = CommandStack::new();
+
+        commands
+            .execute(
+                Box::new(DisconnectManyCommand::new(vec![first.id, second.id])),
+                &mut driver,
+            )
+            .unwrap();
+        assert!(driver.graph().links.is_empty());
+        commands.undo(&mut driver).unwrap();
+        assert_eq!(driver.graph().links.len(), 2);
+        commands.redo(&mut driver).unwrap();
+        assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn connect_many_is_one_undoable_operation() {
+        let mut driver = InMemoryDriver::demo();
+        let mut commands = CommandStack::new();
+        commands
+            .execute(
+                Box::new(ConnectManyCommand::new(vec![
+                    (PortId(1), PortId(3)),
+                    (PortId(2), PortId(4)),
+                ])),
+                &mut driver,
+            )
+            .unwrap();
+        assert_eq!(driver.graph().links.len(), 2);
+        commands.undo(&mut driver).unwrap();
+        assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn move_nodes_undo_redo_round_trip() {
+        let mut driver = InMemoryDriver::demo();
+        let before = driver.graph().node(NodeId(1)).unwrap().position;
+        let after = [300.0, 200.0];
+        let mut commands = CommandStack::new();
+        commands
+            .execute(
+                Box::new(MoveNodesCommand::new(
+                    vec![(NodeId(1), before)],
+                    vec![(NodeId(1), after)],
+                )),
+                &mut driver,
+            )
+            .unwrap();
+        assert_eq!(driver.graph().node(NodeId(1)).unwrap().position, after);
+        commands.undo(&mut driver).unwrap();
+        assert_eq!(driver.graph().node(NodeId(1)).unwrap().position, before);
+        commands.redo(&mut driver).unwrap();
+        assert_eq!(driver.graph().node(NodeId(1)).unwrap().position, after);
     }
 }

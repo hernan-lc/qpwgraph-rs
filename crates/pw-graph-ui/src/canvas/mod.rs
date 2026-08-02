@@ -250,12 +250,53 @@ impl GraphCanvas {
             .nodes
             .values()
             .filter(|node| self.media_filter.matches_node(graph, node.id))
+            .filter(|node| self.search_matches_node(graph, node.id))
             .map(|node| node.id)
             .collect()
     }
 
+    fn search_matches_node(&self, graph: &Graph, node_id: NodeId) -> bool {
+        let query = self.search_query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let Some(node) = graph.node(node_id) else {
+            return false;
+        };
+        node.name.to_ascii_lowercase().contains(&query)
+            || node
+                .ports
+                .iter()
+                .any(|port_id| self.search_matches_port(graph, *port_id))
+    }
+
+    /// A node-name match keeps all of that node's ports visible. A port-name
+    /// match keeps only the matching port rows visible, which makes the search
+    /// useful for finding a single channel in a large graph.
+    pub(super) fn search_matches_port(
+        &self,
+        graph: &Graph,
+        port_id: pw_graph_core::PortId,
+    ) -> bool {
+        let query = self.search_query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let Some(port) = graph.port(port_id) else {
+            return false;
+        };
+        graph
+            .node(port.node_id)
+            .is_some_and(|node| node.name.to_ascii_lowercase().contains(&query))
+            || port.name.to_ascii_lowercase().contains(&query)
+    }
+
     pub fn selected_link(&self) -> Option<LinkId> {
         self.selected_link
+    }
+
+    pub fn clear_selected_link(&mut self) {
+        self.selected_link = None;
     }
 
     pub fn visible_counts(&self, graph: &Graph) -> (usize, usize, usize) {
@@ -266,6 +307,7 @@ impl GraphCanvas {
             .filter(|port| {
                 visible_nodes.contains(&port.node_id)
                     && self.media_filter.matches_port_type(port.port_type)
+                    && self.search_matches_port(graph, port.id)
             })
             .count();
         let links = graph
@@ -282,6 +324,8 @@ impl GraphCanvas {
                     && visible_nodes.contains(&destination.node_id)
                     && self.media_filter.matches_port_type(source.port_type)
                     && self.media_filter.matches_port_type(destination.port_type)
+                    && self.search_matches_port(graph, source.id)
+                    && self.search_matches_port(graph, destination.id)
             })
             .count();
         (visible_nodes.len(), ports, links)
@@ -301,6 +345,7 @@ impl GraphCanvas {
                 graph.port(*port_id).is_none_or(|port| {
                     !visible_node_ids.contains(&port.node_id)
                         || !self.media_filter.matches_port_type(port.port_type)
+                        || !self.search_matches_port(graph, port.id)
                 })
             })
         }) {
@@ -324,6 +369,8 @@ impl GraphCanvas {
                     || !visible_node_ids.contains(&destination.node_id)
                     || !self.media_filter.matches_port_type(source.port_type)
                     || !self.media_filter.matches_port_type(destination.port_type)
+                    || !self.search_matches_port(graph, source.id)
+                    || !self.search_matches_port(graph, destination.id)
             })
         }) {
             self.selected_link = None;

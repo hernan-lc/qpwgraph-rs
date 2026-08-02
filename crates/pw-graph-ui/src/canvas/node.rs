@@ -67,6 +67,18 @@ impl GraphCanvas {
                 body_sense,
             )
             .on_hover_text(body_tooltip);
+        let disconnect_node_requested = Cell::new(false);
+        let arrange_nodes_requested = Cell::new(false);
+        body_response.context_menu(|ui| {
+            if ui.button(i18n.text("canvas.disconnect_node")).clicked() {
+                disconnect_node_requested.set(true);
+                ui.close_menu();
+            }
+            if ui.button(i18n.text("canvas.arrange_selection")).clicked() {
+                arrange_nodes_requested.set(true);
+                ui.close_menu();
+            }
+        });
         let header_response = ui
             .interact(
                 header,
@@ -74,6 +86,16 @@ impl GraphCanvas {
                 Sense::click_and_drag(),
             )
             .on_hover_text(format!("{tooltip}\n\n{}", i18n.text("canvas.drag_header")));
+        header_response.context_menu(|ui| {
+            if ui.button(i18n.text("canvas.disconnect_node")).clicked() {
+                disconnect_node_requested.set(true);
+                ui.close_menu();
+            }
+            if ui.button(i18n.text("canvas.arrange_selection")).clicked() {
+                arrange_nodes_requested.set(true);
+                ui.close_menu();
+            }
+        });
         if body_response.clicked() || header_response.clicked() {
             let shift = ui.input(|input| input.modifiers.shift);
             if !shift {
@@ -97,10 +119,12 @@ impl GraphCanvas {
                     let pairs = pair_ports(&output_ports, &inputs);
                     if !pairs.is_empty() {
                         self.pending_outputs = None;
-                        for (output, input) in pairs {
-                            if !link_exists(graph, output, input) {
-                                actions.push(CanvasAction::Connect { output, input });
-                            }
+                        let pairs: Vec<_> = pairs
+                            .into_iter()
+                            .filter(|(output, input)| !link_exists(graph, *output, *input))
+                            .collect();
+                        if !pairs.is_empty() {
+                            actions.push(CanvasAction::ConnectMany { pairs });
                         }
                     }
                 }
@@ -115,10 +139,13 @@ impl GraphCanvas {
             if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
                 if let Some(target) = self.node_at(rect, graph, pointer, node.id) {
                     if let Some(target_node) = graph.node(target) {
-                        for (output, input) in self.matching_port_pairs(graph, node, target_node) {
-                            if !link_exists(graph, output, input) {
-                                actions.push(CanvasAction::Connect { output, input });
-                            }
+                        let pairs: Vec<_> = self
+                            .matching_port_pairs(graph, node, target_node)
+                            .into_iter()
+                            .filter(|(output, input)| !link_exists(graph, *output, *input))
+                            .collect();
+                        if !pairs.is_empty() {
+                            actions.push(CanvasAction::ConnectMany { pairs });
                         }
                     }
                 }
@@ -151,6 +178,19 @@ impl GraphCanvas {
             }
         }
         if header_response.drag_stopped() && self.dragging_node == Some(node.id) {
+            let before: Vec<_> = self
+                .dragging_origin
+                .iter()
+                .map(|(id, position)| (*id, *position))
+                .collect();
+            let delta = self.drag_delta / self.zoom;
+            let after: Vec<_> = before
+                .iter()
+                .map(|(id, origin)| (*id, [origin[0] + delta.x, origin[1] + delta.y]))
+                .collect();
+            if before != after {
+                actions.push(CanvasAction::CommitNodeMove { before, after });
+            }
             self.dragging_node = None;
             self.dragging_origin.clear();
             self.drag_delta = Vec2::ZERO;
@@ -159,6 +199,18 @@ impl GraphCanvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if header_response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+
+        if disconnect_node_requested.get() {
+            actions.push(CanvasAction::DisconnectNode { node: node.id });
+        }
+        if arrange_nodes_requested.get() {
+            let nodes = if self.selected_nodes.contains(&node.id) && self.selected_nodes.len() > 1 {
+                self.selected_nodes.iter().copied().collect()
+            } else {
+                vec![node.id]
+            };
+            actions.push(CanvasAction::ArrangeNodes { nodes });
         }
 
         let selected = self.selected_nodes.contains(&node.id);
@@ -305,7 +357,11 @@ impl GraphCanvas {
             let pin_requested = Cell::new(false);
             let port_help = port_group_tooltip(node, &group, i18n);
             if group.port_type == PortType::Audio {
-                let meter = self.meters.get(&node.id).copied();
+                let meter = self
+                    .port_meters
+                    .get(&representative_id)
+                    .copied()
+                    .or_else(|| self.meters.get(&node.id).copied());
                 response = response.on_hover_ui(|ui| {
                     ui.label(RichText::new(port_help.clone()).strong());
                     ui.separator();
@@ -458,10 +514,12 @@ impl GraphCanvas {
                 if let Some(output_ids) = self.pending_outputs.take() {
                     let output_ports: Vec<&Port> =
                         output_ids.iter().filter_map(|id| graph.port(*id)).collect();
-                    for (output, input) in pair_ports(&output_ports, &group.ports) {
-                        if !link_exists(graph, output, input) {
-                            actions.push(CanvasAction::Connect { output, input });
-                        }
+                    let pairs: Vec<_> = pair_ports(&output_ports, &group.ports)
+                        .into_iter()
+                        .filter(|(output, input)| !link_exists(graph, *output, *input))
+                        .collect();
+                    if !pairs.is_empty() {
+                        actions.push(CanvasAction::ConnectMany { pairs });
                     }
                 }
             }
@@ -474,6 +532,7 @@ impl GraphCanvas {
             .iter()
             .filter_map(|id| graph.ports.get(id))
             .filter(|port| self.media_filter.matches_port_type(port.port_type))
+            .filter(|port| self.search_matches_port(graph, port.id))
             .collect();
         if self.sort_ports_by_name {
             ports.sort_by_key(|port| port.name.to_ascii_lowercase());

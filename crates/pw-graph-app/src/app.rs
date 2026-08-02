@@ -6,13 +6,17 @@ use eframe::egui;
 use pw_graph_alsamidi::AlsaMidiDriver;
 #[cfg(feature = "pipewire")]
 use pw_graph_backend::PipewireDriver;
-use pw_graph_backend::{AudioMeter, GraphDriver, InMemoryDriver, MeterPolicy};
-use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
+use pw_graph_backend::{GraphDriver, InMemoryDriver, MeterPolicy};
+use pw_graph_command::{
+    CommandStack, ConnectCommand, ConnectManyCommand, DisconnectAllCommand, DisconnectCommand,
+    DisconnectManyCommand, MoveNodesCommand,
+};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, LinkId, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, ConnectMode, GraphCanvas, MediaFilter, MeterReading};
+use rfd::FileDialog;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -45,7 +49,9 @@ pub(crate) struct QpwgraphApp {
     /// back at the top instead of reusing a scroll offset left over from
     /// before.
     pub(crate) preferences_scroll_epoch: u32,
+    pub(crate) profile_name: String,
     pub(crate) last_meter_refresh: Instant,
+    pub(crate) last_graph_refresh: Instant,
     /// Mirrors `config.audio_meters` so a change in the panel is pushed to the
     /// driver exactly once instead of on every frame.
     pub(crate) meter_policy: MeterPolicy,
@@ -62,10 +68,13 @@ impl QpwgraphApp {
             .clone()
             .unwrap_or_else(|| config.language.clone());
         let i18n = I18n::from_language(&language);
+        let default_patchbay_file = config_file.with_file_name("default.qpwgraph");
         let patchbay_file = config
-            .patchbay_path
-            .clone()
-            .unwrap_or_else(|| config_file.with_file_name("default.qpwgraph"));
+            .patchbay_profiles
+            .get(&config.active_patchbay_profile)
+            .cloned()
+            .or_else(|| config.patchbay_path.clone())
+            .unwrap_or(default_patchbay_file);
         let mut status = i18n.text("status.backend_unavailable");
         let (mut driver, backend_name): (Box<dyn GraphDriver>, String) = if args.demo {
             status = i18n.text("status.demo_ready");
@@ -182,7 +191,9 @@ impl QpwgraphApp {
         canvas.connect_through_nodes = config.connect_through_nodes;
         canvas.connect_mode = ConnectMode::parse(&config.connect_mode);
         canvas.media_filter = MediaFilter::parse(&config.media_filter);
+        canvas.search_query = config.graph_search.clone();
         canvas.metering_disabled = meter_policy == MeterPolicy::Disabled;
+        let profile_name = config.active_patchbay_profile.clone();
         #[cfg(all(target_os = "linux", feature = "tray"))]
         let tray = tray_support::start(
             i18n.text("tray.show"),
@@ -212,7 +223,9 @@ impl QpwgraphApp {
             show_preferences: false,
             preferences_tab: PreferencesTab::default(),
             preferences_scroll_epoch: 0,
+            profile_name,
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
+            last_graph_refresh: Instant::now(),
             meter_policy,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
@@ -242,12 +255,25 @@ impl QpwgraphApp {
     pub(crate) fn refresh_graph(&mut self) {
         match self.driver.refresh() {
             Ok(nodes) => {
+                self.last_graph_refresh = Instant::now();
                 self.status = self.tf("status.refreshed", &[("count", nodes.len().to_string())])
             }
             Err(error) => {
                 self.status = self.tf("status.refresh_failed", &[("error", error.to_string())])
             }
         }
+    }
+
+    fn refresh_graph_if_dirty(&mut self) {
+        if self.last_graph_refresh.elapsed() < Duration::from_millis(500)
+            || !self.driver.graph_dirty()
+        {
+            return;
+        }
+        if let Err(error) = self.driver.refresh() {
+            self.status = self.tf("status.refresh_failed", &[("error", error.to_string())]);
+        }
+        self.last_graph_refresh = Instant::now();
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
@@ -276,11 +302,12 @@ impl QpwgraphApp {
         let shortcut_search_id = self
             .show_shortcuts
             .then_some(egui::Id::new("shortcuts-search"));
-        ctx.memory(|memory| {
-            memory
-                .focused()
-                .is_some_and(|focused| Some(focused) == shortcut_search_id)
-        })
+        ctx.wants_keyboard_input()
+            || ctx.memory(|memory| {
+                memory
+                    .focused()
+                    .is_some_and(|focused| Some(focused) == shortcut_search_id)
+            })
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -398,6 +425,7 @@ impl QpwgraphApp {
     pub(crate) fn reset_audio_config(&mut self) {
         self.canvas.pinned_meter = None;
         self.canvas.meters.clear();
+        self.canvas.port_meters.clear();
         match self.driver.reset_audio_config() {
             Ok(()) => self.status = self.t("status.audio_reset"),
             Err(error) => {
@@ -414,20 +442,20 @@ impl QpwgraphApp {
                 return;
             }
         };
-        self.canvas.meters = readings
-            .into_iter()
-            .map(|meter: AudioMeter| {
-                (
-                    meter.node_id,
-                    MeterReading {
-                        rms: meter.rms,
-                        peak: meter.peak,
-                        age_ms: meter.age_ms,
-                        available: meter.available,
-                    },
-                )
-            })
-            .collect();
+        self.canvas.meters.clear();
+        self.canvas.port_meters.clear();
+        for meter in readings.into_iter() {
+            let reading = MeterReading {
+                rms: meter.rms,
+                peak: meter.peak,
+                age_ms: meter.age_ms,
+                available: meter.available,
+            };
+            self.canvas.meters.insert(meter.node_id, reading);
+            if let Some(port_id) = meter.port_id {
+                self.canvas.port_meters.insert(port_id, reading);
+            }
+        }
         if self
             .canvas
             .pinned_meter
@@ -461,11 +489,117 @@ impl QpwgraphApp {
                         }
                     }
                 }
+                CanvasAction::ConnectMany { pairs } => self.connect_many(pairs),
                 CanvasAction::Disconnect { link } => self.disconnect(link),
+                CanvasAction::DisconnectNode { node } => self.disconnect_node(node),
+                CanvasAction::ArrangeNodes { nodes } => self.arrange_selected_nodes(nodes),
                 CanvasAction::MoveNode { node, position } => {
                     let _ = self.driver.set_node_position(node, position);
                 }
+                CanvasAction::CommitNodeMove { before, after } => {
+                    let _ = self.commands.execute(
+                        Box::new(MoveNodesCommand::new(before, after)),
+                        self.driver.as_mut(),
+                    );
+                }
             }
+        }
+    }
+
+    fn connect_many(&mut self, pairs: Vec<(pw_graph_core::PortId, pw_graph_core::PortId)>) {
+        if pairs.is_empty() {
+            return;
+        }
+        let count = pairs.len();
+        match self.commands.execute(
+            Box::new(ConnectManyCommand::new(pairs.clone())),
+            self.driver.as_mut(),
+        ) {
+            Ok(()) => {
+                for (output, input) in pairs {
+                    self.patchbay.add_graph_connection(
+                        self.driver.graph(),
+                        output,
+                        input,
+                        self.config.patchbay_auto_pin,
+                    );
+                }
+                self.status = self.tf("status.connected_many", &[("count", count.to_string())]);
+            }
+            Err(error) => {
+                self.status = self.tf("status.connect_failed", &[("error", error.to_string())]);
+            }
+        }
+    }
+
+    fn disconnect_node(&mut self, node: NodeId) {
+        let links: Vec<_> = self
+            .driver
+            .graph()
+            .links
+            .values()
+            .filter(|link| {
+                self.driver
+                    .graph()
+                    .port(link.output_port)
+                    .is_some_and(|port| port.node_id == node)
+                    || self
+                        .driver
+                        .graph()
+                        .port(link.input_port)
+                        .is_some_and(|port| port.node_id == node)
+            })
+            .cloned()
+            .collect();
+        let ids: Vec<_> = links.iter().map(|link| link.id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        match self.commands.execute(
+            Box::new(DisconnectManyCommand::new(ids)),
+            self.driver.as_mut(),
+        ) {
+            Ok(()) => {
+                for link in links {
+                    self.patchbay
+                        .remove_connection(link.output_port, link.input_port);
+                }
+                self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
+            }
+            Err(error) => {
+                self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())]);
+            }
+        }
+    }
+
+    fn arrange_selected_nodes(&mut self, nodes: Vec<NodeId>) {
+        let defaults = self.driver.graph().default_node_positions();
+        let before: Vec<_> = nodes
+            .iter()
+            .filter_map(|node| {
+                self.driver
+                    .graph()
+                    .node(*node)
+                    .map(|item| (*node, item.position))
+            })
+            .collect();
+        let after: Vec<_> = before
+            .iter()
+            .map(|(node, current)| (*node, defaults.get(node).copied().unwrap_or(*current)))
+            .collect();
+        if before == after {
+            return;
+        }
+        if self
+            .commands
+            .execute(
+                Box::new(MoveNodesCommand::new(before, after)),
+                self.driver.as_mut(),
+            )
+            .is_ok()
+        {
+            self.status = self.tf("status.arranged", &[("count", nodes.len().to_string())]);
         }
     }
 
@@ -481,6 +615,28 @@ impl QpwgraphApp {
                 self.patchbay
                     .remove_connection(existing.output_port, existing.input_port);
                 self.status = self.tf("status.disconnected", &[("link", link.to_string())]);
+            }
+            Err(error) => {
+                self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
+    pub(crate) fn disconnect_all(&mut self) {
+        let count = self.driver.graph().links.len();
+        if count == 0 {
+            self.status = self.t("status.no_links");
+            return;
+        }
+
+        match self
+            .commands
+            .execute(Box::new(DisconnectAllCommand::new()), self.driver.as_mut())
+        {
+            Ok(()) => {
+                self.patchbay.connections.clear();
+                self.canvas.clear_selected_link();
+                self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
             }
             Err(error) => {
                 self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())])
@@ -509,6 +665,25 @@ impl QpwgraphApp {
     }
 
     pub(crate) fn save_patchbay(&mut self) {
+        let directory = self
+            .config
+            .patchbay_dir
+            .clone()
+            .or_else(|| self.patchbay_file.parent().map(PathBuf::from));
+        let selected = FileDialog::new()
+            .set_directory(directory.unwrap_or_else(|| PathBuf::from(".")))
+            .set_file_name(
+                self.patchbay_file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("default.qpwgraph"),
+            )
+            .add_filter("Patchbay", &["qpwgraph", "xml", "json"])
+            .save_file();
+        let Some(path) = selected else {
+            return;
+        };
+        self.select_patchbay_path(path);
         match self.patchbay.save_to(&self.patchbay_file) {
             Ok(()) => {
                 self.status = self.tf(
@@ -526,8 +701,21 @@ impl QpwgraphApp {
     }
 
     pub(crate) fn load_patchbay(&mut self) {
-        match Patchbay::load_from(&self.patchbay_file) {
+        let directory = self
+            .config
+            .patchbay_dir
+            .clone()
+            .or_else(|| self.patchbay_file.parent().map(PathBuf::from));
+        let selected = FileDialog::new()
+            .set_directory(directory.unwrap_or_else(|| PathBuf::from(".")))
+            .add_filter("Patchbay", &["qpwgraph", "xml", "json"])
+            .pick_file();
+        let Some(path) = selected else {
+            return;
+        };
+        match Patchbay::load_from(&path) {
             Ok(patchbay) => {
+                self.select_patchbay_path(path);
                 self.patchbay = patchbay;
                 self.status = self.tf(
                     "status.loaded",
@@ -540,6 +728,56 @@ impl QpwgraphApp {
                     &[("error", error.to_string())],
                 )
             }
+        }
+    }
+
+    pub(crate) fn select_patchbay_path(&mut self, path: PathBuf) {
+        self.patchbay_file = path.clone();
+        self.config.patchbay_dir = path.parent().map(PathBuf::from);
+        self.config
+            .recent_patchbay_paths
+            .retain(|item| item != &path);
+        self.config.recent_patchbay_paths.insert(0, path.clone());
+        self.config.recent_patchbay_paths.truncate(8);
+        self.config.patchbay_path = Some(path);
+        self.config.patchbay_profiles.insert(
+            self.config.active_patchbay_profile.clone(),
+            self.patchbay_file.clone(),
+        );
+    }
+
+    pub(crate) fn choose_patchbay_directory(&mut self) {
+        let initial = self
+            .config
+            .patchbay_dir
+            .clone()
+            .or_else(|| self.patchbay_file.parent().map(PathBuf::from));
+        if let Some(path) = FileDialog::new()
+            .set_directory(initial.unwrap_or_else(|| PathBuf::from(".")))
+            .pick_folder()
+        {
+            self.config.patchbay_dir = Some(path);
+        }
+    }
+
+    pub(crate) fn use_recent_patchbay(&mut self, path: PathBuf) {
+        if Patchbay::load_from(&path).is_ok() {
+            self.select_patchbay_path(path);
+            let _ = self.load_patchbay_from_current();
+        }
+    }
+
+    pub(crate) fn load_patchbay_from_current(&mut self) -> Result<(), String> {
+        match Patchbay::load_from(&self.patchbay_file) {
+            Ok(patchbay) => {
+                self.patchbay = patchbay;
+                self.status = self.tf(
+                    "status.loaded",
+                    &[("path", self.patchbay_file.display().to_string())],
+                );
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -575,12 +813,32 @@ impl QpwgraphApp {
     }
 
     pub(crate) fn arrange_nodes(&mut self) {
-        let positions = self.driver.graph().default_node_positions();
-        let count = positions.len();
-        for (node, position) in positions {
-            let _ = self.driver.set_node_position(node, position);
+        let defaults = self.driver.graph().default_node_positions();
+        let before: Vec<_> = self
+            .driver
+            .graph()
+            .nodes
+            .values()
+            .map(|node| (node.id, node.position))
+            .collect();
+        let after: Vec<_> = before
+            .iter()
+            .map(|(node, position)| (*node, defaults.get(node).copied().unwrap_or(*position)))
+            .collect();
+        if before != after
+            && self
+                .commands
+                .execute(
+                    Box::new(MoveNodesCommand::new(before, after)),
+                    self.driver.as_mut(),
+                )
+                .is_ok()
+        {
+            self.status = self.tf(
+                "status.arranged",
+                &[("count", self.driver.graph().nodes.len().to_string())],
+            );
         }
-        self.status = self.tf("status.arranged", &[("count", count.to_string())]);
     }
 
     fn sync_config(&mut self) {
@@ -598,6 +856,7 @@ impl QpwgraphApp {
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
         self.config.connect_mode = self.canvas.connect_mode.as_str().into();
         self.config.media_filter = self.canvas.media_filter.as_str().into();
+        self.config.graph_search = self.canvas.search_query.clone();
         self.config.node_positions = self
             .driver
             .graph()
@@ -606,6 +865,10 @@ impl QpwgraphApp {
             .map(|(id, node)| (id.0.to_string(), node.position))
             .collect();
         self.config.patchbay_path = Some(self.patchbay_file.clone());
+        self.config.patchbay_profiles.insert(
+            self.config.active_patchbay_profile.clone(),
+            self.patchbay_file.clone(),
+        );
     }
 
     pub(crate) fn save_config_now(&mut self) {
@@ -671,6 +934,7 @@ impl eframe::App for QpwgraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_ui_text_scale(ctx);
         self.sync_meter_policy();
+        self.refresh_graph_if_dirty();
         if self.last_meter_refresh.elapsed() >= Duration::from_millis(50) {
             self.refresh_audio_meters();
             self.last_meter_refresh = Instant::now();
@@ -692,6 +956,7 @@ impl eframe::App for QpwgraphApp {
         self.show_gui_panels(ctx);
 
         self.canvas.media_filter = MediaFilter::parse(&self.config.media_filter);
+        self.canvas.search_query = self.config.graph_search.clone();
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
         self.canvas.sort_ports_descending = self.config.sort_order == "descending";
         self.canvas.node_text_scale = self.config.node_text_scale;

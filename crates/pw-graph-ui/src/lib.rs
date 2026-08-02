@@ -9,9 +9,30 @@ mod canvas;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasAction {
-    Connect { output: PortId, input: PortId },
-    Disconnect { link: LinkId },
-    MoveNode { node: NodeId, position: [f32; 2] },
+    Connect {
+        output: PortId,
+        input: PortId,
+    },
+    ConnectMany {
+        pairs: Vec<(PortId, PortId)>,
+    },
+    Disconnect {
+        link: LinkId,
+    },
+    DisconnectNode {
+        node: NodeId,
+    },
+    ArrangeNodes {
+        nodes: Vec<NodeId>,
+    },
+    MoveNode {
+        node: NodeId,
+        position: [f32; 2],
+    },
+    CommitNodeMove {
+        before: Vec<(NodeId, [f32; 2])>,
+        after: Vec<(NodeId, [f32; 2])>,
+    },
 }
 
 /// How dragging from a node's ports/body creates connections.
@@ -116,7 +137,9 @@ pub struct GraphCanvas {
     pub connect_through_nodes: bool,
     pub connect_mode: ConnectMode,
     pub media_filter: MediaFilter,
+    pub search_query: String,
     pub meters: BTreeMap<NodeId, MeterReading>,
+    pub port_meters: BTreeMap<PortId, MeterReading>,
     pub pinned_meter: Option<PortId>,
     /// Node whose audio meter the pointer is revealing this frame. Recomputed
     /// by every [`GraphCanvas::show`] call.
@@ -154,7 +177,9 @@ impl Default for GraphCanvas {
             connect_through_nodes: false,
             connect_mode: ConnectMode::Advanced,
             media_filter: MediaFilter::All,
+            search_query: String::new(),
             meters: BTreeMap::new(),
+            port_meters: BTreeMap::new(),
             pinned_meter: None,
             hovered_meter_node: None,
             metering_disabled: false,
@@ -282,5 +307,30 @@ mod tests {
 
         canvas.media_filter = MediaFilter::Midi;
         assert_eq!(canvas.visible_node_ids(&graph), BTreeSet::from([NodeId(3)]));
+    }
+
+    #[test]
+    fn search_filters_nodes_and_port_rows() {
+        let mut graph = categorized_graph();
+        graph
+            .add_port(Port::new(
+                PortId(11),
+                NodeId(1),
+                "other",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        let mut canvas = GraphCanvas {
+            search_query: "monitor".into(),
+            ..GraphCanvas::default()
+        };
+        assert_eq!(canvas.visible_counts(&graph), (0, 0, 0));
+
+        graph.ports.get_mut(&PortId(10)).unwrap().name = "monitor_FL".into();
+        assert_eq!(canvas.visible_counts(&graph), (1, 1, 0));
+
+        canvas.search_query = "audio".into();
+        assert_eq!(canvas.visible_counts(&graph), (1, 2, 0));
     }
 }

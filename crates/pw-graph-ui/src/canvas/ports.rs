@@ -15,6 +15,11 @@ use pw_graph_i18n::I18n;
 use std::collections::HashMap;
 
 const CHANNEL_DELIMITERS: [char; 5] = ['_', '-', ' ', ':', '.'];
+const CHANNEL_TOKENS: [&str; 34] = [
+    "FL", "FR", "RL", "RR", "SL", "SR", "FC", "RC", "LFE", "MONO", "LEFT", "RIGHT", "L", "R", "C",
+    "FLC", "FRC", "TC", "TFL", "TFR", "TFC", "TRL", "TRR", "TRC", "BFL", "BFR", "BFC", "BL", "BR",
+    "BC", "BLC", "BRC", "TBL", "TBR",
+];
 
 /// A row of one or more ports rendered together. Advanced mode only ever
 /// produces single-port groups; Easy mode may merge several.
@@ -80,7 +85,7 @@ pub(crate) fn display_groups<'a>(
         .into_iter()
         .map(|group| {
             let label = if group.len() > 1 {
-                channel_base_name(group[0].name.as_str())
+                channel_base_name(group[0])
                     .filter(|base| !base.is_empty())
                     .map(|base| display_port_name(base, i18n))
                     .unwrap_or_else(|| i18n.text("canvas.channel_group_label"))
@@ -96,15 +101,42 @@ fn channel_group_key(port: &Port) -> Option<(Direction, PortType, String)> {
     if port.port_type != PortType::Audio {
         return None;
     }
-    let base = channel_base_name(&port.name)?;
+    let base = channel_base_name(port)?;
     Some((port.direction, port.port_type, base.to_ascii_lowercase()))
 }
 
-/// Finds the trailing channel token (FL, FR, L, R, LFE, ...) in `name` and
-/// returns the base name shared by every channel of the same bus. `None`
-/// means the name has no recognized channel suffix and should stay on its
-/// own row.
-fn channel_base_name(name: &str) -> Option<&str> {
+/// Finds the shared bus name for an audio port. Prefer the semantic channel
+/// position supplied by the backend; otherwise recognize a conservative
+/// trailing channel token (FL, FR, L, R, LFE, ...) in the display name. `None`
+/// means the port should stay on its own row.
+fn channel_base_name(port: &Port) -> Option<&str> {
+    let name = port.name.as_str();
+
+    // PipeWire exposes the semantic channel position separately from the
+    // display name. When it is present, trust the backend metadata and allow
+    // names such as `output_1` whose suffix is not itself `FL`/`FR`. The name
+    // still supplies the shared bus prefix. Unknown/empty metadata falls
+    // through to the conservative display-name parser below.
+    if let Some(channel) = port.channel.as_deref() {
+        if is_backend_channel_position(channel) {
+            if let Some(position) =
+                name.rfind(|character: char| CHANNEL_DELIMITERS.contains(&character))
+            {
+                let (base, _) = name.split_at(position);
+                if !base.is_empty() {
+                    return Some(base);
+                }
+            }
+            return if is_channel_token(name) {
+                Some("")
+            } else if name.is_empty() {
+                None
+            } else {
+                Some(name)
+            };
+        }
+    }
+
     if let Some(position) = name.rfind(|character: char| CHANNEL_DELIMITERS.contains(&character)) {
         let (base, rest) = name.split_at(position);
         let token = &rest[1..];
@@ -118,23 +150,22 @@ fn channel_base_name(name: &str) -> Option<&str> {
 }
 
 fn is_channel_token(token: &str) -> bool {
-    matches!(
-        token.to_ascii_uppercase().as_str(),
-        "FL" | "FR"
-            | "RL"
-            | "RR"
-            | "SL"
-            | "SR"
-            | "FC"
-            | "RC"
-            | "LFE"
-            | "MONO"
-            | "LEFT"
-            | "RIGHT"
-            | "L"
-            | "R"
-            | "C"
-    )
+    let token = token.trim();
+    CHANNEL_TOKENS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(token))
+        || token
+            .strip_prefix("AUX")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_backend_channel_position(channel: &str) -> bool {
+    let channel = channel.trim();
+    !channel.is_empty()
+        && !matches!(
+            channel.to_ascii_uppercase().as_str(),
+            "UNKNOWN" | "UNDEFINED" | "NONE" | "NA"
+        )
 }
 
 pub(crate) fn ports_compatible(a: PortType, b: PortType) -> bool {
@@ -396,5 +427,74 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].label, "Out");
         assert_eq!(groups[0].ports.len(), 2);
+    }
+
+    #[test]
+    fn backend_channel_metadata_groups_numeric_port_suffixes() {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(NodeId(1), "Source", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_port(
+                Port::new(
+                    PortId(1),
+                    NodeId(1),
+                    "output_1",
+                    Direction::Source,
+                    PortType::Audio,
+                )
+                .with_channel("FL"),
+            )
+            .unwrap();
+        graph
+            .add_port(
+                Port::new(
+                    PortId(2),
+                    NodeId(1),
+                    "output_2",
+                    Direction::Source,
+                    PortType::Audio,
+                )
+                .with_channel("FR"),
+            )
+            .unwrap();
+
+        let node = graph.node(NodeId(1)).unwrap();
+        let ports: Vec<&Port> = node.ports.iter().filter_map(|id| graph.port(*id)).collect();
+        assert_eq!(grouped_rows(ConnectMode::Easy, &ports).len(), 1);
+    }
+
+    #[test]
+    fn backend_metadata_is_authoritative_for_new_channel_positions() {
+        let mut first = Port::new(
+            PortId(1),
+            NodeId(1),
+            "output_1",
+            Direction::Source,
+            PortType::Audio,
+        )
+        .with_channel("TopFrontLeft");
+        let second = Port::new(
+            PortId(2),
+            NodeId(1),
+            "output_2",
+            Direction::Source,
+            PortType::Audio,
+        )
+        .with_channel("TopFrontRight");
+        assert_eq!(channel_base_name(&first), Some("output"));
+        assert_eq!(channel_base_name(&second), Some("output"));
+
+        first.channel = Some("UNKNOWN".into());
+        assert_eq!(channel_base_name(&first), None);
+    }
+
+    #[test]
+    fn channel_token_matching_is_case_insensitive_without_rewriting_the_name() {
+        assert!(is_channel_token("fl"));
+        assert!(is_channel_token(" Right "));
+        assert!(is_channel_token("AUX12"));
+        assert!(!is_channel_token("1"));
     }
 }

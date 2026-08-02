@@ -99,26 +99,6 @@ impl GraphDriver for CompositeDriver {
         Ok(existing)
     }
 
-    fn rename_node(&mut self, node: NodeId, name: String) -> pw_graph_backend::BackendResult<()> {
-        if node.0 & (1_u64 << 63) != 0 {
-            self.alsa
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
-                })?
-                .rename_node(node, name)
-        } else {
-            self.pipewire
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported(
-                        "PipeWire backend is disabled".into(),
-                    )
-                })?
-                .rename_node(node, name)
-        }
-    }
-
     fn set_node_position(
         &mut self,
         node: NodeId,
@@ -149,6 +129,12 @@ impl GraphDriver for CompositeDriver {
 
     fn graph(&self) -> &Graph {
         &self.graph
+    }
+    fn graph_dirty(&self) -> bool {
+        self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.graph_dirty())
+            || self.alsa.is_some()
     }
     fn is_node_type(&self, node_type: pw_graph_core::NodeType) -> bool {
         self.pipewire

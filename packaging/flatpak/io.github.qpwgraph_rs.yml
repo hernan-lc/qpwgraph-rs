@@ -6,8 +6,11 @@ command: qpwgraph-rs
 finish-args:
   - --socket=x11
   - --socket=wayland
+  - --socket=pipewire
   - --socket=pulseaudio
   - --socket=session-bus
+  - --device=all
+  - --talk-name=org.pipewire.Pulse
   - --filesystem=xdg-config/qpwgraph-rs:create
 modules:
   - name: qpwgraph-rs

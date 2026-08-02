@@ -28,11 +28,13 @@ pub struct AppConfig {
     pub zoom: f32,
     /// Multiplier for application chrome such as the toolbar and status bar.
     pub ui_text_scale: f32,
-    /// Multiplier for navigation and inspector panel text.
+    /// Multiplier for navigation and Preferences panel text.
     pub panel_text_scale: f32,
     /// Multiplier for node titles, port labels, and node counters.
     pub node_text_scale: f32,
     pub media_filter: String,
+    /// Case-insensitive text used to hide non-matching nodes and ports.
+    pub graph_search: String,
     pub sort_type: String,
     pub sort_order: String,
     /// When helper streams may be attached to measure audio levels:
@@ -52,6 +54,11 @@ pub struct AppConfig {
     pub patchbay_activated: bool,
     pub patchbay_path: Option<PathBuf>,
     pub patchbay_dir: Option<PathBuf>,
+    /// Most recently used patchbay files, newest first.
+    pub recent_patchbay_paths: Vec<PathBuf>,
+    /// Optional named patchbay profiles and their files.
+    pub patchbay_profiles: std::collections::BTreeMap<String, PathBuf>,
+    pub active_patchbay_profile: String,
 }
 
 impl Default for AppConfig {
@@ -67,6 +74,7 @@ impl Default for AppConfig {
             panel_text_scale: 1.20,
             node_text_scale: 1.15,
             media_filter: "all".into(),
+            graph_search: String::new(),
             sort_type: "name".into(),
             sort_order: "ascending".into(),
             audio_meters: "on-demand".into(),
@@ -82,6 +90,9 @@ impl Default for AppConfig {
             patchbay_activated: false,
             patchbay_path: None,
             patchbay_dir: None,
+            recent_patchbay_paths: Vec::new(),
+            patchbay_profiles: std::collections::BTreeMap::new(),
+            active_patchbay_profile: "default".into(),
         }
     }
 }

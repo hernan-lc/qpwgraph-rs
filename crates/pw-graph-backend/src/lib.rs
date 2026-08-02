@@ -68,6 +68,9 @@ pub type BackendResult<T> = Result<T, BackendError>;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AudioMeter {
     pub node_id: NodeId,
+    /// Port represented by this reading. A node-level fallback is used when
+    /// the backend cannot expose a stable port association.
+    pub port_id: Option<PortId>,
     /// Root-mean-square level normalized to 0..=1.
     pub rms: f32,
     /// Peak level normalized to 0..=1.
@@ -82,7 +85,6 @@ pub trait GraphDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>>;
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
-    fn rename_node(&mut self, node: pw_graph_core::NodeId, name: String) -> BackendResult<()>;
     fn set_node_position(
         &mut self,
         node: pw_graph_core::NodeId,
@@ -94,6 +96,11 @@ pub trait GraphDriver {
         ))
     }
     fn graph(&self) -> &Graph;
+    /// Returns whether registry state changed since the last `refresh`.
+    /// Backends without event-driven registries may keep the default `false`.
+    fn graph_dirty(&self) -> bool {
+        false
+    }
     fn is_node_type(&self, node_type: NodeType) -> bool;
     fn is_port_type(&self, port_type: PortType) -> bool;
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
@@ -255,15 +262,6 @@ impl GraphDriver for InMemoryDriver {
         Ok(self.graph.remove_link(link)?)
     }
 
-    fn rename_node(&mut self, node: NodeId, name: String) -> BackendResult<()> {
-        self.graph
-            .nodes
-            .get_mut(&node)
-            .ok_or(GraphError::MissingNode(node))?
-            .name = name;
-        Ok(())
-    }
-
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
         self.graph
             .nodes
@@ -325,12 +323,6 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn disconnect(&mut self, _link: LinkId) -> BackendResult<Link> {
-        Err(BackendError::Unsupported(
-            "PipeWire feature is disabled".into(),
-        ))
-    }
-
-    fn rename_node(&mut self, _node: NodeId, _name: String) -> BackendResult<()> {
         Err(BackendError::Unsupported(
             "PipeWire feature is disabled".into(),
         ))
