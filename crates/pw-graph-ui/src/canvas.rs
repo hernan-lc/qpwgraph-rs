@@ -12,10 +12,18 @@ impl GraphCanvas {
         let painter = ui.painter_at(rect);
         let mut actions = Vec::new();
         let mut anchors = HashMap::new();
+        let pointer_pos = ui.input(|input| input.pointer.interact_pos());
+        let pointer_over_node = pointer_pos.is_some_and(|pointer| {
+            graph
+                .nodes
+                .values()
+                .any(|node| self.node_rect(rect, graph, node).contains(pointer))
+        });
 
         if self.repel_overlapping_nodes
             && self.dragging_node.is_none()
             && self.selection_start.is_none()
+            && !pointer_over_node
             && !self.thumbnail_mode
         {
             self.repel_overlaps(rect, graph, &mut actions);
@@ -36,7 +44,7 @@ impl GraphCanvas {
             }
         }
 
-        if canvas_response.drag_started() && self.dragging_node.is_none() {
+        if canvas_response.drag_started() && self.dragging_node.is_none() && !pointer_over_node {
             self.selection_start = ui.input(|input| input.pointer.interact_pos());
             self.selection_current = self.selection_start;
         }
@@ -60,6 +68,7 @@ impl GraphCanvas {
         if canvas_response.dragged()
             && self.dragging_node.is_none()
             && self.selection_start.is_none()
+            && !pointer_over_node
         {
             self.pan += canvas_response.drag_delta();
         }
@@ -261,6 +270,7 @@ impl GraphCanvas {
                 self.selected_node = Some(node.id);
             }
             self.dragging_node = Some(node.id);
+            self.drag_delta = Vec2::ZERO;
             self.dragging_origin = self
                 .selected_nodes
                 .iter()
@@ -268,8 +278,10 @@ impl GraphCanvas {
                 .collect();
         }
         if response.dragged() && self.dragging_node == Some(node.id) {
-            self.drag_delta = response.drag_delta();
-            let delta = response.drag_delta() / self.zoom;
+            // egui reports the movement since the previous frame. Accumulate it
+            // so the node follows the pointer for the whole drag gesture.
+            self.drag_delta += response.drag_delta();
+            let delta = self.drag_delta / self.zoom;
             for (selected_id, origin) in &self.dragging_origin {
                 actions.push(CanvasAction::MoveNode {
                     node: *selected_id,

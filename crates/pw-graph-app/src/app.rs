@@ -118,7 +118,9 @@ impl QpwgraphApp {
             }
         };
         for (node_id, position) in &config.node_positions {
-            let _ = driver.set_node_position(NodeId(*node_id), *position);
+            if let Ok(node_id) = node_id.parse::<u64>() {
+                let _ = driver.set_node_position(NodeId(node_id), *position);
+            }
         }
         let patchbay = Patchbay::load_from(&patchbay_file).unwrap_or_else(|_| {
             Patchbay::new(
@@ -359,7 +361,7 @@ impl QpwgraphApp {
             .graph()
             .nodes
             .iter()
-            .map(|(id, node)| (id.0, node.position))
+            .map(|(id, node)| (id.0.to_string(), node.position))
             .collect();
         self.config.patchbay_path = Some(self.patchbay_file.clone());
     }

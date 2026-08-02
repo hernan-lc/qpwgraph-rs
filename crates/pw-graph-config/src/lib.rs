@@ -20,7 +20,8 @@ pub enum ConfigError {
 #[serde(default)]
 pub struct AppConfig {
     pub language: String,
-    pub node_positions: std::collections::BTreeMap<u64, [f32; 2]>,
+    /// TOML table keys are strings, so node IDs are stored as decimal strings.
+    pub node_positions: std::collections::BTreeMap<String, [f32; 2]>,
     pub thumbnail_view: bool,
     pub window_width: f32,
     pub window_height: f32,
@@ -106,6 +107,21 @@ mod tests {
             std::env::temp_dir().join(format!("pw-graph-config-{}", std::process::id()));
         let path = directory.join("config.toml");
         let expected = AppConfig::default();
+        expected.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn node_positions_round_trip() {
+        let directory =
+            std::env::temp_dir().join(format!("pw-graph-config-positions-{}", std::process::id()));
+        let path = directory.join("config.toml");
+        let mut expected = AppConfig::default();
+        expected.node_positions.insert("42".into(), [120.5, -18.0]);
+        expected
+            .node_positions
+            .insert("9001".into(), [640.0, 240.25]);
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();

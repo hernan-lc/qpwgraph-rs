@@ -12,7 +12,7 @@ The workspace provides:
 - `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation. XML serialization/parsing is isolated in `xml.rs`.
 - `pw-graph-config`: TOML application settings and XDG config path helpers.
 - `pw-graph-i18n`: catalog-based English/Spanish localization with fallback.
-- `pw-graph-ui`: egui graph canvas, drag-to-connect, selection, moving, sorting, and thumbnail view. Canvas interaction/rendering is isolated in `canvas.rs`.
+- `pw-graph-ui`: egui graph canvas, drag-to-connect, reliable node/group moving, selection, sorting, and thumbnail view. Canvas interaction/rendering is isolated in `canvas.rs`.
 - `pw-graph-app`: a runnable egui desktop shell, backend selection, patchbay controls, localization, and CLI flags. Its application state, argument parsing, composite backend, tray integration, and GUI panels live in separate modules.
 
 ## Run
@@ -27,7 +27,9 @@ panel is split into Graph, Patchbay, Interface, and Diagnostics screens so
 layout, routing, presentation, and status options remain separate. Hover any
 icon for its label and explanation, and use Save configuration to write immediately. The
 single action toolbar contains graph history controls and optional patchbay actions;
-the same commands are not repeated in a second menu row. Use
+the same commands are not repeated in a second menu row. Toolbar, navigation, and
+settings icons are drawn as platform-independent vector geometry rather than font
+glyphs. Use
 `--demo` to force the deterministic in-memory graph.
 
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
