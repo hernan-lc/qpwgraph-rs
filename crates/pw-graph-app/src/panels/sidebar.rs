@@ -1,6 +1,6 @@
 //! Navigation rail and compact graph controls.
 
-use super::{
+use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, media_filter_key, NAV_RAIL_WIDTH, PANEL_FILL,
 };
 use crate::app::QpwgraphApp;
