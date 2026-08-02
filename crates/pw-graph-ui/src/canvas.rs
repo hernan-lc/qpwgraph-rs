@@ -376,7 +376,9 @@ impl GraphCanvas {
 
         let selected = self.selected_nodes.contains(&node.id);
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
-        let accent = node_color(node.node_type);
+        let accent = dominant_port_type(&ports)
+            .map(port_color)
+            .unwrap_or_else(|| node_color(node.node_type));
         let fill = if selected {
             Color32::from_rgb(48, 60, 76)
         } else {
@@ -438,6 +440,15 @@ impl GraphCanvas {
         if self.thumbnail_mode {
             return;
         }
+
+        let mut port_name_totals: HashMap<(Direction, String), usize> = HashMap::new();
+        for port in &ports {
+            let name = display_port_name(&port.name, i18n);
+            *port_name_totals
+                .entry((port.direction, name))
+                .or_insert(0) += 1;
+        }
+        let mut port_name_seen: HashMap<(Direction, String), usize> = HashMap::new();
 
         for (index, port) in ports.into_iter().enumerate() {
             let y = node_rect.top()
@@ -535,7 +546,13 @@ impl GraphCanvas {
                 );
             }
             let radius = 6.0 * self.zoom.max(0.7);
-            painter.circle_filled(anchor, radius, port_color(port.port_type));
+            let dot_color = port_color(port.port_type);
+            painter.circle_stroke(
+                anchor,
+                radius + 0.6,
+                Stroke::new(1.2_f32, Color32::from_black_alpha(170)),
+            );
+            painter.circle_filled(anchor, radius, dot_color);
             if response.hovered() || pending {
                 painter.circle_stroke(anchor, radius + 3.0, Stroke::new(1.5_f32, Color32::WHITE));
             }
@@ -544,6 +561,15 @@ impl GraphCanvas {
             } else {
                 anchor + vec2(10.0, 0.0)
             };
+            let base_name = display_port_name(&port.name, i18n);
+            let name_key = (port.direction, base_name.clone());
+            let label = if port_name_totals.get(&name_key).copied().unwrap_or(1) > 1 {
+                let seen = port_name_seen.entry(name_key).or_insert(0);
+                *seen += 1;
+                format!("{base_name} #{seen}")
+            } else {
+                base_name
+            };
             painter.text(
                 text_pos,
                 if port.direction == Direction::Source {
@@ -551,7 +577,7 @@ impl GraphCanvas {
                 } else {
                     egui::Align2::LEFT_CENTER
                 },
-                compact_label(&display_port_name(&port.name, i18n), 25),
+                compact_label(&label, 25),
                 FontId::proportional(11.5 * self.zoom * text_scale),
                 Color32::from_rgb(215, 220, 227),
             );
@@ -640,6 +666,19 @@ impl GraphCanvas {
 
 fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
+}
+
+fn dominant_port_type(ports: &[&Port]) -> Option<PortType> {
+    let mut counts: HashMap<PortType, usize> = HashMap::new();
+    for port in ports {
+        if port.port_type != PortType::Unknown {
+            *counts.entry(port.port_type).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(port_type, _)| port_type)
 }
 
 fn port_color(port_type: PortType) -> Color32 {

@@ -29,6 +29,7 @@
 struct pw_graph_node {
     uint32_t id;
     char name[PW_GRAPH_NAME_SIZE];
+    char media_class[PW_GRAPH_TYPE_SIZE];
 };
 
 struct pw_graph_port {
@@ -426,6 +427,8 @@ static void on_registry_global(void *data, uint32_t id, uint32_t permissions,
                 name = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
             }
             copy_text(shim->nodes[index].name, sizeof(shim->nodes[index].name), name, "PipeWire node");
+            copy_text(shim->nodes[index].media_class, sizeof(shim->nodes[index].media_class),
+                    props == NULL ? NULL : spa_dict_lookup(props, PW_KEY_MEDIA_CLASS), "");
         }
     } else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
         int index = port_index(shim, id);
@@ -439,8 +442,27 @@ static void on_registry_global(void *data, uint32_t id, uint32_t permissions,
             copy_text(shim->ports[index].name, sizeof(shim->ports[index].name), name, "PipeWire port");
             direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
             shim->ports[index].direction = direction != NULL && strcmp(direction, "out") == 0 ? 1 : 0;
+            /* Most real-world ports never set media.type directly: it is
+             * primarily a node-level property. format.dsp, on the other
+             * hand, is set on nearly every negotiated adapter port (e.g.
+             * "32 bit float mono audio", "8 bit raw midi"), so use it as
+             * the reliable per-port signal and fall back to media.type
+             * when present. The node's media.class (see above) covers the
+             * remaining ports on the Rust side. */
             media_type = spa_dict_lookup(props, PW_KEY_MEDIA_TYPE);
-            copy_text(shim->ports[index].media_type, sizeof(shim->ports[index].media_type), media_type, "Unknown");
+            if (media_type == NULL) {
+                const char *format_dsp = spa_dict_lookup(props, PW_KEY_FORMAT_DSP);
+                if (format_dsp != NULL) {
+                    if (strcasestr(format_dsp, "midi") != NULL) {
+                        media_type = "midi";
+                    } else if (strcasestr(format_dsp, "video") != NULL) {
+                        media_type = "video";
+                    } else if (strcasestr(format_dsp, "audio") != NULL) {
+                        media_type = "audio";
+                    }
+                }
+            }
+            copy_text(shim->ports[index].media_type, sizeof(shim->ports[index].media_type), media_type, "");
         }
     } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
         int index = link_index(shim, id);

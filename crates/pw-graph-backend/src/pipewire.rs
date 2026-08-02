@@ -12,6 +12,7 @@ const MAX_METERS: usize = 4096;
 struct RawNode {
     id: u32,
     name: [c_char; 256],
+    media_class: [c_char; 64],
 }
 
 #[repr(C)]
@@ -116,6 +117,7 @@ impl PipewireDriver {
         let snapshot = unsafe { snapshot.assume_init() };
 
         let mut graph = Graph::default();
+        let mut node_media_class = std::collections::HashMap::new();
         for (index, raw) in snapshot.nodes[..(snapshot.node_count as usize).min(MAX_NODES)]
             .iter()
             .enumerate()
@@ -125,6 +127,7 @@ impl PipewireDriver {
             if is_private_meter_node(&node_name) {
                 continue;
             }
+            node_media_class.insert(id, raw_text(&raw.media_class).to_ascii_lowercase());
             let mut node = Node::new(id, node_name, NodeType::PipeWire);
             node.position = self.positions.get(&id).copied().unwrap_or_else(|| {
                 let column = (index % 4) as f32;
@@ -139,6 +142,30 @@ impl PipewireDriver {
             if graph.node(node_id).is_none() {
                 continue;
             }
+            let mut port_type = match raw_text(&raw.media_type).to_ascii_lowercase().as_str() {
+                "audio" => PortType::Audio,
+                "video" => PortType::Video,
+                "midi" => PortType::MidiJack,
+                _ => PortType::Unknown,
+            };
+            // The port itself frequently has no usable media type/format hint
+            // (bluetooth, camera, and application-stream ports commonly
+            // don't). Fall back to the owning node's media.class, which
+            // PipeWire nearly always sets (e.g. "Audio/Source",
+            // "Video/Source", "Midi/Bridge").
+            if port_type == PortType::Unknown {
+                if let Some(class) = node_media_class.get(&node_id) {
+                    port_type = if class.contains("midi") {
+                        PortType::MidiJack
+                    } else if class.contains("video") {
+                        PortType::Video
+                    } else if class.contains("audio") {
+                        PortType::Audio
+                    } else {
+                        PortType::Unknown
+                    };
+                }
+            }
             graph.add_port(Port::new(
                 PortId(raw.id as u64),
                 node_id,
@@ -148,12 +175,7 @@ impl PipewireDriver {
                 } else {
                     Direction::Sink
                 },
-                match raw_text(&raw.media_type).to_ascii_lowercase().as_str() {
-                    "audio" => PortType::Audio,
-                    "video" => PortType::Video,
-                    "midi" => PortType::MidiJack,
-                    _ => PortType::Unknown,
-                },
+                port_type,
             ))?;
         }
         for raw in snapshot.links[..(snapshot.link_count as usize).min(MAX_LINKS)].iter() {
