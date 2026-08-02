@@ -1,7 +1,9 @@
 //! Backend abstraction. The in-memory driver makes the rest of the application
 //! deterministic and testable while a PipeWire driver is added incrementally.
 
-use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeType, Port, PortId, PortType};
+use pw_graph_core::{
+    Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
+};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -16,6 +18,23 @@ pub enum BackendError {
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
+
+/// A normalized, node-level audio reading supplied by a backend.
+///
+/// PipeWire exposes graph topology separately from audio buffers, so meters
+/// are deliberately kept as an optional side channel. An empty collection is
+/// a valid result for backends that do not provide runtime audio data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioMeter {
+    pub node_id: NodeId,
+    /// Root-mean-square level normalized to 0..=1.
+    pub rms: f32,
+    /// Peak level normalized to 0..=1.
+    pub peak: f32,
+    /// Milliseconds since the backend received the last audio buffer.
+    pub age_ms: u32,
+    pub available: bool,
+}
 
 /// Common operations needed by commands, patchbay activation, and the UI.
 pub trait GraphDriver {
@@ -36,6 +55,9 @@ pub trait GraphDriver {
     fn graph(&self) -> &Graph;
     fn is_node_type(&self, node_type: NodeType) -> bool;
     fn is_port_type(&self, port_type: PortType) -> bool;
+    fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A small backend that behaves like a PipeWire registry from the perspective
@@ -149,7 +171,7 @@ fn add_demo_port(
         .expect("demo port ids are unique");
 }
 
-use pw_graph_core::{Direction, NodeId};
+use pw_graph_core::Direction;
 
 impl GraphDriver for InMemoryDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {

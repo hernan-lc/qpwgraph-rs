@@ -1,13 +1,21 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <math.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <pipewire/pipewire.h>
+#include <pipewire/keys.h>
+#include <pipewire/stream.h>
+#include <spa/param/audio/raw-utils.h>
+#include <spa/param/format.h>
+#include <spa/buffer/buffer.h>
 #include <spa/utils/dict.h>
 #include <spa/utils/hook.h>
 
@@ -45,6 +53,32 @@ struct pw_graph_snapshot {
     struct pw_graph_link links[PW_GRAPH_MAX_LINKS];
 };
 
+struct pw_graph_meter_reading {
+    uint32_t node_id;
+    float rms;
+    float peak;
+    uint32_t age_ms;
+    uint32_t available;
+};
+
+struct pw_graph_meter_snapshot {
+    uint32_t meter_count;
+    struct pw_graph_meter_reading meters[PW_GRAPH_MAX_NODES];
+};
+
+struct pw_graph_meter {
+    uint32_t node_id;
+    char node_name[PW_GRAPH_NAME_SIZE];
+    struct pw_stream *stream;
+    struct spa_hook listener;
+    uint32_t format;
+    uint32_t channels;
+    _Atomic float rms;
+    _Atomic float peak;
+    _Atomic uint64_t timestamp_ns;
+    _Atomic int connected;
+};
+
 struct pw_graph_shim {
     struct pw_thread_loop *thread_loop;
     struct pw_context *context;
@@ -61,6 +95,8 @@ struct pw_graph_shim {
     size_t port_count;
     struct pw_graph_link links[PW_GRAPH_MAX_LINKS];
     size_t link_count;
+    struct pw_graph_meter meters[PW_GRAPH_MAX_NODES];
+    size_t meter_count;
 };
 
 static void copy_text(char *destination, size_t size, const char *source, const char *fallback)
@@ -117,6 +153,199 @@ static int link_index(struct pw_graph_shim *shim, uint32_t id)
         }
     }
     return -1;
+}
+
+static uint64_t monotonic_ns(void)
+{
+    struct timespec time;
+    if (clock_gettime(CLOCK_MONOTONIC, &time) != 0) {
+        return 0;
+    }
+    return (uint64_t)time.tv_sec * 1000000000ull + (uint64_t)time.tv_nsec;
+}
+
+static int meter_index(struct pw_graph_shim *shim, uint32_t node_id)
+{
+    size_t i;
+    for (i = 0; i < shim->meter_count; ++i) {
+        if (shim->meters[i].node_id == node_id) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void meter_state_changed(void *data, enum pw_stream_state old_state,
+        enum pw_stream_state state, const char *error)
+{
+    struct pw_graph_meter *meter = data;
+    (void)old_state;
+    (void)error;
+    atomic_store_explicit(&meter->connected,
+            state == PW_STREAM_STATE_STREAMING ? 1 : 0,
+            memory_order_relaxed);
+}
+
+static void meter_param_changed(void *data, uint32_t id, const struct spa_pod *param)
+{
+    struct pw_graph_meter *meter = data;
+    struct spa_audio_info_raw info;
+    if (id != SPA_PARAM_Format || param == NULL ||
+            spa_format_audio_raw_parse(param, &info) < 0) {
+        return;
+    }
+    meter->format = info.format;
+    meter->channels = info.channels == 0 ? 1 : info.channels;
+}
+
+static void meter_process(void *data)
+{
+    struct pw_graph_meter *meter = data;
+    struct pw_buffer *buffer = pw_stream_dequeue_buffer(meter->stream);
+    if (buffer == NULL || buffer->buffer == NULL) {
+        return;
+    }
+
+    struct spa_buffer *spa_buffer = buffer->buffer;
+    float peak = 0.0f;
+    double sum = 0.0;
+    uint64_t samples = 0;
+    uint32_t i;
+    for (i = 0; i < spa_buffer->n_datas; ++i) {
+        struct spa_data *data_block = &spa_buffer->datas[i];
+        if (data_block->data == NULL || data_block->chunk == NULL ||
+                data_block->chunk->size < sizeof(float) ||
+                meter->format != SPA_AUDIO_FORMAT_F32) {
+            continue;
+        }
+        const uint8_t *bytes = (const uint8_t *)data_block->data + data_block->chunk->offset;
+        size_t count = data_block->chunk->size / sizeof(float);
+        const float *values = (const float *)bytes;
+        size_t sample;
+        for (sample = 0; sample < count; ++sample) {
+            float value = fabsf(values[sample]);
+            if (value > peak) {
+                peak = value;
+            }
+            sum += (double)value * (double)value;
+        }
+        samples += count;
+    }
+    if (samples > 0) {
+        float rms = (float)sqrt(sum / (double)samples);
+        atomic_store_explicit(&meter->rms, fminf(rms, 1.0f), memory_order_relaxed);
+        atomic_store_explicit(&meter->peak, fminf(peak, 1.0f), memory_order_relaxed);
+        atomic_store_explicit(&meter->timestamp_ns, monotonic_ns(), memory_order_relaxed);
+    }
+    pw_stream_queue_buffer(meter->stream, buffer);
+}
+
+static const struct pw_stream_events meter_events = {
+    .version = PW_VERSION_STREAM_EVENTS,
+    .state_changed = meter_state_changed,
+    .param_changed = meter_param_changed,
+    .process = meter_process,
+};
+
+static void destroy_meter(struct pw_graph_shim *shim, size_t index)
+{
+    struct pw_graph_meter *meter = &shim->meters[index];
+    if (meter->stream != NULL) {
+        pw_stream_destroy(meter->stream);
+        meter->stream = NULL;
+    }
+    if (index + 1 < shim->meter_count) {
+        shim->meters[index] = shim->meters[shim->meter_count - 1];
+    }
+    --shim->meter_count;
+}
+
+static bool node_has_audio_source(struct pw_graph_shim *shim, uint32_t node_id)
+{
+    size_t i;
+    for (i = 0; i < shim->port_count; ++i) {
+        const struct pw_graph_port *port = &shim->ports[i];
+        if (port->node_id == node_id && port->direction == 1 &&
+                strcasecmp(port->media_type, "audio") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int create_meter(struct pw_graph_shim *shim, const struct pw_graph_node *node)
+{
+    if (shim->meter_count >= PW_GRAPH_MAX_NODES) {
+        return -ENOSPC;
+    }
+    size_t meter_slot = shim->meter_count++;
+    struct pw_graph_meter *meter = &shim->meters[meter_slot];
+    memset(meter, 0, sizeof(*meter));
+    meter->node_id = node->id;
+    copy_text(meter->node_name, sizeof(meter->node_name), node->name, "PipeWire node");
+    meter->format = SPA_AUDIO_FORMAT_F32;
+    meter->channels = 2;
+    atomic_init(&meter->rms, 0.0f);
+    atomic_init(&meter->peak, 0.0f);
+    atomic_init(&meter->timestamp_ns, 0);
+    atomic_init(&meter->connected, 0);
+
+    char stream_name[PW_GRAPH_NAME_SIZE + 32];
+    snprintf(stream_name, sizeof(stream_name), "qpwgraph-rs audio meter: %s", node->name);
+    struct pw_properties *properties = pw_properties_new(
+            PW_KEY_MEDIA_TYPE, "Audio",
+            PW_KEY_MEDIA_CATEGORY, "Monitor",
+            PW_KEY_MEDIA_ROLE, "DSP",
+            PW_KEY_TARGET_OBJECT, node->name,
+            NULL);
+    if (properties == NULL) {
+        return -ENOMEM;
+    }
+    meter->stream = pw_stream_new(shim->core, stream_name, properties);
+    if (meter->stream == NULL) {
+        return errno == 0 ? -EIO : -errno;
+    }
+    pw_stream_add_listener(meter->stream, &meter->listener, &meter_events, meter);
+
+    uint8_t buffer[1024];
+    struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    struct spa_audio_info_raw info = SPA_AUDIO_INFO_RAW_INIT(
+            .format = SPA_AUDIO_FORMAT_F32,
+            .rate = 48000,
+            .channels = 2);
+    const struct spa_pod *params[1];
+    params[0] = spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+    if (params[0] == NULL) {
+        destroy_meter(shim, meter_slot);
+        return -EINVAL;
+    }
+    int result = pw_stream_connect(meter->stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+            PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
+            PW_STREAM_FLAG_DONT_RECONNECT,
+            params, 1);
+    if (result < 0) {
+        destroy_meter(shim, meter_slot);
+        return result;
+    }
+    return 0;
+}
+
+static void ensure_meters(struct pw_graph_shim *shim)
+{
+    size_t i = 0;
+    while (i < shim->meter_count) {
+        if (!node_has_audio_source(shim, shim->meters[i].node_id)) {
+            destroy_meter(shim, i);
+        } else {
+            ++i;
+        }
+    }
+    for (i = 0; i < shim->node_count; ++i) {
+        struct pw_graph_node *node = &shim->nodes[i];
+        if (meter_index(shim, node->id) < 0 && node_has_audio_source(shim, node->id)) {
+            (void)create_meter(shim, node);
+        }
+    }
 }
 
 static void remove_node(struct pw_graph_shim *shim, uint32_t id)

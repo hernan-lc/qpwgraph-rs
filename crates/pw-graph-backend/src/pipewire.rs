@@ -6,6 +6,7 @@ use std::ffi::{c_char, c_void, CStr};
 const MAX_NODES: usize = 4096;
 const MAX_PORTS: usize = 16384;
 const MAX_LINKS: usize = 16384;
+const MAX_METERS: usize = 4096;
 
 #[repr(C)]
 struct RawNode {
@@ -39,6 +40,21 @@ struct RawSnapshot {
     links: [RawLink; MAX_LINKS],
 }
 
+#[repr(C)]
+struct RawMeter {
+    node_id: u32,
+    rms: f32,
+    peak: f32,
+    age_ms: u32,
+    available: u32,
+}
+
+#[repr(C)]
+struct RawMeterSnapshot {
+    meter_count: u32,
+    meters: [RawMeter; MAX_METERS],
+}
+
 unsafe extern "C" {
     fn pw_graph_shim_new() -> *mut c_void;
     fn pw_graph_shim_free(shim: *mut c_void);
@@ -52,6 +68,10 @@ unsafe extern "C" {
         link_id: *mut u32,
     ) -> i32;
     fn pw_graph_shim_destroy_link(shim: *mut c_void, link_id: u32) -> i32;
+    fn pw_graph_shim_meter_snapshot(
+        shim: *mut c_void,
+        snapshot: *mut RawMeterSnapshot,
+    ) -> i32;
 }
 
 fn raw_text(value: &[c_char]) -> String {
@@ -62,6 +82,10 @@ fn raw_text(value: &[c_char]) -> String {
 
 fn native_error(operation: &str, code: i32) -> BackendError {
     BackendError::Native(format!("{operation} failed with code {code}"))
+}
+
+fn is_private_meter_node(name: &str) -> bool {
+    name.starts_with("qpwgraph-rs audio meter:")
 }
 
 #[derive(Debug)]
@@ -100,7 +124,11 @@ impl PipewireDriver {
             .enumerate()
         {
             let id = NodeId(raw.id as u64);
-            let mut node = Node::new(id, raw_text(&raw.name), NodeType::PipeWire);
+            let node_name = raw_text(&raw.name);
+            if is_private_meter_node(&node_name) {
+                continue;
+            }
+            let mut node = Node::new(id, node_name, NodeType::PipeWire);
             node.position = self.positions.get(&id).copied().unwrap_or_else(|| {
                 let column = (index % 4) as f32;
                 let row = (index / 4) as f32;
@@ -242,5 +270,25 @@ impl GraphDriver for PipewireDriver {
             port_type,
             PortType::Audio | PortType::Video | PortType::MidiJack | PortType::Unknown
         )
+    }
+
+    fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
+        let mut snapshot = Box::<RawMeterSnapshot>::new_uninit();
+        let result = unsafe { pw_graph_shim_meter_snapshot(self.native, snapshot.as_mut_ptr()) };
+        if result < 0 {
+            return Err(native_error("PipeWire audio meter snapshot", result));
+        }
+        let snapshot = unsafe { snapshot.assume_init() };
+        Ok(snapshot.meters[..(snapshot.meter_count as usize).min(MAX_METERS)]
+            .iter()
+            .filter(|meter| meter.available != 0)
+            .map(|meter| AudioMeter {
+                node_id: NodeId(meter.node_id as u64),
+                rms: meter.rms.clamp(0.0, 1.0),
+                peak: meter.peak.clamp(0.0, 1.0),
+                age_ms: meter.age_ms,
+                available: true,
+            })
+            .collect())
     }
 }
