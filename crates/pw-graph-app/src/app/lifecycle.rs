@@ -78,6 +78,7 @@ impl eframe::App for QpwgraphApp {
         self.update_window_size(ctx);
         self.show_gui_panels(ctx);
         self.update_canvas_from_config();
+        self.sync_effect_controls();
 
         if self.config.statusbar {
             egui::TopBottomPanel::bottom("statusbar")
@@ -121,7 +122,6 @@ impl eframe::App for QpwgraphApp {
         self.request_visible_meters(ctx);
         self.show_shortcuts_modal(ctx);
         self.show_history_modal(ctx);
-        self.show_effect_wizard_modal(ctx);
         self.show_preferences_modal(ctx);
         self.autosave_config();
     }

@@ -50,6 +50,15 @@ impl QpwgraphApp {
                 CanvasAction::Disconnect { link } => self.disconnect(link),
                 CanvasAction::DisconnectMany { links } => self.disconnect_many(links),
                 CanvasAction::DisconnectNode { node } => self.disconnect_node(node),
+                CanvasAction::RemoveEffect { node } => self.remove_effect_node(node),
+                CanvasAction::SetEffectEnabled { node, enabled } => {
+                    self.set_effect_enabled_for_node(node, enabled)
+                }
+                CanvasAction::SetEffectParameter {
+                    node,
+                    parameter,
+                    value,
+                } => self.set_effect_parameter_for_node(node, &parameter, value),
                 CanvasAction::ArrangeNodes { nodes } => self.arrange_selected_nodes(nodes),
                 CanvasAction::SetNodeAppearance { node, appearance } => {
                     self.canvas.set_node_appearance(node, appearance);

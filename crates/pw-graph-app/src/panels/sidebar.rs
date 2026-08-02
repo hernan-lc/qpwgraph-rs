@@ -3,6 +3,7 @@
 use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, media_filter_key, NAV_RAIL_WIDTH, PANEL_FILL,
 };
+use crate::app::effects::available_descriptors;
 use crate::app::QpwgraphApp;
 use crate::icons::{
     sidebar_icon_button, sidebar_icon_button_enabled, sidebar_icon_toggle_button,
@@ -221,79 +222,44 @@ impl QpwgraphApp {
     }
 
     fn show_effect_controls(&mut self, ui: &mut Ui) {
-        let instances = self.driver.effect_instances();
-        let descriptors = self.driver.effect_descriptors();
-        let add_effect = sidebar_icon_button(
-            ui,
-            "sidebar.effects-add",
-            Icon::Effects,
-            self.t("effects.add"),
-            self.t("effects.add_help"),
-        );
-        let mut toggle = Vec::new();
-        let mut parameters = Vec::new();
-        let mut remove = Vec::new();
-        if !instances.is_empty() {
-            ui.collapsing(self.t("effects.title"), |ui| {
-                for instance in &instances {
-                    ui.separator();
-                    ui.label(&instance.config.effect_id);
-                    let mut enabled = instance.config.enabled;
-                    if ui
-                        .checkbox(&mut enabled, self.t("effects.enabled"))
-                        .changed()
-                    {
-                        toggle.push((instance.config.instance_id.clone(), enabled));
+        let descriptors = available_descriptors(self.driver.as_ref());
+        let mut selected = self.effect_to_add.clone();
+        let selected_name = descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == selected)
+            .map(|descriptor| descriptor.name.clone())
+            .unwrap_or_else(|| self.t("effects.no_available"));
+        let choose_effect_help = self.t("effects.choose_effect");
+        let add_label = self.t("effects.add");
+        let add_help = self.t("effects.add_help");
+        let mut add = false;
+        ui.horizontal(|ui| {
+            let combo = egui::ComboBox::from_id_salt("sidebar-effect-select")
+                .selected_text(selected_name)
+                .width(42.0)
+                .show_ui(ui, |ui| {
+                    for descriptor in &descriptors {
+                        ui.selectable_value(
+                            &mut selected,
+                            descriptor.id.clone(),
+                            format!("{} — {}", descriptor.name, descriptor.vendor),
+                        );
                     }
-                    if let Some(descriptor) = descriptors
-                        .iter()
-                        .find(|descriptor| descriptor.id == instance.config.effect_id)
-                    {
-                        for parameter in &descriptor.parameters {
-                            if parameter.id == pw_graph_effects::NOISE_GATE_BYPASS {
-                                continue;
-                            }
-                            let mut value = instance
-                                .config
-                                .parameters
-                                .get(&parameter.id)
-                                .copied()
-                                .unwrap_or(parameter.default);
-                            if ui
-                                .add(
-                                    egui::Slider::new(
-                                        &mut value,
-                                        parameter.minimum..=parameter.maximum,
-                                    )
-                                    .text(format!("{} ({})", parameter.name, parameter.unit)),
-                                )
-                                .changed()
-                            {
-                                parameters.push((
-                                    instance.config.instance_id.clone(),
-                                    parameter.id.clone(),
-                                    value,
-                                ));
-                            }
-                        }
-                    }
-                    if ui.button(self.t("effects.remove")).clicked() {
-                        remove.push(instance.config.instance_id.clone());
-                    }
-                }
-            });
-        }
-        if add_effect {
-            self.open_effect_wizard();
-        }
-        for (id, enabled) in toggle {
-            self.set_effect_enabled_from_ui(&id, enabled);
-        }
-        for (id, parameter, value) in parameters {
-            self.set_effect_parameter_from_ui(&id, &parameter, value);
-        }
-        for id in remove {
-            self.remove_effect_from_ui(&id);
+                });
+            combo.response.on_hover_text(choose_effect_help);
+            if sidebar_icon_button(
+                ui,
+                "sidebar.effects-add",
+                Icon::Effects,
+                add_label,
+                add_help,
+            ) {
+                add = true;
+            }
+        });
+        self.effect_to_add = selected;
+        if add {
+            self.add_selected_effect();
         }
     }
 

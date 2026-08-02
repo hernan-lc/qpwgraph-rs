@@ -98,6 +98,11 @@ impl QpwgraphApp {
         // default on-demand policy never attaches a metering stream on its own.
         let meter_policy = MeterPolicy::parse(&config.audio_meters);
         let _ = driver.set_meter_policy(meter_policy);
+        let effect_to_add = driver
+            .effect_descriptors()
+            .first()
+            .map(|descriptor| descriptor.id.clone())
+            .unwrap_or_else(|| pw_graph_effects::NOISE_GATE_ID.into());
         layout::restore_node_positions(driver.as_mut(), &config);
         let patchbay = Patchbay::load_from(&patchbay_file).unwrap_or_else(|_| {
             Patchbay::new(
@@ -177,7 +182,7 @@ impl QpwgraphApp {
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
             last_graph_refresh: Instant::now(),
             meter_policy,
-            effect_wizard: None,
+            effect_to_add,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         };

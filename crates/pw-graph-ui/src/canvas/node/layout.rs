@@ -4,7 +4,8 @@ use pw_graph_core::{Direction, Graph, Node, Port, PortType};
 
 use super::super::ports::{grouped_rows, pair_ports};
 use super::{
-    AUDIO_CONTROLS_HEIGHT, COLLAPSED_NODE_HEIGHT, NODE_HEADER_HEIGHT, NODE_WIDTH, PORT_ROW_HEIGHT,
+    AUDIO_CONTROLS_HEIGHT, COLLAPSED_NODE_HEIGHT, EFFECT_CONTROLS_HEIGHT, NODE_HEADER_HEIGHT,
+    NODE_WIDTH, PORT_ROW_HEIGHT,
 };
 
 impl GraphCanvas {
@@ -35,12 +36,26 @@ impl GraphCanvas {
         } else {
             let ports = self.ordered_ports(graph, node);
             let port_count = grouped_rows(self.connect_mode, &ports).len();
-            let controls_height = if ports.iter().any(|port| port.port_type == PortType::Audio) {
-                AUDIO_CONTROLS_HEIGHT
+            let audio_controls_height =
+                if ports.iter().any(|port| port.port_type == PortType::Audio)
+                    && node.node_type != pw_graph_core::NodeType::Effect
+                {
+                    AUDIO_CONTROLS_HEIGHT
+                } else {
+                    0.0
+                };
+            let effect_controls_height = if node.node_type == pw_graph_core::NodeType::Effect
+                && self.effect_controls.contains_key(&node.id)
+            {
+                EFFECT_CONTROLS_HEIGHT
             } else {
                 0.0
             };
-            (NODE_HEADER_HEIGHT + controls_height + 14.0 + port_count as f32 * PORT_ROW_HEIGHT)
+            (NODE_HEADER_HEIGHT
+                + audio_controls_height
+                + effect_controls_height
+                + 14.0
+                + port_count as f32 * PORT_ROW_HEIGHT)
                 .max(COLLAPSED_NODE_HEIGHT)
         };
         vec2(NODE_WIDTH, height)
@@ -89,8 +104,17 @@ impl GraphCanvas {
             x,
             node_rect.top()
                 + (NODE_HEADER_HEIGHT
-                    + if ordered.iter().any(|item| item.port_type == PortType::Audio) {
+                    + if ordered.iter().any(|item| item.port_type == PortType::Audio)
+                        && node.node_type != pw_graph_core::NodeType::Effect
+                    {
                         AUDIO_CONTROLS_HEIGHT
+                    } else {
+                        0.0
+                    }
+                    + if node.node_type == pw_graph_core::NodeType::Effect
+                        && self.effect_controls.contains_key(&node.id)
+                    {
+                        EFFECT_CONTROLS_HEIGHT
                     } else {
                         0.0
                     }

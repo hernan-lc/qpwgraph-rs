@@ -1,5 +1,7 @@
 //! Reusable controls for modal forms and setup screens.
 
+#![allow(dead_code)]
+
 use eframe::egui::{self, RichText, Ui};
 
 pub(super) fn modal_hint(ui: &mut Ui, text: String) {

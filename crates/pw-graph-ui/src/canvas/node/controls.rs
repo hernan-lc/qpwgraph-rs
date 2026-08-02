@@ -309,6 +309,14 @@ impl GraphCanvas {
                             ui.separator();
                         }
 
+                        if node.node_type == pw_graph_core::NodeType::Effect {
+                            if ui.button(i18n.text("canvas.remove_effect")).clicked() {
+                                actions.push(CanvasAction::RemoveEffect { node: node.id });
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                        }
+
                         ui.label(i18n.text("canvas.node_name"));
                         let name_response = ui.text_edit_singleline(&mut name_draft);
                         let submit_name = name_response.lost_focus()
@@ -467,6 +475,94 @@ impl GraphCanvas {
                 volume: state.volume,
             });
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_node_effect_controls(
+        &mut self,
+        ui: &mut Ui,
+        node: &Node,
+        node_rect: Rect,
+        header: Rect,
+        accent: Color32,
+        actions: &mut Vec<CanvasAction>,
+        i18n: &I18n,
+    ) {
+        let Some(control) = self.effect_controls.get(&node.id).cloned() else {
+            return;
+        };
+        let control_rect = Rect::from_min_size(
+            pos2(
+                node_rect.left() + 8.0 * self.zoom,
+                header.bottom() + 5.0 * self.zoom,
+            ),
+            vec2(
+                node_rect.width() - 16.0 * self.zoom,
+                (super::EFFECT_CONTROLS_HEIGHT - 10.0) * self.zoom,
+            ),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(control_rect)
+                .id_salt(("node-effect-controls", node.id)),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0 * self.zoom;
+                let mut enabled = control.enabled;
+                if ui
+                    .checkbox(&mut enabled, i18n.text("effects.enabled"))
+                    .changed()
+                {
+                    actions.push(CanvasAction::SetEffectEnabled {
+                        node: node.id,
+                        enabled,
+                    });
+                }
+                for parameter in control.parameters {
+                    if parameter.boolean {
+                        let mut value = parameter.value >= 0.5;
+                        if ui.checkbox(&mut value, parameter.name).changed() {
+                            actions.push(CanvasAction::SetEffectParameter {
+                                node: node.id,
+                                parameter: parameter.id,
+                                value: if value { 1.0 } else { 0.0 },
+                            });
+                        }
+                    } else {
+                        let mut value = parameter.value;
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut value,
+                                    parameter.minimum..=parameter.maximum,
+                                )
+                                .text(format!("{} ({})", parameter.name, parameter.unit)),
+                            )
+                            .changed()
+                        {
+                            actions.push(CanvasAction::SetEffectParameter {
+                                node: node.id,
+                                parameter: parameter.id,
+                                value,
+                            });
+                        }
+                    }
+                }
+            },
+        );
+        ui.painter().line_segment(
+            [
+                pos2(
+                    node_rect.left() + 8.0 * self.zoom,
+                    header.bottom() + super::EFFECT_CONTROLS_HEIGHT * self.zoom,
+                ),
+                pos2(
+                    node_rect.right() - 8.0 * self.zoom,
+                    header.bottom() + super::EFFECT_CONTROLS_HEIGHT * self.zoom,
+                ),
+            ],
+            Stroke::new(1.0_f32, Color32::from_rgb(52, 63, 78)),
+        );
+        let _ = accent;
     }
 }
 

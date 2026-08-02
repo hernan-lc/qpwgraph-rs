@@ -29,7 +29,6 @@ impl QpwgraphApp {
                 self.close_shortcuts();
                 self.show_history = false;
                 self.show_preferences = false;
-                self.effect_wizard = None;
             }
             return;
         }

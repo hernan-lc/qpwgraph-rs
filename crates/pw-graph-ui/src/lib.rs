@@ -51,6 +51,9 @@ pub enum CanvasAction {
     DisconnectNode {
         node: NodeId,
     },
+    RemoveEffect {
+        node: NodeId,
+    },
     ArrangeNodes {
         nodes: Vec<NodeId>,
     },
@@ -65,6 +68,15 @@ pub enum CanvasAction {
     SetNodeVolume {
         node: NodeId,
         volume: f32,
+    },
+    SetEffectEnabled {
+        node: NodeId,
+        enabled: bool,
+    },
+    SetEffectParameter {
+        node: NodeId,
+        parameter: String,
+        value: f32,
     },
     MoveNode {
         node: NodeId,
@@ -167,6 +179,23 @@ pub struct MeterReading {
     pub available: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectNodeParameter {
+    pub id: String,
+    pub name: String,
+    pub minimum: f32,
+    pub maximum: f32,
+    pub value: f32,
+    pub unit: String,
+    pub boolean: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectNodeControl {
+    pub enabled: bool,
+    pub parameters: Vec<EffectNodeParameter>,
+}
+
 pub struct GraphCanvas {
     pub zoom: f32,
     pub node_text_scale: f32,
@@ -182,6 +211,7 @@ pub struct GraphCanvas {
     pub search_query: String,
     pub meters: BTreeMap<NodeId, MeterReading>,
     pub port_meters: BTreeMap<PortId, MeterReading>,
+    pub effect_controls: BTreeMap<NodeId, EffectNodeControl>,
     pub pinned_meter: Option<PortId>,
     /// Set by the application when the backend may not measure levels at all,
     /// so the meter popover can say so instead of claiming no data exists.
@@ -223,6 +253,7 @@ impl Default for GraphCanvas {
             search_query: String::new(),
             meters: BTreeMap::new(),
             port_meters: BTreeMap::new(),
+            effect_controls: BTreeMap::new(),
             pinned_meter: None,
             metering_disabled: false,
             peak_hold: BTreeMap::new(),
@@ -269,6 +300,10 @@ impl GraphCanvas {
         } else {
             self.node_audio.insert(node_id, state);
         }
+    }
+
+    pub fn set_effect_controls(&mut self, controls: BTreeMap<NodeId, EffectNodeControl>) {
+        self.effect_controls = controls;
     }
 }
 

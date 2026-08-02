@@ -25,6 +25,7 @@ const NODE_HEADER_HEIGHT: f32 = 42.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
+pub(super) const EFFECT_CONTROLS_HEIGHT: f32 = 154.0;
 
 pub(super) struct AudioInfo {
     pub(super) port_id: PortId,
@@ -66,7 +67,14 @@ impl GraphCanvas {
         let tooltip = node_tooltip(node, &ports, i18n);
         let easy_connect = self.connect_mode == ConnectMode::Easy;
         let appearance = self.node_appearance(node.id);
-        let visible_audio_controls = has_audio && !appearance.collapsed && !self.thumbnail_mode;
+        let visible_audio_controls = has_audio
+            && node.node_type != pw_graph_core::NodeType::Effect
+            && !appearance.collapsed
+            && !self.thumbnail_mode;
+        let visible_effect_controls = node.node_type == pw_graph_core::NodeType::Effect
+            && self.effect_controls.contains_key(&node.id)
+            && !appearance.collapsed
+            && !self.thumbnail_mode;
         let monitor_port = ports
             .iter()
             .copied()
@@ -97,11 +105,15 @@ impl GraphCanvas {
             .as_ref()
             .and_then(|audio_info| audio_info.meter)
             .or_else(|| self.meters.get(&node.id).copied());
-        let controls_height = if visible_audio_controls {
-            AUDIO_CONTROLS_HEIGHT * self.zoom
+        let controls_height = (if visible_audio_controls {
+            AUDIO_CONTROLS_HEIGHT
         } else {
             0.0
-        };
+        } + if visible_effect_controls {
+            EFFECT_CONTROLS_HEIGHT
+        } else {
+            0.0
+        }) * self.zoom;
         let header_drag_rect = Rect::from_min_max(
             header.min,
             pos2(header.right() - 60.0 * self.zoom, header.bottom()),
@@ -398,6 +410,10 @@ impl GraphCanvas {
                 actions,
                 i18n,
             );
+        }
+
+        if visible_effect_controls {
+            self.draw_node_effect_controls(ui, node, node_rect, header, accent, actions, i18n);
         }
 
         if let Some(source_id) = self.pending_node_connect {
