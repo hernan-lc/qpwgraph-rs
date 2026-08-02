@@ -22,6 +22,10 @@ pub struct AppConfig {
     pub language: String,
     /// TOML table keys are strings, so node IDs are stored as decimal strings.
     pub node_positions: std::collections::BTreeMap<String, [f32; 2]>,
+    /// Fallback layout keyed by backend-independent node type and name. This
+    /// lets a saved layout survive PipeWire global node IDs changing between
+    /// sessions. Ambiguous duplicate names are omitted by the app.
+    pub node_positions_by_name: std::collections::BTreeMap<String, [f32; 2]>,
     pub thumbnail_view: bool,
     pub window_width: f32,
     pub window_height: f32,
@@ -66,6 +70,7 @@ impl Default for AppConfig {
         Self {
             language: "en".into(),
             node_positions: std::collections::BTreeMap::new(),
+            node_positions_by_name: std::collections::BTreeMap::new(),
             thumbnail_view: false,
             window_width: 1100.0,
             window_height: 760.0,
@@ -152,6 +157,9 @@ mod tests {
         expected
             .node_positions
             .insert("9001".into(), [640.0, 240.25]);
+        expected
+            .node_positions_by_name
+            .insert("PipeWire:Capture".into(), [120.5, -18.0]);
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();

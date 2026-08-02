@@ -167,7 +167,7 @@
   "shortcuts.title": "Atajos de teclado",
   "shortcuts.hint": "Pulsa F1 para mostrar u ocultar esta ayuda. Los atajos se desactivan al escribir en un campo de texto.",
   "shortcuts.search": "Buscar",
-  "shortcuts.search_hint": "Filtrar por tecla o acción… (Ctrl/Cmd+F enfoca este campo)",
+  "shortcuts.search_hint": "Filtrar por tecla o descripción… (Ctrl/Cmd+F enfoca este campo)",
   "shortcuts.clear_search": "Limpiar",
   "shortcuts.result_count": "Se muestran {count} atajos",
   "shortcuts.no_results": "Ningún atajo coincide con la búsqueda.",

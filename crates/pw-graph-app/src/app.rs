@@ -12,16 +12,59 @@ use pw_graph_command::{
     DisconnectManyCommand, MoveNodesCommand,
 };
 use pw_graph_config::{config_path, AppConfig};
-use pw_graph_core::{Graph, LinkId, NodeId};
+use pw_graph_core::{Graph, LinkId, Node, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, ConnectMode, GraphCanvas, MediaFilter, MeterReading};
 use rfd::FileDialog;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[cfg(all(target_os = "linux", feature = "tray"))]
 use crate::tray::tray_support;
+
+fn node_layout_key(node: &Node) -> String {
+    let node_type = match node.node_type {
+        pw_graph_core::NodeType::PipeWire => "PipeWire",
+        pw_graph_core::NodeType::AlsaMidi => "AlsaMidi",
+        pw_graph_core::NodeType::Unknown => "Unknown",
+    };
+    format!("{node_type}:{}", node.name)
+}
+
+/// Restore the user's last layout when possible and fill in missing nodes with
+/// the deterministic default arrangement. Numeric IDs remain a fast path for
+/// compatibility; the name key handles IDs that PipeWire reassigns later.
+fn restore_node_positions(driver: &mut dyn GraphDriver, config: &AppConfig) {
+    let graph = driver.graph();
+    let defaults = graph.default_node_positions();
+    let mut key_counts = BTreeMap::new();
+    for node in graph.nodes.values() {
+        *key_counts.entry(node_layout_key(node)).or_insert(0_usize) += 1;
+    }
+    let positions: Vec<_> = graph
+        .nodes
+        .values()
+        .map(|node| {
+            let key = node_layout_key(node);
+            let by_id = config.node_positions.get(&node.id.0.to_string()).copied();
+            let by_name = if key_counts.get(&key) == Some(&1) {
+                config.node_positions_by_name.get(&key).copied()
+            } else {
+                None
+            };
+            let position = by_id
+                .or(by_name)
+                .or_else(|| defaults.get(&node.id).copied())
+                .unwrap_or(node.position);
+            (node.id, position)
+        })
+        .collect();
+    for (node, position) in positions {
+        let _ = driver.set_node_position(node, position);
+    }
+}
 
 pub(crate) struct QpwgraphApp {
     pub(crate) driver: Box<dyn GraphDriver>,
@@ -141,11 +184,7 @@ impl QpwgraphApp {
         // default on-demand policy never attaches a metering stream on its own.
         let meter_policy = MeterPolicy::parse(&config.audio_meters);
         let _ = driver.set_meter_policy(meter_policy);
-        for (node_id, position) in &config.node_positions {
-            if let Ok(node_id) = node_id.parse::<u64>() {
-                let _ = driver.set_node_position(NodeId(node_id), *position);
-            }
-        }
+        restore_node_positions(driver.as_mut(), &config);
         let patchbay = Patchbay::load_from(&patchbay_file).unwrap_or_else(|_| {
             Patchbay::new(
                 patchbay_file
@@ -965,13 +1004,26 @@ impl QpwgraphApp {
         self.config.connect_mode = self.canvas.connect_mode.as_str().into();
         self.config.media_filter = self.canvas.media_filter.as_str().into();
         self.config.graph_search = self.canvas.search_query.clone();
-        self.config.node_positions = self
-            .driver
-            .graph()
+        let graph = self.driver.graph();
+        let mut key_counts = BTreeMap::new();
+        for node in graph.nodes.values() {
+            *key_counts.entry(node_layout_key(node)).or_insert(0_usize) += 1;
+        }
+        let node_positions = graph
             .nodes
             .iter()
             .map(|(id, node)| (id.0.to_string(), node.position))
             .collect();
+        let node_positions_by_name = graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let key = node_layout_key(node);
+                (key_counts.get(&key) == Some(&1)).then_some((key, node.position))
+            })
+            .collect();
+        self.config.node_positions = node_positions;
+        self.config.node_positions_by_name = node_positions_by_name;
         self.config.patchbay_path = Some(self.patchbay_file.clone());
         self.config.patchbay_profiles.insert(
             self.config.active_patchbay_profile.clone(),

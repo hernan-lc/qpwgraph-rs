@@ -72,6 +72,12 @@ fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
     ui.end_row();
 }
 
+fn shortcut_matches_query(keys: &str, description: &str, query: &str) -> bool {
+    query.is_empty()
+        || keys.to_lowercase().contains(query)
+        || description.to_lowercase().contains(query)
+}
+
 struct ShortcutEntry {
     keys: &'static str,
     description_key: &'static str,
@@ -588,9 +594,7 @@ impl QpwgraphApp {
                 .iter()
                 .filter_map(|entry| {
                     let description = self.t(entry.description_key);
-                    let searchable = format!("{} {}", entry.keys, description).to_lowercase();
-                    searchable
-                        .contains(&query)
+                    shortcut_matches_query(entry.keys, &description, &query)
                         .then_some((entry.keys, description))
                 })
                 .collect();
@@ -1061,5 +1065,24 @@ impl QpwgraphApp {
                 node_text_help,
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shortcut_matches_query;
+
+    #[test]
+    fn shortcut_search_matches_translated_descriptions() {
+        assert!(shortcut_matches_query(
+            "Ctrl/Cmd+Z",
+            "Deshacer el último cambio",
+            "deshacer"
+        ));
+        assert!(!shortcut_matches_query(
+            "Ctrl/Cmd+Z",
+            "Deshacer el último cambio",
+            "volumen"
+        ));
     }
 }

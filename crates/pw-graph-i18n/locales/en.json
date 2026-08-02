@@ -167,7 +167,7 @@
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.hint": "Press F1 to toggle this help. Shortcuts are disabled while typing in a text field.",
   "shortcuts.search": "Search",
-  "shortcuts.search_hint": "Filter by key or action… (Ctrl/Cmd+F focuses this field)",
+  "shortcuts.search_hint": "Filter by key or description… (Ctrl/Cmd+F focuses this field)",
   "shortcuts.clear_search": "Clear",
   "shortcuts.result_count": "{count} shortcuts shown",
   "shortcuts.no_results": "No shortcuts match your search.",

@@ -11,6 +11,7 @@
   "toolbar.snapshot": "Capturer les connexions",
   "nav.preferences": "Préférences",
   "nav.shortcuts": "Raccourcis",
+  "shortcuts.search_hint": "Filtrer par touche ou description… (Ctrl/Cmd+F place le curseur ici)",
   "preferences.title": "Préférences",
   "screen.interface": "Interface",
   "inspector.patchbay_options": "Options du patchbay",
