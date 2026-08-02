@@ -38,7 +38,7 @@ impl GraphCanvas {
         let visible_node_ids = self.visible_node_ids(graph);
         self.prune_hidden_state(graph, &visible_node_ids);
         let rect = ui.available_rect_before_wrap();
-        let canvas_response = ui.allocate_rect(rect, Sense::drag());
+        let canvas_response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let mut actions = Vec::new();
         let mut anchors = HashMap::new();
@@ -58,12 +58,6 @@ impl GraphCanvas {
             && !self.thumbnail_mode
         {
             self.repel_overlaps(rect, graph, &visible_node_ids, &mut actions);
-        }
-
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
-        self.draw_grid(&painter, rect);
-        if canvas_response.has_focus() {
-            painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::LIGHT_BLUE));
         }
 
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -131,7 +125,14 @@ impl GraphCanvas {
             }
         }
 
-        if !self.thumbnail_mode {
+        self.clamp_pan(rect, graph, &visible_node_ids);
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
+        self.draw_grid(&painter, rect);
+        if canvas_response.has_focus() {
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::LIGHT_BLUE));
+        }
+
+        let pointer_over_link = if !self.thumbnail_mode {
             self.draw_links(
                 ui,
                 &painter,
@@ -142,8 +143,10 @@ impl GraphCanvas {
                 pointer_pos,
                 pointer_over_node,
                 &mut actions,
-            );
-        }
+            )
+        } else {
+            false
+        };
 
         for node in graph
             .nodes
@@ -158,6 +161,14 @@ impl GraphCanvas {
                 actions: &mut actions,
             };
             self.draw_node(ui, painter.clone(), node, &mut context);
+        }
+
+        // A pending connection is a transient gesture. Clicking the canvas
+        // itself cancels it, while clicks on nodes, ports, or links retain
+        // their normal connection/selection behavior.
+        if canvas_response.clicked() && !pointer_over_node && !pointer_over_link {
+            self.pending_outputs = None;
+            self.pending_node_connect = None;
         }
 
         // Handle this after the canvas has processed pointer input. This lets
@@ -191,7 +202,7 @@ impl GraphCanvas {
         self.draw_pending_connection(ui, &painter, graph, i18n, &anchors);
 
         if self.minimap_visible {
-            self.draw_minimap(&painter, rect, graph, i18n);
+            self.draw_minimap(&painter, rect, graph, i18n, &visible_node_ids);
         }
 
         actions
@@ -263,6 +274,60 @@ impl GraphCanvas {
             .filter(|node| self.search_matches_node(graph, node.id))
             .map(|node| node.id)
             .collect()
+    }
+
+    fn clamp_pan(&mut self, rect: Rect, graph: &Graph, visible_node_ids: &BTreeSet<NodeId>) {
+        let Some(scene_bounds) = self.visible_scene_bounds(graph, visible_node_ids) else {
+            return;
+        };
+        let viewport_size = rect.size() / self.zoom;
+        let view_left = clamp_scene_view(
+            -self.pan.x / self.zoom,
+            viewport_size.x,
+            scene_bounds.left(),
+            scene_bounds.right(),
+        );
+        let view_top = clamp_scene_view(
+            -self.pan.y / self.zoom,
+            viewport_size.y,
+            scene_bounds.top(),
+            scene_bounds.bottom(),
+        );
+        self.pan = vec2(-view_left * self.zoom, -view_top * self.zoom);
+    }
+
+    fn visible_scene_bounds(
+        &self,
+        graph: &Graph,
+        visible_node_ids: &BTreeSet<NodeId>,
+    ) -> Option<Rect> {
+        let mut bounds: Option<Rect> = None;
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
+            let port_count = if self.thumbnail_mode {
+                0
+            } else {
+                let ports = self.ordered_ports(graph, node);
+                ports::grouped_rows(self.connect_mode, &ports).len()
+            };
+            let height = if self.thumbnail_mode {
+                62.0
+            } else {
+                (34.0 + 14.0 + port_count as f32 * 25.0).max(62.0)
+            };
+            let candidate = Rect::from_min_size(
+                egui::pos2(node.position[0], node.position[1]),
+                vec2(244.0, height),
+            );
+            bounds = Some(match bounds {
+                Some(current) => current.union(candidate),
+                None => candidate,
+            });
+        }
+        bounds.map(|bounds| bounds.expand(SCENE_MARGIN))
     }
 
     fn search_matches_node(&self, graph: &Graph, node_id: NodeId) -> bool {
@@ -503,5 +568,32 @@ impl GraphCanvas {
             );
             y += spacing;
         }
+    }
+}
+
+const SCENE_MARGIN: f32 = 160.0;
+
+fn clamp_scene_view(view_start: f32, viewport_size: f32, scene_min: f32, scene_max: f32) -> f32 {
+    let scene_size = scene_max - scene_min;
+    if viewport_size >= scene_size {
+        (scene_min + scene_max - viewport_size) * 0.5
+    } else {
+        view_start.clamp(scene_min, scene_max - viewport_size)
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::clamp_scene_view;
+
+    #[test]
+    fn scene_view_is_centered_when_content_is_smaller_than_viewport() {
+        assert_eq!(clamp_scene_view(-100.0, 200.0, -20.0, 60.0), -80.0);
+    }
+
+    #[test]
+    fn scene_view_is_clamped_to_dynamic_content_bounds() {
+        assert_eq!(clamp_scene_view(-100.0, 40.0, -20.0, 60.0), -20.0);
+        assert_eq!(clamp_scene_view(100.0, 40.0, -20.0, 60.0), 20.0);
     }
 }

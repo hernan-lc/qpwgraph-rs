@@ -24,12 +24,13 @@ impl GraphCanvas {
         pointer_pos: Option<Pos2>,
         pointer_over_node: bool,
         actions: &mut Vec<CanvasAction>,
-    ) {
+    ) -> bool {
         let disconnect_label = if self.connect_mode == crate::ConnectMode::Easy {
             i18n.text("canvas.disconnect_group")
         } else {
             i18n.text("toolbar.disconnect")
         };
+        let mut pointer_over_link = false;
         for (link_index, link) in graph.links.values().enumerate() {
             let (Some(source), Some(destination)) = (
                 graph.ports.get(&link.output_port),
@@ -62,6 +63,7 @@ impl GraphCanvas {
             );
             let hovered = pointer_pos
                 .is_some_and(|pointer| point_near_polyline(pointer, &points, EDGE_HIT_DISTANCE));
+            pointer_over_link |= hovered;
             let hit_rect = points_bounds(&points).expand(EDGE_HIT_DISTANCE);
             let link_widget_id = ui.id().with((
                 "graph-link",
@@ -141,6 +143,7 @@ impl GraphCanvas {
                 }
             }
         }
+        pointer_over_link
     }
 }
 

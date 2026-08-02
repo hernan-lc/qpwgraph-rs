@@ -4,6 +4,7 @@ use crate::{GraphCanvas, NodeId};
 use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Stroke};
 use pw_graph_core::{Graph, NodeType, PortType};
 use pw_graph_i18n::I18n;
+use std::collections::BTreeSet;
 
 const PANEL_SIZE: egui::Vec2 = vec2(238.0, 164.0);
 const PANEL_MARGIN: f32 = 12.0;
@@ -55,15 +56,15 @@ fn node_accent(graph: &Graph, node_id: NodeId, node_type: NodeType) -> Color32 {
 }
 
 impl GraphCanvas {
-    /// Draw a compact overview of the complete graph, independently of the
-    /// active media filter and search query. The viewport outline makes it
-    /// clear which part of the full scene is currently visible.
+    /// Draw a compact overview of the currently visible graph. The viewport
+    /// outline makes it clear which part of the filtered scene is visible.
     pub(super) fn draw_minimap(
         &self,
         painter: &egui::Painter,
         canvas_rect: Rect,
         graph: &Graph,
         i18n: &I18n,
+        visible_node_ids: &BTreeSet<NodeId>,
     ) {
         let panel_width = PANEL_SIZE.x.min((canvas_rect.width() - 16.0).max(0.0));
         let panel_height = PANEL_SIZE.y.min((canvas_rect.height() - 16.0).max(0.0));
@@ -113,7 +114,11 @@ impl GraphCanvas {
             ),
         );
         let mut scene_bounds = None;
-        for node in graph.nodes.values() {
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
             extend_rect(
                 &mut scene_bounds,
                 Rect::from_min_size(pos2(node.position[0], node.position[1]), NODE_SIZE),
@@ -153,6 +158,15 @@ impl GraphCanvas {
             else {
                 continue;
             };
+            if !visible_node_ids.contains(&source.id)
+                || !visible_node_ids.contains(&destination.id)
+                || !self.media_filter.matches_port_type(output.port_type)
+                || !self.media_filter.matches_port_type(input.port_type)
+                || !self.search_matches_port(graph, output.id)
+                || !self.search_matches_port(graph, input.id)
+            {
+                continue;
+            }
             let source_center =
                 map_point(pos2(source.position[0], source.position[1]) + NODE_SIZE * 0.5);
             let destination_center =
@@ -163,7 +177,11 @@ impl GraphCanvas {
             );
         }
 
-        for node in graph.nodes.values() {
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
             let node_rect = map_rect_for_scene(Rect::from_min_size(
                 pos2(node.position[0], node.position[1]),
                 NODE_SIZE,
