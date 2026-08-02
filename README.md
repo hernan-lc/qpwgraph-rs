@@ -53,6 +53,11 @@ The same panel has **Reset audio config**, which releases every metering stream
 so PipeWire can suspend those nodes again and restore their configured settings.
 The policy is persisted as `audio_meters` in `config.toml`.
 
+Application options and filters are autosaved shortly after they change,
+including language, layout, zoom, toolbar visibility, typography, and node
+positions. Patchbay connection files remain separate and continue to use their
+explicit Save Patchbay action.
+
 The Graph panel's **Show media** filter can display all nodes or only Audio,
 Video, or MIDI nodes and ports; MIDI includes both PipeWire/JACK and ALSA MIDI.
 Fresh nodes are initially organized into media-category bands with source-only

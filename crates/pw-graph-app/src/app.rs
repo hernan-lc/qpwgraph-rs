@@ -26,6 +26,8 @@ pub(crate) struct QpwgraphApp {
     pub(crate) canvas: GraphCanvas,
     pub(crate) patchbay: Patchbay,
     pub(crate) config: AppConfig,
+    config_saved_snapshot: AppConfig,
+    config_dirty_since: Option<Instant>,
     pub(crate) config_file: PathBuf,
     pub(crate) patchbay_file: PathBuf,
     pub(crate) status: String,
@@ -186,6 +188,8 @@ impl QpwgraphApp {
             commands: CommandStack::new(),
             canvas,
             patchbay,
+            config_saved_snapshot: config.clone(),
+            config_dirty_since: None,
             config,
             config_file,
             patchbay_file,
@@ -564,9 +568,35 @@ impl QpwgraphApp {
     pub(crate) fn save_config_now(&mut self) {
         self.sync_config();
         match self.config.save_to(&self.config_file) {
-            Ok(()) => self.status = self.t("status.config_saved"),
+            Ok(()) => {
+                self.config_saved_snapshot = self.config.clone();
+                self.config_dirty_since = None;
+                self.status = self.t("status.config_saved");
+            }
             Err(error) => {
                 self.status = self.tf("status.config_save_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
+    fn autosave_config(&mut self) {
+        self.sync_config();
+        if self.config == self.config_saved_snapshot {
+            self.config_dirty_since = None;
+            return;
+        }
+        let dirty_since = self.config_dirty_since.get_or_insert_with(Instant::now);
+        if dirty_since.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        match self.config.save_to(&self.config_file) {
+            Ok(()) => {
+                self.config_saved_snapshot = self.config.clone();
+                self.config_dirty_since = None;
+            }
+            Err(error) => {
+                self.config_dirty_since = Some(Instant::now());
+                self.status = self.tf("status.config_save_failed", &[("error", error.to_string())]);
             }
         }
     }
@@ -748,6 +778,7 @@ impl eframe::App for QpwgraphApp {
         // Runs after the canvas so the request reflects what this frame drew.
         self.request_visible_meters();
         self.show_shortcuts_modal(ctx);
+        self.autosave_config();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
