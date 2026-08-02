@@ -16,7 +16,8 @@ stable, and reserves node hit areas before canvas pan or rectangle selection.
 The graph canvas now presents type-accented draggable node headers, compact
 human-readable names, port-row hover states, media-colored curved links, media
 category filtering, deterministic media/direction-based default organization,
-and full node, port, and link tooltips without hiding the raw PipeWire names.
+an F1 keyboard-shortcuts modal, and full node, port, and link tooltips without
+hiding the raw PipeWire names.
 The inspector was then redesigned with scrollable grouped sections, statistic
 cards, clearer panel headers, a wider responsive side panel, and independent
 text-size controls for application chrome, inspector panels, and graph nodes.

@@ -88,6 +88,12 @@ fn media_filter_key(filter: MediaFilter) -> &'static str {
     }
 }
 
+fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
+    ui.label(RichText::new(keys).strong().monospace());
+    ui.label(description);
+    ui.end_row();
+}
+
 fn meter_policy_key(policy: MeterPolicy) -> &'static str {
     match policy {
         MeterPolicy::Disabled => "meters.off",
@@ -177,7 +183,7 @@ impl QpwgraphApp {
             self.t("screen.graph"),
             self.t("screen.graph_hint"),
         );
-        panel_section(ui, self.t("inspector.media_filter"), |ui| {
+        panel_section(ui, self.t("inspector.filter_nodes"), |ui| {
             self.show_media_filter_control(ui);
         });
         let (node_count, port_count, link_count) = self.canvas.visible_counts(self.driver.graph());
@@ -289,10 +295,26 @@ impl QpwgraphApp {
         if !self.show_shortcuts {
             return;
         }
+        let screen_rect = ctx.screen_rect();
+        let backdrop_response = egui::Area::new(egui::Id::new("shortcuts-backdrop"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen_rect.min)
+            .show(ctx, |ui| {
+                let (response, painter) =
+                    ui.allocate_painter(screen_rect.size(), egui::Sense::click());
+                painter.rect_filled(response.rect, 0.0, Color32::from_black_alpha(120));
+                response
+            })
+            .inner;
+        if backdrop_response.clicked() {
+            self.show_shortcuts = false;
+            return;
+        }
         egui::Window::new(self.t("shortcuts.title"))
             .collapsible(false)
             .resizable(false)
             .default_width(560.0)
+            .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label(RichText::new(self.t("shortcuts.hint")).weak());
@@ -308,11 +330,7 @@ impl QpwgraphApp {
                         shortcut_row(ui, "Ctrl/Cmd+Shift+Z", self.t("shortcuts.redo"));
                         shortcut_row(ui, "Ctrl/Cmd+Y", self.t("shortcuts.redo"));
                         shortcut_row(ui, "Ctrl/Cmd+S", self.t("shortcuts.save_config"));
-                        shortcut_row(
-                            ui,
-                            "Ctrl/Cmd+Shift+S",
-                            self.t("shortcuts.save_patchbay"),
-                        );
+                        shortcut_row(ui, "Ctrl/Cmd+Shift+S", self.t("shortcuts.save_patchbay"));
                         shortcut_row(ui, "Ctrl/Cmd+O", self.t("shortcuts.load_patchbay"));
                         shortcut_row(ui, "R", self.t("shortcuts.refresh"));
                         shortcut_row(ui, "A", self.t("shortcuts.arrange"));

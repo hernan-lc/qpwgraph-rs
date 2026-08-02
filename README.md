@@ -59,6 +59,10 @@ Fresh nodes are initially organized into media-category bands with source-only
 nodes on the left and sink-only nodes on the right. **Arrange nodes** reapplies
 that layout when existing saved positions need to be cleaned up.
 
+Press **F1** for the keyboard-shortcuts window. It covers undo/redo, saving and
+loading patchbay/configuration state, refresh, arrangement, thumbnail mode,
+media filters (`0`–`3`), and graph zoom (`+`/`-`).
+
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
 support. PipeWire and ALSA are feature-gated so the application can still be
 built without native development headers:

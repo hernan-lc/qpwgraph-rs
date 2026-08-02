@@ -251,6 +251,10 @@ impl QpwgraphApp {
             return;
         }
 
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+
         let (command, shift, undo, redo, save, load) = ctx.input(|input| {
             (
                 input.modifiers.command,
@@ -283,10 +287,6 @@ impl QpwgraphApp {
         }
         if command && load {
             self.load_patchbay();
-            return;
-        }
-
-        if ctx.wants_keyboard_input() {
             return;
         }
 

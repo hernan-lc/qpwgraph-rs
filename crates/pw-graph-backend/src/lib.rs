@@ -454,6 +454,25 @@ mod tests {
             .expect("requesting a meter should succeed");
         assert_eq!(driver.active_meter_count(), 1);
 
+        // Regression guard: `process` runs on PipeWire's realtime data thread,
+        // which the thread-loop lock does not exclude. Reading meters from this
+        // thread while that thread publishes used to hit `RefCell already
+        // borrowed` inside a callback that cannot unwind, aborting the process.
+        // Polling hard for a second reliably reproduced it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut polls = 0_u32;
+        while std::time::Instant::now() < deadline {
+            for meter in driver
+                .audio_meters()
+                .expect("reading meters should succeed")
+            {
+                assert!(meter.rms.is_finite() && (0.0..=1.0).contains(&meter.rms));
+                assert!(meter.peak.is_finite() && (0.0..=1.0).contains(&meter.peak));
+            }
+            polls += 1;
+        }
+        assert!(polls > 0);
+
         driver
             .reset_audio_config()
             .expect("releasing meters should succeed");
