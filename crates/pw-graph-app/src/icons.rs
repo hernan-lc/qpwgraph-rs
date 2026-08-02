@@ -116,7 +116,7 @@ pub(crate) fn sidebar_icon_button_enabled(
         9.0,
     )
 }
-
+#[allow(clippy::too_many_arguments)]
 fn icon_button_enabled_sized(
     ui: &mut Ui,
     id: &str,
@@ -167,7 +167,7 @@ pub(crate) fn sidebar_icon_toggle_button(
         9.0,
     )
 }
-
+#[allow(clippy::too_many_arguments)]
 fn icon_toggle_button_sized(
     ui: &mut Ui,
     id: &str,
@@ -209,7 +209,7 @@ pub(crate) fn sidebar_nav_icon_button(
         12.0,
     )
 }
-
+#[allow(clippy::too_many_arguments)]
 fn nav_icon_button_sized(
     ui: &mut Ui,
     id: &str,

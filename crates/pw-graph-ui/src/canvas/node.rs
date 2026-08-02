@@ -2,7 +2,9 @@
 //! Easy-mode connect drags, and the port/group rows underneath.
 
 use crate::{CanvasAction, ConnectMode, GraphCanvas, NodeId, PortId};
-use egui::{pos2, vec2, Color32, FontId, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
+use egui::{
+    pos2, vec2, Color32, FontId, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
+};
 use pw_graph_core::{Direction, Graph, Node, NodeType, Port, PortType};
 use pw_graph_i18n::I18n;
 use std::cell::Cell;
@@ -113,8 +115,7 @@ impl GraphCanvas {
             if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
                 if let Some(target) = self.node_at(rect, graph, pointer, node.id) {
                     if let Some(target_node) = graph.node(target) {
-                        for (output, input) in self.matching_port_pairs(graph, node, target_node)
-                        {
+                        for (output, input) in self.matching_port_pairs(graph, node, target_node) {
                             if !link_exists(graph, output, input) {
                                 actions.push(CanvasAction::Connect { output, input });
                             }
@@ -297,7 +298,8 @@ impl GraphCanvas {
             let representative_id = group.representative().id;
             let mut response = ui.interact(
                 hit_rect,
-                ui.id().with(("graph-port", node.id, index, representative_id)),
+                ui.id()
+                    .with(("graph-port", node.id, index, representative_id)),
                 Sense::click_and_drag(),
             );
             let pin_requested = Cell::new(false);
@@ -451,8 +453,7 @@ impl GraphCanvas {
             {
                 self.pending_outputs = Some(group.ports.iter().map(|port| port.id).collect());
             }
-            if group.direction == Direction::Sink
-                && (response.clicked() || response.drag_stopped())
+            if group.direction == Direction::Sink && (response.clicked() || response.drag_stopped())
             {
                 if let Some(output_ids) = self.pending_outputs.take() {
                     let output_ports: Vec<&Port> =

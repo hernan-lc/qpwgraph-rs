@@ -105,9 +105,7 @@ fn channel_group_key(port: &Port) -> Option<(Direction, PortType, String)> {
 /// means the name has no recognized channel suffix and should stay on its
 /// own row.
 fn channel_base_name(name: &str) -> Option<&str> {
-    if let Some(position) =
-        name.rfind(|character: char| CHANNEL_DELIMITERS.contains(&character))
-    {
+    if let Some(position) = name.rfind(|character: char| CHANNEL_DELIMITERS.contains(&character)) {
         let (base, rest) = name.split_at(position);
         let token = &rest[1..];
         if !base.is_empty() && is_channel_token(token) {
