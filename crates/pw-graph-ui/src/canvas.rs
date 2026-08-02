@@ -7,17 +7,27 @@ use egui::{
 use pw_graph_core::{Direction, Graph, Node, NodeType, Port, PortType};
 use pw_graph_i18n::I18n;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 const NODE_WIDTH: f32 = 244.0;
 const NODE_HEADER_HEIGHT: f32 = 34.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 const EDGE_HIT_DISTANCE: f32 = 9.0;
 
+struct NodeDrawContext<'a> {
+    rect: Rect,
+    graph: &'a Graph,
+    i18n: &'a I18n,
+    anchors: &'a mut HashMap<PortId, Pos2>,
+    actions: &'a mut Vec<CanvasAction>,
+}
+
 impl GraphCanvas {
     pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
         self.update_peak_holds();
         self.hovered_meter_node = None;
+        let visible_node_ids = self.visible_node_ids(graph);
+        self.prune_hidden_state(graph, &visible_node_ids);
         let rect = ui.available_rect_before_wrap();
         let canvas_response = ui.allocate_rect(rect, Sense::drag());
         let painter = ui.painter_at(rect);
@@ -28,6 +38,7 @@ impl GraphCanvas {
             graph
                 .nodes
                 .values()
+                .filter(|node| visible_node_ids.contains(&node.id))
                 .any(|node| self.node_rect(rect, graph, node).contains(pointer))
         });
 
@@ -37,7 +48,7 @@ impl GraphCanvas {
             && !pointer_over_node
             && !self.thumbnail_mode
         {
-            self.repel_overlaps(rect, graph, &mut actions);
+            self.repel_overlaps(rect, graph, &visible_node_ids, &mut actions);
         }
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
@@ -68,6 +79,7 @@ impl GraphCanvas {
                 self.selected_nodes = graph
                     .nodes
                     .values()
+                    .filter(|node| visible_node_ids.contains(&node.id))
                     .filter(|node| self.node_rect(rect, graph, node).intersects(selection))
                     .map(|node| node.id)
                     .collect();
@@ -99,6 +111,13 @@ impl GraphCanvas {
                 graph.ports.get(&link.output_port),
                 graph.ports.get(&link.input_port),
             ) {
+                if !self.media_filter.matches_port_type(source.port_type)
+                    || !self.media_filter.matches_port_type(destination.port_type)
+                    || !visible_node_ids.contains(&source.node_id)
+                    || !visible_node_ids.contains(&destination.node_id)
+                {
+                    continue;
+                }
                 if let (Some(source_pos), Some(destination_pos)) = (
                     self.port_anchor(rect, graph, source),
                     self.port_anchor(rect, graph, destination),
@@ -153,17 +172,19 @@ impl GraphCanvas {
             }
         }
 
-        for node in graph.nodes.values() {
-            self.draw_node(
-                ui,
-                painter.clone(),
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
+            let mut context = NodeDrawContext {
                 rect,
                 graph,
-                node,
                 i18n,
-                &mut anchors,
-                &mut actions,
-            );
+                anchors: &mut anchors,
+                actions: &mut actions,
+            };
+            self.draw_node(ui, painter.clone(), node, &mut context);
         }
 
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
@@ -211,6 +232,79 @@ impl GraphCanvas {
         actions
     }
 
+    pub fn visible_node_ids(&self, graph: &Graph) -> BTreeSet<NodeId> {
+        graph
+            .nodes
+            .values()
+            .filter(|node| self.media_filter.matches_node(graph, node.id))
+            .map(|node| node.id)
+            .collect()
+    }
+
+    pub fn visible_counts(&self, graph: &Graph) -> (usize, usize, usize) {
+        let visible_nodes = self.visible_node_ids(graph);
+        let ports = graph
+            .ports
+            .values()
+            .filter(|port| {
+                visible_nodes.contains(&port.node_id)
+                    && self.media_filter.matches_port_type(port.port_type)
+            })
+            .count();
+        let links = graph
+            .links
+            .values()
+            .filter(|link| {
+                let Some(source) = graph.port(link.output_port) else {
+                    return false;
+                };
+                let Some(destination) = graph.port(link.input_port) else {
+                    return false;
+                };
+                visible_nodes.contains(&source.node_id)
+                    && visible_nodes.contains(&destination.node_id)
+                    && self.media_filter.matches_port_type(source.port_type)
+                    && self.media_filter.matches_port_type(destination.port_type)
+            })
+            .count();
+        (visible_nodes.len(), ports, links)
+    }
+
+    fn prune_hidden_state(&mut self, graph: &Graph, visible_node_ids: &BTreeSet<NodeId>) {
+        self.selected_nodes
+            .retain(|node_id| visible_node_ids.contains(node_id));
+        if self
+            .selected_node
+            .is_some_and(|node_id| !visible_node_ids.contains(&node_id))
+        {
+            self.selected_node = self.selected_nodes.iter().next().copied();
+        }
+        if self.pending_output.is_some_and(|port_id| {
+            graph.port(port_id).is_none_or(|port| {
+                !visible_node_ids.contains(&port.node_id)
+                    || !self.media_filter.matches_port_type(port.port_type)
+            })
+        }) {
+            self.pending_output = None;
+        }
+        if self.selected_link.is_some_and(|link_id| {
+            graph.link(link_id).is_none_or(|link| {
+                let Some(source) = graph.port(link.output_port) else {
+                    return true;
+                };
+                let Some(destination) = graph.port(link.input_port) else {
+                    return true;
+                };
+                !visible_node_ids.contains(&source.node_id)
+                    || !visible_node_ids.contains(&destination.node_id)
+                    || !self.media_filter.matches_port_type(source.port_type)
+                    || !self.media_filter.matches_port_type(destination.port_type)
+            })
+        }) {
+            self.selected_link = None;
+        }
+    }
+
     pub fn meter_peak_hold(&self, node_id: NodeId, fallback: f32) -> f32 {
         self.peak_hold.get(&node_id).copied().unwrap_or(fallback)
     }
@@ -236,9 +330,19 @@ impl GraphCanvas {
         }
     }
 
-    fn repel_overlaps(&self, rect: Rect, graph: &Graph, actions: &mut Vec<CanvasAction>) {
+    fn repel_overlaps(
+        &self,
+        rect: Rect,
+        graph: &Graph,
+        visible_node_ids: &BTreeSet<NodeId>,
+        actions: &mut Vec<CanvasAction>,
+    ) {
         let mut occupied = Vec::new();
-        for node in graph.nodes.values() {
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
             let mut candidate = self.node_rect(rect, graph, node);
             let mut position = node.position;
             while occupied
@@ -284,13 +388,14 @@ impl GraphCanvas {
         &mut self,
         ui: &mut Ui,
         painter: egui::Painter,
-        rect: Rect,
-        graph: &Graph,
         node: &Node,
-        i18n: &I18n,
-        anchors: &mut HashMap<PortId, Pos2>,
-        actions: &mut Vec<CanvasAction>,
+        context: &mut NodeDrawContext<'_>,
     ) {
+        let rect = context.rect;
+        let graph = context.graph;
+        let i18n = context.i18n;
+        let anchors = &mut *context.anchors;
+        let actions = &mut *context.actions;
         let ports = self.ordered_ports(graph, node);
         let node_rect = self.node_rect(rect, graph, node);
         let header = Rect::from_min_max(
@@ -631,6 +736,7 @@ impl GraphCanvas {
             .ports
             .iter()
             .filter_map(|id| graph.ports.get(id))
+            .filter(|port| self.media_filter.matches_port_type(port.port_type))
             .collect();
         if self.sort_ports_by_name {
             ports.sort_by_key(|port| port.name.to_ascii_lowercase());

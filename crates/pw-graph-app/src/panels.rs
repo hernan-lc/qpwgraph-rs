@@ -5,6 +5,7 @@ use pw_graph_backend::MeterPolicy;
 use pw_graph_command::RenameCommand;
 use pw_graph_core::{NodeId, PortId};
 use pw_graph_i18n::Locale;
+use pw_graph_ui::MediaFilter;
 
 const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
@@ -76,6 +77,15 @@ fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: Str
 
 fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
+}
+
+fn media_filter_key(filter: MediaFilter) -> &'static str {
+    match filter {
+        MediaFilter::All => "filter.all",
+        MediaFilter::Audio => "filter.audio",
+        MediaFilter::Video => "filter.video",
+        MediaFilter::Midi => "filter.midi",
+    }
 }
 
 fn meter_policy_key(policy: MeterPolicy) -> &'static str {
@@ -167,9 +177,10 @@ impl QpwgraphApp {
             self.t("screen.graph"),
             self.t("screen.graph_hint"),
         );
-        let node_count = self.driver.graph().nodes.len().to_string();
-        let port_count = self.driver.graph().ports.len().to_string();
-        let link_count = self.driver.graph().links.len().to_string();
+        let (node_count, port_count, link_count) = self.canvas.visible_counts(self.driver.graph());
+        let node_count = node_count.to_string();
+        let port_count = port_count.to_string();
+        let link_count = link_count.to_string();
         panel_section(ui, self.t("inspector.overview"), |ui| {
             ui.horizontal_wrapped(|ui| {
                 stat_card(ui, self.t("inspector.nodes_short"), node_count);
@@ -195,6 +206,34 @@ impl QpwgraphApp {
         }
 
         panel_section(ui, self.t("inspector.layout"), |ui| {
+            let current_filter = MediaFilter::parse(&self.config.media_filter);
+            let mut selected_filter = current_filter;
+            let filter_response = egui::ComboBox::from_label(self.t("inspector.media_filter"))
+                .selected_text(self.t(media_filter_key(current_filter)))
+                .show_ui(ui, |ui| {
+                    for filter in MediaFilter::ALL {
+                        ui.selectable_value(
+                            &mut selected_filter,
+                            filter,
+                            self.t(media_filter_key(filter)),
+                        );
+                    }
+                });
+            filter_response
+                .response
+                .on_hover_text(self.t("help.media_filter"));
+            if selected_filter != current_filter {
+                self.config.media_filter = selected_filter.as_str().into();
+            }
+
+            if ui
+                .button(self.t("inspector.arrange_nodes"))
+                .on_hover_text(self.t("help.arrange_nodes"))
+                .clicked()
+            {
+                self.arrange_nodes();
+            }
+
             let sort_by_name = self.config.sort_type != "id";
             let sort_by_name_before = sort_by_name;
             let mut sort_by_name_choice = sort_by_name;

@@ -14,8 +14,9 @@ emoji and font-symbol rendering differences across operating systems.
 Node dragging now accumulates per-frame pointer deltas, keeps group movement
 stable, and reserves node hit areas before canvas pan or rectangle selection.
 The graph canvas now presents type-accented draggable node headers, compact
-human-readable names, port-row hover states, media-colored curved links, and
-full node, port, and link tooltips without hiding the raw PipeWire names.
+human-readable names, port-row hover states, media-colored curved links, media
+category filtering, deterministic media/direction-based default organization,
+and full node, port, and link tooltips without hiding the raw PipeWire names.
 The inspector was then redesigned with scrollable grouped sections, statistic
 cards, clearer panel headers, a wider responsive side panel, and independent
 text-size controls for application chrome, inspector panels, and graph nodes.
@@ -46,9 +47,9 @@ Diagnostics screens instead of placing every option in one inspector column.
 | M0 – PipeWire FFI/data model | Implemented | Native PipeWire Rust bindings enumerate nodes, ports, media types, and links; graph positions are retained across refreshes. |
 | M1 – Connect/disconnect | Implemented | PipeWire `link-factory` creation and registry destruction are wired and integration-tested against the running daemon. |
 | M2 – Minimal GUI | Implemented | egui desktop shell renders nodes, ports, links, zoom, pan, and color-coded media types. |
-| M3 – Interactive connections | Implemented | Source-to-sink click/drag, link selection/deletion, rectangle and multi-selection, node movement, port sorting, overlap repulsion, connect-through-node mode, and thumbnail view are present. |
+| M3 – Interactive connections | Implemented | Source-to-sink click/drag, link selection/deletion, rectangle and multi-selection, node movement, port sorting, overlap repulsion, connect-through-node mode, thumbnail view, media filtering, and node organization are present. |
 | M4 – Undo/redo | Implemented | Connect, disconnect, and rename commands support undo/redo; keyboard shortcuts and toolbar controls are wired. |
-| M5 – Config persistence | Implemented | TOML persists language, window geometry, zoom, string-keyed node positions, sort state, toolbar/status visibility, patchbay flags/path, thumbnail, layout options, and independent UI/panel/node text scales. |
+| M5 – Config persistence | Implemented | TOML persists language, window geometry, zoom, string-keyed node positions, media filter, sort state, toolbar/status visibility, patchbay flags/path, thumbnail, layout options, and independent UI/panel/node text scales. |
 | M6 – Patchbay system | Implemented | qpwgraph-style XML and JSON are supported; name-based activation, startup activation, snapshot, pin/unpin, exclusive mode, auto-disconnect, idempotence, and activation reporting are wired. |
 | M7 – ALSA MIDI | Implemented | Native ALSA Sequencer enumeration, existing-subscription discovery, namespaced IDs, connect, disconnect, refresh, and composite PipeWire+ALSA routing are implemented. |
 | M8 – Extras | Implemented | `-m`, `-d`, `-n`, `--lang`, and `--demo` are available; thumbnail mode and Linux StatusNotifier tray Show/Hide/Quit actions are implemented. |
@@ -58,7 +59,7 @@ Diagnostics screens instead of placing every option in one inspector column.
 
 ## UI organization
 
-- Graph: node counts, selection/rename, port sorting, and compact labels with full-name hover tooltips.
+- Graph: node counts, media filtering, selection/rename, port sorting, default organization, and compact labels with full-name hover tooltips.
 - Patchbay: persistent routing rules, activation behavior, live-link pinning,
   and disconnect actions.
 - Interface: language selection, configuration save, one action-toolbar toggle,

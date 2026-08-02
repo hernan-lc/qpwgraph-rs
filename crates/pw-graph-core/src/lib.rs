@@ -1,7 +1,7 @@
 //! Core graph types shared by every backend and presentation layer.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 macro_rules! id_type {
@@ -33,6 +33,9 @@ macro_rules! id_type {
 id_type!(NodeId);
 id_type!(PortId);
 id_type!(LinkId);
+
+type LayoutNode = (NodeId, String, usize);
+type LayoutGroups = BTreeMap<(u8, u8), Vec<LayoutNode>>;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum Direction {
@@ -273,6 +276,93 @@ impl Graph {
             .values()
             .filter(move |link| link.output_port == port_id || link.input_port == port_id)
     }
+
+    /// Suggest a readable first layout for a graph that does not have saved
+    /// positions yet. Media categories form horizontal bands and the port
+    /// direction forms columns: source-only nodes on the left, mixed nodes in
+    /// the middle, and sink-only nodes on the right.
+    pub fn default_node_positions(&self) -> BTreeMap<NodeId, [f32; 2]> {
+        let mut groups: LayoutGroups = BTreeMap::new();
+        for node in self.nodes.values() {
+            let category = self.node_media_category(node);
+            let role = self.node_layout_role(node);
+            groups.entry((category, role)).or_default().push((
+                node.id,
+                node.name.to_ascii_lowercase(),
+                node.ports.len(),
+            ));
+        }
+
+        for nodes in groups.values_mut() {
+            nodes.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        }
+
+        let categories: BTreeSet<u8> = groups.keys().map(|(category, _)| *category).collect();
+        let mut positions = BTreeMap::new();
+        let mut category_top = 40.0;
+        for category in categories {
+            let mut role_tops = [category_top; 3];
+            for role in 0..3_u8 {
+                let Some(nodes) = groups.get(&(category, role)) else {
+                    continue;
+                };
+                for (node_id, _, port_count) in nodes {
+                    positions.insert(
+                        *node_id,
+                        [40.0 + f32::from(role) * 320.0, role_tops[role as usize]],
+                    );
+                    let height = (34.0 + 14.0 + *port_count as f32 * 25.0).max(62.0);
+                    role_tops[role as usize] += height + 70.0;
+                }
+            }
+            category_top = role_tops
+                .into_iter()
+                .max_by(f32::total_cmp)
+                .unwrap_or(category_top)
+                + 100.0;
+        }
+        positions
+    }
+
+    fn node_media_category(&self, node: &Node) -> u8 {
+        let mut has_audio = false;
+        let mut has_video = false;
+        let mut has_midi = false;
+        for port_id in &node.ports {
+            match self.port(*port_id).map(|port| port.port_type) {
+                Some(PortType::Audio) => has_audio = true,
+                Some(PortType::Video) => has_video = true,
+                Some(PortType::MidiJack | PortType::MidiAlsa) => has_midi = true,
+                _ => {}
+            }
+        }
+        if has_audio {
+            0
+        } else if has_video {
+            1
+        } else if has_midi {
+            2
+        } else {
+            3
+        }
+    }
+
+    fn node_layout_role(&self, node: &Node) -> u8 {
+        let mut has_source = false;
+        let mut has_sink = false;
+        for port_id in &node.ports {
+            match self.port(*port_id).map(|port| port.direction) {
+                Some(Direction::Source) => has_source = true,
+                Some(Direction::Sink) => has_sink = true,
+                None => {}
+            }
+        }
+        match (has_source, has_sink) {
+            (true, false) => 0,
+            (false, true) => 2,
+            _ => 1,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -322,5 +412,46 @@ mod tests {
         let mut graph = graph();
         let error = graph.add_link(LinkId(1), PortId(2), PortId(1)).unwrap_err();
         assert_eq!(error, GraphError::NotSource(PortId(2)));
+    }
+
+    #[test]
+    fn default_layout_groups_media_and_direction() {
+        let mut graph = Graph::default();
+        for (id, name) in [(1, "Audio source"), (2, "Audio sink"), (3, "MIDI source")] {
+            graph
+                .add_node(Node::new(NodeId(id), name, NodeType::PipeWire))
+                .unwrap();
+        }
+        graph
+            .add_port(Port::new(
+                PortId(10),
+                NodeId(1),
+                "out",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(11),
+                NodeId(2),
+                "in",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(12),
+                NodeId(3),
+                "out",
+                Direction::Source,
+                PortType::MidiJack,
+            ))
+            .unwrap();
+
+        let positions = graph.default_node_positions();
+        assert!(positions[&NodeId(1)][0] < positions[&NodeId(2)][0]);
+        assert!(positions[&NodeId(1)][1] < positions[&NodeId(3)][1]);
     }
 }

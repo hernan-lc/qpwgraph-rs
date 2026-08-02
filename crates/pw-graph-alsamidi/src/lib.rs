@@ -101,11 +101,7 @@ impl AlsaMidiDriver {
         let mut graph = Graph::default();
         for raw in snapshot.nodes[..(snapshot.node_count as usize).min(MAX_NODES)].iter() {
             let id = NodeId(NAMESPACE | raw.id as u64);
-            let mut node = Node::new(id, raw_text(&raw.name), NodeType::AlsaMidi);
-            node.position = [
-                40.0 + (raw.id % 4) as f32 * 280.0,
-                40.0 + (raw.id / 4) as f32 * 180.0,
-            ];
+            let node = Node::new(id, raw_text(&raw.name), NodeType::AlsaMidi);
             graph.add_node(node)?;
         }
         for raw in snapshot.ports[..(snapshot.port_count as usize).min(MAX_PORTS)].iter() {
@@ -124,6 +120,12 @@ impl AlsaMidiDriver {
                 },
                 PortType::MidiAlsa,
             ))?;
+        }
+        let default_positions = graph.default_node_positions();
+        for (node_id, position) in default_positions {
+            if let Some(node) = graph.nodes.get_mut(&node_id) {
+                node.position = position;
+            }
         }
         for raw in snapshot.links[..(snapshot.link_count as usize).min(MAX_PORTS)].iter() {
             let output = NAMESPACE | raw.output_port as u64;

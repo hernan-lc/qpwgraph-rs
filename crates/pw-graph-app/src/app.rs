@@ -13,7 +13,7 @@ use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, LinkId, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-use pw_graph_ui::{CanvasAction, GraphCanvas, MeterReading};
+use pw_graph_ui::{CanvasAction, GraphCanvas, MediaFilter, MeterReading};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -172,6 +172,7 @@ impl QpwgraphApp {
         canvas.thumbnail_mode = config.thumbnail_view;
         canvas.repel_overlapping_nodes = config.repel_overlapping_nodes;
         canvas.connect_through_nodes = config.connect_through_nodes;
+        canvas.media_filter = MediaFilter::parse(&config.media_filter);
         canvas.metering_disabled = meter_policy == MeterPolicy::Disabled;
         #[cfg(all(target_os = "linux", feature = "tray"))]
         let tray = tray_support::start(
@@ -441,6 +442,15 @@ impl QpwgraphApp {
         );
     }
 
+    pub(crate) fn arrange_nodes(&mut self) {
+        let positions = self.driver.graph().default_node_positions();
+        let count = positions.len();
+        for (node, position) in positions {
+            let _ = self.driver.set_node_position(node, position);
+        }
+        self.status = self.tf("status.arranged", &[("count", count.to_string())]);
+    }
+
     fn sync_config(&mut self) {
         self.config.zoom = self.canvas.zoom;
         self.config.sort_type = if self.canvas.sort_ports_by_name {
@@ -454,6 +464,7 @@ impl QpwgraphApp {
             "ascending".into()
         };
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
+        self.config.media_filter = self.canvas.media_filter.as_str().into();
         self.config.node_positions = self
             .driver
             .graph()
@@ -612,6 +623,7 @@ impl eframe::App for QpwgraphApp {
 
         self.show_gui_panels(ctx);
 
+        self.canvas.media_filter = MediaFilter::parse(&self.config.media_filter);
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
         self.canvas.sort_ports_descending = self.config.sort_order == "descending";
         self.canvas.node_text_scale = self.config.node_text_scale;

@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub panel_text_scale: f32,
     /// Multiplier for node titles, port labels, and node counters.
     pub node_text_scale: f32,
+    pub media_filter: String,
     pub sort_type: String,
     pub sort_order: String,
     /// When helper streams may be attached to measure audio levels:
@@ -62,6 +63,7 @@ impl Default for AppConfig {
             ui_text_scale: 1.10,
             panel_text_scale: 1.20,
             node_text_scale: 1.15,
+            media_filter: "all".into(),
             sort_type: "name".into(),
             sort_order: "ascending".into(),
             audio_meters: "on-demand".into(),

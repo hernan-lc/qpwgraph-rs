@@ -2,7 +2,7 @@
 //! never owns the driver or command stack.
 
 use egui::{vec2, Pos2, Vec2};
-use pw_graph_core::{LinkId, NodeId, PortId};
+use pw_graph_core::{Graph, LinkId, NodeId, PortId, PortType};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod canvas;
@@ -12,6 +12,58 @@ pub enum CanvasAction {
     Connect { output: PortId, input: PortId },
     Disconnect { link: LinkId },
     MoveNode { node: NodeId, position: [f32; 2] },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MediaFilter {
+    #[default]
+    All,
+    Audio,
+    Video,
+    Midi,
+}
+
+impl MediaFilter {
+    pub const ALL: [Self; 4] = [Self::All, Self::Audio, Self::Video, Self::Midi];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Midi => "midi",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "audio" => Self::Audio,
+            "video" => Self::Video,
+            "midi" => Self::Midi,
+            _ => Self::All,
+        }
+    }
+
+    pub fn matches_port_type(self, port_type: PortType) -> bool {
+        match self {
+            Self::All => true,
+            Self::Audio => port_type == PortType::Audio,
+            Self::Video => port_type == PortType::Video,
+            Self::Midi => matches!(port_type, PortType::MidiJack | PortType::MidiAlsa),
+        }
+    }
+
+    pub fn matches_node(self, graph: &Graph, node_id: NodeId) -> bool {
+        let Some(node) = graph.node(node_id) else {
+            return false;
+        };
+        self == Self::All
+            || node.ports.iter().any(|port_id| {
+                graph
+                    .port(*port_id)
+                    .is_some_and(|port| self.matches_port_type(port.port_type))
+            })
+    }
 }
 
 /// Runtime audio data rendered by the canvas. The backend intentionally owns
@@ -33,6 +85,7 @@ pub struct GraphCanvas {
     pub thumbnail_mode: bool,
     pub repel_overlapping_nodes: bool,
     pub connect_through_nodes: bool,
+    pub media_filter: MediaFilter,
     pub meters: BTreeMap<NodeId, MeterReading>,
     pub pinned_meter: Option<PortId>,
     /// Node whose audio meter the pointer is revealing this frame. Recomputed
@@ -64,6 +117,7 @@ impl Default for GraphCanvas {
             thumbnail_mode: false,
             repel_overlapping_nodes: false,
             connect_through_nodes: false,
+            media_filter: MediaFilter::All,
             meters: BTreeMap::new(),
             pinned_meter: None,
             hovered_meter_node: None,
@@ -140,5 +194,56 @@ mod tests {
             ..GraphCanvas::default()
         };
         assert!(canvas.requested_meter_nodes(&metering_graph()).is_empty());
+    }
+
+    fn categorized_graph() -> Graph {
+        let mut graph = Graph::default();
+        for (id, name) in [(1, "Audio"), (2, "Video"), (3, "MIDI")] {
+            graph
+                .add_node(Node::new(NodeId(id), name, NodeType::PipeWire))
+                .unwrap();
+        }
+        graph
+            .add_port(Port::new(
+                PortId(10),
+                NodeId(1),
+                "audio",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(20),
+                NodeId(2),
+                "video",
+                Direction::Source,
+                PortType::Video,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(30),
+                NodeId(3),
+                "midi",
+                Direction::Source,
+                PortType::MidiJack,
+            ))
+            .unwrap();
+        graph
+    }
+
+    #[test]
+    fn media_filter_limits_nodes_and_ports() {
+        let graph = categorized_graph();
+        let mut canvas = GraphCanvas::default();
+        assert_eq!(canvas.visible_counts(&graph), (3, 3, 0));
+
+        canvas.media_filter = MediaFilter::Audio;
+        assert_eq!(canvas.visible_node_ids(&graph), BTreeSet::from([NodeId(1)]));
+        assert_eq!(canvas.visible_counts(&graph), (1, 1, 0));
+
+        canvas.media_filter = MediaFilter::Midi;
+        assert_eq!(canvas.visible_node_ids(&graph), BTreeSet::from([NodeId(3)]));
     }
 }

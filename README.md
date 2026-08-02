@@ -12,7 +12,7 @@ The workspace provides:
 - `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation. XML serialization/parsing is isolated in `xml.rs`.
 - `pw-graph-config`: TOML application settings and XDG config path helpers.
 - `pw-graph-i18n`: catalog-based English/Spanish localization with fallback.
-- `pw-graph-ui`: egui graph canvas with type-accented nodes, readable port aliases, curved media-colored links, drag-to-connect, reliable node/group moving, selection, sorting, and thumbnail view. Canvas interaction/rendering is isolated in `canvas.rs`.
+- `pw-graph-ui`: egui graph canvas with type-accented nodes, readable port aliases, curved media-colored links, drag-to-connect, reliable node/group moving, selection, media filtering, sorting, default media/direction layout, and thumbnail view. Canvas interaction/rendering is isolated in `canvas.rs`.
 - `pw-graph-app`: a runnable egui desktop shell, backend selection, patchbay controls, localization, and CLI flags. Its application state, argument parsing, composite backend, tray integration, and GUI panels live in separate modules.
 
 ## Run
@@ -52,6 +52,12 @@ opt-in per node. The Graph panel exposes the policy as **Measure levels**:
 The same panel has **Reset audio config**, which releases every metering stream
 so PipeWire can suspend those nodes again and restore their configured settings.
 The policy is persisted as `audio_meters` in `config.toml`.
+
+The Graph panel's **Show media** filter can display all nodes or only Audio,
+Video, or MIDI nodes and ports; MIDI includes both PipeWire/JACK and ALSA MIDI.
+Fresh nodes are initially organized into media-category bands with source-only
+nodes on the left and sink-only nodes on the right. **Arrange nodes** reapplies
+that layout when existing saved positions need to be cleaned up.
 
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
 support. PipeWire and ALSA are feature-gated so the application can still be

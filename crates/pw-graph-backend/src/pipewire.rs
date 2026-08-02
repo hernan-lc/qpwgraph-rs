@@ -298,19 +298,14 @@ impl PipewireDriver {
         let mut graph = Graph::default();
         let mut node_media_classes = HashMap::new();
 
-        for (index, (id, record)) in state.nodes.iter().enumerate() {
+        for (id, record) in state.nodes.iter() {
             let node_id = NodeId(*id as u64);
             if record.name.starts_with(METER_NODE_PREFIX) {
                 continue;
             }
             node_media_classes.insert(node_id, record.media_class.to_ascii_lowercase());
             let mut node = Node::new(node_id, &record.name, NodeType::PipeWire);
-            node.position = self.positions.get(&node_id).copied().unwrap_or_else(|| {
-                let column = (index % 4) as f32;
-                let row = (index / 4) as f32;
-                [40.0 + column * 280.0, 40.0 + row * 180.0]
-            });
-            self.positions.insert(node_id, node.position);
+            node.position = self.positions.get(&node_id).copied().unwrap_or([0.0, 0.0]);
             graph.add_node(node)?;
         }
 
@@ -330,6 +325,16 @@ impl PipewireDriver {
                 record.direction,
                 port_type,
             ))?;
+        }
+
+        let default_positions = graph.default_node_positions();
+        for (node_id, node) in &mut graph.nodes {
+            if let Some(position) = self.positions.get(node_id).copied() {
+                node.position = position;
+            } else if let Some(position) = default_positions.get(node_id).copied() {
+                node.position = position;
+                self.positions.insert(*node_id, position);
+            }
         }
 
         for (id, record) in state.links {
@@ -487,7 +492,7 @@ impl PipewireDriver {
                     data.format = format;
                 }
             })
-            .process(|stream, data| process_meter_buffer(stream, data))
+            .process(process_meter_buffer)
             .register()
             .map_err(|error| native_error("PipeWire audio meter listener", error))?;
 
@@ -742,38 +747,6 @@ fn classify_port_type(media_type: &str, node_media_class: Option<&str>) -> PortT
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::classify_port_type;
-    use pw_graph_core::PortType;
-
-    #[test]
-    fn classifies_media_types_without_case_sensitive_metadata() {
-        assert_eq!(classify_port_type("Audio", None), PortType::Audio);
-        assert_eq!(classify_port_type("video/raw", None), PortType::Video);
-        assert_eq!(
-            classify_port_type("", Some("Midi/Source")),
-            PortType::MidiJack
-        );
-    }
-
-    #[test]
-    fn prefers_explicit_port_media_metadata() {
-        assert_eq!(
-            classify_port_type("audio/raw", Some("Video/Source")),
-            PortType::Audio
-        );
-        assert_eq!(
-            classify_port_type("midi/raw", Some("Audio/Source")),
-            PortType::MidiJack
-        );
-        assert_eq!(
-            classify_port_type("", Some("Stream/Output")),
-            PortType::Unknown
-        );
-    }
-}
-
 fn native_error(operation: &str, error: impl std::fmt::Display) -> BackendError {
     BackendError::Native(format!("{operation} failed: {error}"))
 }
@@ -842,5 +815,37 @@ fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut MeterCallback
         reading.rms = (sum / samples as f64).sqrt().min(1.0) as f32;
         reading.peak = peak.min(1.0);
         reading.updated_at = Some(Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_port_type;
+    use pw_graph_core::PortType;
+
+    #[test]
+    fn classifies_media_types_without_case_sensitive_metadata() {
+        assert_eq!(classify_port_type("Audio", None), PortType::Audio);
+        assert_eq!(classify_port_type("video/raw", None), PortType::Video);
+        assert_eq!(
+            classify_port_type("", Some("Midi/Source")),
+            PortType::MidiJack
+        );
+    }
+
+    #[test]
+    fn prefers_explicit_port_media_metadata() {
+        assert_eq!(
+            classify_port_type("audio/raw", Some("Video/Source")),
+            PortType::Audio
+        );
+        assert_eq!(
+            classify_port_type("midi/raw", Some("Audio/Source")),
+            PortType::MidiJack
+        );
+        assert_eq!(
+            classify_port_type("", Some("Stream/Output")),
+            PortType::Unknown
+        );
     }
 }
