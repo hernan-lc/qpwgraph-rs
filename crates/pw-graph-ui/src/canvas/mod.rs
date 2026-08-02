@@ -1,0 +1,390 @@
+//! Graph canvas: top-level input handling and per-frame orchestration.
+//!
+//! Node rendering lives in [`node`], link rendering in [`links`], port
+//! grouping/matching in [`ports`], and name formatting in [`names`], so each
+//! concern can be read (and tested) on its own instead of one long file.
+
+use crate::{CanvasAction, GraphCanvas, LinkId, NodeId};
+use egui::{pos2, vec2, Color32, FontId, Rect, Sense, Shape, Stroke, Ui};
+use pw_graph_core::Graph;
+use pw_graph_i18n::I18n;
+use std::collections::{BTreeSet, HashMap};
+
+mod geometry;
+mod links;
+mod names;
+mod node;
+mod ports;
+
+use geometry::bezier_points;
+use names::display_port_name;
+use node::NodeDrawContext;
+
+impl GraphCanvas {
+    pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
+        self.show_with_keyboard_shortcuts(ui, graph, i18n, true)
+    }
+
+    pub fn show_with_keyboard_shortcuts(
+        &mut self,
+        ui: &mut Ui,
+        graph: &Graph,
+        i18n: &I18n,
+        keyboard_shortcuts_enabled: bool,
+    ) -> Vec<CanvasAction> {
+        self.update_peak_holds();
+        self.hovered_meter_node = None;
+        let visible_node_ids = self.visible_node_ids(graph);
+        self.prune_hidden_state(graph, &visible_node_ids);
+        let rect = ui.available_rect_before_wrap();
+        let canvas_response = ui.allocate_rect(rect, Sense::drag());
+        let painter = ui.painter_at(rect);
+        let mut actions = Vec::new();
+        let mut anchors = HashMap::new();
+        let pointer_pos = ui.input(|input| input.pointer.interact_pos());
+        let pointer_over_node = pointer_pos.is_some_and(|pointer| {
+            graph
+                .nodes
+                .values()
+                .filter(|node| visible_node_ids.contains(&node.id))
+                .any(|node| self.node_rect(rect, graph, node).contains(pointer))
+        });
+
+        if self.repel_overlapping_nodes
+            && self.dragging_node.is_none()
+            && self.selection_start.is_none()
+            && !pointer_over_node
+            && !self.thumbnail_mode
+        {
+            self.repel_overlaps(rect, graph, &visible_node_ids, &mut actions);
+        }
+
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
+        self.draw_grid(&painter, rect);
+        if canvas_response.has_focus() {
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::LIGHT_BLUE));
+        }
+
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.pending_outputs = None;
+            self.pending_node_connect = None;
+            self.selection_start = None;
+            self.selection_current = None;
+            self.selected_link = None;
+        }
+        if canvas_response.drag_started() && self.dragging_node.is_none() && !pointer_over_node {
+            self.selection_start = ui.input(|input| input.pointer.interact_pos());
+            self.selection_current = self.selection_start;
+        }
+        if self.selection_start.is_some() && canvas_response.dragged() {
+            self.selection_current = ui.input(|input| input.pointer.interact_pos());
+        }
+        if canvas_response.drag_stopped() {
+            if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
+                let selection = Rect::from_two_pos(start, end);
+                self.selected_nodes = graph
+                    .nodes
+                    .values()
+                    .filter(|node| visible_node_ids.contains(&node.id))
+                    .filter(|node| self.node_rect(rect, graph, node).intersects(selection))
+                    .map(|node| node.id)
+                    .collect();
+                self.selected_node = self.selected_nodes.iter().next().copied();
+            }
+            self.selection_start = None;
+            self.selection_current = None;
+        }
+        if canvas_response.dragged()
+            && self.dragging_node.is_none()
+            && self.selection_start.is_none()
+            && !pointer_over_node
+        {
+            self.pan += canvas_response.drag_delta();
+        }
+
+        let scroll = ui.input(|input| input.raw_scroll_delta.y);
+        if scroll.abs() > f32::EPSILON
+            && rect.contains(ui.input(|input| input.pointer.hover_pos().unwrap_or(rect.center())))
+        {
+            self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.35, 2.5);
+        }
+
+        if !self.thumbnail_mode {
+            self.draw_links(
+                ui,
+                &painter,
+                rect,
+                graph,
+                i18n,
+                &visible_node_ids,
+                pointer_pos,
+                pointer_over_node,
+                &mut actions,
+            );
+        }
+
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
+            let mut context = NodeDrawContext {
+                rect,
+                graph,
+                i18n,
+                anchors: &mut anchors,
+                actions: &mut actions,
+            };
+            self.draw_node(ui, painter.clone(), node, &mut context);
+        }
+
+        // Handle this after the canvas has processed pointer input. This lets
+        // a link be selected and deleted during the same egui frame, and keeps
+        // the action in the same path as the context-menu disconnect.
+        if keyboard_shortcuts_enabled
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+            })
+        {
+            if let Some(link) = self.selected_link.take() {
+                actions.push(CanvasAction::Disconnect { link });
+            }
+        }
+
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_current) {
+            let selection = Rect::from_two_pos(start, end);
+            painter.rect_filled(
+                selection,
+                0.0,
+                Color32::from_rgba_unmultiplied(80, 130, 190, 40),
+            );
+            painter.rect_stroke(selection, 0.0, Stroke::new(1.0_f32, Color32::LIGHT_BLUE));
+        }
+
+        self.draw_pending_connection(ui, &painter, graph, i18n, &anchors);
+
+        actions
+    }
+
+    /// The bezier preview drawn from a pending Advanced-mode single-port (or
+    /// Easy-mode grouped-row) connection to wherever the pointer is.
+    fn draw_pending_connection(
+        &self,
+        ui: &Ui,
+        painter: &egui::Painter,
+        graph: &Graph,
+        i18n: &I18n,
+        anchors: &HashMap<crate::PortId, egui::Pos2>,
+    ) {
+        let Some(output_ids) = &self.pending_outputs else {
+            return;
+        };
+        let Some(&first_id) = output_ids.first() else {
+            return;
+        };
+        let Some(output) = graph.ports.get(&first_id) else {
+            return;
+        };
+        let Some(start) = anchors.get(&first_id).copied() else {
+            return;
+        };
+        let end = ui.input(|input| input.pointer.hover_pos()).unwrap_or(start);
+        let points = bezier_points(start, end, 0.0);
+        painter.add(Shape::line(
+            points.clone(),
+            Stroke::new(4.0_f32, Color32::BLACK),
+        ));
+        painter.add(Shape::line(
+            points,
+            Stroke::new(2.0_f32, Color32::LIGHT_GREEN),
+        ));
+        let label = if output_ids.len() > 1 {
+            i18n.format(
+                "canvas.pending_connection_group",
+                &[
+                    ("action", i18n.text("canvas.connect_hint")),
+                    ("count", output_ids.len().to_string()),
+                ],
+            )
+        } else {
+            i18n.format(
+                "canvas.pending_connection",
+                &[
+                    ("action", i18n.text("canvas.connect_hint")),
+                    ("port", display_port_name(&output.name, i18n)),
+                ],
+            )
+        };
+        painter.text(
+            start + vec2(8.0, -22.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            FontId::proportional(12.0 * self.zoom * self.node_text_scale.clamp(0.80, 2.0)),
+            Color32::LIGHT_GREEN,
+        );
+    }
+
+    pub fn visible_node_ids(&self, graph: &Graph) -> BTreeSet<NodeId> {
+        graph
+            .nodes
+            .values()
+            .filter(|node| self.media_filter.matches_node(graph, node.id))
+            .map(|node| node.id)
+            .collect()
+    }
+
+    pub fn selected_link(&self) -> Option<LinkId> {
+        self.selected_link
+    }
+
+    pub fn visible_counts(&self, graph: &Graph) -> (usize, usize, usize) {
+        let visible_nodes = self.visible_node_ids(graph);
+        let ports = graph
+            .ports
+            .values()
+            .filter(|port| {
+                visible_nodes.contains(&port.node_id)
+                    && self.media_filter.matches_port_type(port.port_type)
+            })
+            .count();
+        let links = graph
+            .links
+            .values()
+            .filter(|link| {
+                let Some(source) = graph.port(link.output_port) else {
+                    return false;
+                };
+                let Some(destination) = graph.port(link.input_port) else {
+                    return false;
+                };
+                visible_nodes.contains(&source.node_id)
+                    && visible_nodes.contains(&destination.node_id)
+                    && self.media_filter.matches_port_type(source.port_type)
+                    && self.media_filter.matches_port_type(destination.port_type)
+            })
+            .count();
+        (visible_nodes.len(), ports, links)
+    }
+
+    fn prune_hidden_state(&mut self, graph: &Graph, visible_node_ids: &BTreeSet<NodeId>) {
+        self.selected_nodes
+            .retain(|node_id| visible_node_ids.contains(node_id));
+        if self
+            .selected_node
+            .is_some_and(|node_id| !visible_node_ids.contains(&node_id))
+        {
+            self.selected_node = self.selected_nodes.iter().next().copied();
+        }
+        if self.pending_outputs.as_ref().is_some_and(|port_ids| {
+            port_ids.iter().any(|port_id| {
+                graph.port(*port_id).is_none_or(|port| {
+                    !visible_node_ids.contains(&port.node_id)
+                        || !self.media_filter.matches_port_type(port.port_type)
+                })
+            })
+        }) {
+            self.pending_outputs = None;
+        }
+        if self
+            .pending_node_connect
+            .is_some_and(|node_id| !visible_node_ids.contains(&node_id))
+        {
+            self.pending_node_connect = None;
+        }
+        if self.selected_link.is_some_and(|link_id| {
+            graph.link(link_id).is_none_or(|link| {
+                let Some(source) = graph.port(link.output_port) else {
+                    return true;
+                };
+                let Some(destination) = graph.port(link.input_port) else {
+                    return true;
+                };
+                !visible_node_ids.contains(&source.node_id)
+                    || !visible_node_ids.contains(&destination.node_id)
+                    || !self.media_filter.matches_port_type(source.port_type)
+                    || !self.media_filter.matches_port_type(destination.port_type)
+            })
+        }) {
+            self.selected_link = None;
+        }
+    }
+
+    pub fn meter_peak_hold(&self, node_id: NodeId, fallback: f32) -> f32 {
+        self.peak_hold.get(&node_id).copied().unwrap_or(fallback)
+    }
+
+    /// Nodes the user is currently looking at a meter for: the pinned monitor
+    /// and whatever audio port the pointer is revealing. On-demand metering
+    /// attaches a helper stream only for these, so an idle window measures
+    /// nothing and leaves the daemon's audio configuration alone.
+    pub fn requested_meter_nodes(&self, graph: &Graph) -> BTreeSet<NodeId> {
+        let pinned = self
+            .pinned_meter
+            .and_then(|port_id| graph.port(port_id))
+            .map(|port| port.node_id);
+        pinned.into_iter().chain(self.hovered_meter_node).collect()
+    }
+
+    fn update_peak_holds(&mut self) {
+        self.peak_hold
+            .retain(|node_id, _| self.meters.contains_key(node_id));
+        for (node_id, reading) in &self.meters {
+            let hold = self.peak_hold.entry(*node_id).or_insert(0.0);
+            *hold = (*hold - 0.012).max(reading.peak).clamp(0.0, 1.0);
+        }
+    }
+
+    fn repel_overlaps(
+        &self,
+        rect: Rect,
+        graph: &Graph,
+        visible_node_ids: &BTreeSet<NodeId>,
+        actions: &mut Vec<CanvasAction>,
+    ) {
+        let mut occupied = Vec::new();
+        for node in graph
+            .nodes
+            .values()
+            .filter(|node| visible_node_ids.contains(&node.id))
+        {
+            let mut candidate = self.node_rect(rect, graph, node);
+            let mut position = node.position;
+            while occupied
+                .iter()
+                .any(|other: &Rect| other.intersects(candidate))
+            {
+                position[0] += 240.0;
+                candidate = candidate.translate(vec2(240.0 * self.zoom, 0.0));
+            }
+            if position != node.position {
+                actions.push(CanvasAction::MoveNode {
+                    node: node.id,
+                    position,
+                });
+            }
+            occupied.push(candidate);
+        }
+    }
+
+    fn draw_grid(&self, painter: &egui::Painter, rect: Rect) {
+        let spacing = 32.0 * self.zoom;
+        let origin = rect.left_top() + self.pan;
+        let color = Color32::from_rgb(38, 43, 51);
+        let mut x = origin.x.rem_euclid(spacing) + rect.left();
+        while x < rect.right() {
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(1.0_f32, color),
+            );
+            x += spacing;
+        }
+        let mut y = origin.y.rem_euclid(spacing) + rect.top();
+        while y < rect.bottom() {
+            painter.line_segment(
+                [pos2(rect.left(), y), pos2(rect.right(), y)],
+                Stroke::new(1.0_f32, color),
+            );
+            y += spacing;
+        }
+    }
+}

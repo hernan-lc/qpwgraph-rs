@@ -125,7 +125,10 @@ pub struct GraphCanvas {
     /// so the meter popover can say so instead of claiming no data exists.
     pub metering_disabled: bool,
     peak_hold: BTreeMap<NodeId, f32>,
-    pending_output: Option<PortId>,
+    /// Output ports of an in-progress connection drag. A single-port row
+    /// (always the case in Advanced mode) holds one id; an Easy-mode grouped
+    /// row holds every channel in that group.
+    pending_outputs: Option<Vec<PortId>>,
     /// Source node of an in-progress Easy-mode node-to-node connect drag.
     pending_node_connect: Option<NodeId>,
     pub selected_node: Option<NodeId>,
@@ -156,7 +159,7 @@ impl Default for GraphCanvas {
             hovered_meter_node: None,
             metering_disabled: false,
             peak_hold: BTreeMap::new(),
-            pending_output: None,
+            pending_outputs: None,
             pending_node_connect: None,
             selected_node: None,
             selected_nodes: BTreeSet::new(),
