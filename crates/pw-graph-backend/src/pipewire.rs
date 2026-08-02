@@ -68,10 +68,7 @@ unsafe extern "C" {
         link_id: *mut u32,
     ) -> i32;
     fn pw_graph_shim_destroy_link(shim: *mut c_void, link_id: u32) -> i32;
-    fn pw_graph_shim_meter_snapshot(
-        shim: *mut c_void,
-        snapshot: *mut RawMeterSnapshot,
-    ) -> i32;
+    fn pw_graph_shim_meter_snapshot(shim: *mut c_void, snapshot: *mut RawMeterSnapshot) -> i32;
 }
 
 fn raw_text(value: &[c_char]) -> String {
@@ -279,16 +276,18 @@ impl GraphDriver for PipewireDriver {
             return Err(native_error("PipeWire audio meter snapshot", result));
         }
         let snapshot = unsafe { snapshot.assume_init() };
-        Ok(snapshot.meters[..(snapshot.meter_count as usize).min(MAX_METERS)]
-            .iter()
-            .filter(|meter| meter.available != 0)
-            .map(|meter| AudioMeter {
-                node_id: NodeId(meter.node_id as u64),
-                rms: meter.rms.clamp(0.0, 1.0),
-                peak: meter.peak.clamp(0.0, 1.0),
-                age_ms: meter.age_ms,
-                available: true,
-            })
-            .collect())
+        Ok(
+            snapshot.meters[..(snapshot.meter_count as usize).min(MAX_METERS)]
+                .iter()
+                .filter(|meter| meter.available != 0)
+                .map(|meter| AudioMeter {
+                    node_id: NodeId(meter.node_id as u64),
+                    rms: meter.rms.clamp(0.0, 1.0),
+                    peak: meter.peak.clamp(0.0, 1.0),
+                    age_ms: meter.age_ms,
+                    available: true,
+                })
+                .collect(),
+        )
     }
 }

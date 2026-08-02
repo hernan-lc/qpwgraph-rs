@@ -2,8 +2,7 @@
 
 use super::*;
 use egui::{
-    pos2, vec2, Color32, FontId, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke, Ui,
-    Vec2,
+    pos2, vec2, Color32, FontId, Pos2, ProgressBar, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
 use pw_graph_core::{Direction, Graph, Node, NodeType, Port, PortType};
 use pw_graph_i18n::I18n;
@@ -492,8 +491,7 @@ impl GraphCanvas {
                         }
                         _ => {
                             ui.label(
-                                RichText::new(i18n.text("canvas.audio_meter_unavailable"))
-                                    .weak(),
+                                RichText::new(i18n.text("canvas.audio_meter_unavailable")).weak(),
                             );
                         }
                     }
