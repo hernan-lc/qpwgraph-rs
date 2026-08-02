@@ -117,6 +117,21 @@ impl ConnectManyCommand {
             created_keys: Vec::new(),
         }
     }
+
+    pub fn with_keys(pairs: Vec<(PortId, PortId)>, keys: Vec<(PortKey, PortKey)>) -> Self {
+        let keys = keys.into_iter().fold(Vec::new(), |mut unique, pair| {
+            if !unique.contains(&pair) {
+                unique.push(pair);
+            }
+            unique
+        });
+        Self {
+            pairs,
+            keys,
+            links: Vec::new(),
+            created_keys: Vec::new(),
+        }
+    }
 }
 
 impl Command for ConnectManyCommand {
@@ -180,6 +195,15 @@ impl ConnectCommand {
             keys: None,
         }
     }
+
+    pub fn from_keys(output: PortKey, input: PortKey) -> Self {
+        Self {
+            src: PortId::default(),
+            dst: PortId::default(),
+            link: None,
+            keys: Some((output, input)),
+        }
+    }
 }
 
 impl Command for ConnectCommand {
@@ -216,17 +240,20 @@ pub struct DisconnectCommand {
     link: Option<Link>,
     link_id: LinkId,
     keys: Option<(PortKey, PortKey)>,
+    removed: bool,
 }
 
 /// Disconnect every live link as one undoable operation.
 pub struct DisconnectAllCommand {
     links: Vec<Link>,
     keys: Vec<(PortKey, PortKey)>,
+    removed_keys: Vec<(PortKey, PortKey)>,
 }
 
 pub struct DisconnectManyCommand {
     link_ids: Vec<LinkId>,
     keys: Vec<(PortKey, PortKey)>,
+    removed_keys: Vec<(PortKey, PortKey)>,
     links: Vec<Link>,
 }
 
@@ -235,6 +262,7 @@ impl DisconnectManyCommand {
         Self {
             link_ids,
             keys: Vec::new(),
+            removed_keys: Vec::new(),
             links: Vec::new(),
         }
     }
@@ -247,6 +275,7 @@ impl DisconnectManyCommand {
         Self {
             link_ids: links.iter().map(|link| link.id).collect(),
             keys,
+            removed_keys: Vec::new(),
             links,
         }
     }
@@ -267,10 +296,12 @@ impl Command for DisconnectManyCommand {
                 .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
                 .collect();
         }
+        self.removed_keys.clear();
         let mut disconnected = Vec::with_capacity(self.keys.len());
         for (output, input) in &self.keys {
             if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
                 disconnected.push(link);
+                self.removed_keys.push((output.clone(), input.clone()));
             }
         }
         self.links = disconnected;
@@ -279,7 +310,7 @@ impl Command for DisconnectManyCommand {
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         let mut restored = Vec::with_capacity(self.links.len());
-        for (output, input) in &self.keys {
+        for (output, input) in &self.removed_keys {
             if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
                 restored.push(link);
             }
@@ -294,6 +325,7 @@ impl DisconnectAllCommand {
         Self {
             links: Vec::new(),
             keys: Vec::new(),
+            removed_keys: Vec::new(),
         }
     }
 }
@@ -317,10 +349,12 @@ impl Command for DisconnectAllCommand {
             .values()
             .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
             .collect();
+        self.removed_keys.clear();
         let mut disconnected = Vec::with_capacity(self.keys.len());
         for (output, input) in &self.keys {
             if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
                 disconnected.push(link);
+                self.removed_keys.push((output.clone(), input.clone()));
             }
         }
         self.links = disconnected;
@@ -329,7 +363,7 @@ impl Command for DisconnectAllCommand {
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         let mut restored = Vec::with_capacity(self.links.len());
-        for (output, input) in &self.keys {
+        for (output, input) in &self.removed_keys {
             if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
                 restored.push(link);
             }
@@ -345,6 +379,7 @@ impl DisconnectCommand {
             link: None,
             link_id,
             keys: None,
+            removed: false,
         }
     }
 
@@ -353,6 +388,7 @@ impl DisconnectCommand {
             link_id: link.id,
             keys: stable_pair(graph, link.output_port, link.input_port),
             link: Some(link),
+            removed: false,
         }
     }
 }
@@ -363,6 +399,7 @@ impl Command for DisconnectCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        self.removed = false;
         driver.refresh()?;
         if self.keys.is_none() {
             self.keys = driver
@@ -376,11 +413,15 @@ impl Command for DisconnectCommand {
         if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
             self.link_id = link.id;
             self.link = Some(link);
+            self.removed = true;
         }
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        if !self.removed {
+            return Ok(());
+        }
         let (output, input) = self.keys.as_ref().ok_or(CommandError::MissingUndoLink)?;
         if let Some(restored) = driver.connect_by_key_if_missing(output, input)? {
             self.link_id = restored.id;
@@ -389,6 +430,7 @@ impl Command for DisconnectCommand {
             self.link_id = restored.id;
             self.link = Some(restored);
         }
+        self.removed = false;
         Ok(())
     }
 }
@@ -472,6 +514,29 @@ mod tests {
         assert!(driver.graph().links.is_empty());
         commands.redo(&mut driver).unwrap();
         assert_eq!(driver.graph().links.len(), 1);
+    }
+
+    #[test]
+    fn connecting_an_existing_pair_is_a_noop_for_undo() {
+        let mut driver = InMemoryDriver::demo();
+        let mut commands = CommandStack::new();
+        commands
+            .execute(
+                Box::new(ConnectCommand::new(PortId(1), PortId(3))),
+                &mut driver,
+            )
+            .unwrap();
+        commands
+            .execute(
+                Box::new(ConnectCommand::new(PortId(1), PortId(3))),
+                &mut driver,
+            )
+            .unwrap();
+        assert_eq!(driver.graph().links.len(), 1);
+        commands.undo(&mut driver).unwrap();
+        assert_eq!(driver.graph().links.len(), 1);
+        commands.undo(&mut driver).unwrap();
+        assert!(driver.graph().links.is_empty());
     }
 
     #[test]

@@ -281,8 +281,12 @@ impl Graph {
                 if node.name != key.node_name || node.node_type != key.node_type {
                     return None;
                 }
-                if key.channel.is_some() && port.channel != key.channel {
-                    return None;
+                if let (Some(expected), Some(actual)) =
+                    (key.channel.as_ref(), port.channel.as_ref())
+                {
+                    if expected != actual {
+                        return None;
+                    }
                 }
                 let serial_score = match (key.node_serial, node.serial) {
                     (Some(expected), Some(actual)) if expected == actual => 100,

@@ -633,10 +633,9 @@ impl GraphCanvas {
             .map(|node| node.id)
     }
 
-    /// Pairs `source`'s outputs with `target`'s inputs in port order, matching
-    /// compatible port types (e.g. stereo L/R landing on L/R in order). Used
-    /// for the whole-node Easy-mode connect drag, which always operates on
-    /// every raw port regardless of how they're visually grouped.
+    /// Pairs `source`'s outputs with `target`'s inputs by channel metadata and
+    /// compatible port type. Used for the whole-node Easy-mode connect drag,
+    /// which operates on every raw port regardless of visual grouping.
     pub(super) fn matching_port_pairs(
         &self,
         graph: &Graph,

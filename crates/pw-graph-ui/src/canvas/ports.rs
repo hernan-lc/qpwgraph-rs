@@ -427,6 +427,29 @@ mod tests {
     }
 
     #[test]
+    fn pair_ports_prefers_matching_channels_over_registry_order() {
+        let mut graph = stereo_pair_graph();
+        graph.ports.get_mut(&PortId(20)).unwrap().name = "in_R".into();
+        graph.ports.get_mut(&PortId(21)).unwrap().name = "in_L".into();
+        let source = graph.node(NodeId(1)).unwrap();
+        let target = graph.node(NodeId(2)).unwrap();
+        let outputs: Vec<&Port> = source
+            .ports
+            .iter()
+            .filter_map(|id| graph.port(*id))
+            .collect();
+        let inputs: Vec<&Port> = target
+            .ports
+            .iter()
+            .filter_map(|id| graph.port(*id))
+            .collect();
+        assert_eq!(
+            pair_ports(&outputs, &inputs),
+            vec![(PortId(10), PortId(21)), (PortId(11), PortId(20))]
+        );
+    }
+
+    #[test]
     fn link_exists_matches_only_the_exact_output_input_pair() {
         let mut graph = stereo_pair_graph();
         graph.add_link(LinkId(1), PortId(10), PortId(20)).unwrap();

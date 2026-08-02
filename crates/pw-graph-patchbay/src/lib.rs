@@ -5,7 +5,7 @@
 //! and for compatibility with the first Rust prototype.
 
 use pw_graph_backend::{BackendError, GraphDriver};
-use pw_graph_core::{Direction, Graph, LinkId, NodeType, PortId, PortKey, PortType};
+use pw_graph_core::{Direction, Graph, NodeType, PortId, PortKey, PortType};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -147,6 +147,20 @@ impl Patchbay {
         original_len != self.connections.len()
     }
 
+    /// Remove a saved rule by stable endpoint identity. Numeric PipeWire IDs
+    /// can change while an application is paused, so deleting a newly
+    /// recreated link must also remove the older saved rule.
+    pub fn remove_stable_connection(&mut self, output: &PortKey, input: &PortKey) -> bool {
+        let original_len = self.connections.len();
+        self.connections.retain(|connection| {
+            !(connection.output_node == output.node_name
+                && connection.output_name == output.port_name
+                && connection.input_node == input.node_name
+                && connection.input_name == input.port_name)
+        });
+        original_len != self.connections.len()
+    }
+
     pub fn snapshot_graph(&mut self, graph: &Graph, pinned: bool) {
         let links: Vec<_> = graph.links.values().cloned().collect();
         self.connections.clear();
@@ -203,19 +217,34 @@ impl Patchbay {
             .collect();
 
         if exclusive {
-            let live: Vec<_> = driver.graph().links.values().cloned().collect();
-            for link in live {
+            let live: Vec<_> = driver
+                .graph()
+                .links
+                .values()
+                .filter_map(|link| {
+                    Some((
+                        driver.graph().port_key(link.output_port)?,
+                        driver.graph().port_key(link.input_port)?,
+                    ))
+                })
+                .collect();
+            for (live_output, live_input) in live {
                 let saved = resolved.iter().any(|(output, input)| {
                     driver
                         .graph()
                         .find_link_by_keys(output, input)
                         .is_some_and(|saved_link| {
-                            saved_link.output_port == link.output_port
-                                && saved_link.input_port == link.input_port
+                            driver
+                                .graph()
+                                .find_link_by_keys(&live_output, &live_input)
+                                .is_some_and(|live_link| saved_link.id == live_link.id)
                         })
                 });
-                if !saved {
-                    driver.disconnect(link.id)?;
+                if !saved
+                    && driver
+                        .disconnect_by_key_if_present(&live_output, &live_input)?
+                        .is_some()
+                {
                     report.disconnected += 1;
                 }
             }
@@ -231,15 +260,24 @@ impl Patchbay {
                 let Some(input_port) = driver.graph().resolve_port_key(&input) else {
                     continue;
                 };
-                let stale: Vec<LinkId> = driver
+                let stale: Vec<(PortKey, PortKey)> = driver
                     .graph()
                     .links_for_port(input_port)
                     .filter(|link| link.input_port == input_port)
-                    .map(|link| link.id)
+                    .filter_map(|link| {
+                        Some((
+                            driver.graph().port_key(link.output_port)?,
+                            driver.graph().port_key(link.input_port)?,
+                        ))
+                    })
                     .collect();
-                for link_id in stale {
-                    driver.disconnect(link_id)?;
-                    report.disconnected += 1;
+                for (stale_output, stale_input) in stale {
+                    if driver
+                        .disconnect_by_key_if_present(&stale_output, &stale_input)?
+                        .is_some()
+                    {
+                        report.disconnected += 1;
+                    }
                 }
             }
 
@@ -335,5 +373,55 @@ mod tests {
         assert_eq!(loaded.connections[0].output_node, "Audio Capture");
         assert_eq!(loaded.connections[0].output_name, "capture_FL");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn activation_prefers_names_when_pipewire_ids_change() {
+        let mut saved = Patchbay::new("demo");
+        let original = InMemoryDriver::demo();
+        saved.add_graph_connection(original.graph(), PortId(1), PortId(3), true);
+
+        let mut graph = Graph::default();
+        graph
+            .add_node(pw_graph_core::Node::new(
+                pw_graph_core::NodeId(101),
+                "Audio Capture",
+                NodeType::PipeWire,
+            ))
+            .unwrap();
+        graph
+            .add_node(pw_graph_core::Node::new(
+                pw_graph_core::NodeId(102),
+                "Audio Playback",
+                NodeType::PipeWire,
+            ))
+            .unwrap();
+        graph
+            .add_port(pw_graph_core::Port::new(
+                PortId(201),
+                pw_graph_core::NodeId(101),
+                "capture_FL",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(pw_graph_core::Port::new(
+                PortId(203),
+                pw_graph_core::NodeId(102),
+                "playback_FL",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+        let mut current = InMemoryDriver::new(graph);
+
+        let report = saved.activate(&mut current, false, false).unwrap();
+        assert_eq!(report.connected, 1);
+        assert!(current
+            .graph()
+            .links
+            .values()
+            .any(|link| link.output_port == PortId(201) && link.input_port == PortId(203)));
     }
 }

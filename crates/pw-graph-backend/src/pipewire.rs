@@ -455,7 +455,7 @@ impl PipewireDriver {
         left.node_name == right.node_name
             && left.node_type == right.node_type
             && left.port_name == right.port_name
-            && left.channel == right.channel
+            && (left.channel.is_none() || right.channel.is_none() || left.channel == right.channel)
             && left.direction == right.direction
             && left.port_type == right.port_type
     }

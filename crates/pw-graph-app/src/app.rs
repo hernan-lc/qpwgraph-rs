@@ -473,7 +473,10 @@ impl QpwgraphApp {
                         .graph()
                         .port_key(output)
                         .zip(self.driver.graph().port_key(input));
-                    let command = Box::new(ConnectCommand::new(output, input));
+                    let command = stable_pair
+                        .clone()
+                        .map(|(output, input)| Box::new(ConnectCommand::from_keys(output, input)))
+                        .unwrap_or_else(|| Box::new(ConnectCommand::new(output, input)));
                     match self.commands.execute(command, self.driver.as_mut()) {
                         Ok(()) => {
                             if let Some((output_key, input_key)) = stable_pair {
@@ -533,7 +536,10 @@ impl QpwgraphApp {
             })
             .collect();
         match self.commands.execute(
-            Box::new(ConnectManyCommand::new(pairs.clone())),
+            Box::new(ConnectManyCommand::with_keys(
+                pairs.clone(),
+                stable_pairs.clone(),
+            )),
             self.driver.as_mut(),
         ) {
             Ok(()) => {
@@ -581,6 +587,15 @@ impl QpwgraphApp {
         if ids.is_empty() {
             return;
         }
+        let stable_pairs: Vec<_> = links
+            .iter()
+            .filter_map(|link| {
+                self.driver
+                    .graph()
+                    .port_key(link.output_port)
+                    .zip(self.driver.graph().port_key(link.input_port))
+            })
+            .collect();
         let count = ids.len();
         match self.commands.execute(
             Box::new(DisconnectManyCommand::from_links(
@@ -590,9 +605,8 @@ impl QpwgraphApp {
             self.driver.as_mut(),
         ) {
             Ok(()) => {
-                for link in links {
-                    self.patchbay
-                        .remove_connection(link.output_port, link.input_port);
+                for (output, input) in stable_pairs {
+                    self.patchbay.remove_stable_connection(&output, &input);
                 }
                 self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
             }
@@ -636,6 +650,11 @@ impl QpwgraphApp {
         let Some(existing) = self.driver.graph().link(link).cloned() else {
             return;
         };
+        let stable_pair = self
+            .driver
+            .graph()
+            .port_key(existing.output_port)
+            .zip(self.driver.graph().port_key(existing.input_port));
         match self.commands.execute(
             Box::new(DisconnectCommand::from_link(
                 self.driver.graph(),
@@ -644,8 +663,12 @@ impl QpwgraphApp {
             self.driver.as_mut(),
         ) {
             Ok(()) => {
-                self.patchbay
-                    .remove_connection(existing.output_port, existing.input_port);
+                if let Some((output, input)) = stable_pair {
+                    self.patchbay.remove_stable_connection(&output, &input);
+                } else {
+                    self.patchbay
+                        .remove_connection(existing.output_port, existing.input_port);
+                }
                 self.status = self.tf("status.disconnected", &[("link", link.to_string())]);
             }
             Err(error) => {
@@ -665,6 +688,15 @@ impl QpwgraphApp {
         if links.is_empty() {
             return;
         }
+        let stable_pairs: Vec<_> = links
+            .iter()
+            .filter_map(|link| {
+                self.driver
+                    .graph()
+                    .port_key(link.output_port)
+                    .zip(self.driver.graph().port_key(link.input_port))
+            })
+            .collect();
         let count = links.len();
         match self.commands.execute(
             Box::new(DisconnectManyCommand::from_links(
@@ -674,9 +706,8 @@ impl QpwgraphApp {
             self.driver.as_mut(),
         ) {
             Ok(()) => {
-                for link in links {
-                    self.patchbay
-                        .remove_connection(link.output_port, link.input_port);
+                for (output, input) in stable_pairs {
+                    self.patchbay.remove_stable_connection(&output, &input);
                 }
                 self.canvas.clear_selected_link();
                 self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);

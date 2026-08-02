@@ -45,7 +45,7 @@ pub enum ConnectMode {
     #[default]
     Advanced,
     /// Drag from one node onto another: every compatible port pair is linked
-    /// at once, matched in port order (e.g. stereo L/R).
+    /// at once, matched by channel position when available (e.g. stereo L/R).
     Easy,
 }
 
