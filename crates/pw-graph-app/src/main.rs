@@ -335,6 +335,42 @@ struct QpwgraphApp {
     tray: Option<tray_support::State>,
 }
 
+fn icon_button(
+    ui: &mut egui::Ui,
+    id: &str,
+    icon: &str,
+    label: String,
+    explanation: String,
+) -> bool {
+    ui.push_id(("action", id), |ui| {
+        ui.button(format!("{icon} {label}"))
+            .on_hover_text(explanation)
+            .clicked()
+    })
+    .inner
+}
+
+fn icon_checkbox(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut bool,
+    icon: &str,
+    label: String,
+    explanation: String,
+) -> bool {
+    ui.push_id(("configuration", id), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(icon).color(egui::Color32::LIGHT_BLUE));
+            let response = ui.checkbox(value, label);
+            let changed = response.changed();
+            response.on_hover_text(explanation);
+            changed
+        })
+        .inner
+    })
+    .inner
+}
+
 impl QpwgraphApp {
     fn new(args: Args) -> Self {
         let config_file = config_path("qpwgraph-rs");
@@ -620,6 +656,39 @@ impl QpwgraphApp {
         );
     }
 
+    fn sync_config(&mut self) {
+        self.config.zoom = self.canvas.zoom;
+        self.config.sort_type = if self.canvas.sort_ports_by_name {
+            "name".into()
+        } else {
+            "id".into()
+        };
+        self.config.sort_order = if self.canvas.sort_ports_descending {
+            "descending".into()
+        } else {
+            "ascending".into()
+        };
+        self.config.thumbnail_view = self.canvas.thumbnail_mode;
+        self.config.node_positions = self
+            .driver
+            .graph()
+            .nodes
+            .iter()
+            .map(|(id, node)| (id.0, node.position))
+            .collect();
+        self.config.patchbay_path = Some(self.patchbay_file.clone());
+    }
+
+    fn save_config_now(&mut self) {
+        self.sync_config();
+        match self.config.save_to(&self.config_file) {
+            Ok(()) => self.status = self.t("status.config_saved"),
+            Err(error) => {
+                self.status = self.tf("status.config_save_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
     #[cfg(all(target_os = "linux", feature = "tray"))]
     fn poll_tray(&mut self, ctx: &egui::Context) {
         let Some(tray) = self.tray.as_ref() else {
@@ -667,7 +736,13 @@ impl eframe::App for QpwgraphApp {
         if self.config.menubar {
             egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(self.t("toolbar.refresh")).clicked() {
+                    if icon_button(
+                        ui,
+                        "menubar.refresh",
+                        "⟳",
+                        self.t("toolbar.refresh"),
+                        self.t("help.refresh"),
+                    ) {
                         match self.driver.refresh() {
                             Ok(nodes) => {
                                 self.status = self
@@ -679,13 +754,31 @@ impl eframe::App for QpwgraphApp {
                             }
                         }
                     }
-                    if ui.button(self.t("toolbar.save_patchbay")).clicked() {
+                    if icon_button(
+                        ui,
+                        "menubar.save",
+                        "▣",
+                        self.t("toolbar.save_patchbay"),
+                        self.t("help.save_patchbay"),
+                    ) {
                         self.save_patchbay();
                     }
-                    if ui.button(self.t("toolbar.load_patchbay")).clicked() {
+                    if icon_button(
+                        ui,
+                        "menubar.load",
+                        "□",
+                        self.t("toolbar.load_patchbay"),
+                        self.t("help.load_patchbay"),
+                    ) {
                         self.load_patchbay();
                     }
-                    if ui.button(self.t("toolbar.activate")).clicked() {
+                    if icon_button(
+                        ui,
+                        "menubar.activate",
+                        "▶",
+                        self.t("toolbar.activate"),
+                        self.t("help.activate"),
+                    ) {
                         self.activate_patchbay();
                     }
                 });
@@ -695,7 +788,13 @@ impl eframe::App for QpwgraphApp {
         if self.config.toolbar {
             egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(self.t("toolbar.refresh")).clicked() {
+                    if icon_button(
+                        ui,
+                        "toolbar.refresh",
+                        "⟳",
+                        self.t("toolbar.refresh"),
+                        self.t("help.refresh"),
+                    ) {
                         match self.driver.refresh() {
                             Ok(nodes) => {
                                 self.status = self
@@ -707,36 +806,60 @@ impl eframe::App for QpwgraphApp {
                             }
                         }
                     }
-                    if ui
+                    let undo_response = ui
                         .add_enabled(
                             self.commands.can_undo(),
-                            egui::Button::new(self.t("toolbar.undo")),
+                            egui::Button::new(format!("↶ {}", self.t("toolbar.undo"))),
                         )
-                        .clicked()
-                    {
+                        .on_hover_text(self.t("help.undo"));
+                    if undo_response.clicked() {
                         self.undo();
                     }
-                    if ui
+                    let redo_response = ui
                         .add_enabled(
                             self.commands.can_redo(),
-                            egui::Button::new(self.t("toolbar.redo")),
+                            egui::Button::new(format!("↷ {}", self.t("toolbar.redo"))),
                         )
-                        .clicked()
-                    {
+                        .on_hover_text(self.t("help.redo"));
+                    if redo_response.clicked() {
                         self.redo();
                     }
                     if self.config.patchbay_toolbar {
                         ui.separator();
-                        if ui.button(self.t("toolbar.save_patchbay")).clicked() {
+                        if icon_button(
+                            ui,
+                            "toolbar.save",
+                            "▣",
+                            self.t("toolbar.save_patchbay"),
+                            self.t("help.save_patchbay"),
+                        ) {
                             self.save_patchbay();
                         }
-                        if ui.button(self.t("toolbar.load_patchbay")).clicked() {
+                        if icon_button(
+                            ui,
+                            "toolbar.load",
+                            "□",
+                            self.t("toolbar.load_patchbay"),
+                            self.t("help.load_patchbay"),
+                        ) {
                             self.load_patchbay();
                         }
-                        if ui.button(self.t("toolbar.snapshot")).clicked() {
+                        if icon_button(
+                            ui,
+                            "toolbar.snapshot",
+                            "◉",
+                            self.t("toolbar.snapshot"),
+                            self.t("help.snapshot"),
+                        ) {
                             self.snapshot_patchbay();
                         }
-                        if ui.button(self.t("toolbar.activate")).clicked() {
+                        if icon_button(
+                            ui,
+                            "toolbar.activate",
+                            "▶",
+                            self.t("toolbar.activate"),
+                            self.t("help.activate"),
+                        ) {
                             self.activate_patchbay();
                         }
                     }
@@ -800,20 +923,79 @@ impl eframe::App for QpwgraphApp {
                     }
                 }
                 ui.separator();
+                ui.heading(format!("⚙ {}", self.t("inspector.configuration")));
+                ui.label(self.t("inspector.configuration_hint"))
+                    .on_hover_text(self.t("help.configuration"));
+                ui.horizontal(|ui| {
+                    ui.label("🌐");
+                    egui::ComboBox::from_label(self.t("language.label"))
+                        .selected_text(selected_locale.native_name())
+                        .show_ui(ui, |ui| {
+                            for locale in Locale::ALL {
+                                ui.selectable_value(
+                                    &mut selected_locale,
+                                    locale,
+                                    locale.native_name(),
+                                );
+                            }
+                        });
+                });
+                ui.label(self.t("help.language"));
+                if icon_button(
+                    ui,
+                    "configuration.save",
+                    "▣",
+                    self.t("inspector.save_configuration"),
+                    self.t("help.save_configuration"),
+                ) {
+                    self.save_config_now();
+                }
+                ui.label(self.tf(
+                    "inspector.config_path",
+                    &[("path", self.config_file.display().to_string())],
+                ));
+                ui.separator();
+                ui.label(self.t("inspector.patchbay_options"));
                 let exclusive_label = self.t("inspector.exclusive");
-                ui.checkbox(&mut self.config.patchbay_exclusive, exclusive_label);
+                let exclusive_help = self.t("help.exclusive");
                 let auto_disconnect_label = self.t("inspector.auto_disconnect");
-                ui.checkbox(
-                    &mut self.config.patchbay_auto_disconnect,
-                    auto_disconnect_label,
-                );
+                let auto_disconnect_help = self.t("help.auto_disconnect");
                 let auto_pin_label = self.t("inspector.auto_pin");
-                ui.checkbox(&mut self.config.patchbay_auto_pin, auto_pin_label);
-                let patchbay_activated_before = self.config.patchbay_activated;
+                let auto_pin_help = self.t("help.auto_pin");
                 let patchbay_activated_label = self.t("inspector.patchbay_activated");
-                ui.checkbox(
+                let patchbay_activated_help = self.t("help.patchbay_activated");
+                icon_checkbox(
+                    ui,
+                    "patchbay.exclusive",
+                    &mut self.config.patchbay_exclusive,
+                    "◇",
+                    exclusive_label,
+                    exclusive_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "patchbay.auto_disconnect",
+                    &mut self.config.patchbay_auto_disconnect,
+                    "⇄",
+                    auto_disconnect_label,
+                    auto_disconnect_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "patchbay.auto_pin",
+                    &mut self.config.patchbay_auto_pin,
+                    "⚑",
+                    auto_pin_label,
+                    auto_pin_help,
+                );
+                let patchbay_activated_before = self.config.patchbay_activated;
+                icon_checkbox(
+                    ui,
+                    "patchbay.activated",
                     &mut self.config.patchbay_activated,
+                    "⏱",
                     patchbay_activated_label,
+                    patchbay_activated_help,
                 );
                 if self.config.patchbay_activated && !patchbay_activated_before {
                     self.activate_patchbay();
@@ -821,28 +1003,77 @@ impl eframe::App for QpwgraphApp {
                 ui.separator();
                 ui.heading(self.t("inspector.interface"));
                 let toolbar_visible_label = self.t("inspector.toolbar_visible");
-                ui.checkbox(&mut self.config.toolbar, toolbar_visible_label);
+                let toolbar_visible_help = self.t("help.toolbar_visible");
                 let statusbar_visible_label = self.t("inspector.statusbar_visible");
-                ui.checkbox(&mut self.config.statusbar, statusbar_visible_label);
+                let statusbar_visible_help = self.t("help.statusbar_visible");
                 let patchbay_toolbar_visible_label = self.t("inspector.patchbay_toolbar_visible");
-                ui.checkbox(
-                    &mut self.config.patchbay_toolbar,
-                    patchbay_toolbar_visible_label,
-                );
+                let patchbay_toolbar_visible_help = self.t("help.patchbay_toolbar_visible");
                 let menubar_visible_label = self.t("inspector.menubar_visible");
-                ui.checkbox(&mut self.config.menubar, menubar_visible_label);
+                let menubar_visible_help = self.t("help.menubar_visible");
+                icon_checkbox(
+                    ui,
+                    "interface.toolbar",
+                    &mut self.config.toolbar,
+                    "▤",
+                    toolbar_visible_label,
+                    toolbar_visible_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "interface.statusbar",
+                    &mut self.config.statusbar,
+                    "▥",
+                    statusbar_visible_label,
+                    statusbar_visible_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "interface.patchbay_toolbar",
+                    &mut self.config.patchbay_toolbar,
+                    "▦",
+                    patchbay_toolbar_visible_label,
+                    patchbay_toolbar_visible_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "interface.menubar",
+                    &mut self.config.menubar,
+                    "☰",
+                    menubar_visible_label,
+                    menubar_visible_help,
+                );
+                ui.separator();
+                ui.label(self.t("inspector.behavior"));
                 let repel_overlaps_label = self.t("inspector.repel_overlaps");
-                ui.checkbox(
-                    &mut self.config.repel_overlapping_nodes,
-                    repel_overlaps_label,
-                );
+                let repel_overlaps_help = self.t("help.repel_overlaps");
                 let connect_through_label = self.t("inspector.connect_through");
-                ui.checkbox(
-                    &mut self.config.connect_through_nodes,
-                    connect_through_label,
-                );
+                let connect_through_help = self.t("help.connect_through");
                 let thumbnail_label = self.t("inspector.thumbnail_view");
-                ui.checkbox(&mut self.canvas.thumbnail_mode, thumbnail_label);
+                let thumbnail_help = self.t("help.thumbnail_view");
+                icon_checkbox(
+                    ui,
+                    "behavior.repel",
+                    &mut self.config.repel_overlapping_nodes,
+                    "✣",
+                    repel_overlaps_label,
+                    repel_overlaps_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "behavior.connect_through",
+                    &mut self.config.connect_through_nodes,
+                    "↔",
+                    connect_through_label,
+                    connect_through_help,
+                );
+                icon_checkbox(
+                    ui,
+                    "behavior.thumbnail",
+                    &mut self.canvas.thumbnail_mode,
+                    "▧",
+                    thumbnail_label,
+                    thumbnail_help,
+                );
                 let sort_by_name = self.config.sort_type != "id";
                 let sort_by_name_before = sort_by_name;
                 let mut sort_by_name_choice = sort_by_name;
@@ -939,14 +1170,6 @@ impl eframe::App for QpwgraphApp {
                     egui::Color32::from_rgb(169, 121, 209),
                     self.t("port.alsa_midi"),
                 );
-                ui.separator();
-                egui::ComboBox::from_label(self.t("language.label"))
-                    .selected_text(selected_locale.native_name())
-                    .show_ui(ui, |ui| {
-                        for locale in Locale::ALL {
-                            ui.selectable_value(&mut selected_locale, locale, locale.native_name());
-                        }
-                    });
             });
 
         if selected_locale != current_locale {
@@ -991,25 +1214,7 @@ impl eframe::App for QpwgraphApp {
         if let Some(tray) = self.tray.as_ref() {
             tray.shutdown();
         }
-        self.config.zoom = self.canvas.zoom;
-        self.config.sort_type = if self.canvas.sort_ports_by_name {
-            "name".into()
-        } else {
-            "id".into()
-        };
-        self.config.sort_order = if self.canvas.sort_ports_descending {
-            "descending".into()
-        } else {
-            "ascending".into()
-        };
-        self.config.node_positions = self
-            .driver
-            .graph()
-            .nodes
-            .iter()
-            .map(|(id, node)| (id.0, node.position))
-            .collect();
-        self.config.patchbay_path = Some(self.patchbay_file.clone());
+        self.sync_config();
         if let Err(error) = self.config.save_to(&self.config_file) {
             eprintln!(
                 "{}",

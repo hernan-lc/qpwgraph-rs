@@ -1,7 +1,7 @@
 //! egui canvas primitives. Backend mutations are returned as actions so the UI
 //! never owns the driver or command stack.
 
-use egui::{pos2, vec2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use pw_graph_core::{Direction, Graph, LinkId, Node, NodeId, Port, PortId, PortType};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -120,7 +120,7 @@ impl GraphCanvas {
             self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.35, 2.5);
         }
 
-        for link in graph.links.values() {
+        for (link_index, link) in graph.links.values().enumerate() {
             if self.thumbnail_mode {
                 break;
             }
@@ -145,8 +145,14 @@ impl GraphCanvas {
                         ),
                     );
                     let hit_rect = Rect::from_two_pos(source_pos, destination_pos).expand(8.0);
-                    let response =
-                        ui.interact(hit_rect, Id::new(("link", link.id)), Sense::click());
+                    let link_widget_id = ui.id().with((
+                        "graph-link",
+                        link_index,
+                        link.id,
+                        link.output_port,
+                        link.input_port,
+                    ));
+                    let response = ui.interact(hit_rect, link_widget_id, Sense::click());
                     if response.clicked() {
                         self.selected_link = Some(link.id);
                         self.selected_nodes.clear();
@@ -255,7 +261,7 @@ impl GraphCanvas {
         let node_rect = self.node_rect(rect, graph, node);
         let response = ui.interact(
             node_rect,
-            Id::new(("node", node.id)),
+            ui.id().with(("graph-node", node.id)),
             Sense::click_and_drag(),
         );
         if response.clicked() {
@@ -370,7 +376,7 @@ impl GraphCanvas {
             let hit_rect = Rect::from_center_size(anchor, vec2(22.0, 22.0) * self.zoom.max(0.7));
             let response = ui.interact(
                 hit_rect,
-                Id::new(("port", port.id)),
+                ui.id().with(("graph-port", node.id, index, port.id)),
                 Sense::click_and_drag(),
             );
             painter.circle_filled(anchor, 6.0 * self.zoom.max(0.7), port_color(port.port_type));

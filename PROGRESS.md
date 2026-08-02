@@ -3,7 +3,9 @@
 The requested i18n and roadmap implementation is complete through M9 for the
 current Rust/egui implementation. English and Spanish are bundled catalogs with
 English fallback, runtime language switching, localized CLI help, status text,
-inspector controls, patchbay actions, and tray labels.
+inspector controls, patchbay actions, tray labels, and configuration help
+tooltips. The canvas widget-ID clash overlay was fixed by scoping every graph
+interaction ID to its canvas and graph item.
 
 ## Roadmap status
 

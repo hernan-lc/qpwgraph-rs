@@ -22,8 +22,11 @@ cargo run -p pw-graph-app
 ```
 
 Use `--lang es` to start in Spanish. The language can also be changed from the
-inspector and is persisted in the application config. Use `--demo` to force the
-deterministic in-memory graph.
+configuration section in the inspector and is persisted in the application
+config. The same section exposes patchbay, interface, graph-behavior, layout,
+and thumbnail settings; hover any icon for an explanation and use Save
+configuration to write immediately. Use `--demo` to force the deterministic
+in-memory graph.
 
 The default application build enables native PipeWire, ALSA MIDI, and Linux tray
 support. PipeWire and ALSA are feature-gated so the application can still be
