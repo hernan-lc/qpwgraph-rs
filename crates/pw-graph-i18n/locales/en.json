@@ -162,6 +162,7 @@
   "canvas.audio_meter_pinned": "Monitor pinned",
   "canvas.audio_meter_rms": "RMS",
   "canvas.audio_meter_peak": "Peak",
+  "canvas.audio_meter_peak_hold": "Peak hold",
   "canvas.audio_meter_age": "Updated {age} ms ago",
   "canvas.node_type_pipewire": "PipeWire node",
   "canvas.node_type_alsa_midi": "ALSA MIDI node",

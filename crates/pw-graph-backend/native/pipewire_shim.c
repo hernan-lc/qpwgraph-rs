@@ -14,6 +14,7 @@
 #include <pipewire/keys.h>
 #include <pipewire/stream.h>
 #include <spa/param/audio/raw-utils.h>
+#include <spa/param/buffers.h>
 #include <spa/param/format.h>
 #include <spa/buffer/buffer.h>
 #include <spa/utils/dict.h>
@@ -197,6 +198,22 @@ static void meter_param_changed(void *data, uint32_t id, const struct spa_pod *p
     }
     meter->format = info.format;
     meter->channels = info.channels == 0 ? 1 : info.channels;
+
+    uint8_t buffer[512];
+    struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    struct spa_pod_frame frame;
+    spa_pod_builder_push_object(&builder, &frame, SPA_TYPE_OBJECT_ParamBuffers,
+            SPA_PARAM_Buffers);
+    spa_pod_builder_add(&builder,
+            SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(4),
+            SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
+            SPA_PARAM_BUFFERS_size, SPA_POD_Int(16384),
+            SPA_PARAM_BUFFERS_stride, SPA_POD_Int(0),
+            0);
+    const struct spa_pod *params[1] = {
+        spa_pod_builder_pop(&builder, &frame),
+    };
+    (void)pw_stream_update_params(meter->stream, params, 1);
 }
 
 static void meter_process(void *data)
@@ -306,10 +323,12 @@ static int create_meter(struct pw_graph_shim *shim, const struct pw_graph_node *
             PW_KEY_TARGET_OBJECT, node->name,
             NULL);
     if (properties == NULL) {
+        destroy_meter(shim, meter_slot);
         return -ENOMEM;
     }
     meter->stream = pw_stream_new(shim->core, stream_name, properties);
     if (meter->stream == NULL) {
+        destroy_meter(shim, meter_slot);
         return errno == 0 ? -EIO : -errno;
     }
     pw_stream_add_listener(meter->stream, &meter->listener, &meter_events, meter);

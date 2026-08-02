@@ -63,7 +63,7 @@ fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: Str
         ui.horizontal(|ui| {
             ui.label(label);
             let response = ui.add(
-                egui::Slider::new(value, 0.75..=1.75)
+                egui::Slider::new(value, 0.80..=2.0)
                     .step_by(0.05)
                     .show_value(false),
             );
@@ -254,13 +254,14 @@ impl QpwgraphApp {
                             level_db(reading.rms)
                         )),
                 );
+                let peak_hold = self.canvas.meter_peak_hold(node_id, reading.peak);
                 ui.add(
-                    egui::ProgressBar::new(reading.peak.clamp(0.0, 1.0))
+                    egui::ProgressBar::new(peak_hold.clamp(0.0, 1.0))
                         .desired_width(ui.available_width())
                         .text(format!(
                             "{}  {:.1} dB",
-                            self.t("canvas.audio_meter_peak"),
-                            level_db(reading.peak)
+                            self.t("canvas.audio_meter_peak_hold"),
+                            level_db(peak_hold)
                         )),
                 );
                 ui.label(

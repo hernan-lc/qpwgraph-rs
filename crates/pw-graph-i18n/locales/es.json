@@ -162,6 +162,7 @@
   "canvas.audio_meter_pinned": "Monitor fijado",
   "canvas.audio_meter_rms": "RMS",
   "canvas.audio_meter_peak": "Pico",
+  "canvas.audio_meter_peak_hold": "Pico retenido",
   "canvas.audio_meter_age": "Actualizado hace {age} ms",
   "canvas.node_type_pipewire": "nodo de PipeWire",
   "canvas.node_type_alsa_midi": "nodo MIDI ALSA",

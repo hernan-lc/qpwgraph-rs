@@ -16,6 +16,7 @@ const EDGE_HIT_DISTANCE: f32 = 9.0;
 
 impl GraphCanvas {
     pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
+        self.update_peak_holds();
         let rect = ui.available_rect_before_wrap();
         let canvas_response = ui.allocate_rect(rect, Sense::drag());
         let painter = ui.painter_at(rect);
@@ -207,6 +208,19 @@ impl GraphCanvas {
         }
 
         actions
+    }
+
+    pub fn meter_peak_hold(&self, node_id: NodeId, fallback: f32) -> f32 {
+        self.peak_hold.get(&node_id).copied().unwrap_or(fallback)
+    }
+
+    fn update_peak_holds(&mut self) {
+        self.peak_hold
+            .retain(|node_id, _| self.meters.contains_key(node_id));
+        for (node_id, reading) in &self.meters {
+            let hold = self.peak_hold.entry(*node_id).or_insert(0.0);
+            *hold = (*hold - 0.012).max(reading.peak).clamp(0.0, 1.0);
+        }
     }
 
     fn repel_overlaps(&self, rect: Rect, graph: &Graph, actions: &mut Vec<CanvasAction>) {
@@ -476,8 +490,8 @@ impl GraphCanvas {
                                     .desired_width(190.0)
                                     .text(format!(
                                         "{}  {:.1} dB",
-                                        i18n.text("canvas.audio_meter_peak"),
-                                        level_db(reading.peak)
+                                        i18n.text("canvas.audio_meter_peak_hold"),
+                                        level_db(self.meter_peak_hold(node.id, reading.peak))
                                     )),
                             );
                             ui.label(

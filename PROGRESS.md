@@ -1,6 +1,6 @@
 # qpwgraph-rs progress report
 
-The requested i18n and roadmap implementation is complete through M9 for the
+The requested i18n and roadmap implementation is complete through M10 for the
 current Rust/egui implementation. English and Spanish are bundled catalogs with
 English fallback, runtime language switching, localized CLI help, status text,
 panel controls, patchbay actions, tray labels, and configuration help
