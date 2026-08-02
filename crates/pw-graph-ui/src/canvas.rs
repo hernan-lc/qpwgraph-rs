@@ -194,7 +194,7 @@ impl GraphCanvas {
                                 ("port", display_port_name(&output.name, i18n)),
                             ],
                         ),
-                        FontId::proportional(12.0),
+                        FontId::proportional(12.0 * self.zoom * self.node_text_scale.clamp(0.75, 1.75)),
                         Color32::LIGHT_GREEN,
                     );
                 }
@@ -356,6 +356,7 @@ impl GraphCanvas {
         }
 
         let selected = self.selected_nodes.contains(&node.id);
+        let text_scale = self.node_text_scale.clamp(0.75, 1.75);
         let accent = node_color(node.node_type);
         let fill = if selected {
             Color32::from_rgb(48, 60, 76)
@@ -396,7 +397,7 @@ impl GraphCanvas {
             header.left_center() + vec2(12.0 * self.zoom, 0.0),
             egui::Align2::LEFT_CENTER,
             compact_label(&display_node_name(&node.name, i18n), 22),
-            FontId::proportional(13.0 * self.zoom),
+            FontId::proportional(13.0 * self.zoom * text_scale),
             Color32::WHITE,
         );
         if !ports.is_empty() {
@@ -404,7 +405,7 @@ impl GraphCanvas {
                 pos2(header.right() - 28.0 * self.zoom, header.center().y),
                 egui::Align2::RIGHT_CENTER,
                 format!("{inputs}/{outputs}"),
-                FontId::proportional(10.0 * self.zoom),
+                FontId::proportional(10.0 * self.zoom * text_scale),
                 Color32::from_rgb(178, 193, 210),
             );
         }
@@ -467,7 +468,7 @@ impl GraphCanvas {
                     egui::Align2::LEFT_CENTER
                 },
                 compact_label(&display_port_name(&port.name, i18n), 25),
-                FontId::proportional(11.5 * self.zoom),
+                FontId::proportional(11.5 * self.zoom * text_scale),
                 Color32::from_rgb(215, 220, 227),
             );
 

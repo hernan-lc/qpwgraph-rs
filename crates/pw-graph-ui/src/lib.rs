@@ -16,6 +16,7 @@ pub enum CanvasAction {
 
 pub struct GraphCanvas {
     pub zoom: f32,
+    pub node_text_scale: f32,
     pub pan: Vec2,
     pub sort_ports_by_name: bool,
     pub sort_ports_descending: bool,
@@ -37,6 +38,7 @@ impl Default for GraphCanvas {
     fn default() -> Self {
         Self {
             zoom: 1.0,
+            node_text_scale: 1.0,
             pan: vec2(24.0, 24.0),
             sort_ports_by_name: true,
             sort_ports_descending: false,

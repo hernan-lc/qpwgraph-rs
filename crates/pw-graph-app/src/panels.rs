@@ -1,9 +1,73 @@
 use crate::app::QpwgraphApp;
 use crate::icons::{icon_button, icon_checkbox, icon_heading, icon_label, nav_icon_button, Icon};
-use egui::Ui;
+use egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_command::RenameCommand;
 use pw_graph_core::NodeId;
 use pw_graph_i18n::Locale;
+
+const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
+const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
+const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
+
+fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
+    let scale = scale.clamp(0.75, 1.75);
+    for font_id in ui.style_mut().text_styles.values_mut() {
+        font_id.size *= scale;
+    }
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 7.0);
+    ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
+}
+
+fn panel_header(ui: &mut Ui, icon: Icon, title: String, hint: String) {
+    ui.add_space(4.0);
+    icon_heading(ui, icon, title);
+    ui.add_space(1.0);
+    ui.label(RichText::new(hint).weak());
+    ui.add_space(5.0);
+    ui.separator();
+    ui.add_space(4.0);
+}
+
+fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&mut Ui)) {
+    egui::Frame::group(ui.style())
+        .fill(SECTION_FILL)
+        .stroke(Stroke::new(1.0, SECTION_STROKE))
+        .inner_margin(9.0)
+        .show(ui, |ui| {
+            ui.label(RichText::new(title).strong().color(Color32::from_rgb(205, 216, 230)));
+            ui.add_space(5.0);
+            contents(ui);
+        });
+    ui.add_space(8.0);
+}
+
+fn stat_card(ui: &mut Ui, label: String, value: String) {
+    egui::Frame::none()
+        .fill(Color32::from_rgb(36, 43, 53))
+        .rounding(5.0)
+        .inner_margin(egui::Margin::symmetric(9.0, 6.0))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(value).strong().size(18.0));
+                ui.label(RichText::new(label).small().weak());
+            });
+        });
+}
+
+fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: String) {
+    ui.push_id(("text-scale", id), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let response = ui.add(
+                egui::Slider::new(value, 0.75..=1.75)
+                    .step_by(0.05)
+                    .show_value(false),
+            );
+            response.on_hover_text(help);
+            ui.label(RichText::new(format!("{:.0}%", *value * 100.0)).weak());
+        });
+    });
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AppScreen {
@@ -18,16 +82,28 @@ impl QpwgraphApp {
     pub(crate) fn show_gui_panels(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("navigation")
             .resizable(false)
-            .default_width(58.0)
-            .show(ctx, |ui| self.show_navigation(ui));
+            .default_width(64.0)
+            .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(6.0))
+            .show(ctx, |ui| {
+                apply_panel_text_scale(ui, self.config.panel_text_scale);
+                self.show_navigation(ui)
+            });
 
         egui::SidePanel::right("screen_panel")
-            .default_width(320.0)
-            .show(ctx, |ui| match self.screen {
-                AppScreen::Graph => self.show_graph_screen(ui),
-                AppScreen::Patchbay => self.show_patchbay_screen(ui),
-                AppScreen::Interface => self.show_interface_screen(ui),
-                AppScreen::Diagnostics => self.show_diagnostics_screen(ui),
+            .default_width(370.0)
+            .width_range(310.0..=520.0)
+            .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(10.0))
+            .show(ctx, |ui| {
+                apply_panel_text_scale(ui, self.config.panel_text_scale);
+                egui::ScrollArea::vertical()
+                    .id_salt("inspector-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.screen {
+                        AppScreen::Graph => self.show_graph_screen(ui),
+                        AppScreen::Patchbay => self.show_patchbay_screen(ui),
+                        AppScreen::Interface => self.show_interface_screen(ui),
+                        AppScreen::Diagnostics => self.show_diagnostics_screen(ui),
+                    });
             });
     }
 
@@ -68,70 +144,73 @@ impl QpwgraphApp {
     }
 
     fn show_graph_screen(&mut self, ui: &mut Ui) {
-        icon_heading(ui, Icon::Graph, self.t("screen.graph"));
-        ui.label(self.t("screen.graph_hint"));
-        ui.separator();
-        ui.label(self.tf(
-            "inspector.nodes",
-            &[("count", self.driver.graph().nodes.len().to_string())],
-        ));
-        ui.label(self.tf(
-            "inspector.ports",
-            &[("count", self.driver.graph().ports.len().to_string())],
-        ));
-        ui.label(self.tf(
-            "inspector.links",
-            &[("count", self.driver.graph().links.len().to_string())],
-        ));
+        panel_header(
+            ui,
+            Icon::Graph,
+            self.t("screen.graph"),
+            self.t("screen.graph_hint"),
+        );
+        let node_count = self.driver.graph().nodes.len().to_string();
+        let port_count = self.driver.graph().ports.len().to_string();
+        let link_count = self.driver.graph().links.len().to_string();
+        panel_section(ui, self.t("inspector.overview"), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                stat_card(ui, self.t("inspector.nodes_short"), node_count);
+                stat_card(ui, self.t("inspector.ports_short"), port_count);
+                stat_card(ui, self.t("inspector.links_short"), link_count);
+            });
+        });
 
         if let Some(selected_node) = self.canvas.selected_node {
-            self.show_rename_control(ui, selected_node);
+            panel_section(ui, self.t("inspector.rename"), |ui| {
+                self.show_rename_control(ui, selected_node);
+            });
         }
 
-        ui.separator();
-        ui.label(self.t("inspector.layout"));
-        let sort_by_name = self.config.sort_type != "id";
-        let sort_by_name_before = sort_by_name;
-        let mut sort_by_name_choice = sort_by_name;
-        let sort_ports_response = egui::ComboBox::from_label(self.t("inspector.sort_ports"))
-            .selected_text(if sort_by_name {
-                self.t("sort.name")
-            } else {
-                self.t("sort.id")
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut sort_by_name_choice, true, self.t("sort.name"));
-                ui.selectable_value(&mut sort_by_name_choice, false, self.t("sort.id"));
-            });
-        sort_ports_response
-            .response
-            .on_hover_text(self.t("help.sort_ports"));
-        if sort_by_name_choice != sort_by_name_before {
-            self.config.sort_type = if sort_by_name_choice { "name" } else { "id" }.into();
-        }
-        let descending = self.config.sort_order == "descending";
-        let mut descending_choice = descending;
-        let sort_order_response = egui::ComboBox::from_label(self.t("inspector.sort_order"))
-            .selected_text(if descending {
-                self.t("sort.descending")
-            } else {
-                self.t("sort.ascending")
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut descending_choice, false, self.t("sort.ascending"));
-                ui.selectable_value(&mut descending_choice, true, self.t("sort.descending"));
-            });
-        sort_order_response
-            .response
-            .on_hover_text(self.t("help.sort_order"));
-        if descending_choice != descending {
-            self.config.sort_order = if descending_choice {
-                "descending"
-            } else {
-                "ascending"
+        panel_section(ui, self.t("inspector.layout"), |ui| {
+            let sort_by_name = self.config.sort_type != "id";
+            let sort_by_name_before = sort_by_name;
+            let mut sort_by_name_choice = sort_by_name;
+            let sort_ports_response = egui::ComboBox::from_label(self.t("inspector.sort_ports"))
+                .selected_text(if sort_by_name {
+                    self.t("sort.name")
+                } else {
+                    self.t("sort.id")
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut sort_by_name_choice, true, self.t("sort.name"));
+                    ui.selectable_value(&mut sort_by_name_choice, false, self.t("sort.id"));
+                });
+            sort_ports_response
+                .response
+                .on_hover_text(self.t("help.sort_ports"));
+            if sort_by_name_choice != sort_by_name_before {
+                self.config.sort_type = if sort_by_name_choice { "name" } else { "id" }.into();
             }
-            .into();
-        }
+            let descending = self.config.sort_order == "descending";
+            let mut descending_choice = descending;
+            let sort_order_response = egui::ComboBox::from_label(self.t("inspector.sort_order"))
+                .selected_text(if descending {
+                    self.t("sort.descending")
+                } else {
+                    self.t("sort.ascending")
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut descending_choice, false, self.t("sort.ascending"));
+                    ui.selectable_value(&mut descending_choice, true, self.t("sort.descending"));
+                });
+            sort_order_response
+                .response
+                .on_hover_text(self.t("help.sort_order"));
+            if descending_choice != descending {
+                self.config.sort_order = if descending_choice {
+                    "descending"
+                } else {
+                    "ascending"
+                }
+                .into();
+            }
+        });
     }
 
     fn show_rename_control(&mut self, ui: &mut Ui, selected_node: NodeId) {
@@ -143,8 +222,7 @@ impl QpwgraphApp {
         let Some(current_name) = current_name else {
             return;
         };
-        ui.separator();
-        ui.label(self.t("inspector.selected_node"));
+        ui.label(RichText::new(self.t("inspector.selected_node")).weak());
         if self.rename_node != Some(selected_node) {
             self.rename_node = Some(selected_node);
             self.rename_buffer = current_name.clone();
@@ -169,57 +247,64 @@ impl QpwgraphApp {
     }
 
     fn show_patchbay_screen(&mut self, ui: &mut Ui) {
-        icon_heading(ui, Icon::Patchbay, self.t("screen.patchbay"));
-        ui.label(self.t("screen.patchbay_hint"));
-        ui.separator();
-        let exclusive_label = self.t("inspector.exclusive");
-        let exclusive_help = self.t("help.exclusive");
-        icon_checkbox(
+        panel_header(
             ui,
-            "patchbay.exclusive",
-            &mut self.config.patchbay_exclusive,
-            Icon::Exclusive,
-            exclusive_label,
-            exclusive_help,
+            Icon::Patchbay,
+            self.t("screen.patchbay"),
+            self.t("screen.patchbay_hint"),
         );
-        let auto_disconnect_label = self.t("inspector.auto_disconnect");
-        let auto_disconnect_help = self.t("help.auto_disconnect");
-        icon_checkbox(
-            ui,
-            "patchbay.auto_disconnect",
-            &mut self.config.patchbay_auto_disconnect,
-            Icon::AutoDisconnect,
-            auto_disconnect_label,
-            auto_disconnect_help,
-        );
-        let auto_pin_label = self.t("inspector.auto_pin");
-        let auto_pin_help = self.t("help.auto_pin");
-        icon_checkbox(
-            ui,
-            "patchbay.auto_pin",
-            &mut self.config.patchbay_auto_pin,
-            Icon::Pin,
-            auto_pin_label,
-            auto_pin_help,
-        );
-        let patchbay_activated_before = self.config.patchbay_activated;
-        let patchbay_activated_label = self.t("inspector.patchbay_activated");
-        let patchbay_activated_help = self.t("help.patchbay_activated");
-        icon_checkbox(
-            ui,
-            "patchbay.activated",
-            &mut self.config.patchbay_activated,
-            Icon::Timer,
-            patchbay_activated_label,
-            patchbay_activated_help,
-        );
-        if self.config.patchbay_activated && !patchbay_activated_before {
-            self.activate_patchbay();
-        }
+        panel_section(ui, self.t("inspector.patchbay_options"), |ui| {
+            let exclusive_label = self.t("inspector.exclusive");
+            let exclusive_help = self.t("help.exclusive");
+            icon_checkbox(
+                ui,
+                "patchbay.exclusive",
+                &mut self.config.patchbay_exclusive,
+                Icon::Exclusive,
+                exclusive_label,
+                exclusive_help,
+            );
+            let auto_disconnect_label = self.t("inspector.auto_disconnect");
+            let auto_disconnect_help = self.t("help.auto_disconnect");
+            icon_checkbox(
+                ui,
+                "patchbay.auto_disconnect",
+                &mut self.config.patchbay_auto_disconnect,
+                Icon::AutoDisconnect,
+                auto_disconnect_label,
+                auto_disconnect_help,
+            );
+            let auto_pin_label = self.t("inspector.auto_pin");
+            let auto_pin_help = self.t("help.auto_pin");
+            icon_checkbox(
+                ui,
+                "patchbay.auto_pin",
+                &mut self.config.patchbay_auto_pin,
+                Icon::Pin,
+                auto_pin_label,
+                auto_pin_help,
+            );
+            let patchbay_activated_before = self.config.patchbay_activated;
+            let patchbay_activated_label = self.t("inspector.patchbay_activated");
+            let patchbay_activated_help = self.t("help.patchbay_activated");
+            icon_checkbox(
+                ui,
+                "patchbay.activated",
+                &mut self.config.patchbay_activated,
+                Icon::Timer,
+                patchbay_activated_label,
+                patchbay_activated_help,
+            );
+            if self.config.patchbay_activated && !patchbay_activated_before {
+                self.activate_patchbay();
+            }
+        });
 
-        ui.separator();
-        ui.heading(self.t("inspector.live_links"));
+        panel_section(ui, self.t("inspector.live_links"), |ui| {
         let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
+        if links.is_empty() {
+            ui.label(RichText::new(self.t("inspector.no_live_links")).weak());
+        }
         for link in links {
             let (output_node, output_port) = self
                 .driver
@@ -304,147 +389,198 @@ impl QpwgraphApp {
                 });
             });
         }
+        });
     }
 
     fn show_interface_screen(&mut self, ui: &mut Ui) {
-        icon_heading(ui, Icon::Settings, self.t("screen.interface"));
-        ui.label(self.t("screen.interface_hint"));
-        ui.separator();
+        panel_header(
+            ui,
+            Icon::Settings,
+            self.t("screen.interface"),
+            self.t("screen.interface_hint"),
+        );
         let current_locale = self.i18n.locale();
         let mut selected_locale = current_locale;
-        ui.horizontal(|ui| {
-            icon_label(ui, Icon::Language, self.t("language.label"));
-            egui::ComboBox::from_label(self.t("language.label"))
-                .selected_text(selected_locale.native_name())
-                .show_ui(ui, |ui| {
-                    for locale in Locale::ALL {
-                        ui.selectable_value(&mut selected_locale, locale, locale.native_name());
-                    }
-                });
+        panel_section(ui, self.t("inspector.configuration"), |ui| {
+            ui.horizontal(|ui| {
+                icon_label(ui, Icon::Language, self.t("language.label"));
+                let response = egui::ComboBox::from_label(self.t("language.label"))
+                    .selected_text(selected_locale.native_name())
+                    .show_ui(ui, |ui| {
+                        for locale in Locale::ALL {
+                            ui.selectable_value(
+                                &mut selected_locale,
+                                locale,
+                                locale.native_name(),
+                            );
+                        }
+                    });
+                response.response.on_hover_text(self.t("help.language"));
+            });
+            ui.add_space(2.0);
+            if icon_button(
+                ui,
+                "configuration.save",
+                Icon::Save,
+                self.t("inspector.save_configuration"),
+                self.t("help.save_configuration"),
+            ) {
+                self.save_config_now();
+            }
+            ui.label(RichText::new(self.tf(
+                "inspector.config_path",
+                &[("path", self.config_file.display().to_string())],
+            )).small().weak());
         });
-        ui.label(self.t("help.language"));
-        if icon_button(
-            ui,
-            "configuration.save",
-            Icon::Save,
-            self.t("inspector.save_configuration"),
-            self.t("help.save_configuration"),
-        ) {
-            self.save_config_now();
-        }
-        ui.label(self.tf(
-            "inspector.config_path",
-            &[("path", self.config_file.display().to_string())],
-        ));
         if selected_locale != current_locale {
             self.i18n.set_locale(selected_locale);
             self.config.language = selected_locale.code().to_owned();
             self.status = self.t("status.language_changed");
         }
 
-        ui.separator();
-        ui.heading(self.t("inspector.interface"));
-        let toolbar_label = self.t("inspector.toolbar_visible");
-        let toolbar_help = self.t("help.toolbar_visible");
-        icon_checkbox(
-            ui,
-            "interface.toolbar",
-            &mut self.config.toolbar,
-            Icon::Toolbar,
-            toolbar_label,
-            toolbar_help,
-        );
-        let statusbar_label = self.t("inspector.statusbar_visible");
-        let statusbar_help = self.t("help.statusbar_visible");
-        icon_checkbox(
-            ui,
-            "interface.statusbar",
-            &mut self.config.statusbar,
-            Icon::Statusbar,
-            statusbar_label,
-            statusbar_help,
-        );
-        let patchbay_toolbar_label = self.t("inspector.patchbay_toolbar_visible");
-        let patchbay_toolbar_help = self.t("help.patchbay_toolbar_visible");
-        icon_checkbox(
-            ui,
-            "interface.patchbay_toolbar",
-            &mut self.config.patchbay_toolbar,
-            Icon::Patchbay,
-            patchbay_toolbar_label,
-            patchbay_toolbar_help,
-        );
-        ui.separator();
-        ui.heading(self.t("inspector.behavior"));
-        let repel_label = self.t("inspector.repel_overlaps");
-        let repel_help = self.t("help.repel_overlaps");
-        icon_checkbox(
-            ui,
-            "behavior.repel",
-            &mut self.config.repel_overlapping_nodes,
-            Icon::Repel,
-            repel_label,
-            repel_help,
-        );
-        let through_label = self.t("inspector.connect_through");
-        let through_help = self.t("help.connect_through");
-        icon_checkbox(
-            ui,
-            "behavior.connect_through",
-            &mut self.config.connect_through_nodes,
-            Icon::Connect,
-            through_label,
-            through_help,
-        );
-        let thumbnail_label = self.t("inspector.thumbnail_view");
-        let thumbnail_help = self.t("help.thumbnail_view");
-        icon_checkbox(
-            ui,
-            "behavior.thumbnail",
-            &mut self.canvas.thumbnail_mode,
-            Icon::Thumbnail,
-            thumbnail_label,
-            thumbnail_help,
-        );
+        panel_section(ui, self.t("inspector.interface"), |ui| {
+            let toolbar_label = self.t("inspector.toolbar_visible");
+            let toolbar_help = self.t("help.toolbar_visible");
+            icon_checkbox(
+                ui,
+                "interface.toolbar",
+                &mut self.config.toolbar,
+                Icon::Toolbar,
+                toolbar_label,
+                toolbar_help,
+            );
+            let statusbar_label = self.t("inspector.statusbar_visible");
+            let statusbar_help = self.t("help.statusbar_visible");
+            icon_checkbox(
+                ui,
+                "interface.statusbar",
+                &mut self.config.statusbar,
+                Icon::Statusbar,
+                statusbar_label,
+                statusbar_help,
+            );
+            let patchbay_toolbar_label = self.t("inspector.patchbay_toolbar_visible");
+            let patchbay_toolbar_help = self.t("help.patchbay_toolbar_visible");
+            icon_checkbox(
+                ui,
+                "interface.patchbay_toolbar",
+                &mut self.config.patchbay_toolbar,
+                Icon::Patchbay,
+                patchbay_toolbar_label,
+                patchbay_toolbar_help,
+            );
+        });
+
+        panel_section(ui, self.t("inspector.behavior"), |ui| {
+            let repel_label = self.t("inspector.repel_overlaps");
+            let repel_help = self.t("help.repel_overlaps");
+            icon_checkbox(
+                ui,
+                "behavior.repel",
+                &mut self.config.repel_overlapping_nodes,
+                Icon::Repel,
+                repel_label,
+                repel_help,
+            );
+            let through_label = self.t("inspector.connect_through");
+            let through_help = self.t("help.connect_through");
+            icon_checkbox(
+                ui,
+                "behavior.connect_through",
+                &mut self.config.connect_through_nodes,
+                Icon::Connect,
+                through_label,
+                through_help,
+            );
+            let thumbnail_label = self.t("inspector.thumbnail_view");
+            let thumbnail_help = self.t("help.thumbnail_view");
+            icon_checkbox(
+                ui,
+                "behavior.thumbnail",
+                &mut self.canvas.thumbnail_mode,
+                Icon::Thumbnail,
+                thumbnail_label,
+                thumbnail_help,
+            );
+        });
+
+        panel_section(ui, self.t("inspector.typography"), |ui| {
+            scale_slider(
+                ui,
+                "ui",
+                &mut self.config.ui_text_scale,
+                self.t("inspector.ui_text_scale"),
+                self.t("help.ui_text_scale"),
+            );
+            scale_slider(
+                ui,
+                "panels",
+                &mut self.config.panel_text_scale,
+                self.t("inspector.panel_text_scale"),
+                self.t("help.panel_text_scale"),
+            );
+            scale_slider(
+                ui,
+                "nodes",
+                &mut self.config.node_text_scale,
+                self.t("inspector.node_text_scale"),
+                self.t("help.node_text_scale"),
+            );
+        });
     }
 
     fn show_diagnostics_screen(&mut self, ui: &mut Ui) {
-        icon_heading(ui, Icon::Diagnostics, self.t("screen.diagnostics"));
-        ui.label(self.t("screen.diagnostics_hint"));
-        ui.separator();
-        ui.label(self.tf(
-            "diagnostics.backend",
-            &[("name", self.backend_name.clone())],
-        ));
-        ui.label(self.tf("diagnostics.status", &[("status", self.status.clone())]));
-        ui.label(self.tf(
-            "diagnostics.nodes",
-            &[("count", self.driver.graph().nodes.len().to_string())],
-        ));
-        ui.label(self.tf(
-            "diagnostics.ports",
-            &[("count", self.driver.graph().ports.len().to_string())],
-        ));
-        ui.label(self.tf(
-            "diagnostics.links",
-            &[("count", self.driver.graph().links.len().to_string())],
-        ));
-        ui.separator();
-        ui.label(self.t("inspector.port_colors"));
-        ui.colored_label(egui::Color32::from_rgb(87, 199, 133), self.t("port.audio"));
-        ui.colored_label(egui::Color32::from_rgb(78, 157, 230), self.t("port.video"));
-        ui.colored_label(
-            egui::Color32::from_rgb(227, 93, 106),
-            self.t("port.pw_midi"),
+        panel_header(
+            ui,
+            Icon::Diagnostics,
+            self.t("screen.diagnostics"),
+            self.t("screen.diagnostics_hint"),
         );
-        ui.colored_label(
-            egui::Color32::from_rgb(169, 121, 209),
-            self.t("port.alsa_midi"),
-        );
-        ui.separator();
-        ui.label(self.tf(
-            "inspector.config_path",
-            &[("path", self.config_file.display().to_string())],
-        ));
+        panel_section(ui, self.t("inspector.runtime"), |ui| {
+            ui.label(self.tf(
+                "diagnostics.backend",
+                &[("name", self.backend_name.clone())],
+            ));
+            ui.label(self.tf("diagnostics.status", &[("status", self.status.clone())]));
+            ui.horizontal_wrapped(|ui| {
+                stat_card(
+                    ui,
+                    self.t("inspector.nodes_short"),
+                    self.driver.graph().nodes.len().to_string(),
+                );
+                stat_card(
+                    ui,
+                    self.t("inspector.ports_short"),
+                    self.driver.graph().ports.len().to_string(),
+                );
+                stat_card(
+                    ui,
+                    self.t("inspector.links_short"),
+                    self.driver.graph().links.len().to_string(),
+                );
+            });
+        });
+        panel_section(ui, self.t("inspector.port_colors"), |ui| {
+            ui.colored_label(egui::Color32::from_rgb(87, 199, 133), self.t("port.audio"));
+            ui.colored_label(egui::Color32::from_rgb(78, 157, 230), self.t("port.video"));
+            ui.colored_label(
+                egui::Color32::from_rgb(227, 93, 106),
+                self.t("port.pw_midi"),
+            );
+            ui.colored_label(
+                egui::Color32::from_rgb(169, 121, 209),
+                self.t("port.alsa_midi"),
+            );
+        });
+        panel_section(ui, self.t("inspector.configuration"), |ui| {
+            ui.label(
+                RichText::new(self.tf(
+                    "inspector.config_path",
+                    &[("path", self.config_file.display().to_string())],
+                ))
+                .small()
+                .weak(),
+            );
+        });
     }
 }

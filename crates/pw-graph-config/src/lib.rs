@@ -26,6 +26,12 @@ pub struct AppConfig {
     pub window_width: f32,
     pub window_height: f32,
     pub zoom: f32,
+    /// Multiplier for application chrome such as the toolbar and status bar.
+    pub ui_text_scale: f32,
+    /// Multiplier for navigation and inspector panel text.
+    pub panel_text_scale: f32,
+    /// Multiplier for node titles, port labels, and node counters.
+    pub node_text_scale: f32,
     pub sort_type: String,
     pub sort_order: String,
     pub repel_overlapping_nodes: bool,
@@ -50,6 +56,9 @@ impl Default for AppConfig {
             window_width: 1100.0,
             window_height: 760.0,
             zoom: 1.0,
+            ui_text_scale: 1.0,
+            panel_text_scale: 1.0,
+            node_text_scale: 1.0,
             sort_type: "name".into(),
             sort_order: "ascending".into(),
             repel_overlapping_nodes: true,

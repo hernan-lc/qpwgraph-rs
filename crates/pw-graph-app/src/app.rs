@@ -157,6 +157,7 @@ impl QpwgraphApp {
         }
         let mut canvas = GraphCanvas::default();
         canvas.zoom = config.zoom;
+        canvas.node_text_scale = config.node_text_scale;
         canvas.sort_ports_by_name = config.sort_type != "id";
         canvas.sort_ports_descending = config.sort_order == "descending";
         canvas.thumbnail_mode = config.thumbnail_view;
@@ -196,6 +197,20 @@ impl QpwgraphApp {
 
     pub(crate) fn tf(&self, key: &str, variables: &[(&str, String)]) -> String {
         self.i18n.format(key, variables)
+    }
+
+    fn apply_ui_text_scale(&self, ctx: &egui::Context) {
+        let scale = self.config.ui_text_scale.clamp(0.75, 1.75);
+        let default_text_styles = egui::Style::default().text_styles;
+        ctx.style_mut(|style| {
+            for (text_style, font_id) in &default_text_styles {
+                let mut scaled_font = font_id.clone();
+                scaled_font.size *= scale;
+                style
+                    .text_styles
+                    .insert(text_style.clone(), scaled_font);
+            }
+        });
     }
 
     fn refresh_graph(&mut self) {
@@ -404,6 +419,7 @@ impl QpwgraphApp {
 
 impl eframe::App for QpwgraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_ui_text_scale(ctx);
         #[cfg(all(target_os = "linux", feature = "tray"))]
         self.poll_tray(ctx);
         if self.start_minimized {
@@ -506,6 +522,7 @@ impl eframe::App for QpwgraphApp {
 
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
         self.canvas.sort_ports_descending = self.config.sort_order == "descending";
+        self.canvas.node_text_scale = self.config.node_text_scale;
         self.canvas.repel_overlapping_nodes = self.config.repel_overlapping_nodes;
         self.canvas.connect_through_nodes = self.config.connect_through_nodes;
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
