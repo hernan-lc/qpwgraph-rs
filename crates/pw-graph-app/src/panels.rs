@@ -67,7 +67,8 @@ fn color_swatch(ui: &mut Ui, color: Color32, label: String) {
         .inner_margin(egui::Margin::symmetric(9.0, 6.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (rect, _response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                let (rect, _response) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 2.5, color);
                 ui.label(label);
             });
@@ -108,6 +109,82 @@ fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
     ui.end_row();
 }
 
+struct ShortcutEntry {
+    keys: &'static str,
+    description_key: &'static str,
+}
+
+const SHORTCUT_ENTRIES: &[ShortcutEntry] = &[
+    ShortcutEntry {
+        keys: "F1",
+        description_key: "shortcuts.help",
+    },
+    ShortcutEntry {
+        keys: "Esc",
+        description_key: "shortcuts.close_cancel",
+    },
+    ShortcutEntry {
+        keys: "Delete / Backspace",
+        description_key: "shortcuts.delete_link",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+Z",
+        description_key: "shortcuts.undo",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+Shift+Z",
+        description_key: "shortcuts.redo",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+Y",
+        description_key: "shortcuts.redo",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+S",
+        description_key: "shortcuts.save_config",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+Shift+S",
+        description_key: "shortcuts.save_patchbay",
+    },
+    ShortcutEntry {
+        keys: "Ctrl/Cmd+O",
+        description_key: "shortcuts.load_patchbay",
+    },
+    ShortcutEntry {
+        keys: "R",
+        description_key: "shortcuts.refresh",
+    },
+    ShortcutEntry {
+        keys: "A",
+        description_key: "shortcuts.arrange",
+    },
+    ShortcutEntry {
+        keys: "T",
+        description_key: "shortcuts.thumbnail",
+    },
+    ShortcutEntry {
+        keys: "0",
+        description_key: "shortcuts.filter_all",
+    },
+    ShortcutEntry {
+        keys: "1",
+        description_key: "shortcuts.filter_audio",
+    },
+    ShortcutEntry {
+        keys: "2",
+        description_key: "shortcuts.filter_video",
+    },
+    ShortcutEntry {
+        keys: "3",
+        description_key: "shortcuts.filter_midi",
+    },
+    ShortcutEntry {
+        keys: "+ / -",
+        description_key: "shortcuts.zoom",
+    },
+];
+
 fn meter_policy_key(policy: MeterPolicy) -> &'static str {
     match policy {
         MeterPolicy::Disabled => "meters.off",
@@ -136,11 +213,29 @@ pub(crate) enum PreferencesTab {
 
 fn show_backdrop(ctx: &egui::Context, id_source: &str) -> bool {
     let screen_rect = ctx.screen_rect();
-    egui::Area::new(egui::Id::new(("modal-backdrop", id_source)))
+    let backdrop_id = egui::Id::new(("modal-backdrop", id_source));
+    // Keep the modal window above its backdrop no matter what. Clicking the
+    // backdrop (to dismiss the dialog) makes egui call `move_to_top` on that
+    // layer, and the reordering persists in memory — so reopening the dialog
+    // would otherwise draw the backdrop over the window. Registering the
+    // window as a sublayer of the backdrop re-inserts it directly above the
+    // backdrop at the end of every frame, overriding any stale order.
+    ctx.set_sublayer(
+        egui::LayerId::new(egui::Order::Foreground, backdrop_id),
+        egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new(("modal-window", id_source)),
+        ),
+    );
+    egui::Area::new(backdrop_id)
         .order(egui::Order::Foreground)
         .fixed_pos(screen_rect.min)
         .show(ctx, |ui| {
-            let (response, painter) = ui.allocate_painter(screen_rect.size(), egui::Sense::click());
+            let mut sense = egui::Sense::click();
+            // The backdrop must receive pointer clicks, but it is not a real
+            // control and must not interrupt Tab traversal inside the modal.
+            sense.focusable = false;
+            let (response, painter) = ui.allocate_painter(screen_rect.size(), sense);
             painter.rect_filled(response.rect, 0.0, Color32::from_black_alpha(120));
             response
         })
@@ -234,8 +329,12 @@ impl QpwgraphApp {
                 self.t("nav.preferences"),
                 self.t("help.navigation_preferences"),
             ) {
-                self.show_preferences = !self.show_preferences;
                 if self.show_preferences {
+                    self.show_preferences = false;
+                } else {
+                    self.show_preferences = true;
+                    self.show_shortcuts = false;
+                    self.show_diagnostics = false;
                     self.preferences_scroll_epoch = self.preferences_scroll_epoch.wrapping_add(1);
                 }
             }
@@ -247,7 +346,13 @@ impl QpwgraphApp {
                 self.t("screen.diagnostics"),
                 self.t("help.navigation_diagnostics"),
             ) {
-                self.show_diagnostics = !self.show_diagnostics;
+                if self.show_diagnostics {
+                    self.show_diagnostics = false;
+                } else {
+                    self.show_diagnostics = true;
+                    self.show_shortcuts = false;
+                    self.show_preferences = false;
+                }
             }
             if nav_icon_button(
                 ui,
@@ -257,7 +362,7 @@ impl QpwgraphApp {
                 self.t("nav.shortcuts"),
                 self.t("help.navigation_shortcuts"),
             ) {
-                self.show_shortcuts = !self.show_shortcuts;
+                self.toggle_shortcuts();
             }
         });
     }
@@ -408,37 +513,81 @@ impl QpwgraphApp {
             return;
         }
         if show_backdrop(ctx, "shortcuts") {
-            self.show_shortcuts = false;
+            self.close_shortcuts();
             return;
         }
         modal_window("shortcuts", self.t("shortcuts.title"), 560.0).show(ctx, |ui| {
             ui.label(RichText::new(self.t("shortcuts.hint")).weak());
             ui.add_space(8.0);
-            egui::Grid::new("shortcuts-grid")
-                .num_columns(2)
-                .spacing(egui::vec2(18.0, 7.0))
-                .show(ui, |ui| {
-                    shortcut_row(ui, "F1", self.t("shortcuts.help"));
-                    shortcut_row(ui, "Esc", self.t("shortcuts.close_cancel"));
-                    shortcut_row(ui, "Delete", self.t("shortcuts.delete_link"));
-                    shortcut_row(ui, "Ctrl/Cmd+Z", self.t("shortcuts.undo"));
-                    shortcut_row(ui, "Ctrl/Cmd+Shift+Z", self.t("shortcuts.redo"));
-                    shortcut_row(ui, "Ctrl/Cmd+Y", self.t("shortcuts.redo"));
-                    shortcut_row(ui, "Ctrl/Cmd+S", self.t("shortcuts.save_config"));
-                    shortcut_row(ui, "Ctrl/Cmd+Shift+S", self.t("shortcuts.save_patchbay"));
-                    shortcut_row(ui, "Ctrl/Cmd+O", self.t("shortcuts.load_patchbay"));
-                    shortcut_row(ui, "R", self.t("shortcuts.refresh"));
-                    shortcut_row(ui, "A", self.t("shortcuts.arrange"));
-                    shortcut_row(ui, "T", self.t("shortcuts.thumbnail"));
-                    shortcut_row(ui, "0", self.t("shortcuts.filter_all"));
-                    shortcut_row(ui, "1", self.t("shortcuts.filter_audio"));
-                    shortcut_row(ui, "2", self.t("shortcuts.filter_video"));
-                    shortcut_row(ui, "3", self.t("shortcuts.filter_midi"));
-                    shortcut_row(ui, "+ / -", self.t("shortcuts.zoom"));
-                });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.t("shortcuts.search")).strong());
+                let clear_width = if self.shortcut_search.is_empty() {
+                    0.0
+                } else {
+                    ui.spacing().button_padding.x * 2.0 + 42.0
+                };
+                let search_width = (ui.available_width() - clear_width).max(140.0);
+                let search_hint = self.t("shortcuts.search_hint");
+                let search_response = ui.add_sized(
+                    [search_width, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut self.shortcut_search)
+                        .id(egui::Id::new("shortcuts-search"))
+                        .hint_text(search_hint),
+                );
+                if self.shortcut_focus_search
+                    || ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F))
+                {
+                    search_response.request_focus();
+                    self.shortcut_focus_search = false;
+                }
+                if !self.shortcut_search.is_empty()
+                    && ui.small_button(self.t("shortcuts.clear_search")).clicked()
+                {
+                    self.shortcut_search.clear();
+                    self.shortcut_focus_search = true;
+                }
+            });
+            ui.add_space(6.0);
+
+            let query = self.shortcut_search.trim().to_lowercase();
+            let matching_entries: Vec<_> = SHORTCUT_ENTRIES
+                .iter()
+                .filter_map(|entry| {
+                    let description = self.t(entry.description_key);
+                    let searchable = format!("{} {}", entry.keys, description).to_lowercase();
+                    searchable
+                        .contains(&query)
+                        .then_some((entry.keys, description))
+                })
+                .collect();
+            ui.label(
+                RichText::new(self.tf(
+                    "shortcuts.result_count",
+                    &[("count", matching_entries.len().to_string())],
+                ))
+                .small()
+                .weak(),
+            );
+            fresh_scroll_area(("shortcuts-scroll", self.shortcut_scroll_epoch), 420.0).show(
+                ui,
+                |ui| {
+                    if matching_entries.is_empty() {
+                        ui.label(RichText::new(self.t("shortcuts.no_results")).weak());
+                    } else {
+                        egui::Grid::new("shortcuts-grid")
+                            .num_columns(2)
+                            .spacing(egui::vec2(18.0, 7.0))
+                            .show(ui, |ui| {
+                                for (keys, description) in matching_entries {
+                                    shortcut_row(ui, keys, description);
+                                }
+                            });
+                    }
+                },
+            );
             ui.add_space(10.0);
             if self.show_close_button(ui) {
-                self.show_shortcuts = false;
+                self.close_shortcuts();
             }
         });
     }
@@ -574,7 +723,10 @@ impl QpwgraphApp {
             self.rename_node = Some(selected_node);
             self.rename_buffer = current_name.clone();
         }
-        let response = ui.text_edit_singleline(&mut self.rename_buffer);
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.rename_buffer)
+                .id(egui::Id::new(("rename-node", selected_node))),
+        );
         if response.lost_focus()
             && ui.input(|input| input.key_pressed(egui::Key::Enter))
             && self.rename_buffer != current_name
@@ -612,6 +764,8 @@ impl QpwgraphApp {
             ) {
                 self.preferences_tab = PreferencesTab::Patchbay;
                 self.show_preferences = true;
+                self.show_shortcuts = false;
+                self.show_diagnostics = false;
                 self.preferences_scroll_epoch = self.preferences_scroll_epoch.wrapping_add(1);
             }
         });
@@ -748,14 +902,19 @@ impl QpwgraphApp {
                         && self.preferences_tab != tab
                     {
                         self.preferences_tab = tab;
-                        self.preferences_scroll_epoch = self.preferences_scroll_epoch.wrapping_add(1);
+                        self.preferences_scroll_epoch =
+                            self.preferences_scroll_epoch.wrapping_add(1);
                     }
                 }
             });
             ui.add_space(6.0);
             ui.separator();
             ui.add_space(6.0);
-            let scroll_id = ("preferences-scroll", self.preferences_tab, self.preferences_scroll_epoch);
+            let scroll_id = (
+                "preferences-scroll",
+                self.preferences_tab,
+                self.preferences_scroll_epoch,
+            );
             fresh_scroll_area(scroll_id, 460.0).show(ui, |ui| match self.preferences_tab {
                 PreferencesTab::Interface => self.show_preferences_interface_tab(ui),
                 PreferencesTab::Patchbay => self.show_preferences_patchbay_tab(ui),
@@ -1014,7 +1173,11 @@ impl QpwgraphApp {
                 color_swatch(ui, Color32::from_rgb(87, 199, 133), self.t("port.audio"));
                 color_swatch(ui, Color32::from_rgb(78, 157, 230), self.t("port.video"));
                 color_swatch(ui, Color32::from_rgb(227, 93, 106), self.t("port.pw_midi"));
-                color_swatch(ui, Color32::from_rgb(169, 121, 209), self.t("port.alsa_midi"));
+                color_swatch(
+                    ui,
+                    Color32::from_rgb(169, 121, 209),
+                    self.t("port.alsa_midi"),
+                );
             });
         });
         panel_section(ui, self.t("inspector.configuration"), |ui| {

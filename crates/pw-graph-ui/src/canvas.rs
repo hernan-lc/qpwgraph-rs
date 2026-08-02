@@ -24,6 +24,16 @@ struct NodeDrawContext<'a> {
 
 impl GraphCanvas {
     pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
+        self.show_with_keyboard_shortcuts(ui, graph, i18n, true)
+    }
+
+    pub fn show_with_keyboard_shortcuts(
+        &mut self,
+        ui: &mut Ui,
+        graph: &Graph,
+        i18n: &I18n,
+        keyboard_shortcuts_enabled: bool,
+    ) -> Vec<CanvasAction> {
         self.update_peak_holds();
         self.hovered_meter_node = None;
         let visible_node_ids = self.visible_node_ids(graph);
@@ -53,6 +63,9 @@ impl GraphCanvas {
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
         self.draw_grid(&painter, rect);
+        if canvas_response.has_focus() {
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, Color32::LIGHT_BLUE));
+        }
 
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.pending_output = None;
@@ -125,21 +138,6 @@ impl GraphCanvas {
                     let hovered = pointer_pos.is_some_and(|pointer| {
                         point_near_polyline(pointer, &points, EDGE_HIT_DISTANCE)
                     });
-                    let color = if selected {
-                        Color32::LIGHT_GREEN
-                    } else if hovered {
-                        Color32::WHITE
-                    } else {
-                        edge_color(source.port_type)
-                    };
-                    painter.add(Shape::line(
-                        points.clone(),
-                        Stroke::new(if selected { 5.0_f32 } else { 3.5_f32 }, Color32::BLACK),
-                    ));
-                    painter.add(Shape::line(
-                        points.clone(),
-                        Stroke::new(if selected { 2.8_f32 } else { 1.6_f32 }, color),
-                    ));
                     let hit_rect = points_bounds(&points).expand(EDGE_HIT_DISTANCE);
                     let link_widget_id = ui.id().with((
                         "graph-link",
@@ -161,7 +159,49 @@ impl GraphCanvas {
                             }
                         });
                     }
-                    let clicked = hovered && !pointer_over_node && response.clicked();
+                    let focused = response.has_focus();
+                    let color = if selected {
+                        Color32::LIGHT_GREEN
+                    } else if focused {
+                        Color32::LIGHT_BLUE
+                    } else if hovered {
+                        Color32::WHITE
+                    } else {
+                        edge_color(source.port_type)
+                    };
+                    painter.add(Shape::line(
+                        points.clone(),
+                        Stroke::new(
+                            if selected {
+                                5.0_f32
+                            } else if focused {
+                                4.5_f32
+                            } else {
+                                3.5_f32
+                            },
+                            Color32::BLACK,
+                        ),
+                    ));
+                    painter.add(Shape::line(
+                        points.clone(),
+                        Stroke::new(
+                            if selected {
+                                2.8_f32
+                            } else if focused {
+                                2.4_f32
+                            } else {
+                                1.6_f32
+                            },
+                            color,
+                        ),
+                    ));
+                    let keyboard_clicked = response.clicked()
+                        && ui.input(|input| {
+                            input.key_pressed(egui::Key::Enter)
+                                || input.key_pressed(egui::Key::Space)
+                        });
+                    let pointer_clicked = hovered && !pointer_over_node && response.clicked();
+                    let clicked = keyboard_clicked || pointer_clicked;
                     if clicked {
                         self.selected_link = Some(link.id);
                         self.selected_nodes.clear();
@@ -195,7 +235,7 @@ impl GraphCanvas {
         // Handle this after the canvas has processed pointer input. This lets
         // a link be selected and deleted during the same egui frame, and keeps
         // the action in the same path as the context-menu disconnect.
-        if !ui.ctx().wants_keyboard_input()
+        if keyboard_shortcuts_enabled
             && ui.input(|input| {
                 input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
             })
@@ -515,6 +555,7 @@ impl GraphCanvas {
         }
 
         let selected = self.selected_nodes.contains(&node.id);
+        let focused = body_response.has_focus() || header_response.has_focus();
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
         let accent = dominant_port_type(&ports)
             .map(port_color)
@@ -529,9 +570,15 @@ impl GraphCanvas {
             8.0,
             fill,
             Stroke::new(
-                if selected { 2.0_f32 } else { 1.0_f32 },
+                if selected || focused {
+                    2.0_f32
+                } else {
+                    1.0_f32
+                },
                 if selected {
                     accent
+                } else if focused {
+                    Color32::LIGHT_BLUE
                 } else {
                     Color32::from_rgb(86, 103, 125)
                 },
@@ -692,7 +739,7 @@ impl GraphCanvas {
                 self.hovered_meter_node = Some(node.id);
             }
             let pending = self.pending_output == Some(port.id);
-            if response.hovered() || pending {
+            if response.hovered() || pending || response.has_focus() {
                 painter.rect_filled(
                     row_rect,
                     4.0,
@@ -707,8 +754,19 @@ impl GraphCanvas {
                 Stroke::new(1.2_f32, Color32::from_black_alpha(170)),
             );
             painter.circle_filled(anchor, radius, dot_color);
-            if response.hovered() || pending {
-                painter.circle_stroke(anchor, radius + 3.0, Stroke::new(1.5_f32, Color32::WHITE));
+            if response.hovered() || pending || response.has_focus() {
+                painter.circle_stroke(
+                    anchor,
+                    radius + 3.0,
+                    Stroke::new(
+                        1.5_f32,
+                        if response.has_focus() && !response.hovered() && !pending {
+                            Color32::LIGHT_BLUE
+                        } else {
+                            Color32::WHITE
+                        },
+                    ),
+                );
             }
             let text_pos = if port.direction == Direction::Source {
                 anchor - vec2(10.0, 0.0)

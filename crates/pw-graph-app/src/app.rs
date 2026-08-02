@@ -42,6 +42,9 @@ pub(crate) struct QpwgraphApp {
     /// at the top instead of reusing a scroll offset left over from before.
     pub(crate) dock_scroll_epoch: u32,
     pub(crate) show_shortcuts: bool,
+    pub(crate) shortcut_search: String,
+    pub(crate) shortcut_focus_search: bool,
+    pub(crate) shortcut_scroll_epoch: u32,
     pub(crate) show_preferences: bool,
     pub(crate) preferences_tab: PreferencesTab,
     /// Same purpose as `dock_scroll_epoch`, for the Preferences modal.
@@ -212,6 +215,9 @@ impl QpwgraphApp {
             dock_open: false,
             dock_scroll_epoch: 0,
             show_shortcuts: false,
+            shortcut_search: String::new(),
+            shortcut_focus_search: false,
+            shortcut_scroll_epoch: 0,
             show_preferences: false,
             preferences_tab: PreferencesTab::default(),
             preferences_scroll_epoch: 0,
@@ -260,23 +266,56 @@ impl QpwgraphApp {
         self.show_shortcuts || self.show_preferences || self.show_diagnostics
     }
 
+    pub(crate) fn toggle_shortcuts(&mut self) {
+        if self.show_shortcuts {
+            self.show_shortcuts = false;
+            self.shortcut_focus_search = false;
+            return;
+        }
+        self.show_shortcuts = true;
+        self.show_preferences = false;
+        self.show_diagnostics = false;
+        self.shortcut_search.clear();
+        self.shortcut_focus_search = true;
+        self.shortcut_scroll_epoch = self.shortcut_scroll_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn close_shortcuts(&mut self) {
+        self.show_shortcuts = false;
+        self.shortcut_focus_search = false;
+    }
+
+    fn text_input_focused(&self, ctx: &egui::Context) -> bool {
+        let rename_id = self
+            .rename_node
+            .map(|node| egui::Id::new(("rename-node", node)));
+        let shortcut_search_id = self
+            .show_shortcuts
+            .then_some(egui::Id::new("shortcuts-search"));
+        ctx.memory(|memory| {
+            memory.focused().is_some_and(|focused| {
+                Some(focused) == shortcut_search_id || Some(focused) == rename_id
+            })
+        })
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let f1_pressed = ctx.input(|input| input.key_pressed(egui::Key::F1));
         if f1_pressed {
-            self.show_shortcuts = !self.show_shortcuts;
+            self.toggle_shortcuts();
             return;
         }
 
         if self.any_modal_open() {
             if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-                self.show_shortcuts = false;
+                self.close_shortcuts();
                 self.show_preferences = false;
                 self.show_diagnostics = false;
             }
             return;
         }
 
-        if ctx.wants_keyboard_input() {
+        if self.text_input_focused(ctx) {
             return;
         }
 
@@ -666,7 +705,7 @@ impl eframe::App for QpwgraphApp {
             self.config.window_height = rect.height();
         }
 
-        if self.config.toolbar || self.config.patchbay_toolbar {
+        if !self.any_modal_open() && (self.config.toolbar || self.config.patchbay_toolbar) {
             egui::TopBottomPanel::top("action_toolbar")
                 .frame(
                     egui::Frame::none()
@@ -752,7 +791,9 @@ impl eframe::App for QpwgraphApp {
                 });
         }
 
-        self.show_gui_panels(ctx);
+        if !self.any_modal_open() {
+            self.show_gui_panels(ctx);
+        }
 
         self.canvas.media_filter = MediaFilter::parse(&self.config.media_filter);
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
@@ -790,7 +831,12 @@ impl eframe::App for QpwgraphApp {
             let actions = if self.any_modal_open() {
                 Vec::new()
             } else {
-                self.canvas.show(ui, self.driver.graph(), &self.i18n)
+                self.canvas.show_with_keyboard_shortcuts(
+                    ui,
+                    self.driver.graph(),
+                    &self.i18n,
+                    !self.text_input_focused(ctx),
+                )
             };
             self.handle_canvas_actions(actions);
         });
