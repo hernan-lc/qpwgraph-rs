@@ -6,13 +6,15 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["pipewire", "alsa"]
+default = ["pipewire", "alsa", "tray"]
 pipewire = ["pw-graph-backend/pipewire"]
 alsa = ["pw-graph-alsamidi/alsa"]
+tray = ["dep:ksni"]
 
 [dependencies]
 eframe.workspace = true
 egui.workspace = true
+ksni = { version = "0.3.6", features = ["blocking"], optional = true }
 pw-graph-backend = { path = "../pw-graph-backend" }
 pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false }
 pw-graph-command = { path = "../pw-graph-command" }

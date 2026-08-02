@@ -125,4 +125,14 @@ mod tests {
             "Connected port 1 → 2"
         );
     }
+
+    #[test]
+    fn locale_catalogs_cover_the_same_keys() {
+        let english = load_catalog(include_str!("../locales/en.json"));
+        let spanish = load_catalog(include_str!("../locales/es.json"));
+        assert_eq!(
+            english.keys().collect::<Vec<_>>(),
+            spanish.keys().collect::<Vec<_>>()
+        );
+    }
 }

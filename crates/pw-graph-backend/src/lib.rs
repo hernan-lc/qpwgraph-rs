@@ -247,7 +247,9 @@ mod pipewire_native {
         fn pw_graph_shim_snapshot(shim: *mut c_void, snapshot: *mut RawSnapshot) -> i32;
         fn pw_graph_shim_create_link(
             shim: *mut c_void,
+            output_node: u32,
             output_port: u32,
+            input_node: u32,
             input_port: u32,
             link_id: *mut u32,
         ) -> i32;
@@ -375,7 +377,14 @@ mod pipewire_native {
             }
             let mut link_id = 0;
             let result = unsafe {
-                pw_graph_shim_create_link(self.native, src.0 as u32, dst.0 as u32, &mut link_id)
+                pw_graph_shim_create_link(
+                    self.native,
+                    output.node_id.0 as u32,
+                    src.0 as u32,
+                    input.node_id.0 as u32,
+                    dst.0 as u32,
+                    &mut link_id,
+                )
             };
             if result < 0 {
                 return Err(native_error("PipeWire link creation", result));
@@ -540,5 +549,44 @@ mod tests {
             .expect("PipeWire registry snapshot should succeed");
         assert!(!nodes.is_empty());
         assert!(!driver.graph().ports.is_empty());
+    }
+
+    #[cfg(feature = "pipewire")]
+    #[test]
+    fn native_backend_can_create_and_destroy_a_link_when_enabled() {
+        if std::env::var_os("PW_GRAPH_TEST_LINKS").is_none() {
+            return;
+        }
+        let mut driver = PipewireDriver::new().expect("PipeWire daemon should be available");
+        driver
+            .refresh()
+            .expect("PipeWire registry snapshot should succeed");
+        let existing = existing_connections(&driver);
+        let pair = driver.graph().ports.values().find_map(|output| {
+            if !output.direction.is_source() {
+                return None;
+            }
+            driver.graph().ports.values().find_map(|input| {
+                if !input.direction.is_sink()
+                    || (output.port_type != input.port_type
+                        && output.port_type != PortType::Unknown
+                        && input.port_type != PortType::Unknown)
+                    || existing.contains(&(output.id, input.id))
+                {
+                    return None;
+                }
+                Some((output.id, input.id))
+            })
+        });
+        let Some((output, input)) = pair else {
+            return;
+        };
+        let link = driver
+            .connect(output, input)
+            .expect("PipeWire link creation should succeed");
+        assert!(driver.graph().link(link.id).is_some());
+        driver
+            .disconnect(link.id)
+            .expect("PipeWire link destruction should succeed");
     }
 }

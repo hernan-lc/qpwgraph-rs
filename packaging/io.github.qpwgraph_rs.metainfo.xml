@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.qpwgraph_rs</id>
+  <name>qpwgraph-rs</name>
+  <summary>Visual PipeWire and ALSA MIDI connection manager</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <launchable type="desktop-id">qpwgraph-rs.desktop</launchable>
+  <description>
+    <p>Inspect, connect, disconnect, and persist PipeWire and ALSA Sequencer MIDI graphs.</p>
+  </description>
+  <url type="homepage">https://github.com/rncbc/qpwgraph</url>
+  <provides>
+    <binary>qpwgraph-rs</binary>
+  </provides>
+</component>

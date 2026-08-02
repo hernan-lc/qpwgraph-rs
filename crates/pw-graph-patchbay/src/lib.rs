@@ -7,7 +7,7 @@
 use pw_graph_backend::{existing_connections, BackendError, GraphDriver};
 use pw_graph_core::{Direction, Graph, LinkId, NodeType, PortId, PortType};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -149,7 +149,9 @@ impl Patchbay {
     }
 
     pub fn snapshot_graph(&mut self, graph: &Graph, pinned: bool) {
-        for link in graph.links.values() {
+        let links: Vec<_> = graph.links.values().cloned().collect();
+        self.connections.clear();
+        for link in links {
             self.add_graph_connection(graph, link.output_port, link.input_port, pinned);
         }
     }
@@ -383,7 +385,7 @@ fn attributes(
             let attribute = attribute.map_err(|_| PatchbayError::XmlAttributes)?;
             let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
             let value = attribute
-                .decode_and_unescape_value(reader.decoder())
+                .decoded_and_normalized_value(XmlVersion::default(), reader.decoder())
                 .map_err(PatchbayError::Xml)?
                 .into_owned();
             Ok((key, value))

@@ -18,6 +18,8 @@ pub struct GraphCanvas {
     pub sort_ports_by_name: bool,
     pub sort_ports_descending: bool,
     pub thumbnail_mode: bool,
+    pub repel_overlapping_nodes: bool,
+    pub connect_through_nodes: bool,
     pending_output: Option<PortId>,
     pub selected_node: Option<NodeId>,
     pub selected_nodes: BTreeSet<NodeId>,
@@ -37,6 +39,8 @@ impl Default for GraphCanvas {
             sort_ports_by_name: true,
             sort_ports_descending: false,
             thumbnail_mode: false,
+            repel_overlapping_nodes: false,
+            connect_through_nodes: false,
             pending_output: None,
             selected_node: None,
             selected_nodes: BTreeSet::new(),
@@ -57,6 +61,14 @@ impl GraphCanvas {
         let painter = ui.painter_at(rect);
         let mut actions = Vec::new();
         let mut anchors = HashMap::new();
+
+        if self.repel_overlapping_nodes
+            && self.dragging_node.is_none()
+            && self.selection_start.is_none()
+            && !self.thumbnail_mode
+        {
+            self.repel_overlaps(rect, graph, &mut actions);
+        }
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(25, 28, 34));
         self.draw_grid(&painter, rect);
@@ -185,6 +197,28 @@ impl GraphCanvas {
         actions
     }
 
+    fn repel_overlaps(&self, rect: Rect, graph: &Graph, actions: &mut Vec<CanvasAction>) {
+        let mut occupied = Vec::new();
+        for node in graph.nodes.values() {
+            let mut candidate = self.node_rect(rect, graph, node);
+            let mut position = node.position;
+            while occupied
+                .iter()
+                .any(|other: &Rect| other.intersects(candidate))
+            {
+                position[0] += 240.0;
+                candidate = candidate.translate(vec2(240.0 * self.zoom, 0.0));
+            }
+            if position != node.position {
+                actions.push(CanvasAction::MoveNode {
+                    node: node.id,
+                    position,
+                });
+            }
+            occupied.push(candidate);
+        }
+    }
+
     fn draw_grid(&self, painter: &egui::Painter, rect: Rect) {
         let spacing = 32.0 * self.zoom;
         let origin = rect.left_top() + self.pan;
@@ -234,6 +268,30 @@ impl GraphCanvas {
             }
             self.selected_node = self.selected_nodes.iter().next().copied();
             self.selected_link = None;
+
+            if self.connect_through_nodes {
+                if let Some(output_id) = self.pending_output {
+                    let compatible_input = self
+                        .ordered_ports(graph, node)
+                        .into_iter()
+                        .find(|port| {
+                            port.direction == Direction::Sink
+                                && graph.port(output_id).is_some_and(|output| {
+                                    output.port_type == port.port_type
+                                        || output.port_type == PortType::Unknown
+                                        || port.port_type == PortType::Unknown
+                                })
+                        })
+                        .map(|port| port.id);
+                    if let Some(input) = compatible_input {
+                        self.pending_output = None;
+                        actions.push(CanvasAction::Connect {
+                            output: output_id,
+                            input,
+                        });
+                    }
+                }
+            }
         }
         if response.drag_started() {
             if !self.selected_nodes.contains(&node.id) {

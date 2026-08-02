@@ -4,13 +4,17 @@
 //! merged with PipeWire without colliding with PipeWire global IDs.
 
 use pw_graph_backend::{BackendError, BackendResult, GraphDriver};
-use pw_graph_core::{
-    Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
-};
+#[cfg(feature = "alsa")]
+use pw_graph_core::{Direction, GraphError, Port};
+use pw_graph_core::{Graph, Link, LinkId, Node, NodeId, NodeType, PortId, PortType};
+#[cfg(feature = "alsa")]
 use std::ffi::{c_void, CStr};
 
+#[cfg(feature = "alsa")]
 const NAMESPACE: u64 = 1 << 63;
+#[cfg(feature = "alsa")]
 const MAX_NODES: usize = 256;
+#[cfg(feature = "alsa")]
 const MAX_PORTS: usize = 4096;
 
 #[cfg(feature = "alsa")]
@@ -53,6 +57,7 @@ mod native {
     }
 }
 
+#[cfg(feature = "alsa")]
 fn native_error(operation: &str, code: i32) -> BackendError {
     BackendError::Native(format!("{operation} failed with code {code}"))
 }
@@ -230,6 +235,44 @@ mod tests {
             .expect("ALSA registry snapshot should succeed");
         assert!(!nodes.is_empty());
         assert!(!driver.graph().ports.is_empty());
+    }
+
+    #[test]
+    fn native_backend_can_create_and_destroy_a_link_when_enabled() {
+        if std::env::var_os("PW_GRAPH_TEST_ALSA_LINKS").is_none() {
+            return;
+        }
+        let mut driver = AlsaMidiDriver::new().expect("ALSA Sequencer should be available");
+        driver
+            .refresh()
+            .expect("ALSA registry snapshot should succeed");
+        let existing: std::collections::BTreeSet<_> = driver
+            .graph()
+            .links
+            .values()
+            .map(|link| (link.output_port, link.input_port))
+            .collect();
+        let pair = driver.graph().ports.values().find_map(|output| {
+            if !output.direction.is_source() {
+                return None;
+            }
+            driver.graph().ports.values().find_map(|input| {
+                if !input.direction.is_sink() || existing.contains(&(output.id, input.id)) {
+                    return None;
+                }
+                Some((output.id, input.id))
+            })
+        });
+        let Some((output, input)) = pair else {
+            return;
+        };
+        let link = driver
+            .connect(output, input)
+            .expect("ALSA link creation should succeed");
+        assert!(driver.graph().link(link.id).is_some());
+        driver
+            .disconnect(link.id)
+            .expect("ALSA link destruction should succeed");
     }
 }
 

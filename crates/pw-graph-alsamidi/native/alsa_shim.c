@@ -52,6 +52,24 @@ static void split_port_id(uint32_t id, int *client, int *port)
     *port = (int)(id & 0xffff);
 }
 
+static void append_link(struct alsa_snapshot *snapshot, uint32_t output_port,
+    uint32_t input_port)
+{
+    uint32_t index;
+    if (output_port == input_port || snapshot->link_count >= ALSA_MAX_PORTS) {
+        return;
+    }
+    for (index = 0; index < snapshot->link_count; ++index) {
+        if (snapshot->links[index].output_port == output_port &&
+                snapshot->links[index].input_port == input_port) {
+            return;
+        }
+    }
+    snapshot->links[snapshot->link_count].output_port = output_port;
+    snapshot->links[snapshot->link_count].input_port = input_port;
+    ++snapshot->link_count;
+}
+
 struct alsa_shim *alsa_shim_new(void)
 {
     struct alsa_shim *shim = calloc(1, sizeof(*shim));
@@ -85,6 +103,7 @@ int alsa_shim_snapshot(struct alsa_shim *shim, struct alsa_snapshot *snapshot)
 {
     snd_seq_client_info_t *client_info;
     snd_seq_port_info_t *port_info;
+    snd_seq_query_subscribe_t *query;
     int client;
     if (shim == NULL || snapshot == NULL) {
         return -EINVAL;
@@ -123,6 +142,31 @@ int alsa_shim_snapshot(struct alsa_shim *shim, struct alsa_snapshot *snapshot)
                 sizeof(snapshot->ports[snapshot->port_count].name), "%s",
                 snd_seq_port_info_get_name(port_info));
             ++snapshot->port_count;
+        }
+    }
+
+    /* Query subscriptions from each source port.  READ subscriptions are
+     * the destinations consuming events written by the queried port. */
+    snd_seq_query_subscribe_alloca(&query);
+    for (uint32_t index = 0; index < snapshot->port_count; ++index) {
+        int source_client;
+        int source_port;
+        uint32_t source_id = snapshot->ports[index].id;
+        const snd_seq_addr_t *destination;
+        split_port_id(source_id, &source_client, &source_port);
+        snd_seq_query_subscribe_set_client(query, source_client);
+        snd_seq_query_subscribe_set_port(query, source_port);
+        snd_seq_query_subscribe_set_type(query, SND_SEQ_QUERY_SUBS_READ);
+        snd_seq_query_subscribe_set_index(query, 0);
+        while (snd_seq_query_port_subscribers(shim->seq, query) >= 0) {
+            destination = snd_seq_query_subscribe_get_addr(query);
+            if (destination == NULL) {
+                break;
+            }
+            append_link(snapshot, source_id,
+                port_id(destination->client, destination->port));
+            snd_seq_query_subscribe_set_index(query,
+                snd_seq_query_subscribe_get_index(query) + 1);
         }
     }
     return 0;

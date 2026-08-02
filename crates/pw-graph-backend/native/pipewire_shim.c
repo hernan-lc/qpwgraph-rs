@@ -328,7 +328,8 @@ int pw_graph_shim_snapshot(struct pw_graph_shim *shim, struct pw_graph_snapshot 
 }
 
 int pw_graph_shim_create_link(struct pw_graph_shim *shim,
-        uint32_t output_port, uint32_t input_port, uint32_t *link_id)
+        uint32_t output_node, uint32_t output_port,
+        uint32_t input_node, uint32_t input_port, uint32_t *link_id)
 {
     struct pw_properties *properties;
     struct pw_proxy *proxy;
@@ -342,15 +343,18 @@ int pw_graph_shim_create_link(struct pw_graph_shim *shim,
         pw_thread_loop_unlock(shim->thread_loop);
         return -ENOMEM;
     }
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u", output_node);
     pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_PORT, "%u", output_port);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u", input_node);
     pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u", input_port);
     proxy = (struct pw_proxy *)pw_core_create_object(
         shim->core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
         &properties->dict, 0);
     pw_properties_free(properties);
     if (proxy == NULL) {
+        int error = errno;
         pw_thread_loop_unlock(shim->thread_loop);
-        return -errno == 0 ? -EIO : -errno;
+        return error == 0 ? -EIO : -error;
     }
     result = do_sync(shim);
     if (result == 0) {

@@ -1,18 +1,19 @@
 # qpwgraph-rs
 
-An incremental Rust reimplementation scaffold for a PipeWire graph patchbay.
+An incremental Rust reimplementation of a PipeWire graph patchbay with optional
+ALSA Sequencer MIDI support.
 
-The workspace currently provides:
+The workspace provides:
 
 - `pw-graph-core`: serializable nodes, ports, links, validation, and graph operations.
-- `pw-graph-backend`: a driver trait and deterministic in-memory backend with a demo graph.
-- `pw-graph-alsamidi`: optional ALSA MIDI driver seam, ready for Sequencer enumeration.
-- `pw-graph-command`: connect/disconnect commands with undo/redo.
-- `pw-graph-patchbay`: JSON patchbay persistence and activation.
+- `pw-graph-backend`: a driver trait, deterministic demo backend, and native PipeWire registry/link backend.
+- `pw-graph-alsamidi`: native ALSA Sequencer enumeration and connection backend.
+- `pw-graph-command`: connect, disconnect, and rename commands with undo/redo.
+- `pw-graph-patchbay`: qpwgraph-compatible XML plus JSON persistence and activation.
 - `pw-graph-config`: TOML application settings and XDG config path helpers.
 - `pw-graph-i18n`: catalog-based English/Spanish localization with fallback.
-- `pw-graph-ui`: egui graph canvas and drag-to-connect interaction.
-- `pw-graph-app`: a runnable egui desktop shell and CLI flags.
+- `pw-graph-ui`: egui graph canvas, drag-to-connect, selection, moving, sorting, and thumbnail view.
+- `pw-graph-app`: a runnable egui desktop shell, backend selection, patchbay controls, localization, and CLI flags.
 
 ## Run
 
@@ -21,26 +22,42 @@ cargo run -p pw-graph-app
 ```
 
 Use `--lang es` to start in Spanish. The language can also be changed from the
-inspector and is persisted in the application config.
+inspector and is persisted in the application config. Use `--demo` to force the
+deterministic in-memory graph.
 
-The default build uses the in-memory backend, so it can be built and tested without
-PipeWire development headers or a running PipeWire daemon. This is intentional: it
-makes the graph model, command stack, persistence, and UI testable independently.
+The default application build enables native PipeWire, ALSA MIDI, and Linux tray
+support. PipeWire and ALSA are feature-gated so the application can still be
+built without native development headers:
+
+```bash
+cargo build --release -p pw-graph-app --no-default-features
+cargo build --release -p pw-graph-app --no-default-features --features pipewire
+```
 
 ## CLI
 
 ```text
--m, --minimized       start with the window minimized (currently recorded for the UI shell)
+-m, --minimized       start with the window minimized
 -d, --debug           enable debug logging
--n, --no-alsa-midi    reserve/disable the optional ALSA MIDI backend
+-n, --no-alsa-midi    disable the optional ALSA MIDI backend
+    --lang <LANG>     set the UI language (`en` or `es`)
+    --demo            use the deterministic in-memory graph
 ```
 
-## Architecture
+## Native backends
 
-The `GraphDriver` trait is the integration seam for a real PipeWire driver. The next
-implementation step is to add PipeWire registry listeners and `pw_link_new`/
-`pw_link_destroy` calls behind the optional `pipewire` feature in
-`pw-graph-backend`, without changing the UI or command layers.
+The PipeWire backend uses a small C ABI shim over the installed PipeWire 0.3
+registry API to keep the Rust graph layer independent of the local PipeWire crate
+version. The ALSA backend uses the ALSA Sequencer API and namespaces its IDs so
+both graphs can be displayed together. The app automatically falls back to the
+demo graph when no native backend is available.
+
+## Patchbay files
+
+Files ending in `.qpwgraph` or `.xml` use the qpwgraph XML shape and resolve rules
+by node and port names; other extensions use JSON. The inspector and toolbar can
+snapshot live links, activate saved links, enable exclusive activation, and
+auto-disconnect sink conflicts.
 
 ## Checks
 
@@ -50,5 +67,5 @@ cargo test --workspace
 cargo check --workspace
 ```
 
-See [PROGRESS.md](PROGRESS.md) for the M0–M9 implementation status and remaining
-native backend work.
+See [PROGRESS.md](PROGRESS.md) for milestone status and [packaging/README.md](packaging/README.md)
+for release and desktop-integration instructions.

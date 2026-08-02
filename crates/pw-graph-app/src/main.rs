@@ -1,13 +1,107 @@
 use eframe::egui;
 use pw_graph_alsamidi::AlsaMidiDriver;
 use pw_graph_backend::{GraphDriver, InMemoryDriver, PipewireDriver};
-use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
+use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand, RenameCommand};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, PortId, PortType};
 use pw_graph_i18n::{I18n, Locale};
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{CanvasAction, GraphCanvas};
 use std::path::PathBuf;
+
+#[cfg(all(target_os = "linux", feature = "tray"))]
+mod tray_support {
+    use ksni::blocking::TrayMethods;
+    use ksni::menu::StandardItem;
+    use std::sync::mpsc::{self, Receiver, Sender};
+
+    pub enum Command {
+        Show,
+        Hide,
+        Quit,
+    }
+
+    struct TrayMenu {
+        sender: Sender<Command>,
+        show_label: String,
+        hide_label: String,
+        quit_label: String,
+    }
+
+    impl ksni::Tray for TrayMenu {
+        fn id(&self) -> String {
+            "qpwgraph-rs".into()
+        }
+
+        fn title(&self) -> String {
+            "qpwgraph-rs".into()
+        }
+
+        fn icon_name(&self) -> String {
+            "audio-card".into()
+        }
+
+        fn activate(&mut self, _x: i32, _y: i32) {
+            let _ = self.sender.send(Command::Show);
+        }
+
+        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+            let show_sender = self.sender.clone();
+            let hide_sender = self.sender.clone();
+            let quit_sender = self.sender.clone();
+            vec![
+                StandardItem {
+                    label: self.show_label.clone(),
+                    activate: Box::new(move |_| {
+                        let _ = show_sender.send(Command::Show);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: self.hide_label.clone(),
+                    activate: Box::new(move |_| {
+                        let _ = hide_sender.send(Command::Hide);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                ksni::MenuItem::Separator,
+                StandardItem {
+                    label: self.quit_label.clone(),
+                    activate: Box::new(move |_| {
+                        let _ = quit_sender.send(Command::Quit);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            ]
+        }
+    }
+
+    pub struct State {
+        pub receiver: Receiver<Command>,
+        handle: ksni::blocking::Handle<TrayMenu>,
+    }
+
+    pub fn start(show_label: String, hide_label: String, quit_label: String) -> Option<State> {
+        let (sender, receiver) = mpsc::channel();
+        let tray = TrayMenu {
+            sender,
+            show_label,
+            hide_label,
+            quit_label,
+        };
+        let handle = tray.spawn().ok()?;
+        Some(State { receiver, handle })
+    }
+
+    impl State {
+        pub fn shutdown(&self) {
+            self.handle.shutdown().wait();
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 struct Args {
@@ -235,6 +329,10 @@ struct QpwgraphApp {
     start_minimized: bool,
     i18n: I18n,
     backend_name: String,
+    rename_node: Option<NodeId>,
+    rename_buffer: String,
+    #[cfg(all(target_os = "linux", feature = "tray"))]
+    tray: Option<tray_support::State>,
 }
 
 impl QpwgraphApp {
@@ -255,7 +353,9 @@ impl QpwgraphApp {
             (Box::new(InMemoryDriver::demo()), "in-memory".into())
         } else {
             let mut composite = CompositeDriver::default();
+            #[allow(unused_mut)]
             let mut has_pipewire = false;
+            #[allow(unused_mut)]
             let mut has_alsa = false;
 
             #[cfg(feature = "pipewire")]
@@ -311,16 +411,54 @@ impl QpwgraphApp {
         for (node_id, position) in &config.node_positions {
             let _ = driver.set_node_position(NodeId(*node_id), *position);
         }
+        let patchbay = Patchbay::load_from(&patchbay_file).unwrap_or_else(|_| {
+            Patchbay::new(
+                patchbay_file
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("default"),
+            )
+        });
+        if config.patchbay_activated {
+            match patchbay.activate(
+                driver.as_mut(),
+                config.patchbay_exclusive,
+                config.patchbay_auto_disconnect,
+            ) {
+                Ok(report) => {
+                    status = i18n.format(
+                        "status.activated",
+                        &[
+                            ("connected", report.connected.to_string()),
+                            ("present", report.already_present.to_string()),
+                            ("disconnected", report.disconnected.to_string()),
+                        ],
+                    );
+                }
+                Err(error) => {
+                    status =
+                        i18n.format("status.activation_failed", &[("error", error.to_string())]);
+                }
+            }
+        }
         let mut canvas = GraphCanvas::default();
         canvas.zoom = config.zoom;
         canvas.sort_ports_by_name = config.sort_type != "id";
         canvas.sort_ports_descending = config.sort_order == "descending";
         canvas.thumbnail_mode = config.thumbnail_view;
+        canvas.repel_overlapping_nodes = config.repel_overlapping_nodes;
+        canvas.connect_through_nodes = config.connect_through_nodes;
+        #[cfg(all(target_os = "linux", feature = "tray"))]
+        let tray = tray_support::start(
+            i18n.text("tray.show"),
+            i18n.text("tray.hide"),
+            i18n.text("tray.quit"),
+        );
         Self {
             driver,
             commands: CommandStack::new(),
             canvas,
-            patchbay: Patchbay::new("default"),
+            patchbay,
             config,
             config_file,
             patchbay_file,
@@ -330,6 +468,10 @@ impl QpwgraphApp {
             start_minimized: args.minimized,
             i18n,
             backend_name,
+            rename_node: None,
+            rename_buffer: String::new(),
+            #[cfg(all(target_os = "linux", feature = "tray"))]
+            tray,
         }
     }
 
@@ -446,10 +588,65 @@ impl QpwgraphApp {
             }
         }
     }
+
+    fn activate_patchbay(&mut self) {
+        match self.patchbay.activate(
+            self.driver.as_mut(),
+            self.config.patchbay_exclusive,
+            self.config.patchbay_auto_disconnect,
+        ) {
+            Ok(report) => {
+                self.status = self.tf(
+                    "status.activated",
+                    &[
+                        ("connected", report.connected.to_string()),
+                        ("present", report.already_present.to_string()),
+                        ("disconnected", report.disconnected.to_string()),
+                    ],
+                )
+            }
+            Err(error) => {
+                self.status = self.tf("status.activation_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
+    fn snapshot_patchbay(&mut self) {
+        self.patchbay
+            .snapshot_graph(self.driver.graph(), self.config.patchbay_auto_pin);
+        self.status = self.tf(
+            "status.snapshot",
+            &[("count", self.patchbay.connections.len().to_string())],
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "tray"))]
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        while let Ok(command) = tray.receiver.try_recv() {
+            match command {
+                tray_support::Command::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                tray_support::Command::Hide => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+                tray_support::Command::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for QpwgraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(all(target_os = "linux", feature = "tray"))]
+        self.poll_tray(ctx);
         if self.start_minimized {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.start_minimized = false;
@@ -460,6 +657,39 @@ impl eframe::App for QpwgraphApp {
             } else {
                 self.undo();
             }
+        }
+
+        if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
+            self.config.window_width = rect.width();
+            self.config.window_height = rect.height();
+        }
+
+        if self.config.menubar {
+            egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(self.t("toolbar.refresh")).clicked() {
+                        match self.driver.refresh() {
+                            Ok(nodes) => {
+                                self.status = self
+                                    .tf("status.refreshed", &[("count", nodes.len().to_string())])
+                            }
+                            Err(error) => {
+                                self.status = self
+                                    .tf("status.refresh_failed", &[("error", error.to_string())])
+                            }
+                        }
+                    }
+                    if ui.button(self.t("toolbar.save_patchbay")).clicked() {
+                        self.save_patchbay();
+                    }
+                    if ui.button(self.t("toolbar.load_patchbay")).clicked() {
+                        self.load_patchbay();
+                    }
+                    if ui.button(self.t("toolbar.activate")).clicked() {
+                        self.activate_patchbay();
+                    }
+                });
+            });
         }
 
         if self.config.toolbar {
@@ -503,29 +733,11 @@ impl eframe::App for QpwgraphApp {
                         if ui.button(self.t("toolbar.load_patchbay")).clicked() {
                             self.load_patchbay();
                         }
+                        if ui.button(self.t("toolbar.snapshot")).clicked() {
+                            self.snapshot_patchbay();
+                        }
                         if ui.button(self.t("toolbar.activate")).clicked() {
-                            match self.patchbay.activate(
-                                self.driver.as_mut(),
-                                self.config.patchbay_exclusive,
-                                self.config.patchbay_auto_disconnect,
-                            ) {
-                                Ok(report) => {
-                                    self.status = self.tf(
-                                        "status.activated",
-                                        &[
-                                            ("connected", report.connected.to_string()),
-                                            ("present", report.already_present.to_string()),
-                                            ("disconnected", report.disconnected.to_string()),
-                                        ],
-                                    )
-                                }
-                                Err(error) => {
-                                    self.status = self.tf(
-                                        "status.activation_failed",
-                                        &[("error", error.to_string())],
-                                    )
-                                }
-                            }
+                            self.activate_patchbay();
                         }
                     }
                 });
@@ -550,6 +762,43 @@ impl eframe::App for QpwgraphApp {
                     "inspector.links",
                     &[("count", self.driver.graph().links.len().to_string())],
                 ));
+                if let Some(selected_node) = self.canvas.selected_node {
+                    let current_name = self
+                        .driver
+                        .graph()
+                        .node(selected_node)
+                        .map(|node| node.name.clone());
+                    if let Some(current_name) = current_name {
+                        ui.separator();
+                        ui.label(self.t("inspector.selected_node"));
+                        if self.rename_node != Some(selected_node) {
+                            self.rename_node = Some(selected_node);
+                            self.rename_buffer = current_name.clone();
+                        }
+                        let response = ui.text_edit_singleline(&mut self.rename_buffer);
+                        if response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            && self.rename_buffer != current_name
+                            && !self.rename_buffer.trim().is_empty()
+                        {
+                            let edited_name = self.rename_buffer.clone();
+                            match self.commands.execute(
+                                Box::new(RenameCommand::new(
+                                    selected_node,
+                                    current_name,
+                                    edited_name,
+                                )),
+                                self.driver.as_mut(),
+                            ) {
+                                Ok(()) => self.status = self.t("status.renamed"),
+                                Err(error) => {
+                                    self.status = self
+                                        .tf("status.rename_failed", &[("error", error.to_string())])
+                                }
+                            }
+                        }
+                    }
+                }
                 ui.separator();
                 let exclusive_label = self.t("inspector.exclusive");
                 ui.checkbox(&mut self.config.patchbay_exclusive, exclusive_label);
@@ -560,6 +809,15 @@ impl eframe::App for QpwgraphApp {
                 );
                 let auto_pin_label = self.t("inspector.auto_pin");
                 ui.checkbox(&mut self.config.patchbay_auto_pin, auto_pin_label);
+                let patchbay_activated_before = self.config.patchbay_activated;
+                let patchbay_activated_label = self.t("inspector.patchbay_activated");
+                ui.checkbox(
+                    &mut self.config.patchbay_activated,
+                    patchbay_activated_label,
+                );
+                if self.config.patchbay_activated && !patchbay_activated_before {
+                    self.activate_patchbay();
+                }
                 ui.separator();
                 ui.heading(self.t("inspector.interface"));
                 let toolbar_visible_label = self.t("inspector.toolbar_visible");
@@ -635,6 +893,35 @@ impl eframe::App for QpwgraphApp {
                 for link in links {
                     ui.horizontal(|ui| {
                         ui.label(format!("{} → {}", link.output_port, link.input_port));
+                        let mut pinned = self
+                            .patchbay
+                            .connections
+                            .iter()
+                            .find(|connection| {
+                                connection.output_port == link.output_port
+                                    && connection.input_port == link.input_port
+                            })
+                            .is_some_and(|connection| connection.pinned);
+                        if ui
+                            .checkbox(&mut pinned, self.t("inspector.pinned"))
+                            .changed()
+                        {
+                            if let Some(connection) =
+                                self.patchbay.connections.iter_mut().find(|connection| {
+                                    connection.output_port == link.output_port
+                                        && connection.input_port == link.input_port
+                                })
+                            {
+                                connection.pinned = pinned;
+                            } else {
+                                self.patchbay.add_graph_connection(
+                                    self.driver.graph(),
+                                    link.output_port,
+                                    link.input_port,
+                                    pinned,
+                                );
+                            }
+                        }
                         if ui.small_button("×").clicked() {
                             self.disconnect(link.id);
                         }
@@ -670,6 +957,8 @@ impl eframe::App for QpwgraphApp {
 
         self.canvas.sort_ports_by_name = self.config.sort_type != "id";
         self.canvas.sort_ports_descending = self.config.sort_order == "descending";
+        self.canvas.repel_overlapping_nodes = self.config.repel_overlapping_nodes;
+        self.canvas.connect_through_nodes = self.config.connect_through_nodes;
         self.config.thumbnail_view = self.canvas.thumbnail_mode;
 
         if self.config.statusbar {
@@ -698,6 +987,10 @@ impl eframe::App for QpwgraphApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(all(target_os = "linux", feature = "tray"))]
+        if let Some(tray) = self.tray.as_ref() {
+            tray.shutdown();
+        }
         self.config.zoom = self.canvas.zoom;
         self.config.sort_type = if self.canvas.sort_ports_by_name {
             "name".into()
