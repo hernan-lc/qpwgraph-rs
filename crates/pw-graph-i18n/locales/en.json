@@ -25,6 +25,7 @@
   "status.refresh_failed": "Refresh failed: {error}",
   "status.activated": "Patchbay activated: {connected} connected, {present} already present, {disconnected} disconnected",
   "status.activation_failed": "Patchbay activation failed: {error}",
+  "status.language_changed": "Language changed",
   "status.config_save_failed": "could not save config: {error}",
   "status.nothing": "Nothing to do",
   "toolbar.refresh": "Refresh",

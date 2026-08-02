@@ -118,9 +118,11 @@ mod tests {
     fn formatting_replaces_named_variables() {
         let i18n = I18n::default();
         assert_eq!(
-            i18n.format("status.connected", &[("output", "1".into()), ("input", "2".into())]),
+            i18n.format(
+                "status.connected",
+                &[("output", "1".into()), ("input", "2".into())]
+            ),
             "Connected port 1 → 2"
         );
     }
 }
-

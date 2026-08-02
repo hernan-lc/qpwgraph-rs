@@ -122,10 +122,8 @@ impl QpwgraphApp {
                             );
                         }
                         Err(error) => {
-                            self.status = self.tf(
-                                "status.connect_failed",
-                                &[("error", error.to_string())],
-                            )
+                            self.status =
+                                self.tf("status.connect_failed", &[("error", error.to_string())])
                         }
                     }
                 }
@@ -228,12 +226,12 @@ impl eframe::App for QpwgraphApp {
                 if ui.button(self.t("toolbar.refresh")).clicked() {
                     match self.driver.refresh() {
                         Ok(nodes) => {
-                            self.status = self
-                                .tf("status.refreshed", &[("count", nodes.len().to_string())])
+                            self.status =
+                                self.tf("status.refreshed", &[("count", nodes.len().to_string())])
                         }
                         Err(error) => {
-                            self.status = self
-                                .tf("status.refresh_failed", &[("error", error.to_string())])
+                            self.status =
+                                self.tf("status.refresh_failed", &[("error", error.to_string())])
                         }
                     }
                 }
@@ -279,30 +277,44 @@ impl eframe::App for QpwgraphApp {
                             )
                         }
                         Err(error) => {
-                            self.status = self
-                                .tf("status.activation_failed", &[("error", error.to_string())])
+                            self.status =
+                                self.tf("status.activation_failed", &[("error", error.to_string())])
                         }
                     }
                 }
             });
         });
 
+        let current_locale = self.i18n.locale();
+        let mut selected_locale = current_locale;
         egui::SidePanel::right("inspector")
             .default_width(250.0)
             .show(ctx, |ui| {
-                ui.heading("Graph");
-                ui.label(format!("{} nodes", self.driver.graph().nodes.len()));
-                ui.label(format!("{} ports", self.driver.graph().ports.len()));
-                ui.label(format!("{} links", self.driver.graph().links.len()));
+                ui.heading(self.t("inspector.graph"));
+                ui.label(self.tf(
+                    "inspector.nodes",
+                    &[("count", self.driver.graph().nodes.len().to_string())],
+                ));
+                ui.label(self.tf(
+                    "inspector.ports",
+                    &[("count", self.driver.graph().ports.len().to_string())],
+                ));
+                ui.label(self.tf(
+                    "inspector.links",
+                    &[("count", self.driver.graph().links.len().to_string())],
+                ));
                 ui.separator();
-                ui.checkbox(&mut self.config.patchbay_exclusive, "Exclusive activation");
+                let exclusive_label = self.t("inspector.exclusive");
+                ui.checkbox(&mut self.config.patchbay_exclusive, exclusive_label);
+                let auto_disconnect_label = self.t("inspector.auto_disconnect");
                 ui.checkbox(
                     &mut self.config.patchbay_auto_disconnect,
-                    "Auto-disconnect sinks",
+                    auto_disconnect_label,
                 );
-                ui.checkbox(&mut self.config.patchbay_auto_pin, "Auto-pin new links");
+                let auto_pin_label = self.t("inspector.auto_pin");
+                ui.checkbox(&mut self.config.patchbay_auto_pin, auto_pin_label);
                 ui.separator();
-                ui.heading("Live links");
+                ui.heading(self.t("inspector.live_links"));
                 let links: Vec<_> = self.driver.graph().links.values().cloned().collect();
                 for link in links {
                     ui.horizontal(|ui| {
@@ -313,28 +325,49 @@ impl eframe::App for QpwgraphApp {
                     });
                 }
                 ui.separator();
-                ui.label("Port colors");
-                ui.colored_label(egui::Color32::from_rgb(87, 199, 133), "Audio");
-                ui.colored_label(egui::Color32::from_rgb(78, 157, 230), "Video");
-                ui.colored_label(egui::Color32::from_rgb(227, 93, 106), "PW/JACK MIDI");
-                ui.colored_label(egui::Color32::from_rgb(169, 121, 209), "ALSA MIDI");
+                ui.label(self.t("inspector.port_colors"));
+                ui.colored_label(egui::Color32::from_rgb(87, 199, 133), self.t("port.audio"));
+                ui.colored_label(egui::Color32::from_rgb(78, 157, 230), self.t("port.video"));
+                ui.colored_label(
+                    egui::Color32::from_rgb(227, 93, 106),
+                    self.t("port.pw_midi"),
+                );
+                ui.colored_label(
+                    egui::Color32::from_rgb(169, 121, 209),
+                    self.t("port.alsa_midi"),
+                );
+                ui.separator();
+                egui::ComboBox::from_label(self.t("language.label"))
+                    .selected_text(selected_locale.native_name())
+                    .show_ui(ui, |ui| {
+                        for locale in Locale::ALL {
+                            ui.selectable_value(&mut selected_locale, locale, locale.native_name());
+                        }
+                    });
             });
+
+        if selected_locale != current_locale {
+            self.i18n.set_locale(selected_locale);
+            self.config.language = selected_locale.code().to_owned();
+            self.status = self.t("status.language_changed");
+        }
 
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 if self.debug {
                     ui.separator();
-                    ui.monospace(format!(
-                        "backend=in-memory alsa_midi={}",
-                        !self.no_alsa_midi
+                    ui.monospace(self.i18n.format(
+                        "debug.backend",
+                        &[("enabled", (!self.no_alsa_midi).to_string())],
                     ));
                 }
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let actions = self.canvas.show(ui, self.driver.graph());
+            let connect_hint = self.t("canvas.connect_hint");
+            let actions = self.canvas.show(ui, self.driver.graph(), &connect_hint);
             self.handle_canvas_actions(actions);
         });
     }
@@ -343,7 +376,10 @@ impl eframe::App for QpwgraphApp {
         self.config.zoom = self.canvas.zoom;
         self.config.patchbay_path = Some(self.patchbay_file.clone());
         if let Err(error) = self.config.save_to(&self.config_file) {
-            eprintln!("could not save config: {error}");
+            eprintln!(
+                "{}",
+                self.tf("status.config_save_failed", &[("error", error.to_string())])
+            );
         }
     }
 }
@@ -351,6 +387,7 @@ impl eframe::App for QpwgraphApp {
 fn main() -> eframe::Result<()> {
     let args = parse_args();
     let app = QpwgraphApp::new(args.clone());
+    let window_title = app.i18n.text("app.title");
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([app.config.window_width, app.config.window_height]);
     let options = eframe::NativeOptions {
@@ -358,7 +395,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "qpwgraph-rs",
+        &window_title,
         options,
         Box::new(move |_creation_context| Ok(Box::new(app))),
     )

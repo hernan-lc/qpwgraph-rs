@@ -25,6 +25,7 @@
   "status.refresh_failed": "Error al actualizar: {error}",
   "status.activated": "Patchbay activado: {connected} conectados, {present} ya presentes, {disconnected} desconectados",
   "status.activation_failed": "Error al activar el patchbay: {error}",
+  "status.language_changed": "Idioma cambiado",
   "status.config_save_failed": "no se pudo guardar la configuración: {error}",
   "status.nothing": "Nada que hacer",
   "toolbar.refresh": "Actualizar",

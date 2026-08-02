@@ -10,6 +10,7 @@ The workspace currently provides:
 - `pw-graph-command`: connect/disconnect commands with undo/redo.
 - `pw-graph-patchbay`: JSON patchbay persistence and activation.
 - `pw-graph-config`: TOML application settings and XDG config path helpers.
+- `pw-graph-i18n`: catalog-based English/Spanish localization with fallback.
 - `pw-graph-ui`: egui graph canvas and drag-to-connect interaction.
 - `pw-graph-app`: a runnable egui desktop shell and CLI flags.
 
@@ -18,6 +19,9 @@ The workspace currently provides:
 ```bash
 cargo run -p pw-graph-app
 ```
+
+Use `--lang es` to start in Spanish. The language can also be changed from the
+inspector and is persisted in the application config.
 
 The default build uses the in-memory backend, so it can be built and tested without
 PipeWire development headers or a running PipeWire daemon. This is intentional: it
@@ -45,3 +49,6 @@ cargo fmt --all -- --check
 cargo test --workspace
 cargo check --workspace
 ```
+
+See [PROGRESS.md](PROGRESS.md) for the M0–M9 implementation status and remaining
+native backend work.
