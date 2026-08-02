@@ -38,9 +38,14 @@ pub(crate) struct QpwgraphApp {
     pub(crate) backend_name: String,
     pub(crate) screen: AppScreen,
     pub(crate) dock_open: bool,
+    /// Bumped whenever the dock is (re)opened so its `ScrollArea` starts back
+    /// at the top instead of reusing a scroll offset left over from before.
+    pub(crate) dock_scroll_epoch: u32,
     pub(crate) show_shortcuts: bool,
     pub(crate) show_preferences: bool,
     pub(crate) preferences_tab: PreferencesTab,
+    /// Same purpose as `dock_scroll_epoch`, for the Preferences modal.
+    pub(crate) preferences_scroll_epoch: u32,
     pub(crate) show_diagnostics: bool,
     pub(crate) rename_node: Option<NodeId>,
     pub(crate) rename_buffer: String,
@@ -205,9 +210,11 @@ impl QpwgraphApp {
             backend_name,
             screen: AppScreen::default(),
             dock_open: false,
+            dock_scroll_epoch: 0,
             show_shortcuts: false,
             show_preferences: false,
             preferences_tab: PreferencesTab::default(),
+            preferences_scroll_epoch: 0,
             show_diagnostics: false,
             rename_node: None,
             rename_buffer: String::new(),
