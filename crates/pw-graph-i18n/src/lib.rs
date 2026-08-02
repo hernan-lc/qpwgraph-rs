@@ -122,7 +122,7 @@ mod tests {
                 "status.connected",
                 &[("output", "1".into()), ("input", "2".into())]
             ),
-            "Connected port 1 → 2"
+            "Connected port 1 to 2"
         );
     }
 

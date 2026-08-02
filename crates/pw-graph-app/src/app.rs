@@ -1,6 +1,7 @@
 use crate::args::Args;
 use crate::backend::CompositeDriver;
-use crate::panels::{icon_button, AppScreen};
+use crate::icons::{icon_button, icon_button_enabled, Icon};
+use crate::panels::AppScreen;
 use eframe::egui;
 use pw_graph_alsamidi::AlsaMidiDriver;
 use pw_graph_backend::{GraphDriver, InMemoryDriver, PipewireDriver};
@@ -424,38 +425,30 @@ impl eframe::App for QpwgraphApp {
                         if icon_button(
                             ui,
                             "toolbar.refresh",
-                            "↻",
+                            Icon::Refresh,
                             self.t("toolbar.refresh"),
                             self.t("help.refresh"),
                         ) {
                             self.refresh_graph();
                         }
-                        let undo_response = ui
-                            .add_enabled(
-                                self.commands.can_undo(),
-                                egui::Button::new(egui::RichText::new("↶").size(18.0))
-                                    .min_size(egui::vec2(34.0, 30.0)),
-                            )
-                            .on_hover_text(format!(
-                                "{}\n{}",
-                                self.t("toolbar.undo"),
-                                self.t("help.undo")
-                            ));
-                        if undo_response.clicked() {
+                        if icon_button_enabled(
+                            ui,
+                            "toolbar.undo",
+                            Icon::Undo,
+                            self.t("toolbar.undo"),
+                            self.t("help.undo"),
+                            self.commands.can_undo(),
+                        ) {
                             self.undo();
                         }
-                        let redo_response = ui
-                            .add_enabled(
-                                self.commands.can_redo(),
-                                egui::Button::new(egui::RichText::new("↷").size(18.0))
-                                    .min_size(egui::vec2(34.0, 30.0)),
-                            )
-                            .on_hover_text(format!(
-                                "{}\n{}",
-                                self.t("toolbar.redo"),
-                                self.t("help.redo")
-                            ));
-                        if redo_response.clicked() {
+                        if icon_button_enabled(
+                            ui,
+                            "toolbar.redo",
+                            Icon::Redo,
+                            self.t("toolbar.redo"),
+                            self.t("help.redo"),
+                            self.commands.can_redo(),
+                        ) {
                             self.redo();
                         }
                     }
@@ -466,7 +459,7 @@ impl eframe::App for QpwgraphApp {
                         if icon_button(
                             ui,
                             "toolbar.save",
-                            "⇩",
+                            Icon::Save,
                             self.t("toolbar.save_patchbay"),
                             self.t("help.save_patchbay"),
                         ) {
@@ -475,7 +468,7 @@ impl eframe::App for QpwgraphApp {
                         if icon_button(
                             ui,
                             "toolbar.load",
-                            "⇧",
+                            Icon::Load,
                             self.t("toolbar.load_patchbay"),
                             self.t("help.load_patchbay"),
                         ) {
@@ -484,7 +477,7 @@ impl eframe::App for QpwgraphApp {
                         if icon_button(
                             ui,
                             "toolbar.snapshot",
-                            "◉",
+                            Icon::Snapshot,
                             self.t("toolbar.snapshot"),
                             self.t("help.snapshot"),
                         ) {
@@ -493,7 +486,7 @@ impl eframe::App for QpwgraphApp {
                         if icon_button(
                             ui,
                             "toolbar.activate",
-                            "▶",
+                            Icon::Activate,
                             self.t("toolbar.activate"),
                             self.t("help.activate"),
                         ) {

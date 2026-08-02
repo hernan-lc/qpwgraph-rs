@@ -105,7 +105,7 @@ impl GraphCanvas {
                     ));
                     let response = ui
                         .interact(hit_rect, link_widget_id, Sense::click())
-                        .on_hover_text(format!("{} → {}", source.name, destination.name));
+                        .on_hover_text(format!("{} to {}", source.name, destination.name));
                     if response.clicked() {
                         self.selected_link = Some(link.id);
                         self.selected_nodes.clear();
@@ -145,7 +145,7 @@ impl GraphCanvas {
                     painter.text(
                         start + vec2(8.0, -22.0),
                         egui::Align2::LEFT_TOP,
-                        format!("{connect_hint} {} → …", output.name),
+                        format!("{connect_hint} {} to ...", output.name),
                         FontId::proportional(12.0),
                         Color32::LIGHT_GREEN,
                     );
@@ -218,7 +218,7 @@ impl GraphCanvas {
                 ui.id().with(("graph-node", node.id)),
                 Sense::click_and_drag(),
             )
-            .on_hover_text(format!("{}\nDrag to move · click to select", node.name));
+            .on_hover_text(format!("{}\nDrag to move - click to select", node.name));
         if response.clicked() {
             let shift = ui.input(|input| input.modifiers.shift);
             if !shift {
@@ -452,7 +452,7 @@ fn port_tooltip(port: &Port) -> String {
         "Input"
     };
     format!(
-        "{} · {} · {}",
+        "{} / {} / {}",
         port.name,
         direction,
         port_type_label(port.port_type)
@@ -473,7 +473,7 @@ fn compact_label(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let compact: String = chars.by_ref().take(max_chars).collect();
     if chars.next().is_some() {
-        format!("{compact}…")
+        format!("{compact}...")
     } else {
         compact
     }

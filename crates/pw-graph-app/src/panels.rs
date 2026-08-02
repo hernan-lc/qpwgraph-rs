@@ -1,4 +1,5 @@
 use crate::app::QpwgraphApp;
+use crate::icons::{icon_button, icon_checkbox, icon_heading, icon_label, nav_icon_button, Icon};
 use egui::Ui;
 use pw_graph_command::RenameCommand;
 use pw_graph_core::NodeId;
@@ -11,51 +12,6 @@ pub(crate) enum AppScreen {
     Patchbay,
     Interface,
     Diagnostics,
-}
-
-pub(crate) fn icon_button(
-    ui: &mut Ui,
-    id: &str,
-    icon: &str,
-    label: String,
-    explanation: String,
-) -> bool {
-    ui.push_id(("action", id), |ui| {
-        let tooltip = format!("{label}\n{explanation}");
-        ui.add(
-            egui::Button::new(egui::RichText::new(icon).size(18.0))
-                .min_size(egui::vec2(34.0, 30.0)),
-        )
-        .on_hover_text(tooltip)
-        .clicked()
-    })
-    .inner
-}
-
-pub(crate) fn icon_checkbox(
-    ui: &mut Ui,
-    id: &str,
-    value: &mut bool,
-    icon: &str,
-    label: String,
-    explanation: String,
-) -> bool {
-    ui.push_id(("configuration", id), |ui| {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(icon)
-                    .size(16.0)
-                    .color(egui::Color32::LIGHT_BLUE),
-            )
-            .on_hover_text(explanation.clone());
-            let response = ui.checkbox(value, label);
-            let changed = response.changed();
-            response.on_hover_text(explanation);
-            changed
-        })
-        .inner
-    })
-    .inner
 }
 
 impl QpwgraphApp {
@@ -78,14 +34,17 @@ impl QpwgraphApp {
     fn show_navigation(&mut self, ui: &mut Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Q").size(22.0).strong())
-                .on_hover_text(self.t("app.title"));
+            icon_label(ui, Icon::Brand, self.t("app.title"));
             ui.separator();
             let screens = [
-                (AppScreen::Graph, "⌘", "screen.graph"),
-                (AppScreen::Patchbay, "⇄", "screen.patchbay"),
-                (AppScreen::Interface, "⚙", "screen.interface"),
-                (AppScreen::Diagnostics, "ⓘ", "screen.diagnostics"),
+                (AppScreen::Graph, Icon::Graph, "screen.graph"),
+                (AppScreen::Patchbay, Icon::Patchbay, "screen.patchbay"),
+                (AppScreen::Interface, Icon::Settings, "screen.interface"),
+                (
+                    AppScreen::Diagnostics,
+                    Icon::Diagnostics,
+                    "screen.diagnostics",
+                ),
             ];
             for (screen, icon, label) in screens {
                 let help_key = match screen {
@@ -94,14 +53,14 @@ impl QpwgraphApp {
                     AppScreen::Interface => "help.navigation_interface",
                     AppScreen::Diagnostics => "help.navigation_diagnostics",
                 };
-                let button = egui::Button::new(egui::RichText::new(icon).size(20.0))
-                    .min_size(egui::vec2(42.0, 38.0))
-                    .selected(self.screen == screen);
-                if ui
-                    .add(button)
-                    .on_hover_text(format!("{}\n{}", self.t(label), self.t(help_key)))
-                    .clicked()
-                {
+                if nav_icon_button(
+                    ui,
+                    label,
+                    icon,
+                    self.screen == screen,
+                    self.t(label),
+                    self.t(help_key),
+                ) {
                     self.screen = screen;
                 }
             }
@@ -109,7 +68,7 @@ impl QpwgraphApp {
     }
 
     fn show_graph_screen(&mut self, ui: &mut Ui) {
-        ui.heading(format!("⌘ {}", self.t("screen.graph")));
+        icon_heading(ui, Icon::Graph, self.t("screen.graph"));
         ui.label(self.t("screen.graph_hint"));
         ui.separator();
         ui.label(self.tf(
@@ -204,7 +163,7 @@ impl QpwgraphApp {
     }
 
     fn show_patchbay_screen(&mut self, ui: &mut Ui) {
-        ui.heading(format!("⇄ {}", self.t("screen.patchbay")));
+        icon_heading(ui, Icon::Patchbay, self.t("screen.patchbay"));
         ui.label(self.t("screen.patchbay_hint"));
         ui.separator();
         let exclusive_label = self.t("inspector.exclusive");
@@ -213,7 +172,7 @@ impl QpwgraphApp {
             ui,
             "patchbay.exclusive",
             &mut self.config.patchbay_exclusive,
-            "◇",
+            Icon::Exclusive,
             exclusive_label,
             exclusive_help,
         );
@@ -223,7 +182,7 @@ impl QpwgraphApp {
             ui,
             "patchbay.auto_disconnect",
             &mut self.config.patchbay_auto_disconnect,
-            "⇄",
+            Icon::AutoDisconnect,
             auto_disconnect_label,
             auto_disconnect_help,
         );
@@ -233,7 +192,7 @@ impl QpwgraphApp {
             ui,
             "patchbay.auto_pin",
             &mut self.config.patchbay_auto_pin,
-            "⚑",
+            Icon::Pin,
             auto_pin_label,
             auto_pin_help,
         );
@@ -244,7 +203,7 @@ impl QpwgraphApp {
             ui,
             "patchbay.activated",
             &mut self.config.patchbay_activated,
-            "⏱",
+            Icon::Timer,
             patchbay_activated_label,
             patchbay_activated_help,
         );
@@ -258,7 +217,7 @@ impl QpwgraphApp {
         for link in links {
             ui.push_id(("live-link", link.id), |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{} → {}", link.output_port, link.input_port));
+                    ui.label(format!("{} to {}", link.output_port, link.input_port));
                     let mut pinned = self
                         .patchbay
                         .connections
@@ -288,11 +247,13 @@ impl QpwgraphApp {
                             );
                         }
                     }
-                    if ui
-                        .small_button("×")
-                        .on_hover_text(self.t("help.disconnect_link"))
-                        .clicked()
-                    {
+                    if icon_button(
+                        ui,
+                        "disconnect",
+                        Icon::Delete,
+                        self.t("toolbar.disconnect"),
+                        self.t("help.disconnect_link"),
+                    ) {
                         self.disconnect(link.id);
                     }
                 });
@@ -301,13 +262,13 @@ impl QpwgraphApp {
     }
 
     fn show_interface_screen(&mut self, ui: &mut Ui) {
-        ui.heading(format!("⚙ {}", self.t("screen.interface")));
+        icon_heading(ui, Icon::Settings, self.t("screen.interface"));
         ui.label(self.t("screen.interface_hint"));
         ui.separator();
         let current_locale = self.i18n.locale();
         let mut selected_locale = current_locale;
         ui.horizontal(|ui| {
-            ui.label("🌐");
+            icon_label(ui, Icon::Language, self.t("language.label"));
             egui::ComboBox::from_label(self.t("language.label"))
                 .selected_text(selected_locale.native_name())
                 .show_ui(ui, |ui| {
@@ -320,7 +281,7 @@ impl QpwgraphApp {
         if icon_button(
             ui,
             "configuration.save",
-            "▣",
+            Icon::Save,
             self.t("inspector.save_configuration"),
             self.t("help.save_configuration"),
         ) {
@@ -344,7 +305,7 @@ impl QpwgraphApp {
             ui,
             "interface.toolbar",
             &mut self.config.toolbar,
-            "▤",
+            Icon::Toolbar,
             toolbar_label,
             toolbar_help,
         );
@@ -354,7 +315,7 @@ impl QpwgraphApp {
             ui,
             "interface.statusbar",
             &mut self.config.statusbar,
-            "▥",
+            Icon::Statusbar,
             statusbar_label,
             statusbar_help,
         );
@@ -364,7 +325,7 @@ impl QpwgraphApp {
             ui,
             "interface.patchbay_toolbar",
             &mut self.config.patchbay_toolbar,
-            "▦",
+            Icon::Patchbay,
             patchbay_toolbar_label,
             patchbay_toolbar_help,
         );
@@ -376,7 +337,7 @@ impl QpwgraphApp {
             ui,
             "behavior.repel",
             &mut self.config.repel_overlapping_nodes,
-            "✣",
+            Icon::Repel,
             repel_label,
             repel_help,
         );
@@ -386,7 +347,7 @@ impl QpwgraphApp {
             ui,
             "behavior.connect_through",
             &mut self.config.connect_through_nodes,
-            "↔",
+            Icon::Connect,
             through_label,
             through_help,
         );
@@ -396,14 +357,14 @@ impl QpwgraphApp {
             ui,
             "behavior.thumbnail",
             &mut self.canvas.thumbnail_mode,
-            "▧",
+            Icon::Thumbnail,
             thumbnail_label,
             thumbnail_help,
         );
     }
 
     fn show_diagnostics_screen(&mut self, ui: &mut Ui) {
-        ui.heading(format!("ⓘ {}", self.t("screen.diagnostics")));
+        icon_heading(ui, Icon::Diagnostics, self.t("screen.diagnostics"));
         ui.label(self.t("screen.diagnostics_hint"));
         ui.separator();
         ui.label(self.tf(
