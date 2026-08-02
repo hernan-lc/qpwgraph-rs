@@ -1,7 +1,5 @@
 use super::shared::{fresh_scroll_area, modal_window, show_backdrop, show_close_button};
-use crate::app::effects::{
-    audio_link_options, available_descriptors, EffectGalleryState, EffectPlacement,
-};
+use crate::app::effects::{available_descriptors, EffectGalleryState};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui};
 use pw_graph_effects::EffectDescriptor;
@@ -208,7 +206,6 @@ impl QpwgraphApp {
         }
 
         let descriptors = available_descriptors(self.driver.as_ref());
-        let links = audio_link_options(self.driver.as_ref());
         let supports_effect_nodes = self.driver.supports_effect_nodes();
         let Some(mut gallery) = self.effect_gallery.take() else {
             return;
@@ -222,14 +219,6 @@ impl QpwgraphApp {
                 gallery.select_effect(descriptor);
             }
         }
-        if gallery.placement == EffectPlacement::InsertOnLink
-            && gallery
-                .link_id
-                .is_none_or(|link_id| !links.iter().any(|(id, _)| *id == link_id))
-        {
-            gallery.link_id = links.first().map(|(id, _)| *id);
-        }
-
         let mut cancel = false;
         let mut create = false;
         modal_window("effects-gallery", self.t("effects.gallery_title"), 720.0).show(ctx, |ui| {
@@ -293,55 +282,6 @@ impl QpwgraphApp {
                     if let Some(descriptor) = selected_descriptor {
                         ui.add_space(4.0);
                         ui.separator();
-                        ui.add_space(5.0);
-                        ui.label(RichText::new(self.t("effects.route_title")).strong());
-                        ui.radio_value(
-                            &mut gallery.placement,
-                            EffectPlacement::NewNode,
-                            self.t("effects.create_node_choice"),
-                        );
-                        ui.label(
-                            RichText::new(self.t("effects.create_node_hint"))
-                                .small()
-                                .weak(),
-                        );
-                        ui.add_space(4.0);
-                        ui.radio_value(
-                            &mut gallery.placement,
-                            EffectPlacement::InsertOnLink,
-                            self.t("effects.insert_link_choice"),
-                        );
-                        ui.label(
-                            RichText::new(self.t("effects.insert_link_hint"))
-                                .small()
-                                .weak(),
-                        );
-                        if gallery.placement == EffectPlacement::InsertOnLink {
-                            ui.add_space(5.0);
-                            if links.is_empty() {
-                                gallery.link_id = None;
-                                ui.label(RichText::new(self.t("effects.no_audio_links")).weak());
-                            } else {
-                                let selected_text = gallery
-                                    .link_id
-                                    .and_then(|id| links.iter().find(|(link_id, _)| *link_id == id))
-                                    .map(|(_, label)| label.clone())
-                                    .unwrap_or_else(|| self.t("effects.select_link"));
-                                egui::ComboBox::from_id_salt("effects-gallery-link")
-                                    .selected_text(selected_text)
-                                    .width(ui.available_width())
-                                    .show_ui(ui, |ui| {
-                                        for (id, label) in &links {
-                                            ui.selectable_value(
-                                                &mut gallery.link_id,
-                                                Some(*id),
-                                                label,
-                                            );
-                                        }
-                                    });
-                            }
-                        }
-
                         ui.add_space(6.0);
                         show_effect_initial_settings(ui, descriptor, &mut gallery, self);
                     }
@@ -355,16 +295,10 @@ impl QpwgraphApp {
                     cancel = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let valid_route =
-                        gallery.placement == EffectPlacement::NewNode || gallery.link_id.is_some();
-                    let label = self.t(match gallery.placement {
-                        EffectPlacement::NewNode => "effects.create_node",
-                        EffectPlacement::InsertOnLink => "effects.insert_effect",
-                    });
                     if ui
                         .add_enabled(
-                            supports_effect_nodes && !gallery.effect_id.is_empty() && valid_route,
-                            egui::Button::new(label),
+                            supports_effect_nodes && !gallery.effect_id.is_empty(),
+                            egui::Button::new(self.t("effects.create_node")),
                         )
                         .clicked()
                     {

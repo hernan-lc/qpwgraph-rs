@@ -64,7 +64,7 @@
   "effects.add": "Ajouter un effet",
   "effects.add_help": "Ouvrir la galerie d’effets et ajouter un nœud connectable.",
   "effects.gallery_title": "Ajouter un effet audio",
-  "effects.gallery_hint": "Choisissez un effet, puis ajoutez un nœud libre ou insérez-le dans une liaison audio existante.",
+  "effects.gallery_hint": "Choisissez un effet pour créer un nouveau nœud à connecter sur le canevas.",
   "effects.backend_unavailable": "Le backend actif ne peut pas encore héberger de nœuds d’effet.",
   "effects.route_title": "Où placer cet effet ?",
   "effects.create_node_choice": "Créer un nouveau nœud d’effet",

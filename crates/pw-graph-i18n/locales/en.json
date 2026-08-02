@@ -300,7 +300,7 @@
   "effects.add": "Add effect",
   "effects.add_help": "Browse the effect gallery and add a connectable node.",
   "effects.gallery_title": "Add audio effect",
-  "effects.gallery_hint": "Choose an effect, then add a free node or insert it into an existing audio link.",
+  "effects.gallery_hint": "Choose an effect to create a new node you can connect on the canvas.",
   "effects.backend_unavailable": "The active backend cannot host effect nodes yet.",
   "effects.route_title": "Where should this effect go?",
   "effects.create_node_choice": "Create a new effect node",

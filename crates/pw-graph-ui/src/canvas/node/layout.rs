@@ -5,8 +5,8 @@ use pw_graph_core::{Direction, Graph, Node, Port, PortType};
 use super::super::ports::{grouped_rows, pair_ports};
 use super::{
     AUDIO_CONTROLS_HEIGHT, COLLAPSED_NODE_HEIGHT, EFFECT_CONTROLS_MIN_HEIGHT,
-    EFFECT_CONTROLS_VERTICAL_PADDING, EFFECT_CONTROL_MIN_SCREEN_ROW_HEIGHT,
-    EFFECT_CONTROL_ROW_HEIGHT, NODE_HEADER_HEIGHT, NODE_WIDTH, PORT_ROW_HEIGHT,
+    EFFECT_CONTROLS_VERTICAL_PADDING, EFFECT_CONTROL_ROW_HEIGHT, NODE_HEADER_HEIGHT, NODE_WIDTH,
+    PORT_ROW_HEIGHT,
 };
 
 impl GraphCanvas {
@@ -14,10 +14,9 @@ impl GraphCanvas {
     /// node. Every parameter gets its own row so the following port rows can
     /// never be painted on top of an effect control.
     ///
-    /// At low canvas zoom, keep each row at least one usable widget-height on
-    /// screen. The rest of the node continues to scale normally, but the
-    /// sliders and checkboxes remain clickable instead of being clipped by
-    /// the port area.
+    /// The value is deliberately independent of zoom: rendering applies the
+    /// same zoom to the panel and widgets, keeping effect nodes proportional
+    /// to every other node on the canvas.
     pub(super) fn effect_controls_height(&self, node: &Node) -> f32 {
         if node.node_type != pw_graph_core::NodeType::Effect {
             return 0.0;
@@ -26,10 +25,9 @@ impl GraphCanvas {
             return 0.0;
         };
 
-        let row_height = EFFECT_CONTROL_ROW_HEIGHT
-            .max(EFFECT_CONTROL_MIN_SCREEN_ROW_HEIGHT / self.zoom.max(f32::EPSILON));
         let row_count = control.parameters.len().saturating_add(1) as f32;
-        (EFFECT_CONTROLS_VERTICAL_PADDING + row_count * row_height).max(EFFECT_CONTROLS_MIN_HEIGHT)
+        (EFFECT_CONTROLS_VERTICAL_PADDING + row_count * EFFECT_CONTROL_ROW_HEIGHT)
+            .max(EFFECT_CONTROLS_MIN_HEIGHT)
     }
 
     /// Total vertical space occupied by the inline controls for a visible,
@@ -241,6 +239,14 @@ mod tests {
         // Effect nodes have audio ports but do not render the generic audio
         // controls, so only the effect panel contributes to their offset.
         assert_eq!(canvas.node_controls_height(node, true), controls_height);
+
+        canvas.zoom = 0.45;
+        assert_eq!(
+            canvas.effect_controls_height(node),
+            controls_height,
+            "effect geometry must stay in scene units so the full node scales uniformly"
+        );
+        canvas.zoom = 1.0;
 
         let scene_size = canvas.node_scene_size(&graph, node);
         assert_eq!(

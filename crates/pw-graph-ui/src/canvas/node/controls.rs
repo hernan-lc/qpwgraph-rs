@@ -492,6 +492,11 @@ impl GraphCanvas {
             return;
         };
         let controls_height = self.effect_controls_height(node);
+        // Scale the native egui widgets along with the scene. Without this,
+        // zooming the canvas out shrinks the card but leaves its sliders at
+        // normal screen size, making an effect node look much larger than
+        // every other node.
+        let control_scale = self.zoom.clamp(0.35, 1.5);
         let control_rect = Rect::from_min_size(
             pos2(
                 node_rect.left() + 8.0 * self.zoom,
@@ -511,7 +516,11 @@ impl GraphCanvas {
                 // painting. Clip the panel as a final safety net at unusual
                 // zoom levels, so no widget can ever cover the port rows.
                 ui.shrink_clip_rect(control_rect);
-                ui.spacing_mut().item_spacing.y = 2.0 * self.zoom;
+                for font_id in ui.style_mut().text_styles.values_mut() {
+                    font_id.size *= control_scale;
+                }
+                ui.spacing_mut().item_spacing *= control_scale;
+                ui.spacing_mut().interact_size *= control_scale;
                 let mut enabled = control.enabled;
                 if ui
                     .checkbox(&mut enabled, i18n.text("effects.enabled"))
@@ -534,16 +543,43 @@ impl GraphCanvas {
                         }
                     } else {
                         let mut value = parameter.value;
-                        if ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut value,
-                                    parameter.minimum..=parameter.maximum,
-                                )
-                                .text(format!("{} ({})", parameter.name, parameter.unit)),
-                            )
-                            .changed()
-                        {
+                        let label = if parameter.unit.is_empty() {
+                            parameter.name.clone()
+                        } else {
+                            format!("{} ({})", parameter.name, parameter.unit)
+                        };
+                        let value_label = if parameter.unit.is_empty() {
+                            format!("{value:.1}")
+                        } else {
+                            format!("{value:.0} {}", parameter.unit)
+                        };
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [78.0 * control_scale, ui.spacing().interact_size.y],
+                                egui::Label::new(RichText::new(label).small()).truncate(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(RichText::new(value_label).small());
+                                    changed = ui
+                                        .add_sized(
+                                            [
+                                                ui.available_width().max(1.0),
+                                                ui.spacing().interact_size.y,
+                                            ],
+                                            egui::Slider::new(
+                                                &mut value,
+                                                parameter.minimum..=parameter.maximum,
+                                            )
+                                            .show_value(false),
+                                        )
+                                        .changed();
+                                },
+                            );
+                        });
+                        if changed {
                             actions.push(CanvasAction::SetEffectParameter {
                                 node: node.id,
                                 parameter: parameter.id,

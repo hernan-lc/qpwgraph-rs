@@ -300,7 +300,7 @@
   "effects.add": "Añadir efecto",
   "effects.add_help": "Abrir la galería de efectos y añadir un nodo conectable.",
   "effects.gallery_title": "Añadir efecto de audio",
-  "effects.gallery_hint": "Elige un efecto y añádelo como nodo libre o insértalo en un enlace de audio existente.",
+  "effects.gallery_hint": "Elige un efecto para crear un nodo nuevo que puedes conectar en el lienzo.",
   "effects.backend_unavailable": "El backend activo todavía no puede alojar nodos de efectos.",
   "effects.route_title": "¿Dónde debe ir este efecto?",
   "effects.create_node_choice": "Crear un nuevo nodo de efecto",
