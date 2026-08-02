@@ -35,6 +35,12 @@ pub struct GraphCanvas {
     pub connect_through_nodes: bool,
     pub meters: BTreeMap<NodeId, MeterReading>,
     pub pinned_meter: Option<PortId>,
+    /// Node whose audio meter the pointer is revealing this frame. Recomputed
+    /// by every [`GraphCanvas::show`] call.
+    pub hovered_meter_node: Option<NodeId>,
+    /// Set by the application when the backend may not measure levels at all,
+    /// so the meter popover can say so instead of claiming no data exists.
+    pub metering_disabled: bool,
     peak_hold: BTreeMap<NodeId, f32>,
     pending_output: Option<PortId>,
     pub selected_node: Option<NodeId>,
@@ -60,6 +66,8 @@ impl Default for GraphCanvas {
             connect_through_nodes: false,
             meters: BTreeMap::new(),
             pinned_meter: None,
+            hovered_meter_node: None,
+            metering_disabled: false,
             peak_hold: BTreeMap::new(),
             pending_output: None,
             selected_node: None,

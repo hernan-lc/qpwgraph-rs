@@ -34,6 +34,9 @@ pub struct AppConfig {
     pub node_text_scale: f32,
     pub sort_type: String,
     pub sort_order: String,
+    /// When helper streams may be attached to measure audio levels:
+    /// `off`, `on-demand`, or `always`. See `pw_graph_backend::MeterPolicy`.
+    pub audio_meters: String,
     pub repel_overlapping_nodes: bool,
     pub connect_through_nodes: bool,
     pub statusbar: bool,
@@ -61,6 +64,7 @@ impl Default for AppConfig {
             node_text_scale: 1.15,
             sort_type: "name".into(),
             sort_order: "ascending".into(),
+            audio_meters: "on-demand".into(),
             repel_overlapping_nodes: true,
             connect_through_nodes: false,
             statusbar: true,

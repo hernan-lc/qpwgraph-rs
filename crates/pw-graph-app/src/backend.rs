@@ -1,6 +1,7 @@
 use pw_graph_alsamidi::AlsaMidiDriver;
-use pw_graph_backend::{AudioMeter, GraphDriver, PipewireDriver};
+use pw_graph_backend::{AudioMeter, GraphDriver, MeterPolicy, PipewireDriver};
 use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, PortId, PortType};
+use std::collections::BTreeSet;
 
 #[derive(Default)]
 pub(crate) struct CompositeDriver {
@@ -173,5 +174,26 @@ impl GraphDriver for CompositeDriver {
             return driver.audio_meters();
         }
         Ok(Vec::new())
+    }
+
+    fn set_meter_policy(&mut self, policy: MeterPolicy) -> pw_graph_backend::BackendResult<()> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.set_meter_policy(policy),
+            None => Ok(()),
+        }
+    }
+
+    fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> pw_graph_backend::BackendResult<()> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.request_meters(nodes),
+            None => Ok(()),
+        }
+    }
+
+    fn reset_audio_config(&mut self) -> pw_graph_backend::BackendResult<()> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.reset_audio_config(),
+            None => Ok(()),
+        }
     }
 }

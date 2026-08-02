@@ -17,6 +17,7 @@ const EDGE_HIT_DISTANCE: f32 = 9.0;
 impl GraphCanvas {
     pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
         self.update_peak_holds();
+        self.hovered_meter_node = None;
         let rect = ui.available_rect_before_wrap();
         let canvas_response = ui.allocate_rect(rect, Sense::drag());
         let painter = ui.painter_at(rect);
@@ -212,6 +213,18 @@ impl GraphCanvas {
 
     pub fn meter_peak_hold(&self, node_id: NodeId, fallback: f32) -> f32 {
         self.peak_hold.get(&node_id).copied().unwrap_or(fallback)
+    }
+
+    /// Nodes the user is currently looking at a meter for: the pinned monitor
+    /// and whatever audio port the pointer is revealing. On-demand metering
+    /// attaches a helper stream only for these, so an idle window measures
+    /// nothing and leaves the daemon's audio configuration alone.
+    pub fn requested_meter_nodes(&self, graph: &Graph) -> BTreeSet<NodeId> {
+        let pinned = self
+            .pinned_meter
+            .and_then(|port_id| graph.port(port_id))
+            .map(|port| port.node_id);
+        pinned.into_iter().chain(self.hovered_meter_node).collect()
     }
 
     fn update_peak_holds(&mut self) {
@@ -512,9 +525,22 @@ impl GraphCanvas {
                                 .weak(),
                             );
                         }
-                        _ => {
+                        Some(_) => {
                             ui.label(
                                 RichText::new(i18n.text("canvas.audio_meter_unavailable")).weak(),
+                            );
+                        }
+                        None if self.metering_disabled => {
+                            ui.label(
+                                RichText::new(i18n.text("canvas.audio_meter_disabled")).weak(),
+                            );
+                        }
+                        // Having no reading yet is the normal case for on-demand
+                        // metering: hovering is what asks the backend to attach a
+                        // stream, and negotiating it takes a moment.
+                        None => {
+                            ui.label(
+                                RichText::new(i18n.text("canvas.audio_meter_starting")).weak(),
                             );
                         }
                     }
@@ -534,6 +560,9 @@ impl GraphCanvas {
             }
             if pin_requested.get() {
                 self.pinned_meter = Some(port.id);
+            }
+            if port.port_type == PortType::Audio && response.hovered() {
+                self.hovered_meter_node = Some(node.id);
             }
             let pending = self.pending_output == Some(port.id);
             if response.hovered() || pending {

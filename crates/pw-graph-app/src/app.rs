@@ -7,7 +7,7 @@ use eframe::egui;
 use pw_graph_alsamidi::AlsaMidiDriver;
 #[cfg(feature = "pipewire")]
 use pw_graph_backend::PipewireDriver;
-use pw_graph_backend::{AudioMeter, GraphDriver, InMemoryDriver};
+use pw_graph_backend::{AudioMeter, GraphDriver, InMemoryDriver, MeterPolicy};
 use pw_graph_command::{CommandStack, ConnectCommand, DisconnectCommand};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Graph, LinkId, NodeId};
@@ -38,6 +38,9 @@ pub(crate) struct QpwgraphApp {
     pub(crate) rename_node: Option<NodeId>,
     pub(crate) rename_buffer: String,
     pub(crate) last_meter_refresh: Instant,
+    /// Mirrors `config.audio_meters` so a change in the panel is pushed to the
+    /// driver exactly once instead of on every frame.
+    pub(crate) meter_policy: MeterPolicy,
     #[cfg(all(target_os = "linux", feature = "tray"))]
     pub(crate) tray: Option<tray_support::State>,
 }
@@ -122,6 +125,10 @@ impl QpwgraphApp {
                 )
             }
         };
+        // Applied before anything else touches the graph so a launch under the
+        // default on-demand policy never attaches a metering stream on its own.
+        let meter_policy = MeterPolicy::parse(&config.audio_meters);
+        let _ = driver.set_meter_policy(meter_policy);
         for (node_id, position) in &config.node_positions {
             if let Ok(node_id) = node_id.parse::<u64>() {
                 let _ = driver.set_node_position(NodeId(node_id), *position);
@@ -165,6 +172,7 @@ impl QpwgraphApp {
         canvas.thumbnail_mode = config.thumbnail_view;
         canvas.repel_overlapping_nodes = config.repel_overlapping_nodes;
         canvas.connect_through_nodes = config.connect_through_nodes;
+        canvas.metering_disabled = meter_policy == MeterPolicy::Disabled;
         #[cfg(all(target_os = "linux", feature = "tray"))]
         let tray = tray_support::start(
             i18n.text("tray.show"),
@@ -189,6 +197,7 @@ impl QpwgraphApp {
             rename_node: None,
             rename_buffer: String::new(),
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
+            meter_policy,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         }
@@ -221,6 +230,42 @@ impl QpwgraphApp {
             }
             Err(error) => {
                 self.status = self.tf("status.refresh_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
+    /// Push a metering-policy change from the panel down to the driver.
+    fn sync_meter_policy(&mut self) {
+        let policy = MeterPolicy::parse(&self.config.audio_meters);
+        if policy == self.meter_policy {
+            return;
+        }
+        self.meter_policy = policy;
+        self.canvas.metering_disabled = policy == MeterPolicy::Disabled;
+        if let Err(error) = self.driver.set_meter_policy(policy) {
+            self.status = self.tf("status.meter_policy_failed", &[("error", error.to_string())]);
+        }
+    }
+
+    /// Tell the driver which nodes the user is actually looking at. Under the
+    /// on-demand policy this is the only thing that opens a metering stream.
+    fn request_visible_meters(&mut self) {
+        if self.meter_policy != MeterPolicy::OnDemand {
+            return;
+        }
+        let requested = self.canvas.requested_meter_nodes(self.driver.graph());
+        let _ = self.driver.request_meters(&requested);
+    }
+
+    /// Release every metering stream so the daemon can return the nodes it had
+    /// resumed to their configured state.
+    pub(crate) fn reset_audio_config(&mut self) {
+        self.canvas.pinned_meter = None;
+        self.canvas.meters.clear();
+        match self.driver.reset_audio_config() {
+            Ok(()) => self.status = self.t("status.audio_reset"),
+            Err(error) => {
+                self.status = self.tf("status.audio_reset_failed", &[("error", error.to_string())])
             }
         }
     }
@@ -452,6 +497,7 @@ impl QpwgraphApp {
 impl eframe::App for QpwgraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_ui_text_scale(ctx);
+        self.sync_meter_policy();
         if self.last_meter_refresh.elapsed() >= Duration::from_millis(50) {
             self.refresh_audio_meters();
             self.last_meter_refresh = Instant::now();
@@ -598,6 +644,9 @@ impl eframe::App for QpwgraphApp {
             let actions = self.canvas.show(ui, self.driver.graph(), &self.i18n);
             self.handle_canvas_actions(actions);
         });
+
+        // Runs after the canvas so the request reflects what this frame drew.
+        self.request_visible_meters();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

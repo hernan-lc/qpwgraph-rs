@@ -1,6 +1,7 @@
 use crate::app::QpwgraphApp;
 use crate::icons::{icon_button, icon_checkbox, icon_heading, icon_label, nav_icon_button, Icon};
 use egui::{Color32, RichText, Stroke, Ui};
+use pw_graph_backend::MeterPolicy;
 use pw_graph_command::RenameCommand;
 use pw_graph_core::{NodeId, PortId};
 use pw_graph_i18n::Locale;
@@ -75,6 +76,14 @@ fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: Str
 
 fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
+}
+
+fn meter_policy_key(policy: MeterPolicy) -> &'static str {
+    match policy {
+        MeterPolicy::Disabled => "meters.off",
+        MeterPolicy::OnDemand => "meters.on_demand",
+        MeterPolicy::Always => "meters.always",
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -169,6 +178,10 @@ impl QpwgraphApp {
             });
         });
 
+        panel_section(ui, self.t("inspector.audio_metering"), |ui| {
+            self.show_meter_controls(ui);
+        });
+
         if let Some(pinned_port) = self.canvas.pinned_meter {
             panel_section(ui, self.t("inspector.audio_monitor"), |ui| {
                 self.show_meter_monitor(ui, pinned_port);
@@ -225,6 +238,44 @@ impl QpwgraphApp {
                 .into();
             }
         });
+    }
+
+    fn show_meter_controls(&mut self, ui: &mut Ui) {
+        let current = MeterPolicy::parse(&self.config.audio_meters);
+        let mut selected = current;
+        let response = egui::ComboBox::from_label(self.t("inspector.audio_metering_policy"))
+            .selected_text(self.t(meter_policy_key(current)))
+            .show_ui(ui, |ui| {
+                for policy in MeterPolicy::ALL {
+                    let label = self.t(meter_policy_key(policy));
+                    ui.selectable_value(&mut selected, policy, label);
+                }
+            });
+        response
+            .response
+            .on_hover_text(self.t("help.audio_metering_policy"));
+        if selected != current {
+            self.config.audio_meters = selected.as_str().to_owned();
+        }
+        ui.label(
+            RichText::new(self.t(match selected {
+                MeterPolicy::Disabled => "meters.off_hint",
+                MeterPolicy::OnDemand => "meters.on_demand_hint",
+                MeterPolicy::Always => "meters.always_hint",
+            }))
+            .small()
+            .weak(),
+        );
+        ui.add_space(2.0);
+        if icon_button(
+            ui,
+            "meters.reset",
+            Icon::Refresh,
+            self.t("inspector.audio_reset"),
+            self.t("help.audio_reset"),
+        ) {
+            self.reset_audio_config();
+        }
     }
 
     fn show_meter_monitor(&mut self, ui: &mut Ui, port_id: PortId) {
