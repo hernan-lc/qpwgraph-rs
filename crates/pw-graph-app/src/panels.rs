@@ -1,12 +1,10 @@
 use crate::app::QpwgraphApp;
 use crate::icons::{
-    icon_button, icon_checkbox, icon_heading, icon_label, sidebar_icon_button,
-    sidebar_icon_button_enabled, sidebar_icon_toggle_button, sidebar_nav_icon_button, Icon,
+    icon_button, icon_checkbox, icon_label, sidebar_icon_button, sidebar_icon_button_enabled,
+    sidebar_icon_toggle_button, sidebar_nav_icon_button, Icon,
 };
 use egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
-use pw_graph_command::RenameCommand;
-use pw_graph_core::{NodeId, PortId};
 use pw_graph_i18n::Locale;
 use pw_graph_ui::{ConnectMode, MediaFilter};
 
@@ -14,7 +12,6 @@ const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
 const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
 const NAV_RAIL_WIDTH: f32 = 76.0;
-const SIDEBAR_WIDTH: f32 = 370.0;
 const FULL_PANEL_MARGIN: f32 = 8.0;
 
 fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
@@ -24,16 +21,6 @@ fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
     }
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 7.0);
     ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
-}
-
-fn panel_header(ui: &mut Ui, icon: Icon, title: String, hint: String) {
-    ui.add_space(4.0);
-    icon_heading(ui, icon, title);
-    ui.add_space(1.0);
-    ui.label(RichText::new(hint).weak());
-    ui.add_space(5.0);
-    ui.separator();
-    ui.add_space(4.0);
 }
 
 fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&mut Ui)) {
@@ -55,19 +42,6 @@ fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&mut Ui)) {
     ui.add_space(8.0);
 }
 
-fn stat_card(ui: &mut Ui, label: String, value: String) {
-    egui::Frame::none()
-        .fill(Color32::from_rgb(36, 43, 53))
-        .rounding(5.0)
-        .inner_margin(egui::Margin::symmetric(9.0, 6.0))
-        .show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(value).strong().size(18.0));
-                ui.label(RichText::new(label).small().weak());
-            });
-        });
-}
-
 fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: String) {
     ui.push_id(("text-scale", id), |ui| {
         ui.horizontal(|ui| {
@@ -81,10 +55,6 @@ fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: Str
             ui.label(RichText::new(format!("{:.0}%", *value * 100.0)).weak());
         });
     });
-}
-
-fn level_db(value: f32) -> f32 {
-    (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)
 }
 
 fn media_filter_key(filter: MediaFilter) -> &'static str {
@@ -196,14 +166,6 @@ fn meter_policy_key(policy: MeterPolicy) -> &'static str {
         MeterPolicy::OnDemand => "meters.on_demand",
         MeterPolicy::Always => "meters.always",
     }
-}
-
-/// The two live screens shown in the expandable sidebar next to the canvas.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
-pub(crate) enum AppScreen {
-    #[default]
-    Graph,
-    Patchbay,
 }
 
 /// Tabs inside the Preferences modal, which holds settings you configure once

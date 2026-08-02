@@ -1,6 +1,6 @@
 use crate::args::Args;
 use crate::backend::CompositeDriver;
-use crate::panels::{AppScreen, PreferencesTab};
+use crate::panels::PreferencesTab;
 use eframe::egui;
 #[cfg(feature = "alsa")]
 use pw_graph_alsamidi::AlsaMidiDriver;
@@ -35,21 +35,16 @@ pub(crate) struct QpwgraphApp {
     pub(crate) start_minimized: bool,
     pub(crate) i18n: I18n,
     pub(crate) backend_name: String,
-    pub(crate) screen: AppScreen,
-    pub(crate) dock_open: bool,
-    /// Bumped whenever the dock is (re)opened so its `ScrollArea` starts back
-    /// at the top instead of reusing a scroll offset left over from before.
-    pub(crate) dock_scroll_epoch: u32,
     pub(crate) show_shortcuts: bool,
     pub(crate) shortcut_search: String,
     pub(crate) shortcut_focus_search: bool,
     pub(crate) shortcut_scroll_epoch: u32,
     pub(crate) show_preferences: bool,
     pub(crate) preferences_tab: PreferencesTab,
-    /// Same purpose as `dock_scroll_epoch`, for the Preferences modal.
+    /// Bumped whenever the Preferences modal opens so its `ScrollArea` starts
+    /// back at the top instead of reusing a scroll offset left over from
+    /// before.
     pub(crate) preferences_scroll_epoch: u32,
-    pub(crate) rename_node: Option<NodeId>,
-    pub(crate) rename_buffer: String,
     pub(crate) last_meter_refresh: Instant,
     /// Mirrors `config.audio_meters` so a change in the panel is pushed to the
     /// driver exactly once instead of on every frame.
@@ -210,9 +205,6 @@ impl QpwgraphApp {
             start_minimized: args.minimized,
             i18n,
             backend_name,
-            screen: AppScreen::default(),
-            dock_open: false,
-            dock_scroll_epoch: 0,
             show_shortcuts: false,
             shortcut_search: String::new(),
             shortcut_focus_search: false,
@@ -220,8 +212,6 @@ impl QpwgraphApp {
             show_preferences: false,
             preferences_tab: PreferencesTab::default(),
             preferences_scroll_epoch: 0,
-            rename_node: None,
-            rename_buffer: String::new(),
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
             meter_policy,
             #[cfg(all(target_os = "linux", feature = "tray"))]
@@ -283,16 +273,13 @@ impl QpwgraphApp {
     }
 
     fn text_input_focused(&self, ctx: &egui::Context) -> bool {
-        let rename_id = self
-            .rename_node
-            .map(|node| egui::Id::new(("rename-node", node)));
         let shortcut_search_id = self
             .show_shortcuts
             .then_some(egui::Id::new("shortcuts-search"));
         ctx.memory(|memory| {
-            memory.focused().is_some_and(|focused| {
-                Some(focused) == shortcut_search_id || Some(focused) == rename_id
-            })
+            memory
+                .focused()
+                .is_some_and(|focused| Some(focused) == shortcut_search_id)
         })
     }
 

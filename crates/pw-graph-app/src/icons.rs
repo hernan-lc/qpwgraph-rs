@@ -8,7 +8,6 @@ pub(crate) enum Icon {
     Delete,
     Exclusive,
     Filter,
-    Graph,
     Help,
     Language,
     Load,
@@ -41,7 +40,6 @@ fn icon_source(icon: Icon) -> ImageSource<'static> {
         Icon::Delete => include_image!("../assets/icons/delete.svg"),
         Icon::Exclusive => include_image!("../assets/icons/exclusive.svg"),
         Icon::Filter => include_image!("../assets/icons/filter.svg"),
-        Icon::Graph => include_image!("../assets/icons/graph.svg"),
         Icon::Help => include_image!("../assets/icons/help.svg"),
         Icon::Language => include_image!("../assets/icons/language.svg"),
         Icon::Load => include_image!("../assets/icons/load.svg"),
@@ -260,16 +258,6 @@ pub(crate) fn icon_checkbox(
         .inner
     })
     .inner
-}
-
-pub(crate) fn icon_heading(ui: &mut Ui, icon: Icon, title: String) {
-    ui.horizontal(|ui| {
-        let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
-        let response = response.on_hover_text(title.clone());
-        paint_icon(ui, rect.shrink(3.0), icon, ui.visuals().text_color());
-        let _ = response;
-        ui.heading(title);
-    });
 }
 
 pub(crate) fn icon_label(ui: &mut Ui, icon: Icon, tooltip: String) {
