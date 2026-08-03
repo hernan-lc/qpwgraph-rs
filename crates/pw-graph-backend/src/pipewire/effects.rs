@@ -19,7 +19,7 @@ use pw_graph_effects::{
 };
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 /// PipeWire's standard quantum is normally far smaller than this.  Keeping a
@@ -45,6 +45,11 @@ struct CallbackState {
     output_ports: [AtomicPtr<c_void>; DSP_CHANNELS],
     enabled: AtomicBool,
     processor_failed: AtomicBool,
+    /// Seed for the low-level diagnostic signal used when an input channel is
+    /// not connected. A filter can still have a live output connection while
+    /// one or both inputs are dangling; leaving the output buffer untouched in
+    /// that case is both silent and unsafe.
+    fallback_noise: AtomicU32,
     /// A control update may run while PipeWire is processing.  The realtime
     /// callback uses `try_lock` and transparently bypasses a single quantum if
     /// the UI owns this mutex, rather than ever blocking the audio thread.
@@ -62,6 +67,7 @@ impl CallbackState {
             output_ports: std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
             enabled: AtomicBool::new(enabled),
             processor_failed: AtomicBool::new(false),
+            fallback_noise: AtomicU32::new(0x6d2b_79f5),
             processor: Mutex::new(ProcessorState {
                 processor,
                 interleaved: vec![0.0; MAX_DSP_FRAMES as usize * DSP_CHANNELS],
@@ -93,31 +99,50 @@ impl CallbackState {
             .output_ports
             .each_ref()
             .map(|port| port.load(Ordering::Acquire));
-        if input_ports.iter().any(|port| port.is_null())
-            || output_ports.iter().any(|port| port.is_null())
-        {
-            return;
-        }
-        let inputs = input_ports.map(|port| pw::sys::pw_filter_get_dsp_buffer(port, frames));
-        let outputs = output_ports.map(|port| pw::sys::pw_filter_get_dsp_buffer(port, frames));
-        if inputs.iter().any(|buffer| buffer.is_null())
-            || outputs.iter().any(|buffer| buffer.is_null())
-        {
+        if output_ports.iter().all(|port| port.is_null()) {
             return;
         }
 
-        // `pw_filter_get_dsp_buffer` owns the buffer lifecycle.  We only
-        // borrow its valid F32 region for this callback and always begin from
-        // a transparent pass-through signal. `copy` also permits the unlikely
-        // case that PipeWire aliases the two DSP pointers.
-        for channel in 0..DSP_CHANNELS {
-            ptr::copy(
-                inputs[channel].cast::<f32>(),
-                outputs[channel].cast::<f32>(),
-                frames as usize,
-            );
+        // PipeWire may not provide a DSP buffer for an unconnected port. Keep
+        // each channel independent: a connected FL input must still reach its
+        // output when FR is not patched, and an output-only effect should emit
+        // a small diagnostic signal instead of leaving the output undefined.
+        let inputs: [*mut c_void; DSP_CHANNELS] = std::array::from_fn(|channel| {
+            let port = input_ports[channel];
+            if port.is_null() {
+                ptr::null_mut()
+            } else {
+                pw::sys::pw_filter_get_dsp_buffer(port, frames)
+            }
+        });
+        let outputs: [*mut c_void; DSP_CHANNELS] = std::array::from_fn(|channel| {
+            let port = output_ports[channel];
+            if port.is_null() {
+                ptr::null_mut()
+            } else {
+                pw::sys::pw_filter_get_dsp_buffer(port, frames)
+            }
+        });
+        if outputs.iter().all(|buffer| buffer.is_null()) {
+            return;
         }
-        if !self.enabled.load(Ordering::Acquire) {
+
+        let enabled = self.enabled.load(Ordering::Acquire);
+        if !enabled {
+            // Disabled effects remain transparent for connected channels and
+            // produce silence for dangling inputs. The diagnostic signal is a
+            // useful enabled-effect indication, not a bypass-side effect.
+            for frame in 0..frames as usize {
+                for channel in 0..DSP_CHANNELS {
+                    if !outputs[channel].is_null() {
+                        *outputs[channel].cast::<f32>().add(frame) = if inputs[channel].is_null() {
+                            0.0
+                        } else {
+                            *inputs[channel].cast::<f32>().add(frame)
+                        };
+                    }
+                }
+            }
             return;
         }
 
@@ -125,6 +150,18 @@ impl CallbackState {
             // Parameter edits are intentionally allowed to cost one bypassed
             // quantum. Waiting for a non-realtime UI thread here would risk an
             // xrun for the entire PipeWire graph.
+            for frame in 0..frames as usize {
+                for channel in 0..DSP_CHANNELS {
+                    if !outputs[channel].is_null() {
+                        let sample = if inputs[channel].is_null() {
+                            next_diagnostic_noise(&self.fallback_noise)
+                        } else {
+                            *inputs[channel].cast::<f32>().add(frame)
+                        };
+                        *outputs[channel].cast::<f32>().add(frame) = sample;
+                    }
+                }
+            }
             return;
         };
         let ProcessorState {
@@ -134,7 +171,25 @@ impl CallbackState {
         let samples = &mut interleaved[..frames as usize * DSP_CHANNELS];
         for frame in 0..frames as usize {
             for channel in 0..DSP_CHANNELS {
-                samples[frame * DSP_CHANNELS + channel] = *inputs[channel].cast::<f32>().add(frame);
+                samples[frame * DSP_CHANNELS + channel] = if inputs[channel].is_null() {
+                    // Keep this deliberately quiet (about -34 dBFS) so an
+                    // accidentally dangling effect is noticeable without
+                    // being an abrupt full-scale burst.
+                    next_diagnostic_noise(&self.fallback_noise)
+                } else {
+                    *inputs[channel].cast::<f32>().add(frame)
+                };
+            }
+        }
+        // Initialize the outputs before invoking the processor. If a future
+        // processor rejects a buffer or panics, the callback still publishes a
+        // valid pass-through/diagnostic signal for this quantum.
+        for frame in 0..frames as usize {
+            for channel in 0..DSP_CHANNELS {
+                if !outputs[channel].is_null() {
+                    *outputs[channel].cast::<f32>().add(frame) =
+                        samples[frame * DSP_CHANNELS + channel];
+                }
             }
         }
         // No Rust panic may cross the C callback boundary. Builtin processors
@@ -147,8 +202,10 @@ impl CallbackState {
             Ok(Ok(())) => {
                 for frame in 0..frames as usize {
                     for channel in 0..DSP_CHANNELS {
-                        *outputs[channel].cast::<f32>().add(frame) =
-                            samples[frame * DSP_CHANNELS + channel];
+                        if !outputs[channel].is_null() {
+                            *outputs[channel].cast::<f32>().add(frame) =
+                                samples[frame * DSP_CHANNELS + channel];
+                        }
                     }
                 }
                 self.processor_failed.store(false, Ordering::Relaxed);
@@ -156,6 +213,22 @@ impl CallbackState {
             _ => self.processor_failed.store(true, Ordering::Relaxed),
         }
     }
+}
+
+/// Generate a bounded, allocation-free diagnostic sample for a dangling
+/// effect input. An xorshift stream is sufficient here; this is a routing
+/// indicator, not an audio-quality noise source.
+fn next_diagnostic_noise(state: &AtomicU32) -> f32 {
+    let value = state
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            let mut next = value;
+            next ^= next << 13;
+            next ^= next >> 17;
+            next ^= next << 5;
+            Some(next)
+        })
+        .unwrap_or(0x6d2b_79f5);
+    ((value as f32 / u32::MAX as f32) * 2.0 - 1.0) * 0.02
 }
 
 unsafe extern "C" fn filter_process(
@@ -502,4 +575,19 @@ fn validate_pipewire_text(label: &str, value: &str) -> BackendResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_diagnostic_noise;
+    use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn dangling_input_signal_is_bounded_and_changes() {
+        let state = AtomicU32::new(0x6d2b_79f5);
+        let samples: Vec<_> = (0..32).map(|_| next_diagnostic_noise(&state)).collect();
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        assert!(samples.iter().all(|sample| sample.abs() <= 0.02));
+        assert!(samples.windows(2).any(|pair| pair[0] != pair[1]));
+    }
 }

@@ -1,11 +1,78 @@
 //! Persistent patchbay profiles and file operations.
 
 use super::QpwgraphApp;
+use pw_graph_core::PortKey;
 use pw_graph_patchbay::Patchbay;
 use rfd::FileDialog;
 use std::path::PathBuf;
 
 impl QpwgraphApp {
+    /// Persist the current in-memory patchbay without opening a dialog. Graph
+    /// edits are user actions, so losing them merely because the profile was
+    /// not manually saved is particularly surprising for effect nodes.
+    pub(crate) fn autosave_patchbay(&mut self) {
+        if let Err(error) = self.patchbay.save_to(&self.patchbay_file) {
+            self.status = self.tf(
+                "status.patchbay_save_failed",
+                &[("error", error.to_string())],
+            );
+        }
+    }
+
+    /// Bring saved rules in line with the live graph after undo/redo and at
+    /// shutdown. Keep the original endpoints of inserted effects even though
+    /// their direct link is intentionally absent while the effect is active.
+    pub(crate) fn sync_patchbay_connections(&mut self) {
+        let live: Vec<(PortKey, PortKey)> = self
+            .driver
+            .graph()
+            .links
+            .values()
+            .filter_map(|link| {
+                self.driver
+                    .graph()
+                    .port_key(link.output_port)
+                    .zip(self.driver.graph().port_key(link.input_port))
+            })
+            .collect();
+        let protected: Vec<(PortKey, PortKey)> = self
+            .config
+            .effects
+            .iter()
+            .filter_map(|effect| effect.source.clone().zip(effect.destination.clone()))
+            .collect();
+
+        self.patchbay.connections.retain(|connection| {
+            if connection.output_node.is_empty()
+                || connection.output_name.is_empty()
+                || connection.input_node.is_empty()
+                || connection.input_name.is_empty()
+            {
+                return true;
+            }
+            live.iter()
+                .any(|(output, input)| same_endpoint_names(connection, output, input))
+                || protected
+                    .iter()
+                    .any(|(output, input)| same_endpoint_names(connection, output, input))
+        });
+
+        for (output, input) in live {
+            let Some(output_id) = self.driver.graph().resolve_port_key(&output) else {
+                continue;
+            };
+            let Some(input_id) = self.driver.graph().resolve_port_key(&input) else {
+                continue;
+            };
+            self.patchbay.add_graph_connection(
+                self.driver.graph(),
+                output_id,
+                input_id,
+                self.config.patchbay_auto_pin,
+            );
+        }
+    }
+
     pub(crate) fn save_patchbay(&mut self) {
         let directory = self
             .config
@@ -153,4 +220,15 @@ impl QpwgraphApp {
             &[("count", self.patchbay.connections.len().to_string())],
         );
     }
+}
+
+fn same_endpoint_names(
+    connection: &pw_graph_patchbay::PatchConnection,
+    output: &PortKey,
+    input: &PortKey,
+) -> bool {
+    connection.output_node == output.node_name
+        && connection.output_name == output.port_name
+        && connection.input_node == input.node_name
+        && connection.input_name == input.port_name
 }

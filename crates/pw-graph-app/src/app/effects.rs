@@ -214,11 +214,38 @@ impl QpwgraphApp {
             self.status = self.t("effects.not_found");
             return;
         };
+        let saved_links: Vec<_> = self
+            .driver
+            .graph()
+            .links
+            .values()
+            .filter(|link| {
+                self.driver
+                    .graph()
+                    .port(link.output_port)
+                    .is_some_and(|port| port.node_id == node_id)
+                    || self
+                        .driver
+                        .graph()
+                        .port(link.input_port)
+                        .is_some_and(|port| port.node_id == node_id)
+            })
+            .filter_map(|link| {
+                self.driver
+                    .graph()
+                    .port_key(link.output_port)
+                    .zip(self.driver.graph().port_key(link.input_port))
+            })
+            .collect();
         match self.driver.remove_effect(&instance_id) {
             Ok(()) => {
                 self.config
                     .effects
                     .retain(|effect| effect.instance.instance_id != instance_id);
+                for (output, input) in saved_links {
+                    self.patchbay.remove_stable_connection(&output, &input);
+                }
+                self.autosave_patchbay();
                 self.status = self.t("effects.removed");
             }
             Err(error) => {

@@ -39,6 +39,7 @@ impl QpwgraphApp {
                                 "status.connected",
                                 &[("output", output.to_string()), ("input", input.to_string())],
                             );
+                            self.autosave_patchbay();
                         }
                         Err(error) => {
                             self.status =
@@ -157,6 +158,7 @@ impl QpwgraphApp {
                     }
                 }
                 self.status = self.tf("status.connected_many", &[("count", count.to_string())]);
+                self.autosave_patchbay();
             }
             Err(error) => {
                 self.status = self.tf("status.connect_failed", &[("error", error.to_string())]);
@@ -209,6 +211,7 @@ impl QpwgraphApp {
                     self.patchbay.remove_stable_connection(&output, &input);
                 }
                 self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
+                self.autosave_patchbay();
             }
             Err(error) => {
                 self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())]);
@@ -270,6 +273,7 @@ impl QpwgraphApp {
                         .remove_connection(existing.output_port, existing.input_port);
                 }
                 self.status = self.tf("status.disconnected", &[("link", link.to_string())]);
+                self.autosave_patchbay();
             }
             Err(error) => {
                 self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())])
@@ -311,6 +315,7 @@ impl QpwgraphApp {
                 }
                 self.canvas.clear_selected_link();
                 self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
+                self.autosave_patchbay();
             }
             Err(error) => {
                 self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())]);
@@ -333,6 +338,7 @@ impl QpwgraphApp {
                 self.patchbay.connections.clear();
                 self.canvas.clear_selected_link();
                 self.status = self.tf("status.disconnected_all", &[("count", count.to_string())]);
+                self.autosave_patchbay();
             }
             Err(error) => {
                 self.status = self.tf("status.disconnect_failed", &[("error", error.to_string())])
@@ -348,6 +354,8 @@ impl QpwgraphApp {
                 self.status = self.tf("status.undo_failed", &[("error", error.to_string())])
             }
         }
+        self.sync_patchbay_connections();
+        self.autosave_patchbay();
     }
 
     pub(crate) fn redo(&mut self) {
@@ -358,6 +366,8 @@ impl QpwgraphApp {
                 self.status = self.tf("status.redo_failed", &[("error", error.to_string())])
             }
         }
+        self.sync_patchbay_connections();
+        self.autosave_patchbay();
     }
 
     pub(crate) fn arrange_nodes(&mut self) {

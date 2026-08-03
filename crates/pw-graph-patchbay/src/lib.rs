@@ -204,6 +204,12 @@ impl Patchbay {
 
     pub fn save_to(&self, path: impl AsRef<Path>) -> Result<(), PatchbayError> {
         let path = path.as_ref();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(PatchbayError::Write)?;
+        }
         let is_xml = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -421,7 +427,8 @@ fn find_named_port(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pw_graph_backend::InMemoryDriver;
+    use pw_graph_backend::{EffectDriver, EffectNodeRequest, InMemoryDriver};
+    use std::collections::BTreeMap;
 
     fn graph_with_named_audio_edge(
         output_node_type: NodeType,
@@ -499,6 +506,63 @@ mod tests {
         assert_eq!(loaded.connections[0].output_node, "Audio Capture");
         assert_eq!(loaded.connections[0].output_name, "capture_FL");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn saving_a_patchbay_creates_missing_parent_directories() {
+        let root =
+            std::env::temp_dir().join(format!("pw-graph-patchbay-parent-{}", std::process::id()));
+        let path = root.join("nested").join("connections.json");
+        Patchbay::new("nested").save_to(&path).unwrap();
+        assert!(path.is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_node_connections_restore_after_the_node_is_recreated() {
+        let mut first = InMemoryDriver::demo();
+        let effect = first
+            .create_effect_node(EffectNodeRequest {
+                instance_id: "persistent-gate".into(),
+                effect_id: "builtin.noise-gate".into(),
+                module_path: None,
+                enabled: true,
+                parameters: BTreeMap::new(),
+                position: [260.0, 180.0],
+            })
+            .unwrap();
+        first.connect(PortId(1), effect.input_port).unwrap();
+        first.connect(effect.output_port, PortId(3)).unwrap();
+
+        let mut saved = Patchbay::new("effects");
+        saved.snapshot_graph(first.graph(), true);
+
+        let mut recreated = InMemoryDriver::demo();
+        let recreated_effect = recreated
+            .create_effect_node(EffectNodeRequest {
+                instance_id: "persistent-gate".into(),
+                effect_id: "builtin.noise-gate".into(),
+                module_path: None,
+                enabled: true,
+                parameters: BTreeMap::new(),
+                position: [260.0, 180.0],
+            })
+            .unwrap();
+        let report = saved.activate(&mut recreated, false, false).unwrap();
+
+        assert_eq!(report.connected, 2);
+        assert!(recreated
+            .graph()
+            .links
+            .values()
+            .any(|link| link.output_port == PortId(1)
+                && link.input_port == recreated_effect.input_port));
+        assert!(recreated
+            .graph()
+            .links
+            .values()
+            .any(|link| link.output_port == recreated_effect.output_port
+                && link.input_port == PortId(3)));
     }
 
     #[test]

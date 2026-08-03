@@ -133,6 +133,8 @@ impl eframe::App for QpwgraphApp {
             tray.shutdown();
         }
         self.sync_config();
+        self.sync_patchbay_connections();
+        self.autosave_patchbay();
         if let Err(error) = self.config.save_to(&self.config_file) {
             eprintln!(
                 "{}",

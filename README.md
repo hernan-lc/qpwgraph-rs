@@ -76,6 +76,10 @@ and bypass parameters. The demo backend can insert it between a selected audio
 link, display it as an effect node, persist its stable endpoint keys, and remove
 it while restoring the original link.
 
+Effect channels are processed independently. An enabled effect with an output
+connection but no matching input emits a quiet diagnostic noise signal, making
+an incomplete route audible instead of silently producing an undefined buffer.
+
 User modules should target `wasm32-unknown-unknown` and implement the exports
 documented by `pw_graph_effects::wasm::ABI_DOCUMENTATION`. The realtime ABI has
 no WASI imports: module loading, validation, instantiation, and memory growth
@@ -116,7 +120,8 @@ Files ending in `.qpwgraph` or `.xml` use the qpwgraph XML shape. Other
 extensions use JSON. The configured patchbay path is used for startup
 activation. Save/load use native dialogs, recent files are retained in
 configuration, and Preferences offers named patchbay profiles plus an editable
-connection-rule list.
+connection-rule list. Graph connection changes are also written to the active
+patchbay path automatically, including effect-node links and undo/redo changes.
 
 ## Checks
 
