@@ -11,6 +11,7 @@ members = [
     "crates/pw-graph-i18n",
     "crates/pw-graph-ui",
     "crates/pw-graph-app",
+    "vendor/nnnoiseless",
 ]
 
 [workspace.package]

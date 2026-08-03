@@ -1,0 +1,28 @@
+[package]
+name = "nnnoiseless"
+version = "0.2.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "Pure-Rust RNNoise-style real-time audio denoising"
+readme = "README.md"
+
+[features]
+default = []
+# Force the portable scalar kernels even when the CPU supports SIMD. Use this
+# when bit-for-bit reproducibility across machines matters more than speed.
+reference = []
+# Keep the neural-network weights quantized as `i8` in memory and widen them
+# during inference. Saves ~3x model memory at a cost in speed.
+low-memory = []
+# JavaScript/WebAssembly bindings. Build with
+# `wasm-pack build --target web --no-default-features --features wasm`.
+wasm = ["dep:wasm-bindgen"]
+
+[lib]
+path = "src/lib.rs"
+# `cdylib` is what the WebAssembly build links; `rlib` keeps normal Rust use working.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+realfft = "3.5.0"
+wasm-bindgen = { version = "0.2", optional = true }

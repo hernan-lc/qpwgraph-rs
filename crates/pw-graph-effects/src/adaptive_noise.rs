@@ -1,25 +1,34 @@
-//! Adaptive multiband noise suppression.
+//! Neural adaptive noise reduction backed by the vendored `nnnoiseless` model.
 //!
-//! This module deliberately contains all denoiser-specific state and math so
-//! the public SDK stays focused on effect registration and host contracts.
-//! Its `process` implementation only mutates buffers prepared up front: it
-//! performs no allocation, locking, or I/O on PipeWire's realtime thread.
+//! `nnnoiseless` operates on 480-sample frames at 48 kHz and has an intrinsic
+//! frame of latency. This module owns the frame assembly, channel deinterleaving,
+//! sample-rate conversion, and fixed-capacity queues needed to expose that
+//! streaming API through the effect SDK's in-place buffer contract.
+//!
+//! All buffers and model state are allocated by [`AdaptiveNoiseSuppressor::prepare`]
+//! (or by a control-thread parameter update). The realtime `process` path only
+//! mutates those buffers; it does not allocate, lock, or perform I/O.
 
 use crate::{
     AudioSpec, EffectDescriptor, EffectError, EffectFactory, EffectParameter, EffectProcessor,
     NOISE_SUPPRESSOR_ADAPTATION, NOISE_SUPPRESSOR_BYPASS, NOISE_SUPPRESSOR_ID,
     NOISE_SUPPRESSOR_REDUCTION, NOISE_SUPPRESSOR_VOICE_PRESERVE,
 };
+use nnnoiseless::{DenoiseParams, DenoiseState, Resampler};
 
-const BANDS: usize = 4;
-const CROSSOVERS_HZ: [f32; BANDS - 1] = [180.0, 750.0, 3_200.0];
+const MODEL_SAMPLE_RATE: u32 = 48_000;
+const MODEL_FRAME_SIZE: usize = DenoiseState::FRAME_SIZE;
+const SAMPLE_SCALE: f32 = 32_768.0;
+const SCHEDULER_LEAD_FRAMES: usize = 1;
+const MIN_SUPPORTED_SAMPLE_RATE: u32 = 8_000;
+const MAX_SUPPORTED_SAMPLE_RATE: u32 = 192_000;
 
 pub(crate) fn descriptor() -> EffectDescriptor {
     EffectDescriptor {
         id: NOISE_SUPPRESSOR_ID.into(),
-        name: "Adaptive Noise Suppressor".into(),
+        name: "Adaptive Neural Noise Suppressor".into(),
         vendor: "qpwgraph-rs".into(),
-        version: "2.0.0".into(),
+        version: "3.0.0".into(),
         parameters: vec![
             EffectParameter {
                 id: NOISE_SUPPRESSOR_REDUCTION.into(),
@@ -70,41 +79,341 @@ impl EffectFactory for AdaptiveNoiseSuppressorFactory {
     }
 }
 
-/// State allocated per stream channel during `prepare`.
-#[derive(Clone, Copy)]
-struct ChannelState {
-    crossover: [f32; BANDS - 1],
-    /// Fast and slow estimators are combined to learn stationary noise without
-    /// quickly absorbing a word, a click, or a transient into the noise floor.
-    noise_fast: [f32; BANDS],
-    noise_slow: [f32; BANDS],
-    gain: [f32; BANDS],
-    foreground_hold: u32,
+/// A fixed-capacity single-producer/single-consumer sample queue.
+///
+/// The queue is used only by one processor call at a time, so it needs no
+/// synchronization. Keeping it as a ring avoids `Vec::drain` and ensures that
+/// the realtime path never has to move a potentially large tail of samples.
+struct SampleRing {
+    samples: Vec<f32>,
+    read: usize,
+    len: usize,
 }
 
-impl Default for ChannelState {
-    fn default() -> Self {
+impl SampleRing {
+    fn with_capacity(capacity: usize) -> Self {
         Self {
-            crossover: [0.0; BANDS - 1],
-            noise_fast: [0.002; BANDS],
-            noise_slow: [0.002; BANDS],
-            gain: [1.0; BANDS],
-            foreground_hold: 0,
+            samples: vec![0.0; capacity.max(1)],
+            read: 0,
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.read = 0;
+        self.len = 0;
+    }
+
+    fn available(&self) -> usize {
+        self.len
+    }
+
+    fn push_slice(&mut self, input: &[f32]) -> Result<(), EffectError> {
+        if input.len() > self.samples.len().saturating_sub(self.len) {
+            return Err(EffectError::InternalBufferOverflow);
+        }
+        let capacity = self.samples.len();
+        for (offset, &sample) in input.iter().enumerate() {
+            self.samples[(self.read + self.len + offset) % capacity] = sample;
+        }
+        self.len += input.len();
+        Ok(())
+    }
+
+    fn pop_or_zero(&mut self, output: &mut [f32]) {
+        let take = output.len().min(self.len);
+        let capacity = self.samples.len();
+        for (offset, sample) in output[..take].iter_mut().enumerate() {
+            *sample = self.samples[(self.read + offset) % capacity];
+        }
+        self.read = (self.read + take) % capacity;
+        self.len -= take;
+        output[take..].fill(0.0);
+    }
+
+    /// Keeps one full model frame queued so irregular host callback sizes do
+    /// not expose a gap while the next neural frame is being assembled.
+    fn pop_with_lead(&mut self) -> f32 {
+        let lead = SCHEDULER_LEAD_FRAMES * MODEL_FRAME_SIZE;
+        if self.len <= lead {
+            0.0
+        } else {
+            let sample = self.samples[self.read];
+            self.read = (self.read + 1) % self.samples.len();
+            self.len -= 1;
+            sample
         }
     }
 }
 
-/// A four-band adaptive Wiener suppressor with dual-rate noise tracking and
-/// foreground hold. It is deliberately more transparent than a noise gate:
-/// speech and transients open only the bands that contain foreground energy.
+/// State for one 48 kHz denoiser channel.
+struct ChannelState {
+    denoiser: Box<DenoiseState<'static>>,
+    pending: Vec<f32>,
+    frame_input: [f32; MODEL_FRAME_SIZE],
+    frame_output: [f32; MODEL_FRAME_SIZE],
+    ready: SampleRing,
+}
+
+impl ChannelState {
+    fn new(params: DenoiseParams, max_model_frames: usize) -> Self {
+        Self {
+            denoiser: DenoiseState::with_params(params),
+            pending: Vec::with_capacity(max_model_frames + MODEL_FRAME_SIZE),
+            frame_input: [0.0; MODEL_FRAME_SIZE],
+            frame_output: [0.0; MODEL_FRAME_SIZE],
+            ready: SampleRing::with_capacity(
+                max_model_frames + (SCHEDULER_LEAD_FRAMES + 2) * MODEL_FRAME_SIZE,
+            ),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.denoiser.reset();
+        self.pending.clear();
+        self.frame_input.fill(0.0);
+        self.frame_output.fill(0.0);
+        self.ready.clear();
+    }
+
+    fn process_pending(&mut self) -> Result<(), EffectError> {
+        let frame_count = self.pending.len() / MODEL_FRAME_SIZE;
+        let processed_samples = frame_count * MODEL_FRAME_SIZE;
+        if self.ready.available().saturating_add(processed_samples) > self.ready.samples.len() {
+            return Err(EffectError::InternalBufferOverflow);
+        }
+
+        for frame in self.pending[..processed_samples].chunks_exact(MODEL_FRAME_SIZE) {
+            for (destination, &sample) in self.frame_input.iter_mut().zip(frame) {
+                *destination = sample * SAMPLE_SCALE;
+            }
+            self.denoiser
+                .process_frame(&mut self.frame_output, &self.frame_input);
+            for sample in &mut self.frame_output {
+                *sample = if sample.is_finite() {
+                    (*sample / SAMPLE_SCALE).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+            self.ready.push_slice(&self.frame_output)?;
+        }
+
+        if processed_samples > 0 {
+            let remaining = self.pending.len() - processed_samples;
+            self.pending.copy_within(processed_samples.., 0);
+            self.pending.truncate(remaining);
+        }
+        Ok(())
+    }
+}
+
+/// A multi-channel 48 kHz neural stream with preallocated frame queues.
+struct NeuralCore {
+    channels: Vec<ChannelState>,
+    channel_count: usize,
+}
+
+impl NeuralCore {
+    fn new(
+        channels: usize,
+        max_model_frames: usize,
+        params: DenoiseParams,
+    ) -> Result<Self, EffectError> {
+        if channels == 0 {
+            return Err(EffectError::InvalidAudioSpec {
+                sample_rate: MODEL_SAMPLE_RATE,
+                channels: 0,
+                max_frames: max_model_frames as u32,
+            });
+        }
+        Ok(Self {
+            channels: (0..channels)
+                .map(|_| ChannelState::new(params, max_model_frames))
+                .collect(),
+            channel_count: channels,
+        })
+    }
+
+    fn reset(&mut self) {
+        for channel in &mut self.channels {
+            channel.reset();
+        }
+    }
+
+    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) -> Result<(), EffectError> {
+        if !input.len().is_multiple_of(self.channel_count) {
+            return Err(EffectError::InvalidBufferLength {
+                actual: input.len(),
+                expected: input.len() - input.len() % self.channel_count,
+            });
+        }
+        let frames = input.len() / self.channel_count;
+        for channel in &self.channels {
+            if channel.pending.len().saturating_add(frames) > channel.pending.capacity() {
+                return Err(EffectError::InternalBufferOverflow);
+            }
+        }
+
+        for frame in input.chunks_exact(self.channel_count) {
+            for (channel, &sample) in self.channels.iter_mut().zip(frame) {
+                let sample = if sample.is_finite() {
+                    sample.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+                channel.pending.push(sample);
+            }
+        }
+        for channel in &mut self.channels {
+            channel.process_pending()?;
+        }
+
+        output.clear();
+        output.resize(input.len(), 0.0);
+        for output_frame in output.chunks_exact_mut(self.channel_count) {
+            for (sample, channel) in output_frame.iter_mut().zip(&mut self.channels) {
+                *sample = channel.ready.pop_with_lead();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A complete stream adapter around the 48 kHz neural core.
+struct NeuralStream {
+    sample_rate: u32,
+    channels: usize,
+    core: NeuralCore,
+    input_resampler: Option<Resampler>,
+    output_resampler: Option<Resampler>,
+    input_at_model_rate: Vec<f32>,
+    output_at_model_rate: Vec<f32>,
+    output_at_input_rate: Vec<f32>,
+    output: SampleRing,
+}
+
+impl NeuralStream {
+    fn new(spec: &AudioSpec, params: DenoiseParams) -> Result<Self, EffectError> {
+        if !(MIN_SUPPORTED_SAMPLE_RATE..=MAX_SUPPORTED_SAMPLE_RATE).contains(&spec.sample_rate) {
+            return Err(EffectError::UnsupportedSampleRate {
+                sample_rate: spec.sample_rate,
+                minimum: MIN_SUPPORTED_SAMPLE_RATE,
+                maximum: MAX_SUPPORTED_SAMPLE_RATE,
+            });
+        }
+
+        // Initialize FFT plans and SIMD dispatch on the preparation/control
+        // thread. The first realtime callback must not pay this cost.
+        let _ = nnnoiseless::active_isa();
+
+        let channels = spec.channels as usize;
+        let input_frames = spec.max_frames as usize;
+        let model_frames = resampled_frame_capacity(input_frames, spec.sample_rate)
+            .checked_add(2 * MODEL_FRAME_SIZE)
+            .ok_or(EffectError::InternalBufferOverflow)?;
+        let model_samples = model_frames
+            .checked_mul(channels)
+            .ok_or(EffectError::InternalBufferOverflow)?;
+        let output_frames = input_frames
+            .checked_add(4 * MODEL_FRAME_SIZE)
+            .ok_or(EffectError::InternalBufferOverflow)?;
+        let output_samples = output_frames
+            .checked_mul(channels)
+            .ok_or(EffectError::InternalBufferOverflow)?;
+
+        let mut input_resampler = None;
+        let mut output_resampler = None;
+        if spec.sample_rate != MODEL_SAMPLE_RATE {
+            let mut input =
+                Resampler::new(spec.sample_rate as f64, MODEL_SAMPLE_RATE as f64, channels);
+            input.reserve(input_frames);
+            input_resampler = Some(input);
+
+            let mut output =
+                Resampler::new(MODEL_SAMPLE_RATE as f64, spec.sample_rate as f64, channels);
+            output.reserve(model_frames);
+            output_resampler = Some(output);
+        }
+
+        Ok(Self {
+            sample_rate: spec.sample_rate,
+            channels,
+            core: NeuralCore::new(channels, model_frames, params)?,
+            input_resampler,
+            output_resampler,
+            input_at_model_rate: Vec::with_capacity(model_samples),
+            output_at_model_rate: Vec::with_capacity(model_samples),
+            output_at_input_rate: Vec::with_capacity(output_samples),
+            output: SampleRing::with_capacity(output_samples),
+        })
+    }
+
+    fn reset(&mut self) {
+        self.core.reset();
+        if let Some(resampler) = &mut self.input_resampler {
+            resampler.reset();
+        }
+        if let Some(resampler) = &mut self.output_resampler {
+            resampler.reset();
+        }
+        self.input_at_model_rate.clear();
+        self.output_at_model_rate.clear();
+        self.output_at_input_rate.clear();
+        self.output.clear();
+    }
+
+    fn process(&mut self, buffer: &mut [f32], frames: u32) -> Result<(), EffectError> {
+        let expected = frames as usize * self.channels;
+        if buffer.len() != expected {
+            return Err(EffectError::InvalidBufferLength {
+                actual: buffer.len(),
+                expected,
+            });
+        }
+
+        self.input_at_model_rate.clear();
+        match &mut self.input_resampler {
+            Some(resampler) => resampler.process(buffer, &mut self.input_at_model_rate),
+            None => self.input_at_model_rate.extend_from_slice(buffer),
+        }
+
+        self.core
+            .process(&self.input_at_model_rate, &mut self.output_at_model_rate)?;
+        self.output_at_input_rate.clear();
+        match &mut self.output_resampler {
+            Some(resampler) => {
+                resampler.process(&self.output_at_model_rate, &mut self.output_at_input_rate);
+            }
+            None => self
+                .output_at_input_rate
+                .extend_from_slice(&self.output_at_model_rate),
+        }
+
+        self.output.push_slice(&self.output_at_input_rate)?;
+        self.output.pop_or_zero(buffer);
+        Ok(())
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
+fn resampled_frame_capacity(input_frames: usize, sample_rate: u32) -> usize {
+    let ratio = MODEL_SAMPLE_RATE as f64 / sample_rate as f64;
+    (input_frames as f64 * ratio).ceil() as usize
+}
+
+/// A neural adaptive noise suppressor exposed through the effect SDK.
 pub struct AdaptiveNoiseSuppressor {
     descriptor: EffectDescriptor,
     spec: Option<AudioSpec>,
+    stream: Option<NeuralStream>,
     reduction_db: f32,
     adaptation: f32,
     voice_preserve: f32,
     bypass: bool,
-    channels: Vec<ChannelState>,
 }
 
 impl Default for AdaptiveNoiseSuppressor {
@@ -112,11 +421,11 @@ impl Default for AdaptiveNoiseSuppressor {
         Self {
             descriptor: descriptor(),
             spec: None,
+            stream: None,
             reduction_db: 20.0,
             adaptation: 55.0,
             voice_preserve: 70.0,
             bypass: false,
-            channels: Vec::new(),
         }
     }
 }
@@ -130,44 +439,29 @@ impl AdaptiveNoiseSuppressor {
             .map(|parameter| (parameter.minimum, parameter.maximum))
     }
 
-    fn coefficient(milliseconds: f32, sample_rate: u32) -> f32 {
-        (-1.0 / (milliseconds.max(0.1) * 0.001 * sample_rate as f32)).exp()
+    fn denoise_params(&self) -> DenoiseParams {
+        let adaptation = self.adaptation / 100.0;
+        let voice_preserve = self.voice_preserve / 100.0;
+
+        // The public controls retain their original meaning while mapping to
+        // the neural model's smoothing and VAD controls:
+        //
+        // * adaptation controls how quickly suppression gains can change;
+        // * voice preserve lowers the VAD gate and permits faster gain release.
+        DenoiseParams::default()
+            .max_attenuation_db(self.reduction_db)
+            .gain_decay(0.92 - 0.42 * adaptation)
+            .gain_rise(0.4 + 0.6 * voice_preserve)
+            .vad_threshold(0.45 * (1.0 - voice_preserve))
+            .silence_gain_decay(0.96 + 0.04 * adaptation)
     }
 
-    fn noise_floor(
-        state: &mut ChannelState,
-        index: usize,
-        level: f32,
-        rate: f32,
-        foreground: bool,
-    ) -> f32 {
-        let fast_rate = if foreground { rate * 0.005 } else { rate };
-        let slow_rate = if foreground {
-            rate * 0.0002
-        } else {
-            rate * 0.12
+    fn rebuild_stream(&mut self) -> Result<(), EffectError> {
+        let Some(spec) = self.spec.clone() else {
+            return Ok(());
         };
-        state.noise_fast[index] += (level - state.noise_fast[index]) * fast_rate;
-        state.noise_slow[index] += (level - state.noise_slow[index]) * slow_rate;
-        state.noise_fast[index]
-            .min(state.noise_slow[index])
-            .max(1e-7)
-    }
-
-    fn split_bands(
-        input: f32,
-        state: &mut ChannelState,
-        coefficients: [f32; BANDS - 1],
-    ) -> [f32; BANDS] {
-        let mut previous = 0.0;
-        let mut bands = [0.0; BANDS];
-        for index in 0..BANDS - 1 {
-            state.crossover[index] += coefficients[index] * (input - state.crossover[index]);
-            bands[index] = state.crossover[index] - previous;
-            previous = state.crossover[index];
-        }
-        bands[BANDS - 1] = input - previous;
-        bands
+        self.stream = Some(NeuralStream::new(&spec, self.denoise_params())?);
+        Ok(())
     }
 }
 
@@ -178,8 +472,9 @@ impl EffectProcessor for AdaptiveNoiseSuppressor {
 
     fn prepare(&mut self, spec: AudioSpec) -> Result<(), EffectError> {
         spec.validate()?;
-        self.channels = vec![ChannelState::default(); spec.channels as usize];
+        let stream = NeuralStream::new(&spec, self.denoise_params())?;
         self.spec = Some(spec);
+        self.stream = Some(stream);
         Ok(())
     }
 
@@ -205,59 +500,9 @@ impl EffectProcessor for AdaptiveNoiseSuppressor {
             return Ok(());
         }
 
-        let sample_rate = spec.sample_rate;
-        let crossovers = CROSSOVERS_HZ.map(|frequency| {
-            1.0 - (-2.0 * std::f32::consts::PI * frequency / sample_rate as f32).exp()
-        });
-        let adaptation_ms = 2_200.0 - self.adaptation * 20.0;
-        let noise_rate = 1.0 - Self::coefficient(adaptation_ms, sample_rate);
-        let open_coefficient = Self::coefficient(8.0, sample_rate);
-        let close_coefficient = Self::coefficient(150.0, sample_rate);
-        let hold_frames = (0.035 * sample_rate as f32) as u32;
-        let minimum_gain = 10.0_f32.powf(-self.reduction_db / 20.0);
-        let voice_protection = self.voice_preserve / 100.0;
-
-        for frame in buffer.chunks_exact_mut(channels) {
-            for (sample, state) in frame.iter_mut().zip(&mut self.channels) {
-                let input = if sample.is_finite() { *sample } else { 0.0 };
-                let bands = Self::split_bands(input, state, crossovers);
-                let foreground = bands.iter().enumerate().any(|(index, band)| {
-                    // Mid bands receive a lower threshold because most speech
-                    // energy is concentrated there.
-                    let multiplier = if index == 1 || index == 2 { 2.0 } else { 2.8 };
-                    band.abs() > state.noise_fast[index] * multiplier
-                });
-                if foreground {
-                    state.foreground_hold = hold_frames;
-                } else {
-                    state.foreground_hold = state.foreground_hold.saturating_sub(1);
-                }
-                let protected = state.foreground_hold > 0;
-                let mut output = 0.0;
-
-                for (index, band) in bands.into_iter().enumerate() {
-                    let floor = Self::noise_floor(state, index, band.abs(), noise_rate, protected);
-                    let noise_power = floor * floor;
-                    let signal_power = (band * band - noise_power).max(0.0);
-                    let wiener = signal_power / (signal_power + noise_power + 1e-12);
-                    let preserve = if protected && (index == 1 || index == 2) {
-                        0.15 + 0.7 * voice_protection
-                    } else {
-                        0.0
-                    };
-                    let target = (minimum_gain + (1.0 - minimum_gain) * wiener).max(preserve);
-                    let coefficient = if target > state.gain[index] {
-                        open_coefficient
-                    } else {
-                        close_coefficient
-                    };
-                    state.gain[index] = target + (state.gain[index] - target) * coefficient;
-                    output += band * state.gain[index];
-                }
-                *sample = output;
-            }
-        }
-        Ok(())
+        let stream = self.stream.as_mut().ok_or(EffectError::NotPrepared)?;
+        debug_assert_eq!(stream.sample_rate(), spec.sample_rate);
+        stream.process(buffer, frames)
     }
 
     fn set_parameter(&mut self, id: &str, value: f32) -> Result<(), EffectError> {
@@ -270,18 +515,24 @@ impl EffectProcessor for AdaptiveNoiseSuppressor {
                 value,
             });
         }
+        let value = value.clamp(minimum, maximum);
         match id {
-            NOISE_SUPPRESSOR_REDUCTION => self.reduction_db = value.clamp(minimum, maximum),
-            NOISE_SUPPRESSOR_ADAPTATION => self.adaptation = value.clamp(minimum, maximum),
-            NOISE_SUPPRESSOR_VOICE_PRESERVE => self.voice_preserve = value.clamp(minimum, maximum),
-            NOISE_SUPPRESSOR_BYPASS => self.bypass = value.clamp(minimum, maximum) >= 0.5,
+            NOISE_SUPPRESSOR_REDUCTION => self.reduction_db = value,
+            NOISE_SUPPRESSOR_ADAPTATION => self.adaptation = value,
+            NOISE_SUPPRESSOR_VOICE_PRESERVE => self.voice_preserve = value,
+            NOISE_SUPPRESSOR_BYPASS => {
+                self.bypass = value >= 0.5;
+                return Ok(());
+            }
             _ => unreachable!("descriptor and parameter match are kept together"),
         }
-        Ok(())
+        self.rebuild_stream()
     }
 
     fn reset(&mut self) {
-        self.channels.fill(ChannelState::default());
+        if let Some(stream) = &mut self.stream {
+            stream.reset();
+        }
     }
 }
 
@@ -289,18 +540,67 @@ impl EffectProcessor for AdaptiveNoiseSuppressor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn filter_bank_reconstructs_the_input() {
-        let mut state = ChannelState::default();
-        let bands = AdaptiveNoiseSuppressor::split_bands(0.42, &mut state, [0.1, 0.2, 0.3]);
-        assert!((bands.iter().sum::<f32>() - 0.42).abs() < 1e-6);
+    fn prepared_suppressor(sample_rate: u32, channels: u16) -> AdaptiveNoiseSuppressor {
+        let mut suppressor = AdaptiveNoiseSuppressor::default();
+        suppressor
+            .prepare(AudioSpec {
+                sample_rate,
+                channels,
+                max_frames: 256,
+            })
+            .unwrap();
+        suppressor
     }
 
     #[test]
-    fn descriptor_exposes_voice_preservation() {
-        assert!(descriptor()
-            .parameters
-            .iter()
-            .any(|parameter| parameter.id == NOISE_SUPPRESSOR_VOICE_PRESERVE));
+    fn steady_noise_is_reduced_after_the_stream_warms_up() {
+        let mut suppressor = prepared_suppressor(MODEL_SAMPLE_RATE, 1);
+        suppressor
+            .set_parameter(NOISE_SUPPRESSOR_REDUCTION, 36.0)
+            .unwrap();
+        for _ in 0..320 {
+            let mut noise = vec![0.004; 128];
+            suppressor.process(&mut noise, 128).unwrap();
+        }
+        let mut noise = vec![0.004; 128];
+        suppressor.process(&mut noise, 128).unwrap();
+        assert!(
+            noise
+                .iter()
+                .all(|sample| sample.is_finite() && sample.abs() < 0.003),
+            "learned steady noise should be attenuated"
+        );
+    }
+
+    #[test]
+    fn speech_and_invalid_input_are_safe_over_a_stream() {
+        let mut suppressor = prepared_suppressor(MODEL_SAMPLE_RATE, 1);
+        let mut saw_foreground = false;
+        for block in 0..24 {
+            let mut audio = vec![0.0; 128];
+            if block == 0 {
+                audio[0] = f32::NAN;
+                audio[1] = f32::INFINITY;
+            }
+            for sample in audio.iter_mut().skip(2) {
+                *sample = 0.5;
+            }
+            suppressor.process(&mut audio, 128).unwrap();
+            assert!(audio.iter().all(|sample| sample.is_finite()));
+            if audio.iter().any(|sample| sample.abs() > 0.1) {
+                saw_foreground = true;
+            }
+        }
+        assert!(saw_foreground, "foreground signal should remain audible");
+    }
+
+    #[test]
+    fn common_audio_rates_are_resampled_without_allocating_in_process() {
+        let mut suppressor = prepared_suppressor(16_000, 2);
+        for _ in 0..80 {
+            let mut audio = vec![0.01; 128 * 2];
+            suppressor.process(&mut audio, 128).unwrap();
+            assert!(audio.iter().all(|sample| sample.is_finite()));
+        }
     }
 }

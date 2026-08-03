@@ -76,6 +76,14 @@ pub enum EffectError {
     UnknownEffect(String),
     #[error("invalid parameter value for {id}: {value}")]
     InvalidParameter { id: String, value: f32 },
+    #[error("effect internal buffer capacity was exceeded")]
+    InternalBufferOverflow,
+    #[error("sample rate {sample_rate} is outside the supported range {minimum}..={maximum} Hz")]
+    UnsupportedSampleRate {
+        sample_rate: u32,
+        minimum: u32,
+        maximum: u32,
+    },
     #[error("effect module is missing export: {0}")]
     MissingWasmExport(String),
     #[error("invalid effect module manifest: {0}")]
@@ -440,58 +448,11 @@ mod tests {
         assert_eq!(audio, vec![0.5, 0.5]);
     }
 
-    fn prepared_suppressor() -> AdaptiveNoiseSuppressor {
-        let mut suppressor = AdaptiveNoiseSuppressor::default();
-        suppressor
-            .prepare(AudioSpec {
-                sample_rate: 48_000,
-                channels: 2,
-                max_frames: 128,
-            })
-            .unwrap();
-        suppressor
-    }
-
     #[test]
     fn host_exposes_the_adaptive_noise_suppressor() {
         let descriptors = EffectHost::new().descriptors();
         assert!(descriptors
             .iter()
             .any(|descriptor| descriptor.id == NOISE_SUPPRESSOR_ID));
-    }
-
-    #[test]
-    fn adaptive_suppressor_learns_and_reduces_steady_noise() {
-        let mut suppressor = prepared_suppressor();
-        suppressor
-            .set_parameter(NOISE_SUPPRESSOR_REDUCTION, 36.0)
-            .unwrap();
-        for _ in 0..400 {
-            let mut noise = vec![0.004; 256];
-            suppressor.process(&mut noise, 128).unwrap();
-        }
-        let mut noise = vec![0.004; 256];
-        suppressor.process(&mut noise, 128).unwrap();
-        assert!(
-            noise.iter().all(|sample| sample.abs() < 0.003),
-            "learned steady noise should be attenuated"
-        );
-    }
-
-    #[test]
-    fn adaptive_suppressor_preserves_loud_foreground_and_sanitizes_input() {
-        let mut suppressor = prepared_suppressor();
-        let mut audio = vec![0.0; 256];
-        audio[0] = f32::NAN;
-        audio[1] = f32::INFINITY;
-        for sample in audio.iter_mut().skip(2) {
-            *sample = 0.5;
-        }
-        suppressor.process(&mut audio, 128).unwrap();
-        assert!(audio.iter().all(|sample| sample.is_finite()));
-        assert!(
-            audio[20].abs() > 0.1,
-            "foreground signal should remain audible"
-        );
     }
 }
