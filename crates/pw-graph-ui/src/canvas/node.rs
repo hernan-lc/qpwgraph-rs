@@ -153,10 +153,17 @@ impl GraphCanvas {
             )
             .on_hover_text(body_tooltip);
         let disconnect_node_requested = Cell::new(false);
+        let remove_effect_requested = Cell::new(false);
         let arrange_nodes_requested = Cell::new(false);
         body_response.context_menu(|ui| {
             if ui.button(&disconnect_node_label).clicked() {
                 disconnect_node_requested.set(true);
+                ui.close_menu();
+            }
+            if node.node_type == pw_graph_core::NodeType::Effect
+                && ui.button(i18n.text("canvas.remove_effect")).clicked()
+            {
+                remove_effect_requested.set(true);
                 ui.close_menu();
             }
             if ui.button(i18n.text("canvas.arrange_selection")).clicked() {
@@ -174,6 +181,12 @@ impl GraphCanvas {
         header_response.context_menu(|ui| {
             if ui.button(&disconnect_node_label).clicked() {
                 disconnect_node_requested.set(true);
+                ui.close_menu();
+            }
+            if node.node_type == pw_graph_core::NodeType::Effect
+                && ui.button(i18n.text("canvas.remove_effect")).clicked()
+            {
+                remove_effect_requested.set(true);
                 ui.close_menu();
             }
             if ui.button(i18n.text("canvas.arrange_selection")).clicked() {
@@ -293,6 +306,9 @@ impl GraphCanvas {
 
         if disconnect_node_requested.get() {
             actions.push(CanvasAction::DisconnectNode { node: node.id });
+        }
+        if remove_effect_requested.get() {
+            actions.push(CanvasAction::RemoveEffect { node: node.id });
         }
         if arrange_nodes_requested.get() {
             let nodes = if self.selected_nodes.contains(&node.id) && self.selected_nodes.len() > 1 {

@@ -173,7 +173,9 @@ impl GraphCanvas {
 
         // Handle this after the canvas has processed pointer input. This lets
         // a link be selected and deleted during the same egui frame, and keeps
-        // the action in the same path as the context-menu disconnect.
+        // the action in the same path as the context-menu disconnect. With no
+        // link selected, Delete removes selected effect nodes; normal PipeWire
+        // nodes remain protected from accidental removal.
         if keyboard_shortcuts_enabled
             && ui.input(|input| {
                 input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
@@ -186,6 +188,22 @@ impl GraphCanvas {
                 } else {
                     actions.push(CanvasAction::Disconnect { link });
                 }
+            } else {
+                let effects: Vec<_> = self
+                    .selected_nodes
+                    .iter()
+                    .copied()
+                    .filter(|node_id| {
+                        graph
+                            .node(*node_id)
+                            .is_some_and(|node| node.node_type == pw_graph_core::NodeType::Effect)
+                    })
+                    .collect();
+                for node in effects {
+                    actions.push(CanvasAction::RemoveEffect { node });
+                    self.selected_nodes.remove(&node);
+                }
+                self.selected_node = self.selected_nodes.iter().next().copied();
             }
         }
 

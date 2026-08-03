@@ -152,9 +152,13 @@ impl GraphCanvas {
             .map(|node| node.id)
     }
 
-    /// Pairs `source`'s outputs with `target`'s inputs by channel metadata and
-    /// compatible port type. Used for the whole-node Easy-mode connect drag,
-    /// which operates on every raw port regardless of visual grouping.
+    /// Pairs the two nodes' compatible ports for a whole-node Easy-mode drag.
+    ///
+    /// The user should not have to discover which side of a newly created
+    /// effect is its input before dragging. Prefer the dragged node as the
+    /// source when that is possible, then transparently reverse the pair when
+    /// the target is the source. This preserves the output-to-input pairs the
+    /// backend requires while making the gesture work in either visual order.
     pub(crate) fn matching_port_pairs(
         &self,
         graph: &Graph,
@@ -171,7 +175,22 @@ impl GraphCanvas {
             .into_iter()
             .filter(|port| port.direction == Direction::Sink)
             .collect();
-        pair_ports(&outputs, &inputs)
+        let forward = pair_ports(&outputs, &inputs);
+        if !forward.is_empty() {
+            return forward;
+        }
+
+        let target_outputs: Vec<&Port> = self
+            .ordered_ports(graph, target)
+            .into_iter()
+            .filter(|port| port.direction == Direction::Source)
+            .collect();
+        let source_inputs: Vec<&Port> = self
+            .ordered_ports(graph, source)
+            .into_iter()
+            .filter(|port| port.direction == Direction::Sink)
+            .collect();
+        pair_ports(&target_outputs, &source_inputs)
     }
 }
 
@@ -264,5 +283,46 @@ mod tests {
         // (its visual top is anchor - 10), keeping controls and ports apart.
         assert_eq!(anchor.y, panel_bottom + 13.0);
         assert!(anchor.y - 10.0 > panel_bottom);
+    }
+
+    #[test]
+    fn easy_mode_node_drag_can_start_on_an_effect_input_side() {
+        let mut graph = Graph::default();
+        let source = NodeId(1);
+        let effect = NodeId(2);
+        graph
+            .add_node(Node::new(source, "Capture", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_node(Node::new(effect, "Noise Gate", NodeType::Effect))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(10),
+                source,
+                "output",
+                Direction::Source,
+                PortType::Audio,
+            ))
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(20),
+                effect,
+                "input",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+
+        let canvas = GraphCanvas::default();
+        assert_eq!(
+            canvas.matching_port_pairs(
+                &graph,
+                graph.node(effect).unwrap(),
+                graph.node(source).unwrap(),
+            ),
+            vec![(PortId(10), PortId(20))]
+        );
     }
 }
