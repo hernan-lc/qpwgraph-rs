@@ -7,12 +7,11 @@
 //! requires before a callback data pointer may be released.
 //!
 //! The current effect SDK has one builtin processor and no native WASM host.
-//! Consequently this runtime exposes one mono, F32 DSP input and one mono,
-//! F32 DSP output.  This is deliberate: each graph link represents one
-//! channel, and a filter can therefore be inserted into a link without
-//! changing channel routing.  Multi-channel/interleaved processing and
-//! out-of-process/WASM module hosting need a richer realtime control channel
-//! before they can be added safely.
+//! Consequently this runtime exposes a stereo FL/FR pair of F32 DSP ports.
+//! The callback converts PipeWire's planar buffers into the interleaved form
+//! expected by the built-in processors, without allocating on the realtime
+//! thread. Out-of-process/WASM module hosting still needs a richer realtime
+//! control channel before it can be added safely.
 
 use super::*;
 use pw_graph_effects::{
@@ -28,15 +27,22 @@ use std::sync::Mutex;
 /// trusting an arbitrarily large duration supplied by an external graph.
 const MAX_DSP_FRAMES: u32 = 16_384;
 const PREPARED_SAMPLE_RATE: u32 = 48_000;
+const DSP_CHANNELS: usize = 2;
 const UNRESOLVED_ID: u64 = u64::MAX;
 
-/// The callback only needs two port-data pointers and a processor.  The
-/// pointers are published before `pw_filter_connect`, then never changed, so
-/// loading them atomically is sufficient even when PipeWire calls `process`
-/// on its separate realtime data thread.
+/// Processing state that is never reallocated from the realtime callback.
+struct ProcessorState {
+    processor: Box<dyn EffectProcessor>,
+    interleaved: Vec<f32>,
+}
+
+/// The callback owns a planar FL/FR pair and an interleaved processor buffer.
+/// The port pointers are published before `pw_filter_connect`, then never
+/// changed, so loading them atomically is sufficient even when PipeWire calls
+/// `process` on its separate realtime data thread.
 struct CallbackState {
-    input_port: AtomicPtr<c_void>,
-    output_port: AtomicPtr<c_void>,
+    input_ports: [AtomicPtr<c_void>; DSP_CHANNELS],
+    output_ports: [AtomicPtr<c_void>; DSP_CHANNELS],
     enabled: AtomicBool,
     processor_failed: AtomicBool,
     /// A control update may run while PipeWire is processing.  The realtime
@@ -46,17 +52,20 @@ struct CallbackState {
     /// This is intentionally a conservative bridge for the builtin Rust
     /// processors.  A future plugin ABI should replace it with a lock-free,
     /// preallocated control queue before hosting third-party processors.
-    processor: Mutex<Box<dyn EffectProcessor>>,
+    processor: Mutex<ProcessorState>,
 }
 
 impl CallbackState {
     fn new(processor: Box<dyn EffectProcessor>, enabled: bool) -> Self {
         Self {
-            input_port: AtomicPtr::new(ptr::null_mut()),
-            output_port: AtomicPtr::new(ptr::null_mut()),
+            input_ports: std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
+            output_ports: std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
             enabled: AtomicBool::new(enabled),
             processor_failed: AtomicBool::new(false),
-            processor: Mutex::new(processor),
+            processor: Mutex::new(ProcessorState {
+                processor,
+                interleaved: vec![0.0; MAX_DSP_FRAMES as usize * DSP_CHANNELS],
+            }),
         }
     }
 
@@ -64,8 +73,8 @@ impl CallbackState {
     ///
     /// PipeWire invokes this with the callback data supplied to
     /// `pw_filter_new_simple`.  Both port pointers were returned by
-    /// `pw_filter_add_port`, and the filter owns their lifetime.  The DSP API
-    /// guarantees F32 sample storage for the requested mono format.
+    /// `pw_filter_add_port`, and the filter owns their lifetime. The DSP API
+    /// guarantees F32 sample storage for each planar FL/FR channel.
     unsafe fn process(&self, position: *mut pw::spa::sys::spa_io_position) {
         if position.is_null() {
             return;
@@ -76,15 +85,24 @@ impl CallbackState {
             return;
         }
         let frames = frames as u32;
-        let input_port = self.input_port.load(Ordering::Acquire);
-        let output_port = self.output_port.load(Ordering::Acquire);
-        if input_port.is_null() || output_port.is_null() {
+        let input_ports = self
+            .input_ports
+            .each_ref()
+            .map(|port| port.load(Ordering::Acquire));
+        let output_ports = self
+            .output_ports
+            .each_ref()
+            .map(|port| port.load(Ordering::Acquire));
+        if input_ports.iter().any(|port| port.is_null())
+            || output_ports.iter().any(|port| port.is_null())
+        {
             return;
         }
-
-        let input = pw::sys::pw_filter_get_dsp_buffer(input_port, frames);
-        let output = pw::sys::pw_filter_get_dsp_buffer(output_port, frames);
-        if input.is_null() || output.is_null() {
+        let inputs = input_ports.map(|port| pw::sys::pw_filter_get_dsp_buffer(port, frames));
+        let outputs = output_ports.map(|port| pw::sys::pw_filter_get_dsp_buffer(port, frames));
+        if inputs.iter().any(|buffer| buffer.is_null())
+            || outputs.iter().any(|buffer| buffer.is_null())
+        {
             return;
         }
 
@@ -92,18 +110,33 @@ impl CallbackState {
         // borrow its valid F32 region for this callback and always begin from
         // a transparent pass-through signal. `copy` also permits the unlikely
         // case that PipeWire aliases the two DSP pointers.
-        ptr::copy(input.cast::<f32>(), output.cast::<f32>(), frames as usize);
+        for channel in 0..DSP_CHANNELS {
+            ptr::copy(
+                inputs[channel].cast::<f32>(),
+                outputs[channel].cast::<f32>(),
+                frames as usize,
+            );
+        }
         if !self.enabled.load(Ordering::Acquire) {
             return;
         }
 
-        let Ok(mut processor) = self.processor.try_lock() else {
+        let Ok(mut state) = self.processor.try_lock() else {
             // Parameter edits are intentionally allowed to cost one bypassed
             // quantum. Waiting for a non-realtime UI thread here would risk an
             // xrun for the entire PipeWire graph.
             return;
         };
-        let samples = std::slice::from_raw_parts_mut(output.cast::<f32>(), frames as usize);
+        let ProcessorState {
+            processor,
+            interleaved,
+        } = &mut *state;
+        let samples = &mut interleaved[..frames as usize * DSP_CHANNELS];
+        for frame in 0..frames as usize {
+            for channel in 0..DSP_CHANNELS {
+                samples[frame * DSP_CHANNELS + channel] = *inputs[channel].cast::<f32>().add(frame);
+            }
+        }
         // No Rust panic may cross the C callback boundary. Builtin processors
         // are specified not to panic, but a defensive catch keeps a malformed
         // future implementation from invoking undefined behaviour here.
@@ -111,7 +144,15 @@ impl CallbackState {
             processor.process(samples, frames)
         }));
         match result {
-            Ok(Ok(())) => self.processor_failed.store(false, Ordering::Relaxed),
+            Ok(Ok(())) => {
+                for frame in 0..frames as usize {
+                    for channel in 0..DSP_CHANNELS {
+                        *outputs[channel].cast::<f32>().add(frame) =
+                            samples[frame * DSP_CHANNELS + channel];
+                    }
+                }
+                self.processor_failed.store(false, Ordering::Relaxed);
+            }
             _ => self.processor_failed.store(true, Ordering::Relaxed),
         }
     }
@@ -203,52 +244,60 @@ impl EffectRuntime {
             ));
         };
 
-        let input_properties = pw::properties::properties! {
-            "format.dsp" => "32 bit float mono audio",
-            "port.name" => "input",
-        };
-        let input_port = unsafe {
-            pw::sys::pw_filter_add_port(
-                filter.as_ptr(),
-                pw::spa::sys::SPA_DIRECTION_INPUT,
-                pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                0,
-                input_properties.into_raw(),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if input_port.is_null() {
-            unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-            return Err(BackendError::Native(
-                "PipeWire effect input-port creation returned null".into(),
-            ));
+        let mut input_ports = [ptr::null_mut(); DSP_CHANNELS];
+        let mut output_ports = [ptr::null_mut(); DSP_CHANNELS];
+        for (index, channel) in ["FL", "FR"].iter().enumerate() {
+            let input_properties = pw::properties::properties! {
+                "format.dsp" => "32 bit float mono audio",
+                "port.name" => format!("input_{channel}"),
+                "audio.channel" => *channel,
+            };
+            input_ports[index] = unsafe {
+                pw::sys::pw_filter_add_port(
+                    filter.as_ptr(),
+                    pw::spa::sys::SPA_DIRECTION_INPUT,
+                    pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                    0,
+                    input_properties.into_raw(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            if input_ports[index].is_null() {
+                unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
+                return Err(BackendError::Native(
+                    "PipeWire effect input-port creation returned null".into(),
+                ));
+            }
+
+            let output_properties = pw::properties::properties! {
+                "format.dsp" => "32 bit float mono audio",
+                "port.name" => format!("output_{channel}"),
+                "audio.channel" => *channel,
+            };
+            output_ports[index] = unsafe {
+                pw::sys::pw_filter_add_port(
+                    filter.as_ptr(),
+                    pw::spa::sys::SPA_DIRECTION_OUTPUT,
+                    pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                    0,
+                    output_properties.into_raw(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            if output_ports[index].is_null() {
+                unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
+                return Err(BackendError::Native(
+                    "PipeWire effect output-port creation returned null".into(),
+                ));
+            }
         }
 
-        let output_properties = pw::properties::properties! {
-            "format.dsp" => "32 bit float mono audio",
-            "port.name" => "output",
-        };
-        let output_port = unsafe {
-            pw::sys::pw_filter_add_port(
-                filter.as_ptr(),
-                pw::spa::sys::SPA_DIRECTION_OUTPUT,
-                pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                0,
-                output_properties.into_raw(),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if output_port.is_null() {
-            unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-            return Err(BackendError::Native(
-                "PipeWire effect output-port creation returned null".into(),
-            ));
+        for channel in 0..DSP_CHANNELS {
+            callback.input_ports[channel].store(input_ports[channel], Ordering::Release);
+            callback.output_ports[channel].store(output_ports[channel], Ordering::Release);
         }
-
-        callback.input_port.store(input_port, Ordering::Release);
-        callback.output_port.store(output_port, Ordering::Release);
         let result = unsafe {
             pw::sys::pw_filter_connect(
                 filter.as_ptr(),
@@ -278,12 +327,13 @@ impl EffectRuntime {
     }
 
     fn set_parameter(&self, parameter: &str, value: f32) -> BackendResult<()> {
-        let mut processor = self
+        let mut state = self
             .callback
             .processor
             .lock()
             .map_err(|_| BackendError::Native("effect processor lock was poisoned".into()))?;
-        processor
+        state
+            .processor
             .set_parameter(parameter, value)
             .map_err(|error| BackendError::Native(error.to_string()))
     }
@@ -325,15 +375,15 @@ impl NativeEffect {
         }
 
         // All setup and parameter validation happens before the raw filter is
-        // published to PipeWire. The only current format is one F32 DSP channel
-        // per graph link; PipeWire's standard quantum stays under this ceiling.
+        // published to PipeWire. Each filter exposes a planar FL/FR pair while
+        // the processor receives the matching interleaved stereo buffer.
         let mut processor = host
             .create(&request.effect_id)
             .map_err(|error| BackendError::Native(format!("could not create effect: {error}")))?;
         processor
             .prepare(AudioSpec {
                 sample_rate: PREPARED_SAMPLE_RATE,
-                channels: 1,
+                channels: DSP_CHANNELS as u16,
                 max_frames: MAX_DSP_FRAMES,
             })
             .map_err(|error| BackendError::Native(error.to_string()))?;

@@ -5,13 +5,17 @@
 //! filesystem/network work from [`EffectProcessor::process`]. This makes the
 //! same API usable from a PipeWire realtime callback and from an offline test.
 
+use adaptive_noise::AdaptiveNoiseSuppressorFactory;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod adaptive_noise;
 pub mod wasm;
+pub use adaptive_noise::AdaptiveNoiseSuppressor;
 
 pub const NOISE_GATE_ID: &str = "builtin.noise-gate";
+pub const NOISE_SUPPRESSOR_ID: &str = "builtin.adaptive-noise-suppressor";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AudioSpec {
@@ -104,6 +108,7 @@ impl EffectHost {
     pub fn new() -> Self {
         let mut host = Self::default();
         host.register(Box::new(NoiseGateFactory));
+        host.register(Box::new(AdaptiveNoiseSuppressorFactory));
         host
     }
 
@@ -148,6 +153,10 @@ pub const NOISE_GATE_ATTACK: &str = "attack-ms";
 pub const NOISE_GATE_HOLD: &str = "hold-ms";
 pub const NOISE_GATE_RELEASE: &str = "release-ms";
 pub const NOISE_GATE_BYPASS: &str = "bypass";
+pub const NOISE_SUPPRESSOR_REDUCTION: &str = "reduction-db";
+pub const NOISE_SUPPRESSOR_ADAPTATION: &str = "adaptation";
+pub const NOISE_SUPPRESSOR_VOICE_PRESERVE: &str = "voice-preserve";
+pub const NOISE_SUPPRESSOR_BYPASS: &str = "bypass";
 
 fn noise_gate_descriptor() -> EffectDescriptor {
     EffectDescriptor {
@@ -429,5 +438,60 @@ mod tests {
         let mut audio = vec![0.5; 2];
         gate.process(&mut audio, 1).unwrap();
         assert_eq!(audio, vec![0.5, 0.5]);
+    }
+
+    fn prepared_suppressor() -> AdaptiveNoiseSuppressor {
+        let mut suppressor = AdaptiveNoiseSuppressor::default();
+        suppressor
+            .prepare(AudioSpec {
+                sample_rate: 48_000,
+                channels: 2,
+                max_frames: 128,
+            })
+            .unwrap();
+        suppressor
+    }
+
+    #[test]
+    fn host_exposes_the_adaptive_noise_suppressor() {
+        let descriptors = EffectHost::new().descriptors();
+        assert!(descriptors
+            .iter()
+            .any(|descriptor| descriptor.id == NOISE_SUPPRESSOR_ID));
+    }
+
+    #[test]
+    fn adaptive_suppressor_learns_and_reduces_steady_noise() {
+        let mut suppressor = prepared_suppressor();
+        suppressor
+            .set_parameter(NOISE_SUPPRESSOR_REDUCTION, 36.0)
+            .unwrap();
+        for _ in 0..400 {
+            let mut noise = vec![0.004; 256];
+            suppressor.process(&mut noise, 128).unwrap();
+        }
+        let mut noise = vec![0.004; 256];
+        suppressor.process(&mut noise, 128).unwrap();
+        assert!(
+            noise.iter().all(|sample| sample.abs() < 0.003),
+            "learned steady noise should be attenuated"
+        );
+    }
+
+    #[test]
+    fn adaptive_suppressor_preserves_loud_foreground_and_sanitizes_input() {
+        let mut suppressor = prepared_suppressor();
+        let mut audio = vec![0.0; 256];
+        audio[0] = f32::NAN;
+        audio[1] = f32::INFINITY;
+        for sample in audio.iter_mut().skip(2) {
+            *sample = 0.5;
+        }
+        suppressor.process(&mut audio, 128).unwrap();
+        assert!(audio.iter().all(|sample| sample.is_finite()));
+        assert!(
+            audio[20].abs() > 0.1,
+            "foreground signal should remain audible"
+        );
     }
 }

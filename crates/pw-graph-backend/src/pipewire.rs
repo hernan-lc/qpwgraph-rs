@@ -306,7 +306,7 @@ impl PipewireDriver {
                     .find(|(_, port)| {
                         port.node_id == node_id.0 as u32
                             && port.direction.is_sink()
-                            && port.name == "input"
+                            && port.name == "input_FL"
                     })
                     .map(|(id, _)| PortId(*id as u64))?;
                 let output_port = state
@@ -315,7 +315,7 @@ impl PipewireDriver {
                     .find(|(_, port)| {
                         port.node_id == node_id.0 as u32
                             && port.direction.is_source()
-                            && port.name == "output"
+                            && port.name == "output_FL"
                     })
                     .map(|(id, _)| PortId(*id as u64))?;
                 Some((instance_id.clone(), node_id, input_port, output_port))
@@ -1212,7 +1212,7 @@ fn ui_volume_to_spa_volume(volume: f32) -> f32 {
 mod tests {
     use super::{classify_port_type, ui_volume_to_spa_volume, PipewireDriver};
     use crate::{EffectDriver, EffectNodeRequest, GraphDriver};
-    use pw_graph_core::{NodeType, PortType};
+    use pw_graph_core::{Direction, NodeType, PortType};
     use std::collections::BTreeMap;
 
     #[test]
@@ -1264,7 +1264,7 @@ mod tests {
         let instance = driver
             .create_effect_node(EffectNodeRequest {
                 instance_id: "qpwgraph-rs-test-effect".into(),
-                effect_id: pw_graph_effects::NOISE_GATE_ID.into(),
+                effect_id: pw_graph_effects::NOISE_SUPPRESSOR_ID.into(),
                 module_path: None,
                 enabled: true,
                 parameters: BTreeMap::new(),
@@ -1282,6 +1282,26 @@ mod tests {
         );
         assert!(driver.graph().port(instance.input_port).is_some());
         assert!(driver.graph().port(instance.output_port).is_some());
+        let effect_ports: BTreeMap<_, _> = node
+            .ports
+            .iter()
+            .filter_map(|port_id| driver.graph().port(*port_id))
+            .map(|port| {
+                (
+                    port.name.as_str(),
+                    (port.direction, port.channel.as_deref()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            effect_ports,
+            BTreeMap::from([
+                ("input_FL", (Direction::Sink, Some("FL"))),
+                ("input_FR", (Direction::Sink, Some("FR"))),
+                ("output_FL", (Direction::Source, Some("FL"))),
+                ("output_FR", (Direction::Source, Some("FR"))),
+            ])
+        );
 
         driver
             .set_effect_enabled("qpwgraph-rs-test-effect", false)
