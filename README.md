@@ -56,6 +56,28 @@ cargo run -p pw-graph-app -- --lang es
 `--demo` starts the deterministic demo graph. Without it, a missing live
 backend produces an empty graph and an explanatory status message.
 
+## Releases
+
+Releases are published by GitHub Actions from tags matching `vX.Y.Z`. The tag
+must match the workspace version in `Cargo.toml`; prerelease suffixes such as
+`-rc.1` are also accepted. The workflow runs the locked workspace tests,
+builds the native Linux release binary, and publishes these assets:
+
+- `qpwgraph-rs-<version>-x86_64-unknown-linux-gnu.tar.gz`, containing the
+  binary, desktop integration files, documentation, and third-party license;
+- the matching `.sha256` checksum file.
+
+To publish a release after updating the workspace version:
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+The same workflow can be rerun from **Actions → Release** for an existing tag.
+See [packaging/README.md](packaging/README.md) for download and installation
+instructions.
+
 Audio meters are opt-in. They can be off, on demand (the default), or always;
 on-demand meters attach only while a meter is hovered or pinned. PipeWire
 helper streams currently report one aggregate reading per node. The backend API
