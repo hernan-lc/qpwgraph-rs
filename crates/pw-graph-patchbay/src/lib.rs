@@ -202,6 +202,25 @@ impl Patchbay {
         }
     }
 
+    /// Return only rules that touch an effect endpoint. Effect routing is part
+    /// of the persisted effect-node state and can be restored independently of
+    /// the user's optional full patchbay-on-startup setting.
+    pub fn effect_connections(&self) -> Self {
+        Self {
+            version: self.version,
+            name: self.name.clone(),
+            connections: self
+                .connections
+                .iter()
+                .filter(|connection| {
+                    connection.effective_output_node_type() == NodeType::Effect
+                        || connection.effective_input_node_type() == NodeType::Effect
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+
     pub fn save_to(&self, path: impl AsRef<Path>) -> Result<(), PatchbayError> {
         let path = path.as_ref();
         if let Some(parent) = path
@@ -536,6 +555,7 @@ mod tests {
 
         let mut saved = Patchbay::new("effects");
         saved.snapshot_graph(first.graph(), true);
+        assert_eq!(saved.effect_connections().connections.len(), 2);
 
         let mut recreated = InMemoryDriver::demo();
         let recreated_effect = recreated

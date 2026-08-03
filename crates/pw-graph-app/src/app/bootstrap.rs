@@ -189,6 +189,9 @@ impl QpwgraphApp {
             }
         }
         app.restore_inserted_effects();
+        if !app.config.patchbay_activated {
+            app.restore_effect_connections();
+        }
         app
     }
 }

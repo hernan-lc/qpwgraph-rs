@@ -122,6 +122,8 @@ activation. Save/load use native dialogs, recent files are retained in
 configuration, and Preferences offers named patchbay profiles plus an editable
 connection-rule list. Graph connection changes are also written to the active
 patchbay path automatically, including effect-node links and undo/redo changes.
+Effect-node links are restored with their saved effect instances even when
+full patchbay activation is disabled.
 
 ## Checks
 

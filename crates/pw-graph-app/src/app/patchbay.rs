@@ -212,6 +212,28 @@ impl QpwgraphApp {
         }
     }
 
+    /// Effect links are persisted together with the effect nodes. Restore
+    /// those links even when the user has disabled automatic activation of the
+    /// general patchbay profile.
+    pub(crate) fn restore_effect_connections(&mut self) {
+        let effect_patchbay = self.patchbay.effect_connections();
+        if effect_patchbay.connections.is_empty() {
+            return;
+        }
+        match effect_patchbay.activate(self.driver.as_mut(), false, false) {
+            Ok(report) if report.failed.is_empty() => {}
+            Ok(report) => {
+                self.status = self.tf(
+                    "status.activation_failed",
+                    &[("error", report.failed.join("; "))],
+                );
+            }
+            Err(error) => {
+                self.status = self.tf("status.activation_failed", &[("error", error.to_string())])
+            }
+        }
+    }
+
     pub(crate) fn snapshot_patchbay(&mut self) {
         self.patchbay
             .snapshot_graph(self.driver.graph(), self.config.patchbay_auto_pin);

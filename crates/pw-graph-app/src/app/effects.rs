@@ -286,16 +286,19 @@ impl QpwgraphApp {
         for effect in saved {
             let result = match (&effect.source, &effect.destination) {
                 (Some(source), Some(destination)) => {
-                    self.driver.insert_effect(EffectInsertRequest {
-                        instance_id: effect.instance.instance_id.clone(),
-                        effect_id: effect.instance.effect_id.clone(),
-                        module_path: effect.instance.module_path.clone(),
-                        source: source.clone(),
-                        destination: destination.clone(),
-                        enabled: effect.instance.enabled,
-                        parameters: effect.instance.parameters.clone(),
-                        position: effect.position,
-                    })
+                    match self.driver.connect_by_key_if_missing(source, destination) {
+                        Ok(_) => self.driver.insert_effect(EffectInsertRequest {
+                            instance_id: effect.instance.instance_id.clone(),
+                            effect_id: effect.instance.effect_id.clone(),
+                            module_path: effect.instance.module_path.clone(),
+                            source: source.clone(),
+                            destination: destination.clone(),
+                            enabled: effect.instance.enabled,
+                            parameters: effect.instance.parameters.clone(),
+                            position: effect.position,
+                        }),
+                        Err(error) => Err(error),
+                    }
                 }
                 (None, None) => self.driver.create_effect_node(EffectNodeRequest {
                     instance_id: effect.instance.instance_id.clone(),
