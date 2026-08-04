@@ -3,6 +3,8 @@ use egui::{include_image, vec2, Color32, Image, ImageSource, Rect, Sense, Ui, Ve
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icon {
     Activate,
+    ArrowDown,
+    ArrowUp,
     AutoDisconnect,
     Connect,
     Delete,
@@ -37,6 +39,8 @@ const SIDEBAR_NAV_BUTTON_SIZE: Vec2 = vec2(52.0, 48.0);
 fn icon_source(icon: Icon) -> ImageSource<'static> {
     match icon {
         Icon::Activate => include_image!("../assets/icons/activate.svg"),
+        Icon::ArrowDown => include_image!("../assets/icons/arrow_down.svg"),
+        Icon::ArrowUp => include_image!("../assets/icons/arrow_up.svg"),
         Icon::AutoDisconnect => include_image!("../assets/icons/auto_disconnect.svg"),
         Icon::Connect => include_image!("../assets/icons/connect.svg"),
         Icon::Delete => include_image!("../assets/icons/delete.svg"),
@@ -125,7 +129,7 @@ pub(crate) fn sidebar_icon_button_enabled(
     )
 }
 #[allow(clippy::too_many_arguments)]
-fn icon_button_enabled_sized(
+pub(crate) fn icon_button_enabled_sized(
     ui: &mut Ui,
     id: &str,
     icon: Icon,
