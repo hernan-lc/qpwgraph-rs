@@ -202,6 +202,7 @@
   "help.ui_text_scale": "Ajusta el texto de la barra de acciones, la barra de estado y otros elementos de la aplicación.",
   "help.panel_text_scale": "Ajusta el texto de navegación y del panel de Preferencias sin cambiar las etiquetas de los nodos.",
   "help.node_text_scale": "Ajusta títulos, etiquetas de puertos y contadores de nodos sin cambiar el texto de los paneles.",
+  "help.typography_controls": "Usa ↑/↓ o los botones de paso. Los valores se limitan a 0,80–2,00 en pasos de 0,05.",
   "help.typography_recommended": "Establece un equilibrio más legible para el texto de la aplicación, los paneles y los nodos.",
   "help.audio_monitor_unpin": "Quita el monitor de audio fijado en este panel.",
   "help.audio_metering_policy": "Medir conecta un flujo de captura al nodo, lo que puede reanudar un dispositivo suspendido y hacer que PipeWire renegocie la tasa del grafo. «A demanda» mide los nodos de audio mostrados mientras esta ventana está visible.",

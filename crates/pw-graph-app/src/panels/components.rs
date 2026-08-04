@@ -16,8 +16,8 @@ use crate::icons::{
 };
 use eframe::egui::{Align, Layout, Response, RichText, Ui};
 use pw_graph_ui::{
-    ButtonProps, CheckboxProps, OptionItem, SelectProps, SliderProps, SwitchProps, TextInputProps,
-    UiDocument, Value,
+    ButtonProps, CheckboxProps, EventType, NumberInputProps, OptionItem, SelectProps, SliderProps,
+    SwitchProps, TextInputProps, UiDocument, Value,
 };
 
 pub(super) fn modal_hint(ui: &mut Ui, text: String) {
@@ -48,6 +48,23 @@ pub(super) fn document_button(
 ) -> bool {
     document
         .button(ui, ButtonProps::new(id, text).enabled(enabled))
+        .clicked()
+}
+
+fn document_step_button(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    label: &str,
+    tooltip: String,
+) -> bool {
+    document
+        .button(
+            ui,
+            ButtonProps::new(id, label)
+                .size(28.0, 18.0)
+                .tooltip(tooltip),
+        )
         .clicked()
 }
 
@@ -139,6 +156,49 @@ pub(super) fn document_setting_switch(
     checked
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn document_setting_select<I>(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: &str,
+    icon: Option<Icon>,
+    label: String,
+    explanation: String,
+    options: I,
+    width: f32,
+) -> String
+where
+    I: IntoIterator<Item = OptionItem>,
+{
+    let available_width = ui.available_width();
+    let mut selected = current.to_owned();
+    ui.horizontal(|ui| {
+        ui.set_min_width(available_width);
+        if let Some(icon) = icon {
+            crate::icons::icon_label(ui, icon, explanation.clone());
+            ui.add_space(8.0);
+        }
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).strong());
+            ui.label(RichText::new(explanation.clone()).small().weak());
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            selected = document_select_sized(
+                document,
+                ui,
+                id,
+                current,
+                String::new(),
+                options,
+                Some(width),
+            );
+        });
+    });
+    ui.add_space(2.0);
+    selected
+}
+
 pub(super) fn document_text_input(
     document: &mut UiDocument,
     ui: &mut Ui,
@@ -220,7 +280,7 @@ pub(super) fn document_slider_sized(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn document_setting_slider(
+pub(super) fn document_setting_number(
     document: &mut UiDocument,
     ui: &mut Ui,
     id: &str,
@@ -233,7 +293,9 @@ pub(super) fn document_setting_slider(
     width: f32,
 ) -> f32 {
     let available_width = ui.available_width();
-    let mut value = current;
+    let mut value = current as f64;
+    let increment_id = format!("{id}.increment");
+    let decrement_id = format!("{id}.decrement");
     ui.horizontal(|ui| {
         ui.set_min_width(available_width);
         ui.vertical(|ui| {
@@ -241,24 +303,70 @@ pub(super) fn document_setting_slider(
             ui.label(RichText::new(explanation.clone()).small().weak());
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (_, next) = document_slider_sized(
-                document,
-                ui,
-                id,
-                current,
-                minimum,
-                maximum,
-                step,
-                String::new(),
-                true,
-                Some(explanation),
-                Some(width),
-            );
-            value = next;
+            ui.horizontal(|ui| {
+                let (_, edited) = document_number_input_sized(
+                    document,
+                    ui,
+                    id,
+                    current as f64,
+                    minimum as f64,
+                    maximum as f64,
+                    step,
+                    String::new(),
+                    Some(width),
+                    Some(explanation.clone()),
+                );
+                value = edited;
+                ui.vertical(|ui| {
+                    let incremented =
+                        document_step_button(document, ui, &increment_id, "▲", explanation.clone());
+                    let decremented =
+                        document_step_button(document, ui, &decrement_id, "▼", explanation.clone());
+                    if incremented && !decremented {
+                        value += step;
+                    } else if decremented && !incremented {
+                        value -= step;
+                    }
+                });
+            });
         });
     });
+    value = value.clamp(minimum as f64, maximum as f64);
+    if document
+        .number(id)
+        .is_some_and(|number| (number - value).abs() > f64::EPSILON)
+    {
+        document.set_value_and_emit(id, Value::Number(value), EventType::Change);
+    }
     ui.add_space(2.0);
-    value
+    value as f32
+}
+
+#[allow(clippy::too_many_arguments)]
+fn document_number_input_sized(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: f64,
+    minimum: f64,
+    maximum: f64,
+    step: f64,
+    label: String,
+    width: Option<f32>,
+    tooltip: Option<String>,
+) -> (Response, f64) {
+    sync_value(document, id, Value::Number(current));
+    let mut props = NumberInputProps::new(id, label)
+        .value(current)
+        .range(minimum, maximum)
+        .step(step)
+        .tooltip_option(tooltip);
+    if let Some(width) = width {
+        props = props.width(width);
+    }
+    let response = document.number_input(ui, props);
+    let value = document.number(id).unwrap_or(current);
+    (response, value)
 }
 
 pub(super) fn document_select<I>(

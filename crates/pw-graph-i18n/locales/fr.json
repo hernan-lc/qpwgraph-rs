@@ -15,6 +15,7 @@
   "shortcuts.search_hint": "Filtrer par touche ou description… (Ctrl/Cmd+F place le curseur ici)",
   "shortcuts.pan_keyboard": "Déplacer le graphique avec les flèches (Shift plus rapide, Ctrl/Cmd très rapide)",
   "preferences.title": "Préférences",
+  "help.typography_controls": "Utilisez ↑/↓ ou les boutons d’incrément. Les valeurs sont limitées à 0,80–2,00 par pas de 0,05.",
   "screen.interface": "Interface",
   "inspector.patchbay_options": "Options du patchbay",
   "status.connected": "Ports connectés {output} vers {input}",

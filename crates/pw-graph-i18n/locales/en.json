@@ -202,6 +202,7 @@
   "help.ui_text_scale": "Scale toolbar, status bar, and other application chrome text.",
   "help.panel_text_scale": "Scale navigation and Preferences panel text without changing graph node labels.",
   "help.node_text_scale": "Scale node titles, port labels, and node counters without changing panel text.",
+  "help.typography_controls": "Use ↑/↓ or the step buttons. Values are limited to 0.80–2.00 in 0.05 steps.",
   "help.typography_recommended": "Set a more readable size balance for the application, panels, and graph nodes.",
   "help.audio_monitor_unpin": "Remove the pinned audio monitor from this panel.",
   "help.audio_metering_policy": "Metering attaches a capture stream to a node, which can resume a suspended device and make PipeWire renegotiate the graph rate. On demand measures the audio nodes shown while this window is visible.",

@@ -1,7 +1,6 @@
 use super::components::{
-    document_button, document_checkbox, document_icon_button, document_select_sized,
-    document_selectable_label, document_setting_slider, document_setting_switch,
-    document_text_input,
+    document_button, document_checkbox, document_select_sized, document_selectable_label,
+    document_setting_number, document_setting_select, document_setting_switch, document_text_input,
 };
 use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, meter_policy_key, panel_section,
@@ -30,18 +29,7 @@ pub(crate) enum PreferencesTab {
 
 impl QpwgraphApp {
     fn show_meter_controls(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        let mut current = MeterPolicy::parse(&self.config.audio_meters);
-        if document_icon_button(
-            document,
-            ui,
-            "meters.reset",
-            Icon::Refresh,
-            self.i18n.text("inspector.audio_reset"),
-            self.i18n.text("help.audio_reset"),
-        ) {
-            self.reset_audio_config();
-            current = MeterPolicy::parse(&self.config.audio_meters);
-        }
+        let current = MeterPolicy::parse(&self.config.audio_meters);
         const METER_POLICY_ID: &str = "preferences.meters.policy";
         if document.text(METER_POLICY_ID) != Some(current.as_str()) {
             document.set_value(METER_POLICY_ID, current.as_str());
@@ -49,34 +37,47 @@ impl QpwgraphApp {
         let options = MeterPolicy::ALL.into_iter().map(|policy| {
             OptionItem::new(policy.as_str(), self.i18n.text(meter_policy_key(policy)))
         });
-        let selected = document_select_sized(
+        let selected = document_setting_select(
             document,
             ui,
             METER_POLICY_ID,
             current.as_str(),
+            None,
             self.i18n.text("inspector.audio_metering_policy"),
+            self.i18n.text("help.audio_metering_policy"),
             options,
-            Some(PREFERENCES_SELECT_WIDTH),
+            PREFERENCES_SELECT_WIDTH,
         );
         let selected = MeterPolicy::parse(&selected);
-        ui.label(
-            RichText::new(self.i18n.text("help.audio_metering_policy"))
-                .small()
-                .weak(),
-        );
         if selected != current {
             self.config.audio_meters = selected.as_str().to_owned();
         }
 
-        ui.label(
-            RichText::new(self.i18n.text(match selected {
-                MeterPolicy::Disabled => "meters.off_hint",
-                MeterPolicy::OnDemand => "meters.on_demand_hint",
-                MeterPolicy::Always => "meters.always_hint",
-            }))
-            .small()
-            .weak(),
-        );
+        egui::Frame::group(ui.style())
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(self.i18n.text(match selected {
+                        MeterPolicy::Disabled => "meters.off_hint",
+                        MeterPolicy::OnDemand => "meters.on_demand_hint",
+                        MeterPolicy::Always => "meters.always_hint",
+                    }))
+                    .small()
+                    .weak(),
+                );
+            });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if document_button(
+                document,
+                ui,
+                "meters.reset",
+                self.i18n.text("inspector.audio_reset"),
+                true,
+            ) {
+                self.reset_audio_config();
+            }
+        });
 
         ui.add_space(2.0);
     }
@@ -433,40 +434,56 @@ impl QpwgraphApp {
         };
         let mut selected_locale = current_locale;
         panel_section(ui, self.i18n.text("inspector.configuration"), |ui| {
-            ui.horizontal(|ui| {
-                icon_label(ui, Icon::Language, self.i18n.text("language.label"));
-                let selected = document_select_sized(
-                    document,
-                    ui,
-                    "preferences.configuration.language",
-                    &selected_locale_code,
-                    String::new(),
-                    Locale::ALL
-                        .into_iter()
-                        .map(|locale| OptionItem::new(locale.code(), locale.native_name())),
-                    Some(PREFERENCES_SELECT_WIDTH),
-                );
-                selected_locale = Locale::parse(&selected);
-            });
-            ui.add_space(2.0);
-            if document_icon_button(
+            ui.label(
+                RichText::new(self.i18n.text("help.configuration"))
+                    .small()
+                    .weak(),
+            );
+            ui.add_space(4.0);
+            let selected = document_setting_select(
                 document,
                 ui,
-                "configuration.save",
-                Icon::Save,
-                self.i18n.text("inspector.save_configuration"),
-                self.i18n.text("help.save_configuration"),
-            ) {
-                self.save_config_now();
-            }
-            ui.label(
-                RichText::new(self.tf(
-                    "inspector.config_path",
-                    &[("path", self.config_file.display().to_string())],
-                ))
-                .small()
-                .weak(),
+                "preferences.configuration.language",
+                &selected_locale_code,
+                Some(Icon::Language),
+                self.i18n.text("language.label"),
+                self.i18n.text("help.language"),
+                Locale::ALL
+                    .into_iter()
+                    .map(|locale| OptionItem::new(locale.code(), locale.native_name())),
+                PREFERENCES_SELECT_WIDTH,
             );
+            selected_locale = Locale::parse(&selected);
+
+            ui.horizontal(|ui| {
+                ui.set_min_width(ui.available_width());
+                icon_label(ui, Icon::Save, self.i18n.text("help.save_configuration"));
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(self.i18n.text("inspector.save_configuration")).strong(),
+                    );
+                    ui.label(
+                        RichText::new(self.tf(
+                            "inspector.config_path",
+                            &[("path", self.config_file.display().to_string())],
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if document_button(
+                        document,
+                        ui,
+                        "configuration.save",
+                        self.i18n.text("shortcuts.save_config"),
+                        true,
+                    ) {
+                        self.save_config_now();
+                    }
+                });
+            });
         });
         if selected_locale != current_locale {
             self.i18n.set_locale(selected_locale);
@@ -551,6 +568,12 @@ impl QpwgraphApp {
         });
 
         panel_section(ui, self.i18n.text("inspector.typography"), |ui| {
+            ui.label(
+                RichText::new(self.i18n.text("help.typography_controls"))
+                    .small()
+                    .weak(),
+            );
+            ui.add_space(4.0);
             if document_button(
                 document,
                 ui,
@@ -562,7 +585,7 @@ impl QpwgraphApp {
                 self.config.panel_text_scale = 1.20;
                 self.config.node_text_scale = 1.15;
             }
-            self.config.ui_text_scale = document_setting_slider(
+            self.config.ui_text_scale = document_setting_number(
                 document,
                 ui,
                 "typography.ui_scale",
@@ -572,9 +595,9 @@ impl QpwgraphApp {
                 0.05,
                 self.i18n.text("inspector.ui_text_scale"),
                 self.i18n.text("help.ui_text_scale"),
-                220.0,
+                82.0,
             );
-            self.config.panel_text_scale = document_setting_slider(
+            self.config.panel_text_scale = document_setting_number(
                 document,
                 ui,
                 "typography.panel_scale",
@@ -584,9 +607,9 @@ impl QpwgraphApp {
                 0.05,
                 self.i18n.text("inspector.panel_text_scale"),
                 self.i18n.text("help.panel_text_scale"),
-                220.0,
+                82.0,
             );
-            self.config.node_text_scale = document_setting_slider(
+            self.config.node_text_scale = document_setting_number(
                 document,
                 ui,
                 "typography.node_scale",
@@ -596,7 +619,7 @@ impl QpwgraphApp {
                 0.05,
                 self.i18n.text("inspector.node_text_scale"),
                 self.i18n.text("help.node_text_scale"),
-                220.0,
+                82.0,
             );
         });
     }
