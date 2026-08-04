@@ -199,6 +199,32 @@ where
     selected
 }
 
+pub(super) fn document_setting_switch_plain(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: bool,
+    label: String,
+    explanation: String,
+) -> bool {
+    let available_width = ui.available_width();
+    let mut checked = current;
+    ui.horizontal(|ui| {
+        ui.set_min_width(available_width);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).strong());
+            if !explanation.is_empty() {
+                ui.label(RichText::new(explanation.clone()).small().weak());
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            checked = document_switch(document, ui, id, current, String::new(), Some(explanation));
+        });
+    });
+    ui.add_space(2.0);
+    checked
+}
+
 pub(super) fn document_text_input(
     document: &mut UiDocument,
     ui: &mut Ui,
@@ -277,6 +303,50 @@ pub(super) fn document_slider_sized(
     let response = document.slider(ui, props);
     let value = document.number(id).unwrap_or(f64::from(current)) as f32;
     (response, value)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn document_setting_slider(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: f32,
+    minimum: f32,
+    maximum: f32,
+    step: f64,
+    label: String,
+    explanation: String,
+    width: f32,
+) -> f32 {
+    let available_width = ui.available_width();
+    let mut value = current;
+    ui.horizontal(|ui| {
+        ui.set_min_width(available_width);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).strong());
+            if !explanation.is_empty() {
+                ui.label(RichText::new(explanation.clone()).small().weak());
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (_, next) = document_slider_sized(
+                document,
+                ui,
+                id,
+                current,
+                minimum,
+                maximum,
+                step,
+                String::new(),
+                true,
+                Some(explanation),
+                Some(width),
+            );
+            value = next;
+        });
+    });
+    ui.add_space(2.0);
+    value
 }
 
 #[allow(clippy::too_many_arguments)]

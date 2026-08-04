@@ -1,11 +1,12 @@
 use super::components::{
-    document_button, document_checkbox, document_slider, document_text_input_sized,
+    document_button, document_setting_slider, document_setting_switch_plain,
+    document_text_input_sized, modal_step_heading,
 };
 use super::shared::{fresh_scroll_area, show_centered_dialog, show_close_button};
-use crate::app::effects::{available_descriptors, EffectGalleryState};
+use crate::app::effects::{available_descriptors, EffectGalleryPhase, EffectGalleryState};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui};
-use pw_graph_effects::EffectDescriptor;
+use pw_graph_effects::{EffectDescriptor, EffectParameter};
 use pw_graph_ui::UiDocument;
 
 fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
@@ -160,24 +161,37 @@ fn effect_gallery_card(
     )
 }
 
+fn effect_parameter_hint(parameter: &EffectParameter) -> String {
+    let range = format!("{}–{}", parameter.minimum, parameter.maximum);
+    if parameter.unit.is_empty() {
+        format!("Range {range}")
+    } else {
+        format!("{} · {range}", parameter.unit)
+    }
+}
+
 fn show_effect_initial_settings(
     document: &mut UiDocument,
     ui: &mut Ui,
     descriptor: &EffectDescriptor,
     gallery: &mut EffectGalleryState,
     initial_settings_label: String,
+    setup_hint: String,
     enabled_label: String,
 ) {
-    egui::CollapsingHeader::new(initial_settings_label)
-        .default_open(false)
+    egui::Frame::group(ui.style())
+        .inner_margin(10.0)
         .show(ui, |ui| {
-            gallery.enabled = document_checkbox(
+            ui.label(RichText::new(initial_settings_label).strong());
+            ui.label(RichText::new(setup_hint).small().weak());
+            ui.add_space(6.0);
+            gallery.enabled = document_setting_switch_plain(
                 document,
                 ui,
                 "modals.effects.enabled",
                 gallery.enabled,
                 enabled_label,
-                None,
+                String::new(),
             );
             for parameter in &descriptor.parameters {
                 if parameter.unit == "boolean" {
@@ -187,13 +201,13 @@ fn show_effect_initial_settings(
                         .copied()
                         .unwrap_or(parameter.default)
                         >= 0.5;
-                    let value = document_checkbox(
+                    let value = document_setting_switch_plain(
                         document,
                         ui,
                         &format!("modals.effects.parameters.{}.boolean", parameter.id),
                         value,
                         parameter.name.clone(),
-                        None,
+                        String::new(),
                     );
                     gallery
                         .parameters
@@ -204,7 +218,7 @@ fn show_effect_initial_settings(
                         .get(&parameter.id)
                         .copied()
                         .unwrap_or(parameter.default);
-                    let (_, value) = document_slider(
+                    let value = document_setting_slider(
                         document,
                         ui,
                         &format!("modals.effects.parameters.{}", parameter.id),
@@ -212,9 +226,9 @@ fn show_effect_initial_settings(
                         parameter.minimum,
                         parameter.maximum,
                         0.0,
-                        format!("{} ({})", parameter.name, parameter.unit),
-                        true,
-                        None,
+                        parameter.name.clone(),
+                        effect_parameter_hint(parameter),
+                        210.0,
                     );
                     gallery.parameters.insert(parameter.id.clone(), value);
                 }
@@ -243,7 +257,10 @@ impl QpwgraphApp {
         }
         let mut cancel = false;
         let mut create = false;
+        let mut next = false;
+        let mut back = false;
         let initial_settings_label = self.i18n.text("effects.initial_settings");
+        let setup_hint = self.i18n.text("effects.setup_hint");
         let enabled_label = self.i18n.text("effects.enabled");
         let mut document = std::mem::take(&mut self.ui_document);
         let dialog_response = show_centered_dialog(
@@ -253,7 +270,29 @@ impl QpwgraphApp {
             self.i18n.text("effects.gallery_title"),
             720.0,
             |ui, document| {
-                ui.label(RichText::new(self.i18n.text("effects.gallery_hint")).weak());
+                ui.horizontal(|ui| {
+                    modal_step_heading(
+                        ui,
+                        0,
+                        gallery.phase.index(),
+                        self.i18n.text("effects.step_effect"),
+                    );
+                    ui.separator();
+                    modal_step_heading(
+                        ui,
+                        1,
+                        gallery.phase.index(),
+                        self.i18n.text("effects.step_setup"),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(match gallery.phase {
+                        EffectGalleryPhase::Choose => self.i18n.text("effects.choose_effect_hint"),
+                        EffectGalleryPhase::Configure => setup_hint.clone(),
+                    })
+                    .weak(),
+                );
                 if !supports_effect_nodes {
                     ui.add_space(6.0);
                     ui.label(
@@ -265,32 +304,18 @@ impl QpwgraphApp {
 
                 fresh_scroll_area(("effects-gallery-scroll", gallery.scroll_epoch), 400.0).show(
                     ui,
-                    |ui| {
-                        ui.label(RichText::new(self.i18n.text("effects.choose_effect")).strong());
-                        ui.add_space(6.0);
-                        if descriptors.is_empty() {
-                            ui.label(RichText::new(self.i18n.text("effects.no_available")).weak());
-                        } else if ui.available_width() < 440.0 {
-                            for descriptor in &descriptors {
-                                let selected = gallery.effect_id == descriptor.id;
-                                let summary = format!(
-                                    "{} · {}",
-                                    self.tf(
-                                        "effects.parameter_count",
-                                        &[("count", descriptor.parameters.len().to_string())],
-                                    ),
-                                    self.i18n.text("effects.port_flow"),
+                    |ui| match gallery.phase {
+                        EffectGalleryPhase::Choose => {
+                            ui.label(
+                                RichText::new(self.i18n.text("effects.choose_effect")).strong(),
+                            );
+                            ui.add_space(6.0);
+                            if descriptors.is_empty() {
+                                ui.label(
+                                    RichText::new(self.i18n.text("effects.no_available")).weak(),
                                 );
-                                if effect_gallery_card(document, ui, descriptor, summary, selected)
-                                {
-                                    gallery.select_effect(descriptor);
-                                }
-                                ui.add_space(8.0);
-                            }
-                        } else {
-                            ui.columns(2, |columns| {
-                                for (index, descriptor) in descriptors.iter().enumerate() {
-                                    let column = &mut columns[index % 2];
+                            } else if ui.available_width() < 440.0 {
+                                for descriptor in &descriptors {
                                     let selected = gallery.effect_id == descriptor.id;
                                     let summary = format!(
                                         "{} · {}",
@@ -301,30 +326,57 @@ impl QpwgraphApp {
                                         self.i18n.text("effects.port_flow"),
                                     );
                                     if effect_gallery_card(
-                                        document, column, descriptor, summary, selected,
+                                        document, ui, descriptor, summary, selected,
                                     ) {
                                         gallery.select_effect(descriptor);
                                     }
-                                    column.add_space(8.0);
+                                    ui.add_space(8.0);
                                 }
-                            });
+                            } else {
+                                ui.columns(2, |columns| {
+                                    for (index, descriptor) in descriptors.iter().enumerate() {
+                                        let column = &mut columns[index % 2];
+                                        let selected = gallery.effect_id == descriptor.id;
+                                        let summary = format!(
+                                            "{} · {}",
+                                            self.tf(
+                                                "effects.parameter_count",
+                                                &[(
+                                                    "count",
+                                                    descriptor.parameters.len().to_string(),
+                                                )],
+                                            ),
+                                            self.i18n.text("effects.port_flow"),
+                                        );
+                                        if effect_gallery_card(
+                                            document, column, descriptor, summary, selected,
+                                        ) {
+                                            gallery.select_effect(descriptor);
+                                        }
+                                        column.add_space(8.0);
+                                    }
+                                });
+                            }
                         }
-
-                        let selected_descriptor = descriptors
-                            .iter()
-                            .find(|descriptor| descriptor.id == gallery.effect_id);
-                        if let Some(descriptor) = selected_descriptor {
-                            ui.add_space(4.0);
-                            ui.separator();
-                            ui.add_space(6.0);
-                            show_effect_initial_settings(
-                                document,
-                                ui,
-                                descriptor,
-                                &mut gallery,
-                                initial_settings_label.clone(),
-                                enabled_label.clone(),
-                            );
+                        EffectGalleryPhase::Configure => {
+                            let selected_descriptor = descriptors
+                                .iter()
+                                .find(|descriptor| descriptor.id == gallery.effect_id);
+                            if let Some(descriptor) = selected_descriptor {
+                                show_effect_initial_settings(
+                                    document,
+                                    ui,
+                                    descriptor,
+                                    &mut gallery,
+                                    initial_settings_label.clone(),
+                                    setup_hint.clone(),
+                                    enabled_label.clone(),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new(self.i18n.text("effects.no_available")).weak(),
+                                );
+                            }
                         }
                     },
                 );
@@ -341,15 +393,41 @@ impl QpwgraphApp {
                     ) {
                         cancel = true;
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if document_button(
+                    if gallery.phase == EffectGalleryPhase::Configure
+                        && document_button(
                             document,
                             ui,
-                            "modals.effects.create_node",
-                            self.i18n.text("effects.create_node"),
-                            supports_effect_nodes && !gallery.effect_id.is_empty(),
-                        ) {
-                            create = true;
+                            "modals.effects.back",
+                            self.i18n.text("effects.back"),
+                            true,
+                        )
+                    {
+                        back = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match gallery.phase {
+                            EffectGalleryPhase::Choose => {
+                                if document_button(
+                                    document,
+                                    ui,
+                                    "modals.effects.next",
+                                    self.i18n.text("effects.next"),
+                                    supports_effect_nodes && !gallery.effect_id.is_empty(),
+                                ) {
+                                    next = true;
+                                }
+                            }
+                            EffectGalleryPhase::Configure => {
+                                if document_button(
+                                    document,
+                                    ui,
+                                    "modals.effects.create_node",
+                                    self.i18n.text("effects.create_node"),
+                                    supports_effect_nodes && !gallery.effect_id.is_empty(),
+                                ) {
+                                    create = true;
+                                }
+                            }
                         }
                     });
                 });
@@ -362,6 +440,11 @@ impl QpwgraphApp {
             return;
         }
 
+        if back {
+            gallery.previous_phase();
+        } else if next {
+            gallery.next_phase();
+        }
         if create && self.create_effect_from_gallery(&gallery) {
             return;
         }

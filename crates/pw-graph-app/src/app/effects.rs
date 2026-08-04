@@ -12,8 +12,28 @@ static EFFECT_INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Transient state for the effect gallery. It deliberately never aliases the
 /// saved configuration, so dismissing the dialog cannot change an effect.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum EffectGalleryPhase {
+    #[default]
+    Choose,
+    Configure,
+}
+
+impl EffectGalleryPhase {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Choose => 0,
+            Self::Configure => 1,
+        }
+    }
+}
+
+/// The gallery deliberately stays a two-phase wizard for now. A future
+/// routing phase can be added once link insertion has the same retained
+/// component coverage as standalone effect creation.
 #[derive(Clone, Debug)]
 pub(crate) struct EffectGalleryState {
+    pub(crate) phase: EffectGalleryPhase,
     pub(crate) effect_id: String,
     pub(crate) enabled: bool,
     pub(crate) parameters: BTreeMap<String, f32>,
@@ -23,6 +43,7 @@ pub(crate) struct EffectGalleryState {
 impl EffectGalleryState {
     fn new(descriptor: &EffectDescriptor, scroll_epoch: u32) -> Self {
         Self {
+            phase: EffectGalleryPhase::Choose,
             effect_id: descriptor.id.clone(),
             enabled: true,
             parameters: default_parameters(descriptor),
@@ -34,6 +55,20 @@ impl EffectGalleryState {
         if self.effect_id != descriptor.id {
             self.effect_id = descriptor.id.clone();
             self.parameters = default_parameters(descriptor);
+        }
+    }
+
+    pub(crate) fn next_phase(&mut self) {
+        if self.phase == EffectGalleryPhase::Choose {
+            self.phase = EffectGalleryPhase::Configure;
+            self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn previous_phase(&mut self) {
+        if self.phase == EffectGalleryPhase::Configure {
+            self.phase = EffectGalleryPhase::Choose;
+            self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
         }
     }
 }
@@ -381,7 +416,24 @@ mod tests {
     fn gallery_starts_with_a_standalone_node_and_default_parameters() {
         let descriptor = EffectHost::new().descriptors().remove(0);
         let state = EffectGalleryState::new(&descriptor, 4);
+        assert_eq!(state.phase, super::EffectGalleryPhase::Choose);
         assert_eq!(state.parameters, default_parameters(&descriptor));
         assert_eq!(state.scroll_epoch, 4);
+    }
+
+    #[test]
+    fn gallery_phases_reset_scroll_when_moving_between_steps() {
+        let descriptor = EffectHost::new().descriptors().remove(0);
+        let mut state = EffectGalleryState::new(&descriptor, 4);
+        state.next_phase();
+        assert_eq!(state.phase, super::EffectGalleryPhase::Configure);
+        assert_eq!(state.scroll_epoch, 5);
+
+        state.next_phase();
+        assert_eq!(state.scroll_epoch, 5);
+
+        state.previous_phase();
+        assert_eq!(state.phase, super::EffectGalleryPhase::Choose);
+        assert_eq!(state.scroll_epoch, 6);
     }
 }
