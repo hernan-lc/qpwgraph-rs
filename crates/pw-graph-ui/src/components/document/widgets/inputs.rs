@@ -8,8 +8,8 @@ use egui::{
     Vec2,
 };
 
-const NUMBER_INPUT_STEPPER_WIDTH: f32 = 20.0;
-const NUMBER_INPUT_ICON_SIZE: f32 = 9.0;
+const NUMBER_INPUT_STEPPER_WIDTH: f32 = 24.0;
+const NUMBER_INPUT_ICON_SIZE: f32 = 13.0;
 
 fn number_step_icon(increment: bool) -> ImageSource<'static> {
     if increment {
@@ -29,7 +29,10 @@ fn number_step_button(ui: &mut Ui, increment: bool, enabled: bool, size: Vec2) -
             } else {
                 Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 120)
             });
-        ui.add_sized(size, Button::image(image).rounding(2.0))
+        // The outer input frame supplies the only border.  Keeping the
+        // button frameless lets the triangle use the whole stepper cell and
+        // avoids a small, nested button border around the icon.
+        ui.add_sized(size, Button::image(image).frame(false))
     })
     .inner
 }
@@ -177,8 +180,8 @@ impl UiDocument {
         )
     }
 
-    /// Renders a draggable numeric input and emits a change event when its
-    /// value changes.
+    /// Renders a draggable numeric input with an embedded SVG stepper and
+    /// emits a change event when its value changes.
     pub fn number_input(&mut self, ui: &mut Ui, props: NumberInputProps) -> Response {
         let (id, before) = prepare_control(
             self,
