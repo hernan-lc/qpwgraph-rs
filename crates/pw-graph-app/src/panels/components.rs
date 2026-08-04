@@ -9,13 +9,12 @@
 
 use crate::icons::{
     icon_button as draw_icon_button, icon_button_enabled as draw_icon_button_enabled,
-    icon_button_enabled_sized as draw_icon_button_enabled_sized,
     sidebar_icon_button as draw_sidebar_icon_button,
     sidebar_icon_button_enabled as draw_sidebar_icon_button_enabled,
     sidebar_icon_toggle_button as draw_sidebar_icon_toggle_button,
     sidebar_nav_icon_button as draw_sidebar_nav_icon_button, Icon,
 };
-use eframe::egui::{vec2, Align, Layout, Response, RichText, Ui};
+use eframe::egui::{Response, RichText, Ui};
 use pw_graph_ui::{
     setting_row, ButtonProps, CheckboxProps, EventType, NumberInputProps, OptionItem, SelectProps,
     SliderProps, SwitchProps, TextInputProps, UiDocument, Value,
@@ -50,27 +49,6 @@ pub(super) fn document_button(
     document
         .button(ui, ButtonProps::new(id, text).enabled(enabled))
         .clicked()
-}
-
-fn document_step_button(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    tooltip: String,
-    enabled: bool,
-) -> bool {
-    let clicked = draw_icon_button_enabled_sized(
-        ui,
-        id,
-        icon,
-        String::new(),
-        tooltip,
-        enabled,
-        vec2(28.0, 18.0),
-        5.0,
-    );
-    document.record_click(id, clicked)
 }
 
 pub(super) fn document_checkbox(
@@ -381,13 +359,7 @@ pub(super) fn document_setting_number(
     explanation: String,
     width: f32,
 ) -> f32 {
-    let mut value = current as f64;
-    let increment_id = format!("{id}.increment");
-    let decrement_id = format!("{id}.decrement");
-    let stepper_width = 28.0;
-    let stepper_height = 40.0_f32;
-    let group_width = width + ui.spacing().item_spacing.x + stepper_width;
-    setting_row(
+    let value = setting_row(
         ui,
         |ui| {
             ui.vertical(|ui| {
@@ -396,54 +368,22 @@ pub(super) fn document_setting_number(
             });
         },
         |ui| {
-            ui.allocate_ui_with_layout(
-                vec2(
-                    group_width,
-                    stepper_height.max(ui.spacing().interact_size.y),
-                ),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    let (_, edited) = document_number_input_sized(
-                        document,
-                        ui,
-                        id,
-                        current as f64,
-                        minimum as f64,
-                        maximum as f64,
-                        step,
-                        String::new(),
-                        Some(width),
-                        Some(explanation.clone()),
-                    );
-                    value = edited;
-                    ui.vertical(|ui| {
-                        let incremented = document_step_button(
-                            document,
-                            ui,
-                            &increment_id,
-                            Icon::ArrowUp,
-                            explanation.clone(),
-                            value < maximum as f64,
-                        );
-                        let decremented = document_step_button(
-                            document,
-                            ui,
-                            &decrement_id,
-                            Icon::ArrowDown,
-                            explanation.clone(),
-                            value > minimum as f64,
-                        );
-                        if incremented && !decremented {
-                            value += step;
-                        } else if decremented && !incremented {
-                            value -= step;
-                        }
-                    });
-                },
-            );
+            document_number_input_sized(
+                document,
+                ui,
+                id,
+                current as f64,
+                minimum as f64,
+                maximum as f64,
+                step,
+                String::new(),
+                Some(width),
+                Some(explanation.clone()),
+            )
+            .1
         },
     );
-    value = value.clamp(minimum as f64, maximum as f64);
+    let value = value.clamp(minimum as f64, maximum as f64);
     if document
         .number(id)
         .is_some_and(|number| (number - value).abs() > f64::EPSILON)

@@ -3,7 +3,129 @@ use super::super::super::{
 };
 use super::shared::{add_sized, labelled, normalize_optional_range, normalize_range, with_common};
 use super::{finish_control, prepare_control};
-use egui::{Response, Ui};
+use egui::{
+    include_image, vec2, Align, Button, Color32, Frame, Image, ImageSource, Layout, Response, Ui,
+    Vec2,
+};
+
+const NUMBER_INPUT_STEPPER_WIDTH: f32 = 20.0;
+const NUMBER_INPUT_ICON_SIZE: f32 = 9.0;
+
+fn number_step_icon(increment: bool) -> ImageSource<'static> {
+    if increment {
+        include_image!("../../../../assets/icons/arrow_up.svg")
+    } else {
+        include_image!("../../../../assets/icons/arrow_down.svg")
+    }
+}
+
+fn number_step_button(ui: &mut Ui, increment: bool, enabled: bool, size: Vec2) -> Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let color = ui.visuals().text_color();
+        let image = Image::new(number_step_icon(increment))
+            .fit_to_exact_size(vec2(NUMBER_INPUT_ICON_SIZE, NUMBER_INPUT_ICON_SIZE))
+            .tint(if enabled {
+                color
+            } else {
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 120)
+            });
+        ui.add_sized(size, Button::image(image).rounding(2.0))
+    })
+    .inner
+}
+
+#[allow(clippy::too_many_arguments)]
+fn number_input_surface(
+    ui: &mut Ui,
+    style: &super::super::super::Style,
+    value: &mut f64,
+    minimum: f64,
+    maximum: f64,
+    step: f64,
+    prefix: &str,
+    suffix: &str,
+) -> Response {
+    let width = style
+        .width
+        .unwrap_or_else(|| ui.spacing().interact_size.x.max(72.0));
+    let height = style
+        .height
+        .unwrap_or_else(|| ui.spacing().interact_size.y.max(24.0));
+    let stepper_width = NUMBER_INPUT_STEPPER_WIDTH.min((width * 0.3).max(16.0));
+    let field_width = (width - stepper_width).max(1.0);
+    let half_height = (height / 2.0).max(1.0);
+    let frame_fill = style
+        .fill
+        .unwrap_or_else(|| ui.visuals().widgets.inactive.bg_fill);
+    let frame_stroke = style
+        .stroke
+        .unwrap_or_else(|| ui.visuals().widgets.inactive.bg_stroke);
+    let frame_rounding = style.rounding.unwrap_or(4.0);
+    let step_size = if step.is_finite() && step.abs() > f64::EPSILON {
+        step.abs()
+    } else {
+        1.0
+    };
+
+    let frame_response = Frame::none()
+        .fill(frame_fill)
+        .stroke(frame_stroke)
+        .rounding(frame_rounding)
+        .show(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                vec2(width, height),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let mut input = egui::DragValue::new(value);
+                    if minimum.is_finite() || maximum.is_finite() {
+                        input = input.range(minimum..=maximum);
+                    }
+                    input = input.speed(step_size);
+                    if !prefix.is_empty() {
+                        input = input.prefix(prefix);
+                    }
+                    if !suffix.is_empty() {
+                        input = input.suffix(suffix);
+                    }
+                    let field_response = ui.add_sized(vec2(field_width, height), input);
+                    let stepper = ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let incremented = number_step_button(
+                            ui,
+                            true,
+                            *value < maximum,
+                            vec2(stepper_width, half_height),
+                        )
+                        .clicked();
+                        let decremented = number_step_button(
+                            ui,
+                            false,
+                            *value > minimum,
+                            vec2(stepper_width, half_height),
+                        )
+                        .clicked();
+                        (incremented, decremented)
+                    });
+                    (field_response, stepper.inner.0, stepper.inner.1)
+                },
+            )
+            .inner
+        });
+    let (field_response, incremented, decremented) = frame_response.inner;
+    // Keep the DragValue response as the primary response so focus and
+    // keyboard events continue to use its stable widget ID, while the frame
+    // expands hover/click geometry to include the embedded stepper.
+    let mut response = field_response.union(frame_response.response);
+    if incremented && !decremented {
+        *value = (*value + step_size).clamp(minimum, maximum);
+        response.mark_changed();
+    } else if decremented && !incremented {
+        *value = (*value - step_size).clamp(minimum, maximum);
+        response.mark_changed();
+    }
+    response
+}
 
 impl UiDocument {
     /// Renders a text input and emits input and change events while editing.
@@ -75,21 +197,10 @@ impl UiDocument {
         let suffix = props.suffix.clone();
         let response = with_common(ui, &props.common, |ui| {
             labelled(ui, label.as_deref(), |ui| {
-                let mut input = egui::DragValue::new(&mut value);
                 let (minimum, maximum) = normalize_optional_range(minimum, maximum);
-                if minimum.is_finite() || maximum.is_finite() {
-                    input = input.range(minimum..=maximum);
-                }
-                if step.is_finite() && step.abs() > f64::EPSILON {
-                    input = input.speed(step.abs());
-                }
-                if !prefix.is_empty() {
-                    input = input.prefix(prefix);
-                }
-                if !suffix.is_empty() {
-                    input = input.suffix(suffix);
-                }
-                add_sized(ui, &style, input)
+                number_input_surface(
+                    ui, &style, &mut value, minimum, maximum, step, &prefix, &suffix,
+                )
             })
         });
         finish_control(

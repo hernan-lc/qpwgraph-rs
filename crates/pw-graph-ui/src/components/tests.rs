@@ -122,6 +122,31 @@ fn slider_respects_explicit_width() {
 }
 
 #[test]
+fn number_input_keeps_the_embedded_stepper_inside_its_width() {
+    let mut document = UiDocument::new();
+    let ctx = egui::Context::default();
+    let mut number_width = 0.0;
+    ctx.begin_pass(egui::RawInput::default());
+    egui::CentralPanel::default().show(&ctx, |ui| {
+        number_width = document
+            .number_input(
+                ui,
+                NumberInputProps::new("sized-number", "")
+                    .value(0.8)
+                    .range(0.8, 2.0)
+                    .step(0.05)
+                    .size(118.0, 24.0),
+            )
+            .rect
+            .width();
+    });
+    let _ = ctx.end_pass();
+
+    assert!((number_width - 118.0).abs() < f32::EPSILON);
+    assert_eq!(document.number("sized-number"), Some(0.8));
+}
+
+#[test]
 fn dialog_registers_and_renders_with_a_stable_id() {
     let mut document = UiDocument::new();
     let ctx = egui::Context::default();
