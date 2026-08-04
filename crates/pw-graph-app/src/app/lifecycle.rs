@@ -107,6 +107,7 @@ impl eframe::App for QpwgraphApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let modal_open = self.any_modal_open();
+            let keyboard_shortcuts_enabled = !modal_open && !self.text_input_focused(ctx);
             // Keep the graph rendered beneath dialogs so the modal backdrop
             // can dim real application content instead of exposing the
             // central panel's plain background.
@@ -114,7 +115,8 @@ impl eframe::App for QpwgraphApp {
                 ui,
                 self.driver.graph(),
                 &self.i18n,
-                !modal_open && !self.text_input_focused(ctx),
+                &mut self.ui_document,
+                keyboard_shortcuts_enabled,
             );
             let actions = if modal_open { Vec::new() } else { actions };
             self.handle_canvas_actions(actions);

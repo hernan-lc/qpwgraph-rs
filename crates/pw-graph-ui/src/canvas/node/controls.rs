@@ -1,21 +1,21 @@
-use crate::{CanvasAction, GraphCanvas, MeterReading, NodeAppearance};
-use egui::{
-    pos2, vec2, Color32, Key, ProgressBar, Rect, Response, RichText, Sense, Stroke, Ui, WidgetInfo,
+use crate::{
+    CanvasAction, CheckboxProps, GraphCanvas, MeterReading, NodeAppearance, SliderProps,
+    TextInputProps, UiDocument, Value,
 };
+use egui::{pos2, vec2, Color32, Key, ProgressBar, Rect, Response, RichText, Stroke, Ui};
 use pw_graph_core::Node;
 use pw_graph_i18n::I18n;
 use std::cell::Cell;
 
 use super::super::icons::{self, NodeIcon};
 use super::helpers::{level_db, meter_fraction};
-use super::AudioInfo;
+use super::{node_button, sync_document_value, AudioInfo};
 
 const MAX_VOLUME: f32 = 1.5;
 const UNITY_TRACK_POSITION: f32 = 0.9;
 
-/// Put 0–100% across most of the track and reserve the final 10% for boost.
-/// Unity therefore sits near the right edge like a conventional audio fader,
-/// while the existing 150% range remains available.
+/// Keep the conventional 0–100% range across most of the track while
+/// retaining the optional 150% boost at the end.
 fn volume_track_position(volume: f32) -> f32 {
     let volume = volume.clamp(0.0, MAX_VOLUME);
     if volume <= 1.0 {
@@ -34,71 +34,19 @@ fn volume_from_track_position(position: f32) -> f32 {
     }
 }
 
-fn volume_slider(
-    ui: &mut Ui,
-    volume: &mut f32,
-    size: egui::Vec2,
-    label: &str,
-    meter: Option<MeterReading>,
-) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let scale = (size.y / 26.0).max(0.1);
-    let thumb_radius = 6.0 * scale;
+fn paint_volume_meter(ui: &Ui, response: &Response, meter: Option<MeterReading>) {
+    let rect = response.rect;
+    let scale = (rect.height() / 26.0).max(0.1);
     let track = Rect::from_min_max(
-        pos2(rect.left() + thumb_radius, rect.top()),
-        pos2(rect.right() - thumb_radius, rect.bottom()),
+        pos2(rect.left() + 6.0 * scale, rect.top()),
+        pos2(rect.right() - 6.0 * scale, rect.bottom()),
     );
-
-    if let Some(pointer) = (response.clicked() || response.dragged())
-        .then(|| response.interact_pointer_pos())
-        .flatten()
-    {
-        let position = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0);
-        let next = volume_from_track_position(position);
-        if (*volume - next).abs() > f32::EPSILON {
-            *volume = next;
-            response.mark_changed();
-        }
-        response.request_focus();
-    }
-
-    if response.has_focus() {
-        let step = ui.input(|input| {
-            if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::ArrowDown) {
-                -0.01
-            } else if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::ArrowUp) {
-                0.01
-            } else {
-                0.0
-            }
-        });
-        if step != 0.0 {
-            *volume = (*volume + step).clamp(0.0, MAX_VOLUME);
-            response.mark_changed();
-        }
-    }
-
-    let position = volume_track_position(*volume);
-    let track_y = rect.top() + 7.0 * scale;
-    let thumb_x = egui::lerp(track.x_range(), position);
-    let painter = ui.painter();
-    painter.line_segment(
-        [pos2(track.left(), track_y), pos2(track.right(), track_y)],
-        Stroke::new(3.0 * scale, Color32::from_rgb(56, 64, 75)),
-    );
-    painter.line_segment(
-        [pos2(track.left(), track_y), pos2(thumb_x, track_y)],
-        Stroke::new(3.0 * scale, Color32::from_rgb(42, 169, 244)),
-    );
-
-    // Reuse the colored scale as the live level indicator. The volume fader
-    // remains the blue line and white thumb above it; only the colored ticks
-    // respond to the node's audio level.
     let meter_level = meter
         .filter(|reading| reading.available)
         .map(|reading| meter_fraction(reading.peak));
-    let tick_top = rect.top() + 18.0 * scale;
-    let tick_bottom = rect.top() + 22.0 * scale;
+    let tick_top = rect.bottom() - 7.0 * scale;
+    let tick_bottom = rect.bottom() - 3.0 * scale;
+    let painter = ui.painter();
     for index in 0..=30 {
         let tick_position = index as f32 / 30.0;
         let base_color = if tick_position < 0.72 {
@@ -119,27 +67,6 @@ fn volume_slider(
             Stroke::new(1.35 * scale, color),
         );
     }
-
-    painter.circle_filled(
-        pos2(thumb_x, track_y),
-        thumb_radius,
-        Color32::from_rgb(244, 247, 250),
-    );
-    painter.circle_stroke(
-        pos2(thumb_x, track_y),
-        thumb_radius,
-        Stroke::new(1.0_f32, Color32::from_rgb(21, 27, 34)),
-    );
-    if response.hovered() || response.has_focus() {
-        painter.circle_stroke(
-            pos2(thumb_x, track_y),
-            thumb_radius + 2.0 * scale,
-            Stroke::new(1.0_f32, Color32::from_white_alpha(80)),
-        );
-    }
-
-    response.widget_info(|| WidgetInfo::slider(ui.is_enabled(), f64::from(*volume), label));
-    response
 }
 
 impl GraphCanvas {
@@ -156,6 +83,7 @@ impl GraphCanvas {
         i18n: &I18n,
         info: &str,
         audio_info: Option<&AudioInfo>,
+        document: &mut UiDocument,
     ) {
         let mut name_draft = self
             .node_name_drafts
@@ -195,6 +123,7 @@ impl GraphCanvas {
                 },
             )
             .inner;
+        document.record_click(format!("node.{}.info", node.id), info_response.clicked());
         if let Some(audio_info) = audio_info {
             let meter = audio_info.meter;
             let peak_hold = meter
@@ -252,14 +181,16 @@ impl GraphCanvas {
                         ui.label(RichText::new(i18n.text("canvas.audio_meter_starting")).weak());
                     }
                 }
-                if ui
-                    .button(if monitor_pinned {
+                if node_button(
+                    document,
+                    ui,
+                    &format!("node.{}.meter.pin", node.id),
+                    if monitor_pinned {
                         i18n.text("canvas.audio_meter_pinned")
                     } else {
                         i18n.text("canvas.audio_meter_pin")
-                    })
-                    .clicked()
-                {
+                    },
+                ) {
                     pin_requested.set(true);
                 }
             });
@@ -294,14 +225,16 @@ impl GraphCanvas {
                     ),
                     |ui| {
                         if can_collapse {
-                            if ui
-                                .button(i18n.text(if appearance.collapsed {
+                            if node_button(
+                                document,
+                                ui,
+                                &format!("node.{}.appearance.collapse", node.id),
+                                i18n.text(if appearance.collapsed {
                                     "canvas.expand_node"
                                 } else {
                                     "canvas.collapse_node"
-                                }))
-                                .clicked()
-                            {
+                                }),
+                            ) {
                                 working_appearance.collapsed = !working_appearance.collapsed;
                                 appearance_changed = true;
                                 ui.close_menu();
@@ -310,7 +243,12 @@ impl GraphCanvas {
                         }
 
                         if node.node_type == pw_graph_core::NodeType::Effect {
-                            if ui.button(i18n.text("canvas.remove_effect")).clicked() {
+                            if node_button(
+                                document,
+                                ui,
+                                &format!("node.{}.appearance.remove-effect", node.id),
+                                i18n.text("canvas.remove_effect"),
+                            ) {
                                 actions.push(CanvasAction::RemoveEffect { node: node.id });
                                 ui.close_menu();
                             }
@@ -318,10 +256,20 @@ impl GraphCanvas {
                         }
 
                         ui.label(i18n.text("canvas.node_name"));
-                        let name_response = ui.text_edit_singleline(&mut name_draft);
+                        let name_id = format!("node.{}.appearance.name", node.id);
+                        sync_document_value(document, &name_id, Value::String(name_draft.clone()));
+                        let name_response = document
+                            .text_input(ui, TextInputProps::new(&name_id, "").value(&name_draft));
+                        name_draft = document.text(&name_id).unwrap_or(&name_draft).to_owned();
                         let submit_name = name_response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        if ui.button(i18n.text("canvas.apply_name")).clicked() || submit_name {
+                            && ui.input(|input| input.key_pressed(Key::Enter));
+                        if node_button(
+                            document,
+                            ui,
+                            &format!("node.{}.appearance.apply-name", node.id),
+                            i18n.text("canvas.apply_name"),
+                        ) || submit_name
+                        {
                             let name = name_draft.trim();
                             working_appearance.custom_name = if name.is_empty() || name == node.name
                             {
@@ -332,7 +280,12 @@ impl GraphCanvas {
                             appearance_changed = true;
                             ui.close_menu();
                         }
-                        if ui.button(i18n.text("canvas.reset_name")).clicked() {
+                        if node_button(
+                            document,
+                            ui,
+                            &format!("node.{}.appearance.reset-name", node.id),
+                            i18n.text("canvas.reset_name"),
+                        ) {
                             name_draft = node.name.clone();
                             working_appearance.custom_name = None;
                             appearance_changed = true;
@@ -353,7 +306,12 @@ impl GraphCanvas {
                                 appearance_changed = true;
                             }
                         });
-                        if ui.button(i18n.text("canvas.reset_color")).clicked() {
+                        if node_button(
+                            document,
+                            ui,
+                            &format!("node.{}.appearance.reset-color", node.id),
+                            i18n.text("canvas.reset_color"),
+                        ) {
                             working_appearance.color = None;
                             appearance_changed = true;
                             ui.close_menu();
@@ -382,6 +340,7 @@ impl GraphCanvas {
         meter: Option<MeterReading>,
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
+        document: &mut UiDocument,
     ) {
         let control_rect = Rect::from_min_size(
             pos2(
@@ -412,15 +371,29 @@ impl GraphCanvas {
                             (ui.available_width() - mute_button_size.x - 5.0 * control_scale)
                                 .max(28.0 * control_scale);
                         let volume_label = i18n.text("canvas.volume");
-                        let volume_response = volume_slider(
-                            ui,
-                            &mut state.volume,
-                            vec2(slider_width, 26.0 * control_scale),
-                            &volume_label,
-                            meter,
+                        let volume_id = format!("node.{}.audio.volume", node.id);
+                        let volume_position = volume_track_position(state.volume);
+                        sync_document_value(
+                            document,
+                            &volume_id,
+                            Value::Number(f64::from(volume_position)),
                         );
-                        volume_response
-                            .on_hover_text(format!("{volume_label}: {:.0}%", state.volume * 100.0));
+                        let volume_response = document.slider(
+                            ui,
+                            SliderProps::new(&volume_id, "")
+                                .value(f64::from(volume_position))
+                                .range(0.0, 1.0)
+                                .step(0.01)
+                                .show_value(false)
+                                .size(slider_width, 26.0 * control_scale)
+                                .tooltip(format!("{volume_label}: {:.0}%", state.volume * 100.0)),
+                        );
+                        paint_volume_meter(ui, &volume_response, meter);
+                        let volume_position = document
+                            .number(&volume_id)
+                            .unwrap_or(f64::from(volume_position))
+                            as f32;
+                        state.volume = volume_from_track_position(volume_position);
                         let icon = if state.muted {
                             NodeIcon::VolumeMuted
                         } else {
@@ -455,7 +428,8 @@ impl GraphCanvas {
                                 .rounding(6.0 * control_scale),
                             )
                             .on_hover_text(tooltip);
-                        if mute_response.clicked() {
+                        let mute_id = format!("node.{}.audio.mute", node.id);
+                        if document.record_click(&mute_id, mute_response.clicked()) {
                             state.muted = !state.muted;
                         }
                     });
@@ -484,9 +458,9 @@ impl GraphCanvas {
         node: &Node,
         node_rect: Rect,
         header: Rect,
-        accent: Color32,
         actions: &mut Vec<CanvasAction>,
         i18n: &I18n,
+        document: &mut UiDocument,
     ) {
         let Some(control) = self.effect_controls.get(&node.id).cloned() else {
             return;
@@ -521,11 +495,15 @@ impl GraphCanvas {
                 }
                 ui.spacing_mut().item_spacing *= control_scale;
                 ui.spacing_mut().interact_size *= control_scale;
-                let mut enabled = control.enabled;
-                if ui
-                    .checkbox(&mut enabled, i18n.text("effects.enabled"))
-                    .changed()
-                {
+                let enabled_id = format!("node.{}.effect.enabled", node.id);
+                sync_document_value(document, &enabled_id, Value::Bool(control.enabled));
+                document.checkbox(
+                    ui,
+                    CheckboxProps::new(&enabled_id, i18n.text("effects.enabled"))
+                        .checked(control.enabled),
+                );
+                if document.changed(&enabled_id) {
+                    let enabled = document.checked(&enabled_id).unwrap_or(control.enabled);
                     actions.push(CanvasAction::SetEffectEnabled {
                         node: node.id,
                         enabled,
@@ -533,8 +511,17 @@ impl GraphCanvas {
                 }
                 for parameter in control.parameters {
                     if parameter.boolean {
-                        let mut value = parameter.value >= 0.5;
-                        if ui.checkbox(&mut value, parameter.name).changed() {
+                        let parameter_id =
+                            format!("node.{}.effect.parameter.{}", node.id, parameter.id);
+                        let current = parameter.value >= 0.5;
+                        sync_document_value(document, &parameter_id, Value::Bool(current));
+                        document.checkbox(
+                            ui,
+                            CheckboxProps::new(&parameter_id, parameter.name.clone())
+                                .checked(current),
+                        );
+                        if document.changed(&parameter_id) {
+                            let value = document.checked(&parameter_id).unwrap_or(current);
                             actions.push(CanvasAction::SetEffectParameter {
                                 node: node.id,
                                 parameter: parameter.id,
@@ -542,44 +529,26 @@ impl GraphCanvas {
                             });
                         }
                     } else {
-                        let mut value = parameter.value;
-                        let label = if parameter.unit.is_empty() {
-                            parameter.name.clone()
+                        let parameter_id =
+                            format!("node.{}.effect.parameter.{}", node.id, parameter.id);
+                        let current = f64::from(parameter.value);
+                        let label = parameter.name.clone();
+                        let suffix = if parameter.unit.is_empty() {
+                            String::new()
                         } else {
-                            format!("{} ({})", parameter.name, parameter.unit)
+                            format!(" {}", parameter.unit)
                         };
-                        let value_label = if parameter.unit.is_empty() {
-                            format!("{value:.1}")
-                        } else {
-                            format!("{value:.0} {}", parameter.unit)
-                        };
-                        let mut changed = false;
-                        ui.horizontal(|ui| {
-                            ui.add_sized(
-                                [78.0 * control_scale, ui.spacing().interact_size.y],
-                                egui::Label::new(RichText::new(label).small()).truncate(),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(RichText::new(value_label).small());
-                                    changed = ui
-                                        .add_sized(
-                                            [
-                                                ui.available_width().max(1.0),
-                                                ui.spacing().interact_size.y,
-                                            ],
-                                            egui::Slider::new(
-                                                &mut value,
-                                                parameter.minimum..=parameter.maximum,
-                                            )
-                                            .show_value(false),
-                                        )
-                                        .changed();
-                                },
-                            );
-                        });
-                        if changed {
+                        sync_document_value(document, &parameter_id, Value::Number(current));
+                        document.slider(
+                            ui,
+                            SliderProps::new(&parameter_id, label)
+                                .value(current)
+                                .range(f64::from(parameter.minimum), f64::from(parameter.maximum))
+                                .show_value(true)
+                                .suffix(suffix),
+                        );
+                        if document.changed(&parameter_id) {
+                            let value = document.number(&parameter_id).unwrap_or(current) as f32;
                             actions.push(CanvasAction::SetEffectParameter {
                                 node: node.id,
                                 parameter: parameter.id,
@@ -603,7 +572,6 @@ impl GraphCanvas {
             ],
             Stroke::new(1.0_f32, Color32::from_rgb(52, 63, 78)),
         );
-        let _ = accent;
     }
 }
 

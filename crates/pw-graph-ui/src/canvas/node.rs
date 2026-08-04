@@ -1,7 +1,9 @@
 //! Rendering and interaction for a single node: header dragging, whole-node
 //! Easy-mode connect drags, and the port/group rows underneath.
 
-use crate::{CanvasAction, ConnectMode, GraphCanvas, MeterReading, PortId};
+use crate::{
+    ButtonProps, CanvasAction, ConnectMode, GraphCanvas, MeterReading, PortId, UiDocument, Value,
+};
 use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use pw_graph_core::{Direction, Graph, Node, Port, PortType};
 use pw_graph_i18n::I18n;
@@ -42,6 +44,7 @@ pub(super) struct NodeDrawContext<'a> {
     pub rect: Rect,
     pub graph: &'a Graph,
     pub i18n: &'a I18n,
+    pub document: &'a mut UiDocument,
     pub anchors: &'a mut HashMap<PortId, Pos2>,
     pub actions: &'a mut Vec<CanvasAction>,
 }
@@ -57,6 +60,7 @@ impl GraphCanvas {
         let rect = context.rect;
         let graph = context.graph;
         let i18n = context.i18n;
+        let document = &mut *context.document;
         let anchors = &mut *context.anchors;
         let actions = &mut *context.actions;
         let ports = self.ordered_ports(graph, node);
@@ -156,17 +160,32 @@ impl GraphCanvas {
         let remove_effect_requested = Cell::new(false);
         let arrange_nodes_requested = Cell::new(false);
         body_response.context_menu(|ui| {
-            if ui.button(&disconnect_node_label).clicked() {
+            if node_button(
+                document,
+                ui,
+                &format!("node.{}.context.disconnect", node.id),
+                disconnect_node_label.clone(),
+            ) {
                 disconnect_node_requested.set(true);
                 ui.close_menu();
             }
             if node.node_type == pw_graph_core::NodeType::Effect
-                && ui.button(i18n.text("canvas.remove_effect")).clicked()
+                && node_button(
+                    document,
+                    ui,
+                    &format!("node.{}.context.remove-effect", node.id),
+                    i18n.text("canvas.remove_effect"),
+                )
             {
                 remove_effect_requested.set(true);
                 ui.close_menu();
             }
-            if ui.button(i18n.text("canvas.arrange_selection")).clicked() {
+            if node_button(
+                document,
+                ui,
+                &format!("node.{}.context.arrange", node.id),
+                i18n.text("canvas.arrange_selection"),
+            ) {
                 arrange_nodes_requested.set(true);
                 ui.close_menu();
             }
@@ -179,17 +198,32 @@ impl GraphCanvas {
             )
             .on_hover_text(format!("{tooltip}\n\n{}", i18n.text("canvas.drag_header")));
         header_response.context_menu(|ui| {
-            if ui.button(&disconnect_node_label).clicked() {
+            if node_button(
+                document,
+                ui,
+                &format!("node.{}.header.disconnect", node.id),
+                disconnect_node_label.clone(),
+            ) {
                 disconnect_node_requested.set(true);
                 ui.close_menu();
             }
             if node.node_type == pw_graph_core::NodeType::Effect
-                && ui.button(i18n.text("canvas.remove_effect")).clicked()
+                && node_button(
+                    document,
+                    ui,
+                    &format!("node.{}.header.remove-effect", node.id),
+                    i18n.text("canvas.remove_effect"),
+                )
             {
                 remove_effect_requested.set(true);
                 ui.close_menu();
             }
-            if ui.button(i18n.text("canvas.arrange_selection")).clicked() {
+            if node_button(
+                document,
+                ui,
+                &format!("node.{}.header.arrange", node.id),
+                i18n.text("canvas.arrange_selection"),
+            ) {
                 arrange_nodes_requested.set(true);
                 ui.close_menu();
             }
@@ -405,6 +439,7 @@ impl GraphCanvas {
             i18n,
             &tooltip,
             audio_info.as_ref(),
+            document,
         );
 
         if visible_audio_controls {
@@ -430,11 +465,12 @@ impl GraphCanvas {
                 audio_meter,
                 actions,
                 i18n,
+                document,
             );
         }
 
         if visible_effect_controls {
-            self.draw_node_effect_controls(ui, node, node_rect, header, accent, actions, i18n);
+            self.draw_node_effect_controls(ui, node, node_rect, header, actions, i18n, document);
         }
 
         if let Some(source_id) = self.pending_node_connect {
@@ -479,5 +515,20 @@ impl GraphCanvas {
             ui, &painter, node, graph, node_rect, ports, has_audio, accent, text_scale, i18n,
             anchors, actions,
         );
+    }
+}
+
+pub(super) fn node_button(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    label: impl Into<String>,
+) -> bool {
+    document.button(ui, ButtonProps::new(id, label)).clicked()
+}
+
+pub(super) fn sync_document_value(document: &mut UiDocument, id: &str, value: Value) {
+    if document.value(id) != Some(&value) {
+        document.set_value(id, value);
     }
 }

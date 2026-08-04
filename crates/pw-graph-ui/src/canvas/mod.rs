@@ -4,7 +4,7 @@
 //! grouping/matching in [`ports`], and name formatting in [`names`], so each
 //! concern can be read (and tested) on its own instead of one long file.
 
-use crate::{CanvasAction, GraphCanvas, LinkId, NodeId};
+use crate::{CanvasAction, GraphCanvas, LinkId, NodeId, UiDocument};
 use egui::{pos2, vec2, Color32, FontId, Rect, Sense, Shape, Stroke, Ui};
 use pw_graph_core::Graph;
 use pw_graph_i18n::I18n;
@@ -23,8 +23,14 @@ use names::display_port_name;
 use node::NodeDrawContext;
 
 impl GraphCanvas {
-    pub fn show(&mut self, ui: &mut Ui, graph: &Graph, i18n: &I18n) -> Vec<CanvasAction> {
-        self.show_with_keyboard_shortcuts(ui, graph, i18n, true)
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        graph: &Graph,
+        i18n: &I18n,
+        document: &mut UiDocument,
+    ) -> Vec<CanvasAction> {
+        self.show_with_keyboard_shortcuts(ui, graph, i18n, document, true)
     }
 
     pub fn show_with_keyboard_shortcuts(
@@ -32,6 +38,7 @@ impl GraphCanvas {
         ui: &mut Ui,
         graph: &Graph,
         i18n: &I18n,
+        document: &mut UiDocument,
         keyboard_shortcuts_enabled: bool,
     ) -> Vec<CanvasAction> {
         self.update_peak_holds();
@@ -157,6 +164,7 @@ impl GraphCanvas {
                 rect,
                 graph,
                 i18n,
+                document,
                 anchors: &mut anchors,
                 actions: &mut actions,
             };
