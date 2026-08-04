@@ -66,6 +66,7 @@ mod tests;
 
 use std::collections::{BTreeMap, VecDeque};
 
+use egui::{Align, Layout, Ui};
 use events::Listener;
 
 pub use dialog::{DialogPlacement, DialogProps, DialogResponse};
@@ -76,6 +77,28 @@ pub use props::{
     ButtonProps, CheckboxProps, CommonProps, LabelProps, NumberInputProps, RadioGroupProps,
     SelectProps, SliderProps, Style, SwitchProps, TextInputProps,
 };
+
+/// Renders a setting row with descriptive content on the leading side and
+/// its control aligned to the trailing edge.
+///
+/// The row deliberately accepts closures instead of a fixed label type. This
+/// keeps the layout reusable for a plain node label, a title plus explanation,
+/// or an icon-labelled application setting while leaving the actual control
+/// owned by UiDocument.
+pub fn setting_row<T>(
+    ui: &mut Ui,
+    leading: impl FnOnce(&mut Ui),
+    trailing: impl FnOnce(&mut Ui) -> T,
+) -> T {
+    let available_width = ui.available_width();
+    ui.horizontal(|ui| {
+        ui.set_min_width(available_width);
+        leading(ui);
+        ui.with_layout(Layout::right_to_left(Align::Center), trailing)
+            .inner
+    })
+    .inner
+}
 
 /// Retained DOM-like state and reusable `egui` controls.
 ///

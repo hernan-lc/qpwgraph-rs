@@ -1,5 +1,5 @@
 use crate::{
-    CanvasAction, CheckboxProps, GraphCanvas, MeterReading, NodeAppearance, SliderProps,
+    setting_row, CanvasAction, GraphCanvas, MeterReading, NodeAppearance, SliderProps, SwitchProps,
     TextInputProps, UiDocument, Value,
 };
 use egui::{pos2, vec2, Color32, Key, ProgressBar, Rect, Response, RichText, Stroke, Ui};
@@ -13,6 +13,10 @@ use super::{node_button, sync_document_value, AudioInfo};
 
 const MAX_VOLUME: f32 = 1.5;
 const UNITY_TRACK_POSITION: f32 = 0.9;
+const EFFECT_SETTING_LABEL_WIDTH: f32 = 82.0;
+const EFFECT_SETTING_SWITCH_WIDTH: f32 = 36.0;
+const EFFECT_SETTING_SWITCH_HEIGHT: f32 = 20.0;
+const EFFECT_SETTING_MIN_SLIDER_WIDTH: f32 = 42.0;
 
 /// Keep the conventional 0–100% range across most of the track while
 /// retaining the optional 150% boost at the end.
@@ -66,6 +70,33 @@ fn paint_volume_meter(ui: &Ui, response: &Response, meter: Option<MeterReading>)
             [pos2(x, tick_top), pos2(x, tick_bottom)],
             Stroke::new(1.35 * scale, color),
         );
+    }
+}
+
+fn effect_setting_label(ui: &mut Ui, label: &str, width: f32) {
+    ui.set_min_width(width);
+    ui.label(RichText::new(label).small());
+}
+
+fn effect_slider_width(ui: &Ui, control_scale: f32) -> f32 {
+    let row_width = ui.available_width().max(0.0);
+    let label_width = EFFECT_SETTING_LABEL_WIDTH * control_scale;
+    let minimum = EFFECT_SETTING_MIN_SLIDER_WIDTH * control_scale;
+    let maximum = (row_width - 54.0 * control_scale).max(minimum);
+    (row_width - label_width - ui.spacing().item_spacing.x).clamp(minimum, maximum)
+}
+
+fn effect_parameter_tooltip(
+    parameter_name: &str,
+    minimum: f32,
+    maximum: f32,
+    unit: &str,
+) -> String {
+    let range = format!("{minimum}–{maximum}");
+    if unit.is_empty() {
+        format!("{parameter_name}: {range}")
+    } else {
+        format!("{parameter_name}: {range} {unit}")
     }
 }
 
@@ -497,10 +528,27 @@ impl GraphCanvas {
                 ui.spacing_mut().interact_size *= control_scale;
                 let enabled_id = format!("node.{}.effect.enabled", node.id);
                 sync_document_value(document, &enabled_id, Value::Bool(control.enabled));
-                document.checkbox(
+                setting_row(
                     ui,
-                    CheckboxProps::new(&enabled_id, i18n.text("effects.enabled"))
-                        .checked(control.enabled),
+                    |ui| {
+                        effect_setting_label(
+                            ui,
+                            &i18n.text("effects.enabled"),
+                            EFFECT_SETTING_LABEL_WIDTH * control_scale,
+                        );
+                    },
+                    |ui| {
+                        document.switch(
+                            ui,
+                            SwitchProps::new(&enabled_id, String::new())
+                                .checked(control.enabled)
+                                .size(
+                                    EFFECT_SETTING_SWITCH_WIDTH * control_scale,
+                                    EFFECT_SETTING_SWITCH_HEIGHT * control_scale,
+                                )
+                                .tooltip(i18n.text("effects.enabled")),
+                        )
+                    },
                 );
                 if document.changed(&enabled_id) {
                     let enabled = document.checked(&enabled_id).unwrap_or(control.enabled);
@@ -515,10 +563,28 @@ impl GraphCanvas {
                             format!("node.{}.effect.parameter.{}", node.id, parameter.id);
                         let current = parameter.value >= 0.5;
                         sync_document_value(document, &parameter_id, Value::Bool(current));
-                        document.checkbox(
+                        let label = parameter.name.clone();
+                        setting_row(
                             ui,
-                            CheckboxProps::new(&parameter_id, parameter.name.clone())
-                                .checked(current),
+                            |ui| {
+                                effect_setting_label(
+                                    ui,
+                                    &label,
+                                    EFFECT_SETTING_LABEL_WIDTH * control_scale,
+                                );
+                            },
+                            |ui| {
+                                document.switch(
+                                    ui,
+                                    SwitchProps::new(&parameter_id, String::new())
+                                        .checked(current)
+                                        .size(
+                                            EFFECT_SETTING_SWITCH_WIDTH * control_scale,
+                                            EFFECT_SETTING_SWITCH_HEIGHT * control_scale,
+                                        )
+                                        .tooltip(label.clone()),
+                                )
+                            },
                         );
                         if document.changed(&parameter_id) {
                             let value = document.checked(&parameter_id).unwrap_or(current);
@@ -538,14 +604,38 @@ impl GraphCanvas {
                         } else {
                             format!(" {}", parameter.unit)
                         };
+                        let tooltip = effect_parameter_tooltip(
+                            &parameter.name,
+                            parameter.minimum,
+                            parameter.maximum,
+                            &parameter.unit,
+                        );
+                        let slider_width = effect_slider_width(ui, control_scale);
                         sync_document_value(document, &parameter_id, Value::Number(current));
-                        document.slider(
+                        setting_row(
                             ui,
-                            SliderProps::new(&parameter_id, label)
-                                .value(current)
-                                .range(f64::from(parameter.minimum), f64::from(parameter.maximum))
-                                .show_value(true)
-                                .suffix(suffix),
+                            |ui| {
+                                effect_setting_label(
+                                    ui,
+                                    &label,
+                                    EFFECT_SETTING_LABEL_WIDTH * control_scale,
+                                );
+                            },
+                            |ui| {
+                                document.slider(
+                                    ui,
+                                    SliderProps::new(&parameter_id, String::new())
+                                        .value(current)
+                                        .range(
+                                            f64::from(parameter.minimum),
+                                            f64::from(parameter.maximum),
+                                        )
+                                        .show_value(true)
+                                        .suffix(suffix)
+                                        .width(slider_width)
+                                        .tooltip(tooltip),
+                                )
+                            },
                         );
                         if document.changed(&parameter_id) {
                             let value = document.number(&parameter_id).unwrap_or(current) as f32;

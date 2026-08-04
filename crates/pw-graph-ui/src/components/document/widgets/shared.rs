@@ -110,7 +110,8 @@ pub(super) fn switch_widget(
     label: Option<&str>,
     style: &Style,
 ) -> Response {
-    let track_size = vec2(36.0, 20.0).max(vec2(0.0, ui.spacing().interact_size.y));
+    let track_size = vec2(style.width.unwrap_or(36.0), style.height.unwrap_or(20.0))
+        .max(vec2(0.0, ui.spacing().interact_size.y));
     let on_fill = style.fill.unwrap_or(Color32::from_rgb(42, 169, 244));
     let off_fill = Color32::from_rgb(76, 84, 96);
     ui.horizontal(|ui| {

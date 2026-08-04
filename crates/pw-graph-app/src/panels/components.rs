@@ -14,10 +14,10 @@ use crate::icons::{
     sidebar_icon_toggle_button as draw_sidebar_icon_toggle_button,
     sidebar_nav_icon_button as draw_sidebar_nav_icon_button, Icon,
 };
-use eframe::egui::{Align, Layout, Response, RichText, Ui};
+use eframe::egui::{Response, RichText, Ui};
 use pw_graph_ui::{
-    ButtonProps, CheckboxProps, EventType, NumberInputProps, OptionItem, SelectProps, SliderProps,
-    SwitchProps, TextInputProps, UiDocument, Value,
+    setting_row, ButtonProps, CheckboxProps, EventType, NumberInputProps, OptionItem, SelectProps,
+    SliderProps, SwitchProps, TextInputProps, UiDocument, Value,
 };
 
 pub(super) fn modal_hint(ui: &mut Ui, text: String) {
@@ -138,20 +138,27 @@ pub(super) fn document_setting_switch(
     label: String,
     explanation: String,
 ) -> bool {
-    let available_width = ui.available_width();
-    let mut checked = current;
-    ui.horizontal(|ui| {
-        ui.set_min_width(available_width);
-        crate::icons::icon_label(ui, icon, explanation.clone());
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).strong());
-            ui.label(RichText::new(explanation.clone()).small().weak());
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            checked = document_switch(document, ui, id, current, String::new(), Some(explanation));
-        });
-    });
+    let checked = setting_row(
+        ui,
+        |ui| {
+            crate::icons::icon_label(ui, icon, explanation.clone());
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).strong());
+                ui.label(RichText::new(explanation.clone()).small().weak());
+            });
+        },
+        |ui| {
+            document_switch(
+                document,
+                ui,
+                id,
+                current,
+                String::new(),
+                Some(explanation.clone()),
+            )
+        },
+    );
     ui.add_space(2.0);
     checked
 }
@@ -171,20 +178,20 @@ pub(super) fn document_setting_select<I>(
 where
     I: IntoIterator<Item = OptionItem>,
 {
-    let available_width = ui.available_width();
-    let mut selected = current.to_owned();
-    ui.horizontal(|ui| {
-        ui.set_min_width(available_width);
-        if let Some(icon) = icon {
-            crate::icons::icon_label(ui, icon, explanation.clone());
-            ui.add_space(8.0);
-        }
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).strong());
-            ui.label(RichText::new(explanation.clone()).small().weak());
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            selected = document_select_sized(
+    let selected = setting_row(
+        ui,
+        |ui| {
+            if let Some(icon) = icon {
+                crate::icons::icon_label(ui, icon, explanation.clone());
+                ui.add_space(8.0);
+            }
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).strong());
+                ui.label(RichText::new(explanation.clone()).small().weak());
+            });
+        },
+        |ui| {
+            document_select_sized(
                 document,
                 ui,
                 id,
@@ -192,9 +199,9 @@ where
                 String::new(),
                 options,
                 Some(width),
-            );
-        });
-    });
+            )
+        },
+    );
     ui.add_space(2.0);
     selected
 }
@@ -207,20 +214,27 @@ pub(super) fn document_setting_switch_plain(
     label: String,
     explanation: String,
 ) -> bool {
-    let available_width = ui.available_width();
-    let mut checked = current;
-    ui.horizontal(|ui| {
-        ui.set_min_width(available_width);
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).strong());
-            if !explanation.is_empty() {
-                ui.label(RichText::new(explanation.clone()).small().weak());
-            }
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            checked = document_switch(document, ui, id, current, String::new(), Some(explanation));
-        });
-    });
+    let checked = setting_row(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).strong());
+                if !explanation.is_empty() {
+                    ui.label(RichText::new(explanation.clone()).small().weak());
+                }
+            });
+        },
+        |ui| {
+            document_switch(
+                document,
+                ui,
+                id,
+                current,
+                String::new(),
+                Some(explanation.clone()),
+            )
+        },
+    );
     ui.add_space(2.0);
     checked
 }
@@ -318,17 +332,17 @@ pub(super) fn document_setting_slider(
     explanation: String,
     width: f32,
 ) -> f32 {
-    let available_width = ui.available_width();
-    let mut value = current;
-    ui.horizontal(|ui| {
-        ui.set_min_width(available_width);
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).strong());
-            if !explanation.is_empty() {
-                ui.label(RichText::new(explanation.clone()).small().weak());
-            }
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    let value = setting_row(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).strong());
+                if !explanation.is_empty() {
+                    ui.label(RichText::new(explanation.clone()).small().weak());
+                }
+            });
+        },
+        |ui| {
             let (_, next) = document_slider_sized(
                 document,
                 ui,
@@ -339,12 +353,12 @@ pub(super) fn document_setting_slider(
                 step,
                 String::new(),
                 true,
-                Some(explanation),
+                Some(explanation.clone()),
                 Some(width),
             );
-            value = next;
-        });
-    });
+            next
+        },
+    );
     ui.add_space(2.0);
     value
 }
@@ -362,17 +376,18 @@ pub(super) fn document_setting_number(
     explanation: String,
     width: f32,
 ) -> f32 {
-    let available_width = ui.available_width();
     let mut value = current as f64;
     let increment_id = format!("{id}.increment");
     let decrement_id = format!("{id}.decrement");
-    ui.horizontal(|ui| {
-        ui.set_min_width(available_width);
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).strong());
-            ui.label(RichText::new(explanation.clone()).small().weak());
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    setting_row(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).strong());
+                ui.label(RichText::new(explanation.clone()).small().weak());
+            });
+        },
+        |ui| {
             ui.horizontal(|ui| {
                 let (_, edited) = document_number_input_sized(
                     document,
@@ -399,8 +414,8 @@ pub(super) fn document_setting_number(
                     }
                 });
             });
-        });
-    });
+        },
+    );
     value = value.clamp(minimum as f64, maximum as f64);
     if document
         .number(id)
