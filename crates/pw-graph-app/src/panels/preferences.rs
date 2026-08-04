@@ -1,17 +1,23 @@
 use super::components::{
-    document_button, document_checkbox, document_icon_button, document_icon_checkbox,
-    document_select, document_selectable_label, document_slider, document_text_input,
+    document_button, document_checkbox, document_icon_button, document_select_sized,
+    document_selectable_label, document_setting_slider, document_setting_switch,
+    document_text_input,
 };
 use super::shared::{
-    apply_panel_text_scale, fresh_scroll_area, meter_policy_key, panel_section, preferences_rect,
-    show_close_button, show_fixed_dialog,
+    apply_panel_text_scale, fresh_scroll_area, meter_policy_key, panel_section,
+    show_centered_dialog, show_close_button,
 };
 use crate::app::QpwgraphApp;
 use crate::icons::{icon_label, Icon};
 use eframe::egui::{self, RichText, Ui};
 use pw_graph_backend::MeterPolicy;
 use pw_graph_i18n::Locale;
-use pw_graph_ui::{OptionItem, SelectProps, UiDocument};
+use pw_graph_ui::{OptionItem, UiDocument};
+
+const PREFERENCES_DIALOG_WIDTH: f32 = 780.0;
+const PREFERENCES_SCROLL_MAX_HEIGHT: f32 = 600.0;
+const PREFERENCES_SELECT_WIDTH: f32 = 260.0;
+const PREFERENCES_PATH_SELECT_WIDTH: f32 = 520.0;
 
 /// Tabs inside the Preferences modal, which holds settings you configure once
 /// rather than watch while working the canvas.
@@ -43,20 +49,16 @@ impl QpwgraphApp {
         let options = MeterPolicy::ALL.into_iter().map(|policy| {
             OptionItem::new(policy.as_str(), self.i18n.text(meter_policy_key(policy)))
         });
-        document.select(
+        let selected = document_select_sized(
+            document,
             ui,
-            SelectProps::new(
-                METER_POLICY_ID,
-                self.i18n.text("inspector.audio_metering_policy"),
-            )
-            .selected(current.as_str())
-            .options(options),
+            METER_POLICY_ID,
+            current.as_str(),
+            self.i18n.text("inspector.audio_metering_policy"),
+            options,
+            Some(PREFERENCES_SELECT_WIDTH),
         );
-        let selected = self
-            .ui_document
-            .text(METER_POLICY_ID)
-            .map(MeterPolicy::parse)
-            .unwrap_or(current);
+        let selected = MeterPolicy::parse(&selected);
         ui.label(
             RichText::new(self.i18n.text("help.audio_metering_policy"))
                 .small()
@@ -83,14 +85,20 @@ impl QpwgraphApp {
         if !self.show_preferences {
             return;
         }
-        let rect = preferences_rect(ctx);
+        let viewport = ctx.screen_rect();
+        let dialog_width = (viewport.width() - 48.0)
+            .clamp(320.0, PREFERENCES_DIALOG_WIDTH)
+            .max(1.0);
+        let scroll_max_height = (viewport.height() - 240.0)
+            .clamp(220.0, PREFERENCES_SCROLL_MAX_HEIGHT)
+            .max(1.0);
         let mut document = std::mem::take(&mut self.ui_document);
-        let dialog_response = show_fixed_dialog(
+        let dialog_response = show_centered_dialog(
             &mut document,
             ctx,
             "preferences",
             self.i18n.text("preferences.title"),
-            rect,
+            dialog_width,
             |ui, document| {
                 apply_panel_text_scale(ui, self.config.panel_text_scale);
                 ui.horizontal(|ui| {
@@ -125,7 +133,7 @@ impl QpwgraphApp {
                     self.preferences_tab,
                     self.preferences_scroll_epoch,
                 );
-                fresh_scroll_area(scroll_id, ui.available_height().max(0.0))
+                fresh_scroll_area(scroll_id, scroll_max_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.preferences_tab {
                         PreferencesTab::Interface => {
@@ -156,7 +164,7 @@ impl QpwgraphApp {
         panel_section(ui, self.i18n.text("inspector.patchbay_options"), |ui| {
             let exclusive_label = self.i18n.text("inspector.exclusive");
             let exclusive_help = self.i18n.text("help.exclusive");
-            self.config.patchbay_exclusive = document_icon_checkbox(
+            self.config.patchbay_exclusive = document_setting_switch(
                 document,
                 ui,
                 "patchbay.exclusive",
@@ -167,7 +175,7 @@ impl QpwgraphApp {
             );
             let auto_disconnect_label = self.i18n.text("inspector.auto_disconnect");
             let auto_disconnect_help = self.i18n.text("help.auto_disconnect");
-            self.config.patchbay_auto_disconnect = document_icon_checkbox(
+            self.config.patchbay_auto_disconnect = document_setting_switch(
                 document,
                 ui,
                 "patchbay.auto_disconnect",
@@ -178,7 +186,7 @@ impl QpwgraphApp {
             );
             let auto_pin_label = self.i18n.text("inspector.auto_pin");
             let auto_pin_help = self.i18n.text("help.auto_pin");
-            self.config.patchbay_auto_pin = document_icon_checkbox(
+            self.config.patchbay_auto_pin = document_setting_switch(
                 document,
                 ui,
                 "patchbay.auto_pin",
@@ -190,7 +198,7 @@ impl QpwgraphApp {
             let patchbay_activated_before = self.config.patchbay_activated;
             let patchbay_activated_label = self.i18n.text("inspector.patchbay_activated");
             let patchbay_activated_help = self.i18n.text("help.patchbay_activated");
-            self.config.patchbay_activated = document_icon_checkbox(
+            self.config.patchbay_activated = document_setting_switch(
                 document,
                 ui,
                 "patchbay.activated",
@@ -239,7 +247,7 @@ impl QpwgraphApp {
             });
             let profiles: Vec<_> = self.config.patchbay_profiles.keys().cloned().collect();
             if !profiles.is_empty() {
-                let selected_profile = document_select(
+                let selected_profile = document_select_sized(
                     document,
                     ui,
                     "preferences.patchbay.profile",
@@ -248,6 +256,7 @@ impl QpwgraphApp {
                     profiles
                         .iter()
                         .map(|profile| OptionItem::new(profile.clone(), profile.clone())),
+                    Some(PREFERENCES_SELECT_WIDTH),
                 );
                 if selected_profile != self.config.active_patchbay_profile {
                     self.config.active_patchbay_profile = selected_profile.clone();
@@ -275,7 +284,7 @@ impl QpwgraphApp {
             }
             if !self.config.recent_patchbay_paths.is_empty() {
                 let current_path = self.patchbay_file.display().to_string();
-                let selected_path = document_select(
+                let selected_path = document_select_sized(
                     document,
                     ui,
                     "preferences.patchbay.recent_path",
@@ -285,6 +294,7 @@ impl QpwgraphApp {
                         let display = path.display().to_string();
                         OptionItem::new(display.clone(), display)
                     }),
+                    Some(PREFERENCES_PATH_SELECT_WIDTH),
                 );
                 if let Some(selected) = self
                     .config
@@ -412,8 +422,7 @@ impl QpwgraphApp {
 
     fn show_preferences_interface_tab(&mut self, document: &mut UiDocument, ui: &mut Ui) {
         let current_locale = self.i18n.locale();
-        let selected_locale_code = self
-            .ui_document
+        let selected_locale_code = document
             .text("preferences.configuration.language")
             .unwrap_or(current_locale.code())
             .to_owned();
@@ -426,7 +435,7 @@ impl QpwgraphApp {
         panel_section(ui, self.i18n.text("inspector.configuration"), |ui| {
             ui.horizontal(|ui| {
                 icon_label(ui, Icon::Language, self.i18n.text("language.label"));
-                let selected = document_select(
+                let selected = document_select_sized(
                     document,
                     ui,
                     "preferences.configuration.language",
@@ -435,6 +444,7 @@ impl QpwgraphApp {
                     Locale::ALL
                         .into_iter()
                         .map(|locale| OptionItem::new(locale.code(), locale.native_name())),
+                    Some(PREFERENCES_SELECT_WIDTH),
                 );
                 selected_locale = Locale::parse(&selected);
             });
@@ -467,7 +477,7 @@ impl QpwgraphApp {
         panel_section(ui, self.i18n.text("inspector.interface"), |ui| {
             let toolbar_label = self.i18n.text("inspector.toolbar_visible");
             let toolbar_help = self.i18n.text("help.toolbar_visible");
-            self.config.toolbar = document_icon_checkbox(
+            self.config.toolbar = document_setting_switch(
                 document,
                 ui,
                 "interface.toolbar",
@@ -478,7 +488,7 @@ impl QpwgraphApp {
             );
             let statusbar_label = self.i18n.text("inspector.statusbar_visible");
             let statusbar_help = self.i18n.text("help.statusbar_visible");
-            self.config.statusbar = document_icon_checkbox(
+            self.config.statusbar = document_setting_switch(
                 document,
                 ui,
                 "interface.statusbar",
@@ -489,7 +499,7 @@ impl QpwgraphApp {
             );
             let patchbay_toolbar_label = self.i18n.text("inspector.patchbay_toolbar_visible");
             let patchbay_toolbar_help = self.i18n.text("help.patchbay_toolbar_visible");
-            self.config.patchbay_toolbar = document_icon_checkbox(
+            self.config.patchbay_toolbar = document_setting_switch(
                 document,
                 ui,
                 "interface.patchbay_toolbar",
@@ -503,7 +513,7 @@ impl QpwgraphApp {
         panel_section(ui, self.i18n.text("inspector.behavior"), |ui| {
             let repel_label = self.i18n.text("inspector.repel_overlaps");
             let repel_help = self.i18n.text("help.repel_overlaps");
-            self.config.repel_overlapping_nodes = document_icon_checkbox(
+            self.config.repel_overlapping_nodes = document_setting_switch(
                 document,
                 ui,
                 "behavior.repel",
@@ -514,7 +524,7 @@ impl QpwgraphApp {
             );
             let through_label = self.i18n.text("inspector.connect_through");
             let through_help = self.i18n.text("help.connect_through");
-            self.config.connect_through_nodes = document_icon_checkbox(
+            self.config.connect_through_nodes = document_setting_switch(
                 document,
                 ui,
                 "behavior.connect_through",
@@ -525,7 +535,7 @@ impl QpwgraphApp {
             );
             let thumbnail_label = self.i18n.text("inspector.thumbnail_view");
             let thumbnail_help = self.i18n.text("help.thumbnail_view");
-            self.canvas.thumbnail_mode = document_icon_checkbox(
+            self.canvas.thumbnail_mode = document_setting_switch(
                 document,
                 ui,
                 "behavior.thumbnail",
@@ -552,9 +562,7 @@ impl QpwgraphApp {
                 self.config.panel_text_scale = 1.20;
                 self.config.node_text_scale = 1.15;
             }
-            let ui_text_label = self.i18n.text("inspector.ui_text_scale");
-            let ui_text_help = self.i18n.text("help.ui_text_scale");
-            let (_, ui_text_scale) = document_slider(
+            self.config.ui_text_scale = document_setting_slider(
                 document,
                 ui,
                 "typography.ui_scale",
@@ -562,14 +570,11 @@ impl QpwgraphApp {
                 0.80,
                 2.0,
                 0.05,
-                ui_text_label,
-                false,
-                Some(ui_text_help),
+                self.i18n.text("inspector.ui_text_scale"),
+                self.i18n.text("help.ui_text_scale"),
+                220.0,
             );
-            self.config.ui_text_scale = ui_text_scale;
-            let panel_text_label = self.i18n.text("inspector.panel_text_scale");
-            let panel_text_help = self.i18n.text("help.panel_text_scale");
-            let (_, panel_text_scale) = document_slider(
+            self.config.panel_text_scale = document_setting_slider(
                 document,
                 ui,
                 "typography.panel_scale",
@@ -577,14 +582,11 @@ impl QpwgraphApp {
                 0.80,
                 2.0,
                 0.05,
-                panel_text_label,
-                false,
-                Some(panel_text_help),
+                self.i18n.text("inspector.panel_text_scale"),
+                self.i18n.text("help.panel_text_scale"),
+                220.0,
             );
-            self.config.panel_text_scale = panel_text_scale;
-            let node_text_label = self.i18n.text("inspector.node_text_scale");
-            let node_text_help = self.i18n.text("help.node_text_scale");
-            let (_, node_text_scale) = document_slider(
+            self.config.node_text_scale = document_setting_slider(
                 document,
                 ui,
                 "typography.node_scale",
@@ -592,11 +594,10 @@ impl QpwgraphApp {
                 0.80,
                 2.0,
                 0.05,
-                node_text_label,
-                false,
-                Some(node_text_help),
+                self.i18n.text("inspector.node_text_scale"),
+                self.i18n.text("help.node_text_scale"),
+                220.0,
             );
-            self.config.node_text_scale = node_text_scale;
         });
     }
 }

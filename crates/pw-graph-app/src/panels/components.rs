@@ -14,7 +14,7 @@ use crate::icons::{
     sidebar_icon_toggle_button as draw_sidebar_icon_toggle_button,
     sidebar_nav_icon_button as draw_sidebar_nav_icon_button, Icon,
 };
-use eframe::egui::{Response, RichText, Ui};
+use eframe::egui::{Align, Layout, Response, RichText, Ui};
 use pw_graph_ui::{
     ButtonProps, CheckboxProps, OptionItem, SelectProps, SliderProps, SwitchProps, TextInputProps,
     UiDocument, Value,
@@ -105,6 +105,40 @@ pub(super) fn document_icon_checkbox(
     .inner
 }
 
+/// A settings-specific composition of the shared switch widget.
+///
+/// Preferences need more context than a bare checkbox: the icon identifies
+/// the setting family, the description explains the consequence, and the
+/// control should line up on the trailing edge of every row. This belongs in
+/// the application layer because it is layout for a settings page rather than
+/// a new primitive that the document component library should know about.
+pub(super) fn document_setting_switch(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: bool,
+    icon: Icon,
+    label: String,
+    explanation: String,
+) -> bool {
+    let available_width = ui.available_width();
+    let mut checked = current;
+    ui.horizontal(|ui| {
+        ui.set_min_width(available_width);
+        crate::icons::icon_label(ui, icon, explanation.clone());
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).strong());
+            ui.label(RichText::new(explanation.clone()).small().weak());
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            checked = document_switch(document, ui, id, current, String::new(), Some(explanation));
+        });
+    });
+    ui.add_space(2.0);
+    checked
+}
+
 pub(super) fn document_text_input(
     document: &mut UiDocument,
     ui: &mut Ui,
@@ -151,16 +185,80 @@ pub(super) fn document_slider(
     show_value: bool,
     tooltip: Option<String>,
 ) -> (Response, f32) {
+    document_slider_sized(
+        document, ui, id, current, minimum, maximum, step, label, show_value, tooltip, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn document_slider_sized(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: f32,
+    minimum: f32,
+    maximum: f32,
+    step: f64,
+    label: String,
+    show_value: bool,
+    tooltip: Option<String>,
+    width: Option<f32>,
+) -> (Response, f32) {
     sync_value(document, id, Value::Number(f64::from(current)));
-    let props = SliderProps::new(id, label)
+    let mut props = SliderProps::new(id, label)
         .value(f64::from(current))
         .range(f64::from(minimum), f64::from(maximum))
         .step(step)
         .show_value(show_value)
         .tooltip_option(tooltip);
+    if let Some(width) = width {
+        props = props.width(width);
+    }
     let response = document.slider(ui, props);
     let value = document.number(id).unwrap_or(f64::from(current)) as f32;
     (response, value)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn document_setting_slider(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: f32,
+    minimum: f32,
+    maximum: f32,
+    step: f64,
+    label: String,
+    explanation: String,
+    width: f32,
+) -> f32 {
+    let available_width = ui.available_width();
+    let mut value = current;
+    ui.horizontal(|ui| {
+        ui.set_min_width(available_width);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).strong());
+            ui.label(RichText::new(explanation.clone()).small().weak());
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (_, next) = document_slider_sized(
+                document,
+                ui,
+                id,
+                current,
+                minimum,
+                maximum,
+                step,
+                String::new(),
+                true,
+                Some(explanation),
+                Some(width),
+            );
+            value = next;
+        });
+    });
+    ui.add_space(2.0);
+    value
 }
 
 pub(super) fn document_select<I>(
@@ -174,13 +272,29 @@ pub(super) fn document_select<I>(
 where
     I: IntoIterator<Item = OptionItem>,
 {
+    document_select_sized(document, ui, id, current, label, options, None)
+}
+
+pub(super) fn document_select_sized<I>(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: &str,
+    label: String,
+    options: I,
+    width: Option<f32>,
+) -> String
+where
+    I: IntoIterator<Item = OptionItem>,
+{
     sync_value(document, id, Value::String(current.to_owned()));
-    document.select(
-        ui,
-        SelectProps::new(id, label)
-            .selected(current)
-            .options(options),
-    );
+    let mut props = SelectProps::new(id, label)
+        .selected(current)
+        .options(options);
+    if let Some(width) = width {
+        props = props.width(width);
+    }
+    document.select(ui, props);
     document.text(id).unwrap_or(current).to_owned()
 }
 

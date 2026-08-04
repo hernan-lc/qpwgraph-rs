@@ -15,7 +15,7 @@ use pw_graph_ui::{ConnectMode, MediaFilter};
 
 impl QpwgraphApp {
     pub(crate) fn show_gui_panels(&mut self, ctx: &egui::Context) {
-        if !self.any_modal_open() || self.show_preferences {
+        if !self.any_modal_open() {
             egui::SidePanel::left("navigation")
                 .resizable(false)
                 .exact_width(NAV_RAIL_WIDTH)

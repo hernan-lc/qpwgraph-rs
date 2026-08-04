@@ -8,7 +8,6 @@ pub(super) const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 pub(super) const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
 pub(super) const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
 pub(super) const NAV_RAIL_WIDTH: f32 = 76.0;
-pub(super) const FULL_PANEL_MARGIN: f32 = 8.0;
 
 pub(super) fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
     let scale = scale.clamp(0.80, 2.0);
@@ -83,26 +82,6 @@ pub(super) fn show_centered_dialog(
         DialogProps::centered(id_source, title, width),
         contents,
     )
-}
-
-pub(super) fn show_fixed_dialog(
-    document: &mut UiDocument,
-    ctx: &egui::Context,
-    id_source: &str,
-    title: String,
-    rect: egui::Rect,
-    contents: impl FnOnce(&mut Ui, &mut UiDocument),
-) -> DialogResponse {
-    document.dialog(ctx, DialogProps::fixed(id_source, title, rect), contents)
-}
-
-pub(super) fn preferences_rect(ctx: &egui::Context) -> egui::Rect {
-    let screen = ctx.screen_rect();
-    let left = screen.left() + NAV_RAIL_WIDTH + FULL_PANEL_MARGIN;
-    let top = screen.top() + FULL_PANEL_MARGIN;
-    let width = (screen.width() - NAV_RAIL_WIDTH - FULL_PANEL_MARGIN * 2.0).max(240.0);
-    let height = (screen.height() - FULL_PANEL_MARGIN * 2.0).max(260.0);
-    egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height))
 }
 
 /// A scroll area that always opens back at the top: reopening a dialog (or
