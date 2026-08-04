@@ -145,7 +145,8 @@ entry remains available when multicast discovery is unavailable.
 
 The relay requires the native PipeWire backend. Builds without relay support
 remain usable for graph editing, but the Relay preferences tab reports that
-relay is unavailable:
+relay is unavailable. The Android client and native bridge are documented in
+[`android/README.md`](android/README.md):
 
 ```bash
 cargo run -p pw-graph-app --features relay

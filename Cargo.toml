@@ -13,6 +13,7 @@ members = [
     "crates/pw-graph-app",
     "crates/pw-graph-relay",
     "crates/pw-graph-relay-sdk",
+    "crates/pw-graph-relay-android",
     "vendor/nnnoiseless",
 ]
 
