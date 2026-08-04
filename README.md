@@ -128,6 +128,30 @@ documented by `pw_graph_effects::wasm::ABI_DOCUMENTATION`. The realtime ABI has
 no WASI imports: module loading, validation, instantiation, and memory growth
 belong on the control thread.
 
+## Audio relay
+
+The desktop app includes the relay UI when the default `relay` feature is
+enabled. Open **Preferences → Relay** to configure the local device name,
+host PIN and TCP port, client target/PIN, role, codec, frame duration, and
+preferred local link. Host, client, discovery, and active-session controls are
+available in that tab; relay settings are saved automatically in the app
+configuration.
+
+Starting a host or connecting to a peer creates two PipeWire virtual nodes:
+`qpwgraph-rs.relay.source` exposes received peer audio as **Relay Microphone**,
+and `qpwgraph-rs.relay.sink` sends audio routed into **Relay Speaker** to
+receiving peers. Discovery uses mDNS (`_qpw-relay._udp`); manual `host:port`
+entry remains available when multicast discovery is unavailable.
+
+The relay requires the native PipeWire backend. Builds without relay support
+remain usable for graph editing, but the Relay preferences tab reports that
+relay is unavailable:
+
+```bash
+cargo run -p pw-graph-app --features relay
+cargo run -p pw-graph-app --no-default-features --features pipewire
+```
+
 ## CLI
 
 ```text

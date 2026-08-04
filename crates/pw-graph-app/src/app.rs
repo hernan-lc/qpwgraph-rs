@@ -1,5 +1,5 @@
 use crate::panels::PreferencesTab;
-use pw_graph_backend::{GraphDriver, MeterPolicy};
+use pw_graph_backend::MeterPolicy;
 use pw_graph_command::CommandStack;
 use pw_graph_config::AppConfig;
 use pw_graph_i18n::I18n;
@@ -19,13 +19,17 @@ mod layout;
 mod lifecycle;
 mod metering;
 mod patchbay;
+#[cfg(feature = "relay")]
+mod relay;
 mod shortcuts;
 mod ui_state;
 
 pub(crate) use lifecycle::run;
+#[cfg(feature = "relay")]
+pub(crate) use relay::RelayUiState;
 
 pub(crate) struct QpwgraphApp {
-    pub(crate) driver: Box<dyn GraphDriver>,
+    pub(crate) driver: Box<dyn crate::backend::AppDriver>,
     pub(crate) commands: CommandStack,
     pub(crate) canvas: GraphCanvas,
     /// Retained DOM-like state for reusable application controls and forms.
@@ -61,6 +65,8 @@ pub(crate) struct QpwgraphApp {
     pub(crate) meter_policy: MeterPolicy,
     pub(crate) effect_gallery: Option<effects::EffectGalleryState>,
     pub(crate) effect_gallery_scroll_epoch: u32,
+    #[cfg(feature = "relay")]
+    pub(crate) relay: RelayUiState,
     #[cfg(all(target_os = "linux", feature = "tray"))]
     pub(crate) tray: Option<tray_support::State>,
 }

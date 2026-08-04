@@ -1271,6 +1271,28 @@ impl RelayDriver for PipewireDriver {
             .map(|set| set.handle().events())
             .unwrap_or_default()
     }
+
+    fn relay_discovery_start(&mut self) -> BackendResult<()> {
+        let loop_for_relay = self.thread_loop.clone();
+        let _guard = loop_for_relay.lock();
+        let set = self.ensure_relay_devices_locked("qpwgraph-rs")?;
+        set.handle()
+            .discovery_start()
+            .map_err(|error| BackendError::Native(format!("relay discovery failed: {error}")))
+    }
+
+    fn relay_discovery_stop(&mut self) {
+        if let Some(set) = self.relay.as_ref() {
+            set.handle().discovery_stop();
+        }
+    }
+
+    fn relay_peers(&self) -> Vec<RelayPeerInfo> {
+        self.relay
+            .as_ref()
+            .map(|set| set.handle().discovered_peers())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(feature = "relay")]

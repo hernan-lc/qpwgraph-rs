@@ -428,4 +428,16 @@ pub trait RelayDriver {
     fn relay_events(&mut self) -> Vec<RelayEvent> {
         Vec::new()
     }
+
+    fn relay_discovery_start(&mut self) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "audio relay discovery is not available for this backend".into(),
+        ))
+    }
+
+    fn relay_discovery_stop(&mut self) {}
+
+    fn relay_peers(&self) -> Vec<RelayPeerInfo> {
+        Vec::new()
+    }
 }

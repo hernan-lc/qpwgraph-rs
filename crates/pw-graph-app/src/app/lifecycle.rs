@@ -63,6 +63,12 @@ impl eframe::App for QpwgraphApp {
         self.ui_document.begin_frame();
         self.apply_ui_text_scale(ctx);
         self.sync_meter_policy();
+        #[cfg(feature = "relay")]
+        {
+            let mut relay = std::mem::take(&mut self.relay);
+            relay.poll(self);
+            self.relay = relay;
+        }
         self.refresh_graph_if_dirty();
         if self.last_meter_refresh.elapsed() >= Duration::from_millis(50) {
             self.refresh_audio_meters();
@@ -137,6 +143,8 @@ impl eframe::App for QpwgraphApp {
         if let Some(tray) = self.tray.as_ref() {
             tray.shutdown();
         }
+        #[cfg(feature = "relay")]
+        self.driver.relay_discovery_stop();
         self.sync_config();
         self.sync_patchbay_connections();
         self.autosave_patchbay();

@@ -81,6 +81,44 @@ pub struct AppConfig {
     /// modules.
     #[serde(default)]
     pub effects: Vec<PersistedEffect>,
+    #[serde(default = "default_relay_device_name")]
+    pub relay_device_name: String,
+    #[serde(default)]
+    pub relay_host_pin: String,
+    #[serde(default)]
+    pub relay_host_port: u16,
+    #[serde(default)]
+    pub relay_client_target: String,
+    #[serde(default)]
+    pub relay_client_pin: String,
+    #[serde(default = "default_relay_role")]
+    pub relay_role: String,
+    #[serde(default = "default_relay_codec")]
+    pub relay_codec: String,
+    #[serde(default = "default_relay_frame_ms")]
+    pub relay_frame_ms: u16,
+    #[serde(default = "default_relay_transport")]
+    pub relay_transport: String,
+}
+
+fn default_relay_device_name() -> String {
+    "qpwgraph-rs".into()
+}
+
+fn default_relay_role() -> String {
+    "both".into()
+}
+
+fn default_relay_codec() -> String {
+    "opus".into()
+}
+
+fn default_relay_frame_ms() -> u16 {
+    20
+}
+
+fn default_relay_transport() -> String {
+    "auto".into()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -138,6 +176,15 @@ impl Default for AppConfig {
             patchbay_profiles: std::collections::BTreeMap::new(),
             active_patchbay_profile: "default".into(),
             effects: Vec::new(),
+            relay_device_name: default_relay_device_name(),
+            relay_host_pin: String::new(),
+            relay_host_port: 0,
+            relay_client_target: String::new(),
+            relay_client_pin: String::new(),
+            relay_role: default_relay_role(),
+            relay_codec: default_relay_codec(),
+            relay_frame_ms: default_relay_frame_ms(),
+            relay_transport: default_relay_transport(),
         }
     }
 }
@@ -181,7 +228,12 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("pw-graph-config-{}", std::process::id()));
         let path = directory.join("config.toml");
-        let expected = AppConfig::default();
+        let expected = AppConfig {
+            relay_device_name: "studio-pc".into(),
+            relay_host_pin: "123456".into(),
+            relay_client_target: "192.168.1.20:48123".into(),
+            ..AppConfig::default()
+        };
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();

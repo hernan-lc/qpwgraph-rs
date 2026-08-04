@@ -1,7 +1,22 @@
 use pw_graph_alsamidi::AlsaMidiDriver;
 use pw_graph_backend::{AudioMeter, GraphDriver, MeterPolicy, PipewireDriver};
+
+#[cfg(feature = "relay")]
+use pw_graph_backend::RelayDriver;
 use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, PortId, PortType};
 use std::collections::BTreeSet;
+
+#[cfg(feature = "relay")]
+pub(crate) trait AppDriver: GraphDriver + RelayDriver {}
+
+#[cfg(feature = "relay")]
+impl<T> AppDriver for T where T: GraphDriver + RelayDriver {}
+
+#[cfg(not(feature = "relay"))]
+pub(crate) trait AppDriver: GraphDriver {}
+
+#[cfg(not(feature = "relay"))]
+impl<T> AppDriver for T where T: GraphDriver {}
 
 #[derive(Default)]
 pub(crate) struct CompositeDriver {
@@ -409,5 +424,27 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
             Some(driver) => driver.relay_events(),
             None => Vec::new(),
         }
+    }
+
+    fn relay_discovery_start(&mut self) -> pw_graph_backend::BackendResult<()> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.relay_discovery_start(),
+            None => Err(pw_graph_backend::BackendError::Unsupported(
+                "PipeWire backend is disabled".into(),
+            )),
+        }
+    }
+
+    fn relay_discovery_stop(&mut self) {
+        if let Some(driver) = self.pipewire.as_mut() {
+            driver.relay_discovery_stop();
+        }
+    }
+
+    fn relay_peers(&self) -> Vec<pw_graph_backend::RelayPeerInfo> {
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.relay_peers())
+            .unwrap_or_default()
     }
 }

@@ -1,5 +1,7 @@
 //! Deterministic in-memory backend used by demo mode and tests.
 
+#[cfg(feature = "relay")]
+use super::api::RelayDriver;
 use super::api::{
     BackendError, BackendResult, EffectDriver, EffectInsertRequest, EffectInstance,
     EffectNodeRequest, GraphDriver, NodeAudioControl,
@@ -300,6 +302,9 @@ impl GraphDriver for DemoDriver {
         )
     }
 }
+
+#[cfg(feature = "relay")]
+impl RelayDriver for DemoDriver {}
 
 impl EffectDriver for DemoDriver {
     fn effect_descriptors(&self) -> Vec<pw_graph_effects::EffectDescriptor> {

@@ -1,3 +1,5 @@
+#[cfg(feature = "relay")]
+use super::RelayUiState;
 use super::{layout, QpwgraphApp};
 use crate::args::Args;
 use crate::backend::CompositeDriver;
@@ -34,7 +36,8 @@ impl QpwgraphApp {
             .or_else(|| config.patchbay_path.clone())
             .unwrap_or(default_patchbay_file);
         let mut status = i18n.text("status.backend_unavailable");
-        let (mut driver, backend_name): (Box<dyn GraphDriver>, String) = if args.demo {
+        let (mut driver, backend_name): (Box<dyn crate::backend::AppDriver>, String) = if args.demo
+        {
             status = i18n.text("status.demo_ready");
             (Box::new(DemoDriver::demo()), "demo".into())
         } else {
@@ -158,6 +161,8 @@ impl QpwgraphApp {
             meter_policy,
             effect_gallery: None,
             effect_gallery_scroll_epoch: 0,
+            #[cfg(feature = "relay")]
+            relay: RelayUiState::default(),
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         };
