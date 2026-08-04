@@ -1,8 +1,12 @@
+use super::components::{
+    document_button, document_checkbox, document_slider, document_text_input_sized,
+};
 use super::shared::{fresh_scroll_area, modal_window, show_backdrop, show_close_button};
 use crate::app::effects::{available_descriptors, EffectGalleryState};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui};
 use pw_graph_effects::EffectDescriptor;
+use pw_graph_ui::UiDocument;
 
 fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
     ui.label(RichText::new(keys).strong().monospace());
@@ -109,6 +113,7 @@ const SHORTCUT_ENTRIES: &[ShortcutEntry] = &[
 ];
 
 fn effect_gallery_card(
+    document: &mut UiDocument,
     ui: &mut Ui,
     descriptor: &EffectDescriptor,
     summary: String,
@@ -149,47 +154,69 @@ fn effect_gallery_card(
             );
         },
     );
-    response.clicked()
+    document.record_click(
+        format!("modals.effects.card.{}", descriptor.id),
+        response.clicked(),
+    )
 }
 
 fn show_effect_initial_settings(
+    document: &mut UiDocument,
     ui: &mut Ui,
     descriptor: &EffectDescriptor,
     gallery: &mut EffectGalleryState,
-    app: &QpwgraphApp,
+    initial_settings_label: String,
+    enabled_label: String,
 ) {
-    egui::CollapsingHeader::new(app.t("effects.initial_settings"))
+    egui::CollapsingHeader::new(initial_settings_label)
         .default_open(false)
         .show(ui, |ui| {
-            ui.checkbox(&mut gallery.enabled, app.t("effects.enabled"));
+            gallery.enabled = document_checkbox(
+                document,
+                ui,
+                "modals.effects.enabled",
+                gallery.enabled,
+                enabled_label,
+                None,
+            );
             for parameter in &descriptor.parameters {
                 if parameter.unit == "boolean" {
-                    let mut value = gallery
+                    let value = gallery
                         .parameters
                         .get(&parameter.id)
                         .copied()
                         .unwrap_or(parameter.default)
                         >= 0.5;
-                    if ui.checkbox(&mut value, &parameter.name).changed() {
-                        gallery
-                            .parameters
-                            .insert(parameter.id.clone(), if value { 1.0 } else { 0.0 });
-                    }
+                    let value = document_checkbox(
+                        document,
+                        ui,
+                        &format!("modals.effects.parameters.{}.boolean", parameter.id),
+                        value,
+                        parameter.name.clone(),
+                        None,
+                    );
+                    gallery
+                        .parameters
+                        .insert(parameter.id.clone(), if value { 1.0 } else { 0.0 });
                 } else {
-                    let mut value = gallery
+                    let value = gallery
                         .parameters
                         .get(&parameter.id)
                         .copied()
                         .unwrap_or(parameter.default);
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut value, parameter.minimum..=parameter.maximum)
-                                .text(format!("{} ({})", parameter.name, parameter.unit)),
-                        )
-                        .changed()
-                    {
-                        gallery.parameters.insert(parameter.id.clone(), value);
-                    }
+                    let (_, value) = document_slider(
+                        document,
+                        ui,
+                        &format!("modals.effects.parameters.{}", parameter.id),
+                        value,
+                        parameter.minimum,
+                        parameter.maximum,
+                        0.0,
+                        format!("{} ({})", parameter.name, parameter.unit),
+                        true,
+                        None,
+                    );
+                    gallery.parameters.insert(parameter.id.clone(), value);
                 }
             }
         });
@@ -221,12 +248,19 @@ impl QpwgraphApp {
         }
         let mut cancel = false;
         let mut create = false;
-        modal_window("effects-gallery", self.t("effects.gallery_title"), 720.0).show(ctx, |ui| {
-            ui.label(RichText::new(self.t("effects.gallery_hint")).weak());
+        let initial_settings_label = self.i18n.text("effects.initial_settings");
+        let enabled_label = self.i18n.text("effects.enabled");
+        modal_window(
+            "effects-gallery",
+            self.i18n.text("effects.gallery_title"),
+            720.0,
+        )
+        .show(ctx, |ui| {
+            ui.label(RichText::new(self.i18n.text("effects.gallery_hint")).weak());
             if !supports_effect_nodes {
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new(self.t("effects.backend_unavailable"))
+                    RichText::new(self.i18n.text("effects.backend_unavailable"))
                         .color(Color32::from_rgb(239, 169, 82)),
                 );
             }
@@ -235,10 +269,10 @@ impl QpwgraphApp {
             fresh_scroll_area(("effects-gallery-scroll", gallery.scroll_epoch), 400.0).show(
                 ui,
                 |ui| {
-                    ui.label(RichText::new(self.t("effects.choose_effect")).strong());
+                    ui.label(RichText::new(self.i18n.text("effects.choose_effect")).strong());
                     ui.add_space(6.0);
                     if descriptors.is_empty() {
-                        ui.label(RichText::new(self.t("effects.no_available")).weak());
+                        ui.label(RichText::new(self.i18n.text("effects.no_available")).weak());
                     } else if ui.available_width() < 440.0 {
                         for descriptor in &descriptors {
                             let selected = gallery.effect_id == descriptor.id;
@@ -248,9 +282,15 @@ impl QpwgraphApp {
                                     "effects.parameter_count",
                                     &[("count", descriptor.parameters.len().to_string())],
                                 ),
-                                self.t("effects.port_flow"),
+                                self.i18n.text("effects.port_flow"),
                             );
-                            if effect_gallery_card(ui, descriptor, summary, selected) {
+                            if effect_gallery_card(
+                                &mut self.ui_document,
+                                ui,
+                                descriptor,
+                                summary,
+                                selected,
+                            ) {
                                 gallery.select_effect(descriptor);
                             }
                             ui.add_space(8.0);
@@ -266,9 +306,15 @@ impl QpwgraphApp {
                                         "effects.parameter_count",
                                         &[("count", descriptor.parameters.len().to_string())],
                                     ),
-                                    self.t("effects.port_flow"),
+                                    self.i18n.text("effects.port_flow"),
                                 );
-                                if effect_gallery_card(column, descriptor, summary, selected) {
+                                if effect_gallery_card(
+                                    &mut self.ui_document,
+                                    column,
+                                    descriptor,
+                                    summary,
+                                    selected,
+                                ) {
                                     gallery.select_effect(descriptor);
                                 }
                                 column.add_space(8.0);
@@ -283,7 +329,14 @@ impl QpwgraphApp {
                         ui.add_space(4.0);
                         ui.separator();
                         ui.add_space(6.0);
-                        show_effect_initial_settings(ui, descriptor, &mut gallery, self);
+                        show_effect_initial_settings(
+                            &mut self.ui_document,
+                            ui,
+                            descriptor,
+                            &mut gallery,
+                            initial_settings_label.clone(),
+                            enabled_label.clone(),
+                        );
                     }
                 },
             );
@@ -291,17 +344,23 @@ impl QpwgraphApp {
             ui.add_space(10.0);
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button(self.t("effects.cancel")).clicked() {
+                if document_button(
+                    &mut self.ui_document,
+                    ui,
+                    "modals.effects.cancel",
+                    self.i18n.text("effects.cancel"),
+                    true,
+                ) {
                     cancel = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(
-                            supports_effect_nodes && !gallery.effect_id.is_empty(),
-                            egui::Button::new(self.t("effects.create_node")),
-                        )
-                        .clicked()
-                    {
+                    if document_button(
+                        &mut self.ui_document,
+                        ui,
+                        "modals.effects.create_node",
+                        self.i18n.text("effects.create_node"),
+                        supports_effect_nodes && !gallery.effect_id.is_empty(),
+                    ) {
                         create = true;
                     }
                 });
@@ -324,24 +383,29 @@ impl QpwgraphApp {
             self.close_shortcuts();
             return;
         }
-        modal_window("shortcuts", self.t("shortcuts.title"), 560.0).show(ctx, |ui| {
-            ui.label(RichText::new(self.t("shortcuts.hint")).weak());
+        modal_window("shortcuts", self.i18n.text("shortcuts.title"), 560.0).show(ctx, |ui| {
+            ui.label(RichText::new(self.i18n.text("shortcuts.hint")).weak());
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(self.t("shortcuts.search")).strong());
+                ui.label(RichText::new(self.i18n.text("shortcuts.search")).strong());
                 let clear_width = if self.shortcut_search.is_empty() {
                     0.0
                 } else {
                     ui.spacing().button_padding.x * 2.0 + 42.0
                 };
                 let search_width = (ui.available_width() - clear_width).max(140.0);
-                let search_hint = self.t("shortcuts.search_hint");
-                let search_response = ui.add_sized(
-                    [search_width, ui.spacing().interact_size.y],
-                    egui::TextEdit::singleline(&mut self.shortcut_search)
-                        .id(egui::Id::new("shortcuts-search"))
-                        .hint_text(search_hint),
+                let search_hint = self.i18n.text("shortcuts.search_hint");
+                let current_search = self.shortcut_search.clone();
+                let (search_response, search_value) = document_text_input_sized(
+                    &mut self.ui_document,
+                    ui,
+                    "modals.shortcuts.search",
+                    &current_search,
+                    String::new(),
+                    Some(search_hint),
+                    Some(search_width),
                 );
+                self.shortcut_search = search_value;
                 if self.shortcut_focus_search
                     || ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F))
                 {
@@ -349,7 +413,13 @@ impl QpwgraphApp {
                     self.shortcut_focus_search = false;
                 }
                 if !self.shortcut_search.is_empty()
-                    && ui.small_button(self.t("shortcuts.clear_search")).clicked()
+                    && document_button(
+                        &mut self.ui_document,
+                        ui,
+                        "modals.shortcuts.clear_search",
+                        self.i18n.text("shortcuts.clear_search"),
+                        true,
+                    )
                 {
                     self.shortcut_search.clear();
                     self.shortcut_focus_search = true;
@@ -361,7 +431,7 @@ impl QpwgraphApp {
             let matching_entries: Vec<_> = SHORTCUT_ENTRIES
                 .iter()
                 .filter_map(|entry| {
-                    let description = self.t(entry.description_key);
+                    let description = self.i18n.text(entry.description_key);
                     shortcut_matches_query(entry.keys, &description, &query)
                         .then_some((entry.keys, description))
                 })
@@ -378,7 +448,7 @@ impl QpwgraphApp {
                 ui,
                 |ui| {
                     if matching_entries.is_empty() {
-                        ui.label(RichText::new(self.t("shortcuts.no_results")).weak());
+                        ui.label(RichText::new(self.i18n.text("shortcuts.no_results")).weak());
                     } else {
                         egui::Grid::new("shortcuts-grid")
                             .num_columns(2)
@@ -392,7 +462,12 @@ impl QpwgraphApp {
                 },
             );
             ui.add_space(10.0);
-            if show_close_button(ui, self.t("shortcuts.close")) {
+            if show_close_button(
+                &mut self.ui_document,
+                ui,
+                "modals.shortcuts.close",
+                self.i18n.text("shortcuts.close"),
+            ) {
                 self.close_shortcuts();
             }
         });
@@ -406,30 +481,35 @@ impl QpwgraphApp {
             self.show_history = false;
             return;
         }
-        modal_window("history", self.t("history.title"), 520.0).show(ctx, |ui| {
-            ui.label(RichText::new(self.t("history.hint")).weak());
+        modal_window("history", self.i18n.text("history.title"), 520.0).show(ctx, |ui| {
+            ui.label(RichText::new(self.i18n.text("history.hint")).weak());
             ui.add_space(8.0);
-            ui.label(RichText::new(self.t("history.undoable")).strong());
+            ui.label(RichText::new(self.i18n.text("history.undoable")).strong());
             let undo_history = self.commands.undo_history();
             if undo_history.is_empty() {
-                ui.label(RichText::new(self.t("history.empty")).weak());
+                ui.label(RichText::new(self.i18n.text("history.empty")).weak());
             } else {
                 for (index, entry) in undo_history.iter().enumerate() {
                     ui.label(format!("{}. {}", index + 1, entry));
                 }
             }
             ui.add_space(8.0);
-            ui.label(RichText::new(self.t("history.redoable")).strong());
+            ui.label(RichText::new(self.i18n.text("history.redoable")).strong());
             let redo_history = self.commands.redo_history();
             if redo_history.is_empty() {
-                ui.label(RichText::new(self.t("history.empty")).weak());
+                ui.label(RichText::new(self.i18n.text("history.empty")).weak());
             } else {
                 for (index, entry) in redo_history.iter().enumerate() {
                     ui.label(format!("{}. {}", index + 1, entry));
                 }
             }
             ui.add_space(10.0);
-            if show_close_button(ui, self.t("shortcuts.close")) {
+            if show_close_button(
+                &mut self.ui_document,
+                ui,
+                "modals.history.close",
+                self.i18n.text("shortcuts.close"),
+            ) {
                 self.show_history = false;
             }
         });

@@ -131,6 +131,7 @@ impl QpwgraphApp {
             driver,
             commands: pw_graph_command::CommandStack::new(),
             canvas,
+            ui_document: pw_graph_ui::UiDocument::new(),
             patchbay,
             config_saved_snapshot: config.clone(),
             config_dirty_since: None,

@@ -1,13 +1,17 @@
-use super::components::modal_combo;
+use super::components::{
+    document_button, document_checkbox, document_icon_button, document_icon_checkbox,
+    document_select, document_selectable_label, document_slider, document_text_input,
+};
 use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, full_panel_window, meter_policy_key, panel_section,
-    preferences_rect, scale_slider, show_backdrop_rect, show_close_button,
+    preferences_rect, show_backdrop_rect, show_close_button,
 };
 use crate::app::QpwgraphApp;
-use crate::icons::{icon_button, icon_checkbox, icon_label, Icon};
+use crate::icons::{icon_label, Icon};
 use eframe::egui::{self, RichText, Ui};
 use pw_graph_backend::MeterPolicy;
 use pw_graph_i18n::Locale;
+use pw_graph_ui::{OptionItem, SelectProps};
 
 /// Tabs inside the Preferences modal, which holds settings you configure once
 /// rather than watch while working the canvas.
@@ -20,29 +24,42 @@ pub(crate) enum PreferencesTab {
 
 impl QpwgraphApp {
     fn show_meter_controls(&mut self, ui: &mut Ui) {
-        let current = MeterPolicy::parse(&self.config.audio_meters);
-        let mut selected = current;
-        if icon_button(
+        let mut current = MeterPolicy::parse(&self.config.audio_meters);
+        if document_icon_button(
+            &mut self.ui_document,
             ui,
             "meters.reset",
             Icon::Refresh,
-            self.t("inspector.audio_reset"),
-            self.t("help.audio_reset"),
+            self.i18n.text("inspector.audio_reset"),
+            self.i18n.text("help.audio_reset"),
         ) {
             self.reset_audio_config();
+            current = MeterPolicy::parse(&self.config.audio_meters);
         }
-        modal_combo(
+        const METER_POLICY_ID: &str = "preferences.meters.policy";
+        if self.ui_document.text(METER_POLICY_ID) != Some(current.as_str()) {
+            self.ui_document
+                .set_value(METER_POLICY_ID, current.as_str());
+        }
+        let options = MeterPolicy::ALL.into_iter().map(|policy| {
+            OptionItem::new(policy.as_str(), self.i18n.text(meter_policy_key(policy)))
+        });
+        self.ui_document.select(
             ui,
-            "meters.policy",
-            self.t("inspector.audio_metering_policy"),
-            self.t(meter_policy_key(current)),
-            &mut selected,
-            MeterPolicy::ALL
-                .into_iter()
-                .map(|policy| (policy, self.t(meter_policy_key(policy)))),
+            SelectProps::new(
+                METER_POLICY_ID,
+                self.i18n.text("inspector.audio_metering_policy"),
+            )
+            .selected(current.as_str())
+            .options(options),
         );
+        let selected = self
+            .ui_document
+            .text(METER_POLICY_ID)
+            .map(MeterPolicy::parse)
+            .unwrap_or(current);
         ui.label(
-            RichText::new(self.t("help.audio_metering_policy"))
+            RichText::new(self.i18n.text("help.audio_metering_policy"))
                 .small()
                 .weak(),
         );
@@ -51,7 +68,7 @@ impl QpwgraphApp {
         }
 
         ui.label(
-            RichText::new(self.t(match selected {
+            RichText::new(self.i18n.text(match selected {
                 MeterPolicy::Disabled => "meters.off_hint",
                 MeterPolicy::OnDemand => "meters.on_demand_hint",
                 MeterPolicy::Always => "meters.always_hint",
@@ -72,84 +89,104 @@ impl QpwgraphApp {
             self.show_preferences = false;
             return;
         }
-        full_panel_window("preferences", self.t("preferences.title"), rect).show(ctx, |ui| {
-            apply_panel_text_scale(ui, self.config.panel_text_scale);
-            ui.horizontal(|ui| {
-                for (tab, label_key) in [
-                    (PreferencesTab::Interface, "screen.interface"),
-                    (PreferencesTab::Patchbay, "inspector.patchbay_options"),
-                ] {
-                    if ui
-                        .selectable_label(self.preferences_tab == tab, self.t(label_key))
-                        .clicked()
-                        && self.preferences_tab != tab
-                    {
-                        self.preferences_tab = tab;
-                        self.preferences_scroll_epoch =
-                            self.preferences_scroll_epoch.wrapping_add(1);
+        full_panel_window("preferences", self.i18n.text("preferences.title"), rect).show(
+            ctx,
+            |ui| {
+                apply_panel_text_scale(ui, self.config.panel_text_scale);
+                ui.horizontal(|ui| {
+                    for (tab, label_key) in [
+                        (PreferencesTab::Interface, "screen.interface"),
+                        (PreferencesTab::Patchbay, "inspector.patchbay_options"),
+                    ] {
+                        let tab_id = match tab {
+                            PreferencesTab::Interface => "preferences.tab.interface",
+                            PreferencesTab::Patchbay => "preferences.tab.patchbay",
+                        };
+                        if document_selectable_label(
+                            &mut self.ui_document,
+                            ui,
+                            tab_id,
+                            self.preferences_tab == tab,
+                            &self.i18n.text(label_key),
+                            self.i18n.text(label_key),
+                        ) && self.preferences_tab != tab
+                        {
+                            self.preferences_tab = tab;
+                            self.preferences_scroll_epoch =
+                                self.preferences_scroll_epoch.wrapping_add(1);
+                        }
                     }
-                }
-            });
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(6.0);
-            let scroll_id = (
-                "preferences-scroll",
-                self.preferences_tab,
-                self.preferences_scroll_epoch,
-            );
-            fresh_scroll_area(scroll_id, ui.available_height().max(0.0))
-                .auto_shrink([false, false])
-                .show(ui, |ui| match self.preferences_tab {
-                    PreferencesTab::Interface => self.show_preferences_interface_tab(ui),
-                    PreferencesTab::Patchbay => self.show_preferences_patchbay_tab(ui),
                 });
-            ui.add_space(8.0);
-            if show_close_button(ui, self.t("shortcuts.close")) {
-                self.show_preferences = false;
-            }
-        });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                let scroll_id = (
+                    "preferences-scroll",
+                    self.preferences_tab,
+                    self.preferences_scroll_epoch,
+                );
+                fresh_scroll_area(scroll_id, ui.available_height().max(0.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.preferences_tab {
+                        PreferencesTab::Interface => self.show_preferences_interface_tab(ui),
+                        PreferencesTab::Patchbay => self.show_preferences_patchbay_tab(ui),
+                    });
+                ui.add_space(8.0);
+                if show_close_button(
+                    &mut self.ui_document,
+                    ui,
+                    "preferences.close",
+                    self.i18n.text("shortcuts.close"),
+                ) {
+                    self.show_preferences = false;
+                }
+            },
+        );
     }
 
     fn show_preferences_patchbay_tab(&mut self, ui: &mut Ui) {
-        panel_section(ui, self.t("inspector.patchbay_options"), |ui| {
-            let exclusive_label = self.t("inspector.exclusive");
-            let exclusive_help = self.t("help.exclusive");
-            icon_checkbox(
+        panel_section(ui, self.i18n.text("inspector.patchbay_options"), |ui| {
+            let exclusive_label = self.i18n.text("inspector.exclusive");
+            let exclusive_help = self.i18n.text("help.exclusive");
+            self.config.patchbay_exclusive = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "patchbay.exclusive",
-                &mut self.config.patchbay_exclusive,
+                self.config.patchbay_exclusive,
                 Icon::Exclusive,
                 exclusive_label,
                 exclusive_help,
             );
-            let auto_disconnect_label = self.t("inspector.auto_disconnect");
-            let auto_disconnect_help = self.t("help.auto_disconnect");
-            icon_checkbox(
+            let auto_disconnect_label = self.i18n.text("inspector.auto_disconnect");
+            let auto_disconnect_help = self.i18n.text("help.auto_disconnect");
+            self.config.patchbay_auto_disconnect = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "patchbay.auto_disconnect",
-                &mut self.config.patchbay_auto_disconnect,
+                self.config.patchbay_auto_disconnect,
                 Icon::AutoDisconnect,
                 auto_disconnect_label,
                 auto_disconnect_help,
             );
-            let auto_pin_label = self.t("inspector.auto_pin");
-            let auto_pin_help = self.t("help.auto_pin");
-            icon_checkbox(
+            let auto_pin_label = self.i18n.text("inspector.auto_pin");
+            let auto_pin_help = self.i18n.text("help.auto_pin");
+            self.config.patchbay_auto_pin = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "patchbay.auto_pin",
-                &mut self.config.patchbay_auto_pin,
+                self.config.patchbay_auto_pin,
                 Icon::Pin,
                 auto_pin_label,
                 auto_pin_help,
             );
             let patchbay_activated_before = self.config.patchbay_activated;
-            let patchbay_activated_label = self.t("inspector.patchbay_activated");
-            let patchbay_activated_help = self.t("help.patchbay_activated");
-            icon_checkbox(
+            let patchbay_activated_label = self.i18n.text("inspector.patchbay_activated");
+            let patchbay_activated_help = self.i18n.text("help.patchbay_activated");
+            self.config.patchbay_activated = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "patchbay.activated",
-                &mut self.config.patchbay_activated,
+                self.config.patchbay_activated,
                 Icon::Timer,
                 patchbay_activated_label,
                 patchbay_activated_help,
@@ -160,15 +197,29 @@ impl QpwgraphApp {
         });
 
         let current_path = self.patchbay_file.display().to_string();
-        let choose_directory = self.t("patchbay.choose_directory");
-        let recent_label = self.t("patchbay.recent_files");
-        let profile_label = self.t("patchbay.profile");
-        let save_profile_label = self.t("patchbay.save_profile");
-        panel_section(ui, self.t("patchbay.file_options"), |ui| {
+        let choose_directory = self.i18n.text("patchbay.choose_directory");
+        let recent_label = self.i18n.text("patchbay.recent_files");
+        let profile_label = self.i18n.text("patchbay.profile");
+        let save_profile_label = self.i18n.text("patchbay.save_profile");
+        panel_section(ui, self.i18n.text("patchbay.file_options"), |ui| {
             ui.horizontal(|ui| {
                 ui.label(profile_label.clone());
-                ui.text_edit_singleline(&mut self.profile_name);
-                if ui.button(save_profile_label.clone()).clicked() {
+                let (_, profile_name) = document_text_input(
+                    &mut self.ui_document,
+                    ui,
+                    "preferences.patchbay.profile_name",
+                    &self.profile_name,
+                    String::new(),
+                    None,
+                );
+                self.profile_name = profile_name;
+                if document_button(
+                    &mut self.ui_document,
+                    ui,
+                    "preferences.patchbay.save_profile",
+                    save_profile_label.clone(),
+                    true,
+                ) {
                     let name = self.profile_name.trim().to_owned();
                     if !name.is_empty() {
                         self.config.active_patchbay_profile = name.clone();
@@ -178,16 +229,18 @@ impl QpwgraphApp {
                     }
                 }
             });
-            let mut selected_profile = self.config.active_patchbay_profile.clone();
             let profiles: Vec<_> = self.config.patchbay_profiles.keys().cloned().collect();
             if !profiles.is_empty() {
-                egui::ComboBox::from_id_salt("patchbay-profile-list")
-                    .selected_text(selected_profile.clone())
-                    .show_ui(ui, |ui| {
-                        for profile in &profiles {
-                            ui.selectable_value(&mut selected_profile, profile.clone(), profile);
-                        }
-                    });
+                let selected_profile = document_select(
+                    &mut self.ui_document,
+                    ui,
+                    "preferences.patchbay.profile",
+                    &self.config.active_patchbay_profile,
+                    profile_label.clone(),
+                    profiles
+                        .iter()
+                        .map(|profile| OptionItem::new(profile.clone(), profile.clone())),
+                );
                 if selected_profile != self.config.active_patchbay_profile {
                     self.config.active_patchbay_profile = selected_profile.clone();
                     self.profile_name = selected_profile.clone();
@@ -203,58 +256,145 @@ impl QpwgraphApp {
                 }
             }
             ui.label(self.tf("patchbay.current_path", &[("path", current_path.clone())]));
-            if ui.button(choose_directory.clone()).clicked() {
+            if document_button(
+                &mut self.ui_document,
+                ui,
+                "preferences.patchbay.choose_directory",
+                choose_directory.clone(),
+                true,
+            ) {
                 self.choose_patchbay_directory();
             }
             if !self.config.recent_patchbay_paths.is_empty() {
-                let mut selected = self.patchbay_file.clone();
-                egui::ComboBox::from_label(recent_label.clone())
-                    .selected_text(selected.display().to_string())
-                    .show_ui(ui, |ui| {
-                        for path in &self.config.recent_patchbay_paths {
-                            ui.selectable_value(
-                                &mut selected,
-                                path.clone(),
-                                path.display().to_string(),
-                            );
-                        }
-                    });
-                if selected != self.patchbay_file {
-                    self.use_recent_patchbay(selected);
+                let current_path = self.patchbay_file.display().to_string();
+                let selected_path = document_select(
+                    &mut self.ui_document,
+                    ui,
+                    "preferences.patchbay.recent_path",
+                    &current_path,
+                    recent_label.clone(),
+                    self.config.recent_patchbay_paths.iter().map(|path| {
+                        let display = path.display().to_string();
+                        OptionItem::new(display.clone(), display)
+                    }),
+                );
+                if let Some(selected) = self
+                    .config
+                    .recent_patchbay_paths
+                    .iter()
+                    .find(|path| path.display().to_string() == selected_path)
+                    .cloned()
+                {
+                    if selected != self.patchbay_file {
+                        self.use_recent_patchbay(selected);
+                    }
                 }
             }
         });
 
-        let remove_rule = self.t("patchbay.remove_rule");
-        let output_label = self.t("patchbay.output");
-        let input_label = self.t("patchbay.input");
-        let pinned_label = self.t("inspector.pinned");
-        panel_section(ui, self.t("patchbay.connections"), |ui| {
+        let remove_rule = self.i18n.text("patchbay.remove_rule");
+        let output_label = self.i18n.text("patchbay.output");
+        let input_label = self.i18n.text("patchbay.input");
+        let pinned_label = self.i18n.text("inspector.pinned");
+        panel_section(ui, self.i18n.text("patchbay.connections"), |ui| {
             if self.patchbay.connections.is_empty() {
-                ui.label(RichText::new(self.t("patchbay.no_connections")).weak());
+                ui.label(RichText::new(self.i18n.text("patchbay.no_connections")).weak());
             }
             let mut remove_index = None;
-            for (index, connection) in self.patchbay.connections.iter_mut().enumerate() {
+            for index in 0..self.patchbay.connections.len() {
+                let (
+                    output_node_current,
+                    output_name_current,
+                    input_node_current,
+                    input_name_current,
+                    pinned_current,
+                ) = {
+                    let connection = &self.patchbay.connections[index];
+                    (
+                        connection.output_node.clone(),
+                        connection.output_name.clone(),
+                        connection.input_node.clone(),
+                        connection.input_name.clone(),
+                        connection.pinned,
+                    )
+                };
+                let mut output_node = output_node_current.clone();
+                let mut output_name = output_name_current.clone();
+                let mut input_node = input_node_current.clone();
+                let mut input_name = input_name_current.clone();
+                let mut pinned = pinned_current;
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(output_label.clone());
-                        ui.text_edit_singleline(&mut connection.output_node);
+                        let (_, value) = document_text_input(
+                            &mut self.ui_document,
+                            ui,
+                            &format!("preferences.patchbay.connections.{index}.output_node"),
+                            &output_node,
+                            String::new(),
+                            None,
+                        );
+                        output_node = value;
                         ui.label("/");
-                        ui.text_edit_singleline(&mut connection.output_name);
+                        let (_, value) = document_text_input(
+                            &mut self.ui_document,
+                            ui,
+                            &format!("preferences.patchbay.connections.{index}.output_name"),
+                            &output_name,
+                            String::new(),
+                            None,
+                        );
+                        output_name = value;
                     });
                     ui.horizontal(|ui| {
                         ui.label(input_label.clone());
-                        ui.text_edit_singleline(&mut connection.input_node);
+                        let (_, value) = document_text_input(
+                            &mut self.ui_document,
+                            ui,
+                            &format!("preferences.patchbay.connections.{index}.input_node"),
+                            &input_node,
+                            String::new(),
+                            None,
+                        );
+                        input_node = value;
                         ui.label("/");
-                        ui.text_edit_singleline(&mut connection.input_name);
+                        let (_, value) = document_text_input(
+                            &mut self.ui_document,
+                            ui,
+                            &format!("preferences.patchbay.connections.{index}.input_name"),
+                            &input_name,
+                            String::new(),
+                            None,
+                        );
+                        input_name = value;
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut connection.pinned, pinned_label.clone());
-                        if ui.button(remove_rule.clone()).clicked() {
+                        pinned = document_checkbox(
+                            &mut self.ui_document,
+                            ui,
+                            &format!("preferences.patchbay.connections.{index}.pinned"),
+                            pinned,
+                            pinned_label.clone(),
+                            None,
+                        );
+                        if document_button(
+                            &mut self.ui_document,
+                            ui,
+                            &format!("preferences.patchbay.connections.{index}.remove"),
+                            remove_rule.clone(),
+                            true,
+                        ) {
                             remove_index = Some(index);
                         }
                     });
                 });
+                if let Some(connection) = self.patchbay.connections.get_mut(index) {
+                    connection.output_node = output_node;
+                    connection.output_name = output_name;
+                    connection.input_node = input_node;
+                    connection.input_name = input_name;
+                    connection.pinned = pinned;
+                }
             }
             if let Some(index) = remove_index {
                 self.patchbay.connections.remove(index);
@@ -264,26 +404,40 @@ impl QpwgraphApp {
 
     fn show_preferences_interface_tab(&mut self, ui: &mut Ui) {
         let current_locale = self.i18n.locale();
+        let selected_locale_code = self
+            .ui_document
+            .text("preferences.configuration.language")
+            .unwrap_or(current_locale.code())
+            .to_owned();
+        let selected_locale_code = if selected_locale_code != current_locale.code() {
+            current_locale.code().to_owned()
+        } else {
+            selected_locale_code
+        };
         let mut selected_locale = current_locale;
-        panel_section(ui, self.t("inspector.configuration"), |ui| {
+        panel_section(ui, self.i18n.text("inspector.configuration"), |ui| {
             ui.horizontal(|ui| {
-                icon_label(ui, Icon::Language, self.t("language.label"));
-                let response = egui::ComboBox::from_label(self.t("language.label"))
-                    .selected_text(selected_locale.native_name())
-                    .show_ui(ui, |ui| {
-                        for locale in Locale::ALL {
-                            ui.selectable_value(&mut selected_locale, locale, locale.native_name());
-                        }
-                    });
-                response.response.on_hover_text(self.t("help.language"));
+                icon_label(ui, Icon::Language, self.i18n.text("language.label"));
+                let selected = document_select(
+                    &mut self.ui_document,
+                    ui,
+                    "preferences.configuration.language",
+                    &selected_locale_code,
+                    String::new(),
+                    Locale::ALL
+                        .into_iter()
+                        .map(|locale| OptionItem::new(locale.code(), locale.native_name())),
+                );
+                selected_locale = Locale::parse(&selected);
             });
             ui.add_space(2.0);
-            if icon_button(
+            if document_icon_button(
+                &mut self.ui_document,
                 ui,
                 "configuration.save",
                 Icon::Save,
-                self.t("inspector.save_configuration"),
-                self.t("help.save_configuration"),
+                self.i18n.text("inspector.save_configuration"),
+                self.i18n.text("help.save_configuration"),
             ) {
                 self.save_config_now();
             }
@@ -299,116 +453,142 @@ impl QpwgraphApp {
         if selected_locale != current_locale {
             self.i18n.set_locale(selected_locale);
             self.config.language = selected_locale.code().to_owned();
-            self.status = self.t("status.language_changed");
+            self.status = self.i18n.text("status.language_changed");
         }
 
-        panel_section(ui, self.t("inspector.interface"), |ui| {
-            let toolbar_label = self.t("inspector.toolbar_visible");
-            let toolbar_help = self.t("help.toolbar_visible");
-            icon_checkbox(
+        panel_section(ui, self.i18n.text("inspector.interface"), |ui| {
+            let toolbar_label = self.i18n.text("inspector.toolbar_visible");
+            let toolbar_help = self.i18n.text("help.toolbar_visible");
+            self.config.toolbar = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "interface.toolbar",
-                &mut self.config.toolbar,
+                self.config.toolbar,
                 Icon::Toolbar,
                 toolbar_label,
                 toolbar_help,
             );
-            let statusbar_label = self.t("inspector.statusbar_visible");
-            let statusbar_help = self.t("help.statusbar_visible");
-            icon_checkbox(
+            let statusbar_label = self.i18n.text("inspector.statusbar_visible");
+            let statusbar_help = self.i18n.text("help.statusbar_visible");
+            self.config.statusbar = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "interface.statusbar",
-                &mut self.config.statusbar,
+                self.config.statusbar,
                 Icon::Statusbar,
                 statusbar_label,
                 statusbar_help,
             );
-            let patchbay_toolbar_label = self.t("inspector.patchbay_toolbar_visible");
-            let patchbay_toolbar_help = self.t("help.patchbay_toolbar_visible");
-            icon_checkbox(
+            let patchbay_toolbar_label = self.i18n.text("inspector.patchbay_toolbar_visible");
+            let patchbay_toolbar_help = self.i18n.text("help.patchbay_toolbar_visible");
+            self.config.patchbay_toolbar = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "interface.patchbay_toolbar",
-                &mut self.config.patchbay_toolbar,
+                self.config.patchbay_toolbar,
                 Icon::Patchbay,
                 patchbay_toolbar_label,
                 patchbay_toolbar_help,
             );
         });
 
-        panel_section(ui, self.t("inspector.behavior"), |ui| {
-            let repel_label = self.t("inspector.repel_overlaps");
-            let repel_help = self.t("help.repel_overlaps");
-            icon_checkbox(
+        panel_section(ui, self.i18n.text("inspector.behavior"), |ui| {
+            let repel_label = self.i18n.text("inspector.repel_overlaps");
+            let repel_help = self.i18n.text("help.repel_overlaps");
+            self.config.repel_overlapping_nodes = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "behavior.repel",
-                &mut self.config.repel_overlapping_nodes,
+                self.config.repel_overlapping_nodes,
                 Icon::Repel,
                 repel_label,
                 repel_help,
             );
-            let through_label = self.t("inspector.connect_through");
-            let through_help = self.t("help.connect_through");
-            icon_checkbox(
+            let through_label = self.i18n.text("inspector.connect_through");
+            let through_help = self.i18n.text("help.connect_through");
+            self.config.connect_through_nodes = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "behavior.connect_through",
-                &mut self.config.connect_through_nodes,
+                self.config.connect_through_nodes,
                 Icon::Connect,
                 through_label,
                 through_help,
             );
-            let thumbnail_label = self.t("inspector.thumbnail_view");
-            let thumbnail_help = self.t("help.thumbnail_view");
-            icon_checkbox(
+            let thumbnail_label = self.i18n.text("inspector.thumbnail_view");
+            let thumbnail_help = self.i18n.text("help.thumbnail_view");
+            self.canvas.thumbnail_mode = document_icon_checkbox(
+                &mut self.ui_document,
                 ui,
                 "behavior.thumbnail",
-                &mut self.canvas.thumbnail_mode,
+                self.canvas.thumbnail_mode,
                 Icon::Thumbnail,
                 thumbnail_label,
                 thumbnail_help,
             );
         });
 
-        panel_section(ui, self.t("inspector.audio_metering"), |ui| {
+        panel_section(ui, self.i18n.text("inspector.audio_metering"), |ui| {
             self.show_meter_controls(ui);
         });
 
-        panel_section(ui, self.t("inspector.typography"), |ui| {
-            if ui
-                .small_button(self.t("inspector.typography_recommended"))
-                .on_hover_text(self.t("help.typography_recommended"))
-                .clicked()
-            {
+        panel_section(ui, self.i18n.text("inspector.typography"), |ui| {
+            if document_button(
+                &mut self.ui_document,
+                ui,
+                "typography.recommended",
+                self.i18n.text("inspector.typography_recommended"),
+                true,
+            ) {
                 self.config.ui_text_scale = 1.10;
                 self.config.panel_text_scale = 1.20;
                 self.config.node_text_scale = 1.15;
             }
-            let ui_text_label = self.t("inspector.ui_text_scale");
-            let ui_text_help = self.t("help.ui_text_scale");
-            scale_slider(
+            let ui_text_label = self.i18n.text("inspector.ui_text_scale");
+            let ui_text_help = self.i18n.text("help.ui_text_scale");
+            let (_, ui_text_scale) = document_slider(
+                &mut self.ui_document,
                 ui,
-                "ui",
-                &mut self.config.ui_text_scale,
+                "typography.ui_scale",
+                self.config.ui_text_scale,
+                0.80,
+                2.0,
+                0.05,
                 ui_text_label,
-                ui_text_help,
+                false,
+                Some(ui_text_help),
             );
-            let panel_text_label = self.t("inspector.panel_text_scale");
-            let panel_text_help = self.t("help.panel_text_scale");
-            scale_slider(
+            self.config.ui_text_scale = ui_text_scale;
+            let panel_text_label = self.i18n.text("inspector.panel_text_scale");
+            let panel_text_help = self.i18n.text("help.panel_text_scale");
+            let (_, panel_text_scale) = document_slider(
+                &mut self.ui_document,
                 ui,
-                "panels",
-                &mut self.config.panel_text_scale,
+                "typography.panel_scale",
+                self.config.panel_text_scale,
+                0.80,
+                2.0,
+                0.05,
                 panel_text_label,
-                panel_text_help,
+                false,
+                Some(panel_text_help),
             );
-            let node_text_label = self.t("inspector.node_text_scale");
-            let node_text_help = self.t("help.node_text_scale");
-            scale_slider(
+            self.config.panel_text_scale = panel_text_scale;
+            let node_text_label = self.i18n.text("inspector.node_text_scale");
+            let node_text_help = self.i18n.text("help.node_text_scale");
+            let (_, node_text_scale) = document_slider(
+                &mut self.ui_document,
                 ui,
-                "nodes",
-                &mut self.config.node_text_scale,
+                "typography.node_scale",
+                self.config.node_text_scale,
+                0.80,
+                2.0,
+                0.05,
                 node_text_label,
-                node_text_help,
+                false,
+                Some(node_text_help),
             );
+            self.config.node_text_scale = node_text_scale;
         });
     }
 }

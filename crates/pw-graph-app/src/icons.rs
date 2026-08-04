@@ -240,30 +240,6 @@ fn nav_icon_button_sized(
     .inner
 }
 
-pub(crate) fn icon_checkbox(
-    ui: &mut Ui,
-    id: &str,
-    value: &mut bool,
-    icon: Icon,
-    label: String,
-    explanation: String,
-) -> bool {
-    ui.push_id(("icon-checkbox", id), |ui| {
-        ui.horizontal(|ui| {
-            let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-            let response = response.on_hover_text(explanation.clone());
-            paint_icon(ui, rect.shrink(3.0), icon, Color32::LIGHT_BLUE);
-            let checkbox_response = ui.checkbox(value, label);
-            let changed = checkbox_response.changed();
-            checkbox_response.on_hover_text(explanation);
-            let _ = response;
-            changed
-        })
-        .inner
-    })
-    .inner
-}
-
 pub(crate) fn icon_label(ui: &mut Ui, icon: Icon, tooltip: String) {
     let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
     let response = response.on_hover_text(tooltip);

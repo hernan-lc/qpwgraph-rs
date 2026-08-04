@@ -4,7 +4,7 @@ use pw_graph_command::CommandStack;
 use pw_graph_config::AppConfig;
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-use pw_graph_ui::GraphCanvas;
+use pw_graph_ui::{GraphCanvas, UiDocument};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -28,6 +28,8 @@ pub(crate) struct QpwgraphApp {
     pub(crate) driver: Box<dyn GraphDriver>,
     pub(crate) commands: CommandStack,
     pub(crate) canvas: GraphCanvas,
+    /// Retained DOM-like state for reusable application controls and forms.
+    pub(crate) ui_document: UiDocument,
     pub(crate) patchbay: Patchbay,
     pub(crate) config: AppConfig,
     config_saved_snapshot: AppConfig,

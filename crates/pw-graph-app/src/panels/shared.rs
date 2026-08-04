@@ -1,7 +1,8 @@
+use super::components::document_button;
 use eframe::egui;
 use eframe::egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
-use pw_graph_ui::MediaFilter;
+use pw_graph_ui::{MediaFilter, UiDocument};
 
 pub(super) const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 pub(super) const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
@@ -37,21 +38,6 @@ pub(super) fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&m
     ui.add_space(8.0);
 }
 
-pub(super) fn scale_slider(ui: &mut Ui, id: &str, value: &mut f32, label: String, help: String) {
-    ui.push_id(("text-scale", id), |ui| {
-        ui.horizontal(|ui| {
-            ui.label(label);
-            let response = ui.add(
-                egui::Slider::new(value, 0.80..=2.0)
-                    .step_by(0.05)
-                    .show_value(false),
-            );
-            response.on_hover_text(help);
-            ui.label(RichText::new(format!("{:.0}%", *value * 100.0)).weak());
-        });
-    });
-}
-
 pub(super) fn media_filter_key(filter: MediaFilter) -> &'static str {
     match filter {
         MediaFilter::All => "filter.all",
@@ -69,10 +55,15 @@ pub(super) fn meter_policy_key(policy: MeterPolicy) -> &'static str {
     }
 }
 
-pub(super) fn show_close_button(ui: &mut Ui, label: String) -> bool {
+pub(super) fn show_close_button(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    label: String,
+) -> bool {
     let mut clicked = false;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.button(label).clicked() {
+        if document_button(document, ui, id, label, true) {
             clicked = true;
         }
     });

@@ -17,8 +17,10 @@ The code is split into small crates:
 - `pw-graph-patchbay`: qpwgraph-compatible XML and JSON persistence/activation.
 - `pw-graph-config`: TOML settings and XDG paths.
 - `pw-graph-i18n`: English, Spanish, and French catalogs with English fallback.
-- `pw-graph-ui`: the egui canvas. Rendering and interaction are split into
-  `canvas/{mod,node,links,ports,names,geometry}.rs`.
+- `pw-graph-ui`: the egui canvas plus reusable DOM-like controls and retained
+  forms. Canvas rendering and interaction are split into
+  `canvas/{mod,node,links,ports,names,geometry}.rs`; component usage is in
+  [`docs/ui-components.md`](docs/ui-components.md).
 - `pw-graph-app`: desktop shell, backend composition, panels, tray, and CLI.
 
 ## Interface
@@ -44,6 +46,22 @@ name-suffix fallback. Advanced mode always renders one row per port.
 
 Node names are displayed using read-only aliases. Native PipeWire rename is not
 exposed because client-owned names cannot be changed safely by the graph UI.
+
+### Panel components
+
+Interactive controls in `crates/pw-graph-app/src/panels` use the retained
+`pw-graph-ui::UiDocument` component layer. Each control has a stable DOM-like
+ID, keeps its value available through `get_element_by_id`/`value`, and can be
+grouped into a form or observed with change/input/click listeners. The app
+starts one document frame at the beginning of each update and dispatches its
+queued events after all panels render.
+
+Panel code uses the shared adapters for text inputs, numbers, sliders,
+selects, buttons, checkboxes, switches, and tab labels. Custom-painted icon
+buttons and effect cards register their clicks through the same document, so
+they remain reusable without losing their existing appearance. See
+[`docs/ui-components.md`](docs/ui-components.md) for the component and form
+API.
 
 ## Run
 

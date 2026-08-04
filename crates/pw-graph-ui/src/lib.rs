@@ -7,6 +7,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod canvas;
 
+/// Reusable DOM-like controls and retained form state for egui panels.
+pub mod components;
+
+pub use components::{
+    ButtonProps, CheckboxProps, CommonProps, Document, Element, ElementId, ElementKind, EventType,
+    Form, FormValues, LabelProps, ListenerId, NumberInputProps, OptionItem, RadioGroupProps,
+    SelectProps, SliderProps, Style, SwitchProps, TextInputProps, UiDocument, UiEvent, Value,
+};
+
 /// User-facing appearance overrides for a node. The backend keeps the native
 /// node identity and name; this state controls how the node is presented in
 /// the canvas and can be persisted by the application.

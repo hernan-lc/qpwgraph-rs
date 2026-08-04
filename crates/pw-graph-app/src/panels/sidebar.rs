@@ -1,13 +1,15 @@
 //! Navigation rail and compact graph controls.
 
+use super::components::{
+    document_selectable_label, document_sidebar_icon_button, document_sidebar_icon_button_enabled,
+    document_sidebar_icon_toggle_button, document_sidebar_nav_icon_button,
+    document_text_input_sized,
+};
 use super::shared::{
     apply_panel_text_scale, fresh_scroll_area, media_filter_key, NAV_RAIL_WIDTH, PANEL_FILL,
 };
 use crate::app::QpwgraphApp;
-use crate::icons::{
-    sidebar_icon_button, sidebar_icon_button_enabled, sidebar_icon_toggle_button,
-    sidebar_nav_icon_button, Icon,
-};
+use crate::icons::Icon;
 use eframe::egui::{self, Ui};
 use pw_graph_ui::{ConnectMode, MediaFilter};
 
@@ -29,13 +31,14 @@ impl QpwgraphApp {
         let rail_max_height = ui.available_height();
         fresh_scroll_area("nav-rail-scroll", rail_max_height).show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                if sidebar_nav_icon_button(
+                if document_sidebar_nav_icon_button(
+                    &mut self.ui_document,
                     ui,
                     "nav.preferences",
                     Icon::Settings,
                     self.show_preferences,
-                    self.t("nav.preferences"),
-                    self.t("help.navigation_preferences"),
+                    self.i18n.text("nav.preferences"),
+                    self.i18n.text("help.navigation_preferences"),
                 ) {
                     if self.show_preferences {
                         self.show_preferences = false;
@@ -47,13 +50,14 @@ impl QpwgraphApp {
                             self.preferences_scroll_epoch.wrapping_add(1);
                     }
                 }
-                if sidebar_nav_icon_button(
+                if document_sidebar_nav_icon_button(
+                    &mut self.ui_document,
                     ui,
                     "nav.shortcuts",
                     Icon::Help,
                     self.show_shortcuts,
-                    self.t("nav.shortcuts"),
-                    self.t("help.navigation_shortcuts"),
+                    self.i18n.text("nav.shortcuts"),
+                    self.i18n.text("help.navigation_shortcuts"),
                 ) {
                     self.toggle_shortcuts();
                 }
@@ -63,75 +67,85 @@ impl QpwgraphApp {
     }
 
     fn show_sidebar_actions(&mut self, ui: &mut Ui) {
-        let search_placeholder = self.t("search.placeholder");
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut self.config.graph_search)
-                .desired_width(58.0)
-                .hint_text(search_placeholder),
+        let search_placeholder = self.i18n.text("search.placeholder");
+        let (_, search_value) = document_text_input_sized(
+            &mut self.ui_document,
+            ui,
+            "sidebar.search",
+            &self.config.graph_search,
+            String::new(),
+            Some(search_placeholder),
+            Some(58.0),
         );
-        search.on_hover_text(self.t("search.help"));
+        self.config.graph_search = search_value;
         ui.add_space(4.0);
-        if sidebar_icon_toggle_button(
+        if document_sidebar_icon_toggle_button(
+            &mut self.ui_document,
             ui,
             "sidebar.minimap",
             Icon::Minimap,
             self.canvas.minimap_visible,
-            self.t("toolbar.minimap"),
-            self.t("help.minimap"),
+            self.i18n.text("toolbar.minimap"),
+            self.i18n.text("help.minimap"),
         ) {
             self.canvas.minimap_visible = !self.canvas.minimap_visible;
         }
         if self.config.toolbar {
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.refresh",
                 Icon::Refresh,
-                self.t("toolbar.refresh"),
-                self.t("help.refresh"),
+                self.i18n.text("toolbar.refresh"),
+                self.i18n.text("help.refresh"),
             ) {
                 self.refresh_graph();
             }
-            if sidebar_icon_button_enabled(
+            if document_sidebar_icon_button_enabled(
+                &mut self.ui_document,
                 ui,
                 "sidebar.undo",
                 Icon::Undo,
-                self.t("toolbar.undo"),
-                self.t("help.undo"),
+                self.i18n.text("toolbar.undo"),
+                self.i18n.text("help.undo"),
                 self.commands.can_undo(),
             ) {
                 self.undo();
             }
-            if sidebar_icon_button_enabled(
+            if document_sidebar_icon_button_enabled(
+                &mut self.ui_document,
                 ui,
                 "sidebar.redo",
                 Icon::Redo,
-                self.t("toolbar.redo"),
-                self.t("help.redo"),
+                self.i18n.text("toolbar.redo"),
+                self.i18n.text("help.redo"),
                 self.commands.can_redo(),
             ) {
                 self.redo();
             }
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.history",
                 Icon::Timer,
-                self.t("toolbar.history"),
-                self.t("help.history"),
+                self.i18n.text("toolbar.history"),
+                self.i18n.text("help.history"),
             ) {
                 self.toggle_history();
             }
             let easy = self.canvas.connect_mode == ConnectMode::Easy;
-            let connect_mode_label = self.t(if easy {
+            let connect_mode_label = self.i18n.text(if easy {
                 "toolbar.connect_mode_easy"
             } else {
                 "toolbar.connect_mode_advanced"
             });
-            let connect_mode_help = self.t(if easy {
+            let connect_mode_help = self.i18n.text(if easy {
                 "help.connect_mode_easy"
             } else {
                 "help.connect_mode_advanced"
             });
-            if sidebar_icon_toggle_button(
+            if document_sidebar_icon_toggle_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.connect_mode",
                 Icon::Connect,
@@ -145,74 +159,81 @@ impl QpwgraphApp {
                     ConnectMode::Easy
                 };
             }
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.arrange",
                 Icon::Repel,
-                self.t("inspector.arrange_nodes"),
-                self.t("help.arrange_nodes"),
+                self.i18n.text("inspector.arrange_nodes"),
+                self.i18n.text("help.arrange_nodes"),
             ) {
                 self.arrange_nodes();
             }
             self.show_sort_controls(ui);
             if self.canvas.selected_link().is_some()
-                && sidebar_icon_button(
+                && document_sidebar_icon_button(
+                    &mut self.ui_document,
                     ui,
                     "sidebar.disconnect-selected",
                     Icon::Delete,
-                    self.t("toolbar.disconnect"),
-                    self.t("help.disconnect_link"),
+                    self.i18n.text("toolbar.disconnect"),
+                    self.i18n.text("help.disconnect_link"),
                 )
             {
                 let links = self.canvas.selected_links(self.driver.graph());
                 self.disconnect_many(links);
             }
             if !self.driver.graph().links.is_empty()
-                && sidebar_icon_button(
+                && document_sidebar_icon_button(
+                    &mut self.ui_document,
                     ui,
                     "sidebar.disconnect-all",
                     Icon::Delete,
-                    self.t("toolbar.disconnect_all"),
-                    self.t("help.disconnect_all"),
+                    self.i18n.text("toolbar.disconnect_all"),
+                    self.i18n.text("help.disconnect_all"),
                 )
             {
                 self.disconnect_all();
             }
         }
         if self.config.patchbay_toolbar {
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.save",
                 Icon::Save,
-                self.t("toolbar.save_patchbay"),
-                self.t("help.save_patchbay"),
+                self.i18n.text("toolbar.save_patchbay"),
+                self.i18n.text("help.save_patchbay"),
             ) {
                 self.save_patchbay();
             }
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.load",
                 Icon::Load,
-                self.t("toolbar.load_patchbay"),
-                self.t("help.load_patchbay"),
+                self.i18n.text("toolbar.load_patchbay"),
+                self.i18n.text("help.load_patchbay"),
             ) {
                 self.load_patchbay();
             }
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.snapshot",
                 Icon::Snapshot,
-                self.t("toolbar.snapshot"),
-                self.t("help.snapshot"),
+                self.i18n.text("toolbar.snapshot"),
+                self.i18n.text("help.snapshot"),
             ) {
                 self.snapshot_patchbay();
             }
-            if sidebar_icon_button(
+            if document_sidebar_icon_button(
+                &mut self.ui_document,
                 ui,
                 "sidebar.activate",
                 Icon::Activate,
-                self.t("toolbar.activate"),
-                self.t("help.activate"),
+                self.i18n.text("toolbar.activate"),
+                self.i18n.text("help.activate"),
             ) {
                 self.activate_patchbay();
             }
@@ -222,12 +243,13 @@ impl QpwgraphApp {
     }
 
     fn show_effect_controls(&mut self, ui: &mut Ui) {
-        if sidebar_icon_button(
+        if document_sidebar_icon_button(
+            &mut self.ui_document,
             ui,
             "sidebar.effects-add",
             Icon::Effects,
-            self.t("effects.add"),
-            self.t("effects.add_help"),
+            self.i18n.text("effects.add"),
+            self.i18n.text("effects.add_help"),
         ) {
             self.open_effect_gallery();
         }
@@ -240,31 +262,39 @@ impl QpwgraphApp {
     /// icon button here instead.
     fn show_sort_controls(&mut self, ui: &mut Ui) {
         let sort_by_name = self.config.sort_type != "id";
-        let sort_label = self.t(if sort_by_name { "sort.name" } else { "sort.id" });
-        if sidebar_icon_toggle_button(
+        let sort_label = self
+            .i18n
+            .text(if sort_by_name { "sort.name" } else { "sort.id" });
+        if document_sidebar_icon_toggle_button(
+            &mut self.ui_document,
             ui,
             "sidebar.sort_by",
             Icon::Sort,
             sort_by_name,
-            format!("{}: {}", self.t("inspector.sort_ports"), sort_label),
-            self.t("help.sort_ports"),
+            format!("{}: {}", self.i18n.text("inspector.sort_ports"), sort_label),
+            self.i18n.text("help.sort_ports"),
         ) {
             self.config.sort_type = if sort_by_name { "id" } else { "name" }.into();
         }
 
         let descending = self.config.sort_order == "descending";
-        let order_label = self.t(if descending {
+        let order_label = self.i18n.text(if descending {
             "sort.descending"
         } else {
             "sort.ascending"
         });
-        if sidebar_icon_toggle_button(
+        if document_sidebar_icon_toggle_button(
+            &mut self.ui_document,
             ui,
             "sidebar.sort_order",
             Icon::SortDirection,
             descending,
-            format!("{}: {}", self.t("inspector.sort_order"), order_label),
-            self.t("help.sort_order"),
+            format!(
+                "{}: {}",
+                self.i18n.text("inspector.sort_order"),
+                order_label
+            ),
+            self.i18n.text("help.sort_order"),
         ) {
             self.config.sort_order = if descending {
                 "ascending"
@@ -278,13 +308,18 @@ impl QpwgraphApp {
     fn show_media_filter_sidebar(&mut self, ui: &mut Ui) {
         ui.separator();
         let current_filter = MediaFilter::parse(&self.config.media_filter);
-        let filter_label = self.t(media_filter_key(current_filter));
-        if sidebar_icon_button(
+        let filter_label = self.i18n.text(media_filter_key(current_filter));
+        if document_sidebar_icon_button(
+            &mut self.ui_document,
             ui,
             "sidebar.media_filter",
             Icon::Filter,
-            format!("{}: {}", self.t("toolbar.media_filter"), filter_label),
-            self.t("help.media_filter"),
+            format!(
+                "{}: {}",
+                self.i18n.text("toolbar.media_filter"),
+                filter_label
+            ),
+            self.i18n.text("help.media_filter"),
         ) {
             let next_index = MediaFilter::ALL
                 .iter()
@@ -308,11 +343,15 @@ impl QpwgraphApp {
                     ("2", MediaFilter::Video),
                     ("3", MediaFilter::Midi),
                 ] {
-                    let response = ui.selectable_label(current_filter == filter, key);
-                    if response
-                        .on_hover_text(format!("{}: {}", key, self.t(media_filter_key(filter))))
-                        .clicked()
-                    {
+                    let id = format!("sidebar.media_filter.shortcut.{key}");
+                    if document_selectable_label(
+                        &mut self.ui_document,
+                        ui,
+                        &id,
+                        current_filter == filter,
+                        key,
+                        format!("{}: {}", key, self.i18n.text(media_filter_key(filter))),
+                    ) {
                         self.set_media_filter(filter);
                     }
                 }

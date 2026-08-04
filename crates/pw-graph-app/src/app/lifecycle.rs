@@ -60,6 +60,7 @@ impl QpwgraphApp {
 
 impl eframe::App for QpwgraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui_document.begin_frame();
         self.apply_ui_text_scale(ctx);
         self.sync_meter_policy();
         self.refresh_graph_if_dirty();
@@ -124,6 +125,7 @@ impl eframe::App for QpwgraphApp {
         self.show_history_modal(ctx);
         self.show_effect_gallery_modal(ctx);
         self.show_preferences_modal(ctx);
+        self.ui_document.dispatch_pending_events();
         self.autosave_config();
     }
 
