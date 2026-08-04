@@ -676,7 +676,7 @@ impl UiDocument {
         response
     }
 
-    fn prepare(
+    pub(super) fn prepare(
         &mut self,
         common: &CommonProps,
         kind: ElementKind,

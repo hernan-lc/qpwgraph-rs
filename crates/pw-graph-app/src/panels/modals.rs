@@ -1,7 +1,7 @@
 use super::components::{
     document_button, document_checkbox, document_slider, document_text_input_sized,
 };
-use super::shared::{fresh_scroll_area, modal_window, show_backdrop, show_close_button};
+use super::shared::{fresh_scroll_area, show_centered_dialog, show_close_button};
 use crate::app::effects::{available_descriptors, EffectGalleryState};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui};
@@ -227,11 +227,6 @@ impl QpwgraphApp {
         if self.effect_gallery.is_none() {
             return;
         }
-        if show_backdrop(ctx, "effects-gallery") {
-            self.effect_gallery = None;
-            return;
-        }
-
         let descriptors = available_descriptors(self.driver.as_ref());
         let supports_effect_nodes = self.driver.supports_effect_nodes();
         let Some(mut gallery) = self.effect_gallery.take() else {
@@ -250,55 +245,33 @@ impl QpwgraphApp {
         let mut create = false;
         let initial_settings_label = self.i18n.text("effects.initial_settings");
         let enabled_label = self.i18n.text("effects.enabled");
-        modal_window(
+        let mut document = std::mem::take(&mut self.ui_document);
+        let dialog_response = show_centered_dialog(
+            &mut document,
+            ctx,
             "effects-gallery",
             self.i18n.text("effects.gallery_title"),
             720.0,
-        )
-        .show(ctx, |ui| {
-            ui.label(RichText::new(self.i18n.text("effects.gallery_hint")).weak());
-            if !supports_effect_nodes {
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(self.i18n.text("effects.backend_unavailable"))
-                        .color(Color32::from_rgb(239, 169, 82)),
-                );
-            }
-            ui.add_space(8.0);
-
-            fresh_scroll_area(("effects-gallery-scroll", gallery.scroll_epoch), 400.0).show(
-                ui,
-                |ui| {
-                    ui.label(RichText::new(self.i18n.text("effects.choose_effect")).strong());
+            |ui, document| {
+                ui.label(RichText::new(self.i18n.text("effects.gallery_hint")).weak());
+                if !supports_effect_nodes {
                     ui.add_space(6.0);
-                    if descriptors.is_empty() {
-                        ui.label(RichText::new(self.i18n.text("effects.no_available")).weak());
-                    } else if ui.available_width() < 440.0 {
-                        for descriptor in &descriptors {
-                            let selected = gallery.effect_id == descriptor.id;
-                            let summary = format!(
-                                "{} · {}",
-                                self.tf(
-                                    "effects.parameter_count",
-                                    &[("count", descriptor.parameters.len().to_string())],
-                                ),
-                                self.i18n.text("effects.port_flow"),
-                            );
-                            if effect_gallery_card(
-                                &mut self.ui_document,
-                                ui,
-                                descriptor,
-                                summary,
-                                selected,
-                            ) {
-                                gallery.select_effect(descriptor);
-                            }
-                            ui.add_space(8.0);
-                        }
-                    } else {
-                        ui.columns(2, |columns| {
-                            for (index, descriptor) in descriptors.iter().enumerate() {
-                                let column = &mut columns[index % 2];
+                    ui.label(
+                        RichText::new(self.i18n.text("effects.backend_unavailable"))
+                            .color(Color32::from_rgb(239, 169, 82)),
+                    );
+                }
+                ui.add_space(8.0);
+
+                fresh_scroll_area(("effects-gallery-scroll", gallery.scroll_epoch), 400.0).show(
+                    ui,
+                    |ui| {
+                        ui.label(RichText::new(self.i18n.text("effects.choose_effect")).strong());
+                        ui.add_space(6.0);
+                        if descriptors.is_empty() {
+                            ui.label(RichText::new(self.i18n.text("effects.no_available")).weak());
+                        } else if ui.available_width() < 440.0 {
+                            for descriptor in &descriptors {
                                 let selected = gallery.effect_id == descriptor.id;
                                 let summary = format!(
                                     "{} · {}",
@@ -308,64 +281,86 @@ impl QpwgraphApp {
                                     ),
                                     self.i18n.text("effects.port_flow"),
                                 );
-                                if effect_gallery_card(
-                                    &mut self.ui_document,
-                                    column,
-                                    descriptor,
-                                    summary,
-                                    selected,
-                                ) {
+                                if effect_gallery_card(document, ui, descriptor, summary, selected)
+                                {
                                     gallery.select_effect(descriptor);
                                 }
-                                column.add_space(8.0);
+                                ui.add_space(8.0);
                             }
-                        });
-                    }
+                        } else {
+                            ui.columns(2, |columns| {
+                                for (index, descriptor) in descriptors.iter().enumerate() {
+                                    let column = &mut columns[index % 2];
+                                    let selected = gallery.effect_id == descriptor.id;
+                                    let summary = format!(
+                                        "{} · {}",
+                                        self.tf(
+                                            "effects.parameter_count",
+                                            &[("count", descriptor.parameters.len().to_string())],
+                                        ),
+                                        self.i18n.text("effects.port_flow"),
+                                    );
+                                    if effect_gallery_card(
+                                        document, column, descriptor, summary, selected,
+                                    ) {
+                                        gallery.select_effect(descriptor);
+                                    }
+                                    column.add_space(8.0);
+                                }
+                            });
+                        }
 
-                    let selected_descriptor = descriptors
-                        .iter()
-                        .find(|descriptor| descriptor.id == gallery.effect_id);
-                    if let Some(descriptor) = selected_descriptor {
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        show_effect_initial_settings(
-                            &mut self.ui_document,
-                            ui,
-                            descriptor,
-                            &mut gallery,
-                            initial_settings_label.clone(),
-                            enabled_label.clone(),
-                        );
-                    }
-                },
-            );
+                        let selected_descriptor = descriptors
+                            .iter()
+                            .find(|descriptor| descriptor.id == gallery.effect_id);
+                        if let Some(descriptor) = selected_descriptor {
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            show_effect_initial_settings(
+                                document,
+                                ui,
+                                descriptor,
+                                &mut gallery,
+                                initial_settings_label.clone(),
+                                enabled_label.clone(),
+                            );
+                        }
+                    },
+                );
 
-            ui.add_space(10.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                if document_button(
-                    &mut self.ui_document,
-                    ui,
-                    "modals.effects.cancel",
-                    self.i18n.text("effects.cancel"),
-                    true,
-                ) {
-                    cancel = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal(|ui| {
                     if document_button(
-                        &mut self.ui_document,
+                        document,
                         ui,
-                        "modals.effects.create_node",
-                        self.i18n.text("effects.create_node"),
-                        supports_effect_nodes && !gallery.effect_id.is_empty(),
+                        "modals.effects.cancel",
+                        self.i18n.text("effects.cancel"),
+                        true,
                     ) {
-                        create = true;
+                        cancel = true;
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if document_button(
+                            document,
+                            ui,
+                            "modals.effects.create_node",
+                            self.i18n.text("effects.create_node"),
+                            supports_effect_nodes && !gallery.effect_id.is_empty(),
+                        ) {
+                            create = true;
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
+        self.ui_document = document;
+
+        if dialog_response.backdrop_clicked {
+            self.effect_gallery = None;
+            return;
+        }
 
         if create && self.create_effect_from_gallery(&gallery) {
             return;
@@ -379,140 +374,158 @@ impl QpwgraphApp {
         if !self.show_shortcuts {
             return;
         }
-        if show_backdrop(ctx, "shortcuts") {
-            self.close_shortcuts();
-            return;
-        }
-        modal_window("shortcuts", self.i18n.text("shortcuts.title"), 560.0).show(ctx, |ui| {
-            ui.label(RichText::new(self.i18n.text("shortcuts.hint")).weak());
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.i18n.text("shortcuts.search")).strong());
-                let clear_width = if self.shortcut_search.is_empty() {
-                    0.0
-                } else {
-                    ui.spacing().button_padding.x * 2.0 + 42.0
-                };
-                let search_width = (ui.available_width() - clear_width).max(140.0);
-                let search_hint = self.i18n.text("shortcuts.search_hint");
-                let current_search = self.shortcut_search.clone();
-                let (search_response, search_value) = document_text_input_sized(
-                    &mut self.ui_document,
-                    ui,
-                    "modals.shortcuts.search",
-                    &current_search,
-                    String::new(),
-                    Some(search_hint),
-                    Some(search_width),
-                );
-                self.shortcut_search = search_value;
-                if self.shortcut_focus_search
-                    || ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F))
-                {
-                    search_response.request_focus();
-                    self.shortcut_focus_search = false;
-                }
-                if !self.shortcut_search.is_empty()
-                    && document_button(
-                        &mut self.ui_document,
-                        ui,
-                        "modals.shortcuts.clear_search",
-                        self.i18n.text("shortcuts.clear_search"),
-                        true,
-                    )
-                {
-                    self.shortcut_search.clear();
-                    self.shortcut_focus_search = true;
-                }
-            });
-            ui.add_space(6.0);
-
-            let query = self.shortcut_search.trim().to_lowercase();
-            let matching_entries: Vec<_> = SHORTCUT_ENTRIES
-                .iter()
-                .filter_map(|entry| {
-                    let description = self.i18n.text(entry.description_key);
-                    shortcut_matches_query(entry.keys, &description, &query)
-                        .then_some((entry.keys, description))
-                })
-                .collect();
-            ui.label(
-                RichText::new(self.tf(
-                    "shortcuts.result_count",
-                    &[("count", matching_entries.len().to_string())],
-                ))
-                .small()
-                .weak(),
-            );
-            fresh_scroll_area(("shortcuts-scroll", self.shortcut_scroll_epoch), 420.0).show(
-                ui,
-                |ui| {
-                    if matching_entries.is_empty() {
-                        ui.label(RichText::new(self.i18n.text("shortcuts.no_results")).weak());
+        let mut document = std::mem::take(&mut self.ui_document);
+        let dialog_response = show_centered_dialog(
+            &mut document,
+            ctx,
+            "shortcuts",
+            self.i18n.text("shortcuts.title"),
+            560.0,
+            |ui, document| {
+                ui.label(RichText::new(self.i18n.text("shortcuts.hint")).weak());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(self.i18n.text("shortcuts.search")).strong());
+                    let clear_width = if self.shortcut_search.is_empty() {
+                        0.0
                     } else {
-                        egui::Grid::new("shortcuts-grid")
-                            .num_columns(2)
-                            .spacing(egui::vec2(18.0, 7.0))
-                            .show(ui, |ui| {
-                                for (keys, description) in matching_entries {
-                                    shortcut_row(ui, keys, description);
-                                }
-                            });
+                        ui.spacing().button_padding.x * 2.0 + 42.0
+                    };
+                    let search_width = (ui.available_width() - clear_width).max(140.0);
+                    let search_hint = self.i18n.text("shortcuts.search_hint");
+                    let current_search = self.shortcut_search.clone();
+                    let (search_response, search_value) = document_text_input_sized(
+                        document,
+                        ui,
+                        "modals.shortcuts.search",
+                        &current_search,
+                        String::new(),
+                        Some(search_hint),
+                        Some(search_width),
+                    );
+                    self.shortcut_search = search_value;
+                    if self.shortcut_focus_search
+                        || ui.input(|input| {
+                            input.modifiers.command && input.key_pressed(egui::Key::F)
+                        })
+                    {
+                        search_response.request_focus();
+                        self.shortcut_focus_search = false;
                     }
-                },
-            );
-            ui.add_space(10.0);
-            if show_close_button(
-                &mut self.ui_document,
-                ui,
-                "modals.shortcuts.close",
-                self.i18n.text("shortcuts.close"),
-            ) {
-                self.close_shortcuts();
-            }
-        });
+                    if !self.shortcut_search.is_empty()
+                        && document_button(
+                            document,
+                            ui,
+                            "modals.shortcuts.clear_search",
+                            self.i18n.text("shortcuts.clear_search"),
+                            true,
+                        )
+                    {
+                        self.shortcut_search.clear();
+                        self.shortcut_focus_search = true;
+                    }
+                });
+                ui.add_space(6.0);
+
+                let query = self.shortcut_search.trim().to_lowercase();
+                let matching_entries: Vec<_> = SHORTCUT_ENTRIES
+                    .iter()
+                    .filter_map(|entry| {
+                        let description = self.i18n.text(entry.description_key);
+                        shortcut_matches_query(entry.keys, &description, &query)
+                            .then_some((entry.keys, description))
+                    })
+                    .collect();
+                ui.label(
+                    RichText::new(self.tf(
+                        "shortcuts.result_count",
+                        &[("count", matching_entries.len().to_string())],
+                    ))
+                    .small()
+                    .weak(),
+                );
+                fresh_scroll_area(("shortcuts-scroll", self.shortcut_scroll_epoch), 420.0).show(
+                    ui,
+                    |ui| {
+                        if matching_entries.is_empty() {
+                            ui.label(RichText::new(self.i18n.text("shortcuts.no_results")).weak());
+                        } else {
+                            egui::Grid::new("shortcuts-grid")
+                                .num_columns(2)
+                                .spacing(egui::vec2(18.0, 7.0))
+                                .show(ui, |ui| {
+                                    for (keys, description) in matching_entries {
+                                        shortcut_row(ui, keys, description);
+                                    }
+                                });
+                        }
+                    },
+                );
+                ui.add_space(10.0);
+                if show_close_button(
+                    document,
+                    ui,
+                    "modals.shortcuts.close",
+                    self.i18n.text("shortcuts.close"),
+                ) {
+                    self.close_shortcuts();
+                }
+            },
+        );
+        self.ui_document = document;
+        if dialog_response.backdrop_clicked {
+            self.close_shortcuts();
+        }
     }
 
     pub(crate) fn show_history_modal(&mut self, ctx: &egui::Context) {
         if !self.show_history {
             return;
         }
-        if show_backdrop(ctx, "history") {
+        let mut document = std::mem::take(&mut self.ui_document);
+        let dialog_response = show_centered_dialog(
+            &mut document,
+            ctx,
+            "history",
+            self.i18n.text("history.title"),
+            520.0,
+            |ui, document| {
+                ui.label(RichText::new(self.i18n.text("history.hint")).weak());
+                ui.add_space(8.0);
+                ui.label(RichText::new(self.i18n.text("history.undoable")).strong());
+                let undo_history = self.commands.undo_history();
+                if undo_history.is_empty() {
+                    ui.label(RichText::new(self.i18n.text("history.empty")).weak());
+                } else {
+                    for (index, entry) in undo_history.iter().enumerate() {
+                        ui.label(format!("{}. {}", index + 1, entry));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(self.i18n.text("history.redoable")).strong());
+                let redo_history = self.commands.redo_history();
+                if redo_history.is_empty() {
+                    ui.label(RichText::new(self.i18n.text("history.empty")).weak());
+                } else {
+                    for (index, entry) in redo_history.iter().enumerate() {
+                        ui.label(format!("{}. {}", index + 1, entry));
+                    }
+                }
+                ui.add_space(10.0);
+                if show_close_button(
+                    document,
+                    ui,
+                    "modals.history.close",
+                    self.i18n.text("shortcuts.close"),
+                ) {
+                    self.show_history = false;
+                }
+            },
+        );
+        self.ui_document = document;
+        if dialog_response.backdrop_clicked {
             self.show_history = false;
-            return;
         }
-        modal_window("history", self.i18n.text("history.title"), 520.0).show(ctx, |ui| {
-            ui.label(RichText::new(self.i18n.text("history.hint")).weak());
-            ui.add_space(8.0);
-            ui.label(RichText::new(self.i18n.text("history.undoable")).strong());
-            let undo_history = self.commands.undo_history();
-            if undo_history.is_empty() {
-                ui.label(RichText::new(self.i18n.text("history.empty")).weak());
-            } else {
-                for (index, entry) in undo_history.iter().enumerate() {
-                    ui.label(format!("{}. {}", index + 1, entry));
-                }
-            }
-            ui.add_space(8.0);
-            ui.label(RichText::new(self.i18n.text("history.redoable")).strong());
-            let redo_history = self.commands.redo_history();
-            if redo_history.is_empty() {
-                ui.label(RichText::new(self.i18n.text("history.empty")).weak());
-            } else {
-                for (index, entry) in redo_history.iter().enumerate() {
-                    ui.label(format!("{}. {}", index + 1, entry));
-                }
-            }
-            ui.add_space(10.0);
-            if show_close_button(
-                &mut self.ui_document,
-                ui,
-                "modals.history.close",
-                self.i18n.text("shortcuts.close"),
-            ) {
-                self.show_history = false;
-            }
-        });
     }
 }
 

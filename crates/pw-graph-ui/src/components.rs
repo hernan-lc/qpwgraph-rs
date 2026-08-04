@@ -6,6 +6,7 @@
 //! - [`props`] contains shared styles and control property builders.
 //! - [`events`] contains event, element, and form data types.
 //! - [`document`] contains retained state and widget rendering.
+//! - [`dialog`] contains reusable modal dialog chrome and backdrop handling.
 //!
 //! `egui` is an immediate-mode UI toolkit: widgets are created again on every
 //! frame. [`UiDocument`] adds the small amount of retained state that is useful
@@ -55,6 +56,7 @@
 //! # }
 //! ```
 
+mod dialog;
 mod document;
 mod events;
 mod ids;
@@ -66,6 +68,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use events::Listener;
 
+pub use dialog::{DialogPlacement, DialogProps, DialogResponse};
 pub use document::Document;
 pub use events::{Element, EventType, Form, FormValues, ListenerId, UiEvent};
 pub use ids::{ElementId, ElementKind, OptionItem, Value};

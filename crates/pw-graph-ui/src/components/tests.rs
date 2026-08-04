@@ -100,6 +100,27 @@ fn every_builtin_component_registers_and_renders() {
 }
 
 #[test]
+fn dialog_registers_and_renders_with_a_stable_id() {
+    let mut document = UiDocument::new();
+    let ctx = egui::Context::default();
+    ctx.begin_pass(egui::RawInput::default());
+    let response = document.dialog(
+        &ctx,
+        DialogProps::centered("settings-dialog", "Settings", 420.0),
+        |ui, _document| {
+            ui.label("Dialog content");
+        },
+    );
+    let _ = ctx.end_pass();
+
+    assert!(response.shown);
+    assert_eq!(
+        document.get_element_by_id("settings-dialog").unwrap().kind,
+        ElementKind::Dialog
+    );
+}
+
+#[test]
 fn listeners_receive_events_and_can_be_removed() {
     let mut document = UiDocument::new();
     let events: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));

@@ -2,7 +2,7 @@ use super::components::document_button;
 use eframe::egui;
 use eframe::egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
-use pw_graph_ui::{MediaFilter, UiDocument};
+use pw_graph_ui::{DialogProps, DialogResponse, MediaFilter, UiDocument};
 
 pub(super) const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
 pub(super) const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
@@ -70,41 +70,30 @@ pub(super) fn show_close_button(
     clicked
 }
 
-pub(super) fn show_backdrop(ctx: &egui::Context, id_source: &str) -> bool {
-    show_backdrop_rect(ctx, id_source, ctx.screen_rect())
+pub(super) fn show_centered_dialog(
+    document: &mut UiDocument,
+    ctx: &egui::Context,
+    id_source: &str,
+    title: String,
+    width: f32,
+    contents: impl FnOnce(&mut Ui, &mut UiDocument),
+) -> DialogResponse {
+    document.dialog(
+        ctx,
+        DialogProps::centered(id_source, title, width),
+        contents,
+    )
 }
 
-pub(super) fn show_backdrop_rect(ctx: &egui::Context, id_source: &str, rect: egui::Rect) -> bool {
-    let backdrop_id = egui::Id::new(("modal-backdrop", id_source));
-    // Keep the modal window above its backdrop no matter what. Clicking the
-    // backdrop (to dismiss the dialog) makes egui call `move_to_top` on that
-    // layer, and the reordering persists in memory — so reopening the dialog
-    // would otherwise draw the backdrop over the window. Registering the
-    // window as a sublayer of the backdrop re-inserts it directly above the
-    // backdrop at the end of every frame, overriding any stale order.
-    ctx.set_sublayer(
-        egui::LayerId::new(egui::Order::Foreground, backdrop_id),
-        egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new(("modal-window", id_source)),
-        ),
-    );
-    egui::Area::new(backdrop_id)
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ctx, |ui| {
-            let mut sense = egui::Sense::click();
-            // The backdrop must receive pointer clicks, but it is not a real
-            // control and must not interrupt Tab traversal inside the modal.
-            sense.focusable = false;
-            // Keep the backdrop as an invisible hit target. The modal still
-            // owns the foreground layer and the backdrop can dismiss it, but
-            // opening a dialog no longer dims the graph behind it.
-            let (response, _painter) = ui.allocate_painter(rect.size(), sense);
-            response
-        })
-        .inner
-        .clicked()
+pub(super) fn show_fixed_dialog(
+    document: &mut UiDocument,
+    ctx: &egui::Context,
+    id_source: &str,
+    title: String,
+    rect: egui::Rect,
+    contents: impl FnOnce(&mut Ui, &mut UiDocument),
+) -> DialogResponse {
+    document.dialog(ctx, DialogProps::fixed(id_source, title, rect), contents)
 }
 
 pub(super) fn preferences_rect(ctx: &egui::Context) -> egui::Rect {
@@ -114,37 +103,6 @@ pub(super) fn preferences_rect(ctx: &egui::Context) -> egui::Rect {
     let width = (screen.width() - NAV_RAIL_WIDTH - FULL_PANEL_MARGIN * 2.0).max(240.0);
     let height = (screen.height() - FULL_PANEL_MARGIN * 2.0).max(260.0);
     egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height))
-}
-
-pub(super) fn full_panel_window(
-    id_source: &str,
-    title: String,
-    rect: egui::Rect,
-) -> egui::Window<'static> {
-    egui::Window::new(title)
-        .id(egui::Id::new(("modal-window", id_source)))
-        .collapsible(false)
-        .resizable(false)
-        .fixed_pos(rect.min)
-        .fixed_size(rect.size())
-        .order(egui::Order::Foreground)
-}
-
-/// Shared chrome for the remaining compact dialog: fixed size, centered,
-/// non-collapsible, and always on top.
-pub(super) fn modal_window(
-    id_source: &str,
-    title: String,
-    default_width: f32,
-) -> egui::Window<'static> {
-    egui::Window::new(title)
-        .id(egui::Id::new(("modal-window", id_source)))
-        .collapsible(false)
-        .resizable(false)
-        .default_width(default_width)
-        .max_width(default_width)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
 }
 
 /// A scroll area that always opens back at the top: reopening a dialog (or

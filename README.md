@@ -57,9 +57,12 @@ starts one document frame at the beginning of each update and dispatches its
 queued events after all panels render.
 
 Panel code uses the shared adapters for text inputs, numbers, sliders,
-selects, buttons, checkboxes, switches, and tab labels. Custom-painted icon
-buttons and effect cards register their clicks through the same document, so
-they remain reusable without losing their existing appearance. See
+selects, buttons, checkboxes, switches, tab labels, and modal dialogs.
+Custom-painted icon buttons and effect cards register their clicks through the
+same document, so they remain reusable without losing their existing
+appearance. All dialogs paint a translucent backdrop while keeping the graph
+rendered underneath, so modal windows do not replace the application with a
+black background. See
 [`docs/ui-components.md`](docs/ui-components.md) for the component and form
 API.
 

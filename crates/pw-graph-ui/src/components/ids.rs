@@ -196,6 +196,8 @@ pub enum ElementKind {
     Select,
     /// A group of mutually exclusive radio buttons.
     RadioGroup,
+    /// A modal dialog container.
+    Dialog,
 }
 
 /// An option used by [`SelectProps`] and [`RadioGroupProps`].

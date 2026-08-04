@@ -60,5 +60,26 @@ Useful APIs include:
   `.style()`, and so on) for per-control defaults and overrides.
 
 Available controls are `label`, `button`, `checkbox`, `switch`, `text_input`,
-`number_input`, `slider`, `select`, and `radio_group`.
+`number_input`, `slider`, `select`, and `radio_group`. `DialogProps` and
+`UiDocument::dialog` provide reusable centered or fixed modal chrome, a
+translucent click-to-dismiss backdrop, stable dialog IDs, and a callback that
+receives both the dialog `Ui` and the document for its child controls.
 
+```rust
+use pw_graph_ui::{CheckboxProps, DialogProps};
+
+let response = document.dialog(
+    ctx,
+    DialogProps::centered("settings-dialog", "Settings", 520.0),
+    |ui, document| {
+        document.checkbox(
+            ui,
+            CheckboxProps::new("settings.enabled", "Enabled")
+                .checked(true)
+                .form("settings"),
+        );
+    },
+);
+
+let should_close = response.backdrop_clicked;
+```
