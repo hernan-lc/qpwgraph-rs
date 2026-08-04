@@ -100,6 +100,28 @@ fn every_builtin_component_registers_and_renders() {
 }
 
 #[test]
+fn slider_respects_explicit_width() {
+    let mut document = UiDocument::new();
+    let ctx = egui::Context::default();
+    let mut slider_width = 0.0;
+    ctx.begin_pass(egui::RawInput::default());
+    egui::CentralPanel::default().show(&ctx, |ui| {
+        slider_width = document
+            .slider(
+                ui,
+                SliderProps::new("sized-slider", "")
+                    .size(180.0, 26.0)
+                    .show_value(false),
+            )
+            .rect
+            .width();
+    });
+    let _ = ctx.end_pass();
+
+    assert!((slider_width - 180.0).abs() < f32::EPSILON);
+}
+
+#[test]
 fn dialog_registers_and_renders_with_a_stable_id() {
     let mut document = UiDocument::new();
     let ctx = egui::Context::default();

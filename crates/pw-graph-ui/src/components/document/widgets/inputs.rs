@@ -134,6 +134,14 @@ impl UiDocument {
                 if !suffix.is_empty() {
                     slider = slider.suffix(suffix);
                 }
+                // egui's slider uses `Spacing::slider_width` for its inner
+                // interaction rect instead of the outer allocation supplied
+                // by `add_sized`. Keep the reusable component's explicit
+                // width authoritative so fixed-size layouts do not leave a
+                // misleading gap beside the slider.
+                if let Some(width) = style.width {
+                    ui.spacing_mut().slider_width = width;
+                }
                 add_sized(ui, &style, slider)
             })
         });
