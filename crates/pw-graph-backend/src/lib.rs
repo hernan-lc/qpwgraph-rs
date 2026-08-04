@@ -198,6 +198,49 @@ mod tests {
         assert!(driver.audio_meters().unwrap().is_empty());
     }
 
+    #[cfg(all(feature = "pipewire", feature = "relay"))]
+    #[test]
+    fn native_backend_creates_and_removes_relay_devices_when_enabled() {
+        if std::env::var_os("PW_GRAPH_TEST_RELAY").is_none() {
+            return;
+        }
+        let mut driver = PipewireDriver::new().expect("PipeWire daemon should be available");
+        driver.refresh().expect("registry snapshot should succeed");
+
+        let port = driver
+            .relay_start_host(RelayHostRequest {
+                device_name: "qpwgraph-rs-test".into(),
+                pin: "123456".into(),
+                port: 0,
+                codec: RelayCodecKind::Opus,
+                frame_ms: 20,
+            })
+            .expect("relay host should start");
+        assert!(port > 0);
+        assert!(driver.relay_devices_active());
+        assert!(driver.relay_status().host_active);
+
+        // The two virtual nodes must be visible in the graph with ports.
+        driver.refresh().expect("registry snapshot should succeed");
+        let names: Vec<String> = driver
+            .graph()
+            .nodes
+            .values()
+            .map(|node| node.name.clone())
+            .collect();
+        assert!(
+            names.iter().any(|name| name.contains("relay.source")),
+            "relay microphone node should appear in the graph, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.contains("relay.sink")),
+            "relay speaker node should appear in the graph, got: {names:?}"
+        );
+
+        driver.relay_stop_host().expect("relay host should stop");
+        assert!(!driver.relay_status().host_active);
+    }
+
     #[cfg(feature = "pipewire")]
     #[test]
     fn native_backend_can_create_and_destroy_a_link_when_enabled() {

@@ -342,3 +342,90 @@ pub trait GraphDriver: EffectDriver {
         Ok(())
     }
 }
+
+/// Networked audio relay (phone-as-microphone / phone-as-speaker).
+///
+/// Like [`EffectDriver`], relay support is layered beside the graph API: a
+/// backend without networking keeps the default `Unsupported` answers. The
+/// PipeWire backend implements it with two client-owned virtual nodes —
+/// `Relay Microphone` (a Source fed by peer audio) and `Relay Speaker` (a
+/// Sink whose input is transmitted to peers) — plus the [`pw_graph_relay`]
+/// engine for transport.
+#[cfg(feature = "relay")]
+pub use pw_graph_relay::{
+    CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, PeerInfo as RelayPeerInfo,
+    RelayEvent, SessionId as RelaySessionId, SessionStatus as RelaySessionStatus,
+    Roles as RelayRoles, TransportPreference as RelayTransportPreference,
+};
+
+/// Parameters for starting the relay host.
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug)]
+pub struct RelayHostRequest {
+    pub device_name: String,
+    /// Pairing PIN clients must present.
+    pub pin: String,
+    /// TCP control port; 0 picks an ephemeral port.
+    pub port: u16,
+    pub codec: RelayCodecKind,
+    pub frame_ms: u16,
+    /// Preferred transport link for advertising and selection.
+    pub transport: RelayTransportPreference,
+}
+
+#[cfg(feature = "relay")]
+pub trait RelayDriver {
+    /// Whether this backend can relay audio at all.
+    fn relay_available(&self) -> bool {
+        false
+    }
+
+    /// Snapshot of host/session state for the UI.
+    fn relay_status(&self) -> RelayEngineStatus {
+        RelayEngineStatus::default()
+    }
+
+    /// Whether the virtual relay microphone/speaker nodes currently exist.
+    fn relay_devices_active(&self) -> bool {
+        false
+    }
+
+    /// Create the virtual relay devices (if needed) and start listening for
+    /// peers. Returns the bound TCP control port.
+    fn relay_start_host(&mut self, _request: RelayHostRequest) -> BackendResult<u16> {
+        Err(BackendError::Unsupported(
+            "audio relay is not available for this backend".into(),
+        ))
+    }
+
+    /// Stop listening; established sessions and virtual devices remain.
+    fn relay_stop_host(&mut self) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "audio relay is not available for this backend".into(),
+        ))
+    }
+
+    /// Create the virtual relay devices (if needed) and connect to a remote
+    /// host as a client. Session outcome arrives via [`RelayEvent`]s.
+    fn relay_connect(
+        &mut self,
+        _target: std::net::SocketAddr,
+        _pin: &str,
+        _roles: RelayRoles,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "audio relay is not available for this backend".into(),
+        ))
+    }
+
+    fn relay_disconnect(&mut self, _session: RelaySessionId) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "audio relay is not available for this backend".into(),
+        ))
+    }
+
+    /// Drain pending relay events. Call once per UI update.
+    fn relay_events(&mut self) -> Vec<RelayEvent> {
+        Vec::new()
+    }
+}

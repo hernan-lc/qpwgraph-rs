@@ -1,0 +1,433 @@
+//! Fast-mode link classification and selection.
+//!
+//! Relay traffic only runs over fast local links: USB tethering, Wi-Fi,
+//! Bluetooth PAN, and (for Linux-to-Linux peers) wired LAN. Interfaces are
+//! classified by name (Linux predictable-naming heuristics), ranked by a
+//! fixed latency/stability policy — USB > Wi-Fi > Bluetooth PAN > LAN — and
+//! a same-subnet match against the peer wins over raw ranking so traffic
+//! never leaves the local segment unnecessarily.
+
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
+use std::time::{Duration, Instant};
+
+/// A kind of local network link, declared in preference order: USB
+/// tethering first (lowest latency, most stable), wired LAN last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinkKind {
+    Usb,
+    Wifi,
+    BluetoothPan,
+    Lan,
+}
+
+impl LinkKind {
+    /// Stable identifier used in config values and TXT records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Usb => "usb",
+            Self::Wifi => "wifi",
+            Self::BluetoothPan => "bluetooth",
+            Self::Lan => "lan",
+        }
+    }
+
+    /// Human-readable label for UI display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Usb => "USB",
+            Self::Wifi => "Wi-Fi",
+            Self::BluetoothPan => "Bluetooth PAN",
+            Self::Lan => "LAN",
+        }
+    }
+}
+
+/// Classify a network interface by name. Returns `None` for interfaces the
+/// relay never uses (loopback, virtual bridges, tunnels, unknown names).
+pub fn classify_interface(name: &str) -> Option<LinkKind> {
+    let name = name.to_ascii_lowercase();
+
+    // Wi-Fi first: nothing else starts with `wl`.
+    if name.starts_with("wlan") || name.starts_with("wlp") || name.starts_with("wifi") {
+        return Some(LinkKind::Wifi);
+    }
+    // USB tethering and USB Ethernet dongles.
+    if name.starts_with("usb")
+        || name.starts_with("rndis")
+        || name.starts_with("enx")
+        || name == "wwan0"
+        || (name.starts_with("en") && name.contains('u'))
+    {
+        return Some(LinkKind::Usb);
+    }
+    // Bluetooth PAN (bnep devices and common bridge names).
+    if name.starts_with("bnep") || name.starts_with("bt-pan") || name.starts_with("pan") {
+        return Some(LinkKind::BluetoothPan);
+    }
+    // Wired Ethernet: accepted for Linux-to-Linux peers. The `en*` USB rule
+    // above already took `enp0s20u1`-style names, so this is plain LAN.
+    if name.starts_with("eth")
+        || name.starts_with("enp")
+        || name.starts_with("eno")
+        || name.starts_with("ens")
+        || name.starts_with("em")
+    {
+        return Some(LinkKind::Lan);
+    }
+    None
+}
+
+/// Which transport the user asked for. `Auto` (the default) picks the best
+/// available link by policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransportPreference {
+    #[default]
+    Auto,
+    Usb,
+    Wifi,
+    Bluetooth,
+    Lan,
+}
+
+impl TransportPreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Usb => "usb",
+            Self::Wifi => "wifi",
+            Self::Bluetooth => "bluetooth",
+            Self::Lan => "lan",
+        }
+    }
+
+    fn matches(self, kind: LinkKind) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Usb => kind == LinkKind::Usb,
+            Self::Wifi => kind == LinkKind::Wifi,
+            Self::Bluetooth => kind == LinkKind::BluetoothPan,
+            Self::Lan => kind == LinkKind::Lan,
+        }
+    }
+}
+
+impl FromStr for TransportPreference {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "usb" => Ok(Self::Usb),
+            "wifi" | "wlan" => Ok(Self::Wifi),
+            "bluetooth" | "bt" => Ok(Self::Bluetooth),
+            "lan" | "ethernet" => Ok(Self::Lan),
+            other => Err(format!("unknown transport preference '{other}'")),
+        }
+    }
+}
+
+/// One usable local IPv4 link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalLink {
+    pub name: String,
+    pub addr: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub kind: LinkKind,
+}
+
+impl LocalLink {
+    /// Whether `target` sits on this link's subnet.
+    pub fn contains(&self, target: Ipv4Addr) -> bool {
+        let mask = u32::from(self.netmask);
+        u32::from(self.addr) & mask == u32::from(target) & mask
+    }
+}
+
+/// Enumerate usable local IPv4 links, sorted best-first (policy rank, then
+/// address for determinism). Requires no privileges on Linux.
+pub fn local_links() -> Vec<LocalLink> {
+    let mut links = Vec::new();
+    let interfaces = match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces,
+        Err(_) => return links,
+    };
+    for interface in interfaces {
+        if interface.is_loopback() {
+            continue;
+        }
+        let if_addrs::IfAddr::V4(v4) = &interface.addr else {
+            continue;
+        };
+        if v4.ip.is_link_local() || v4.ip.is_unspecified() {
+            continue;
+        }
+        let Some(kind) = classify_interface(&interface.name) else {
+            continue;
+        };
+        links.push(LocalLink {
+            name: interface.name.clone(),
+            addr: v4.ip,
+            netmask: v4.netmask,
+            kind,
+        });
+    }
+    links.sort_by(|a, b| {
+        (a.kind, a.addr)
+            .partial_cmp(&(b.kind, b.addr))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    links
+}
+
+/// Filter and rank links for a preference. `Auto` keeps everything ranked
+/// by policy; a specific preference may yield an empty list when that link
+/// kind is currently absent. Input order does not matter.
+pub fn select_links(links: &[LocalLink], preference: TransportPreference) -> Vec<LocalLink> {
+    let mut selected: Vec<LocalLink> = links
+        .iter()
+        .filter(|link| preference.matches(link.kind))
+        .cloned()
+        .collect();
+    selected.sort_by(|a, b| {
+        (a.kind, a.addr)
+            .partial_cmp(&(b.kind, b.addr))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    selected
+}
+
+/// Choose the local address to bind when reaching `target`: a same-subnet
+/// link wins; otherwise the highest-ranked candidate. Returns `None` when
+/// no candidate links exist (the OS default route is used then).
+pub fn outbound_bind_addr(
+    links: &[LocalLink],
+    target: SocketAddr,
+    preference: TransportPreference,
+) -> Option<Ipv4Addr> {
+    let IpAddr::V4(target_v4) = target.ip() else {
+        return None;
+    };
+    let candidates = select_links(links, preference);
+    candidates
+        .iter()
+        .find(|link| link.contains(target_v4))
+        .or_else(|| candidates.first())
+        .map(|link| link.addr)
+}
+
+/// Connect a TCP stream, optionally bound to a specific local address.
+pub fn connect_tcp(
+    target: SocketAddr,
+    bind: Option<Ipv4Addr>,
+    timeout: Duration,
+) -> std::io::Result<std::net::TcpStream> {
+    let domain = if target.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if let Some(addr) = bind {
+        socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(addr), 0)))?;
+    }
+    socket.set_nonblocking(true)?;
+    match socket.connect(&SockAddr::from(target)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            wait_for_connect(&socket, timeout)?;
+        }
+        Err(error) => return Err(error),
+    }
+    socket.set_nonblocking(false)?;
+    socket.set_nodelay(true)?;
+    Ok(socket.into())
+}
+
+fn wait_for_connect(socket: &Socket, timeout: Duration) -> std::io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match socket.take_error()? {
+            Some(error) => return Err(error),
+            None => {
+                if socket.peer_addr().is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TCP connect timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Measure TCP connect latency to `target`, optionally from a specific local
+/// address. Used to break ties between several candidate links.
+pub fn probe_tcp_rtt(
+    target: SocketAddr,
+    bind: Option<Ipv4Addr>,
+    timeout: Duration,
+) -> Option<Duration> {
+    let start = Instant::now();
+    connect_tcp(target, bind, timeout).ok()?;
+    Some(start.elapsed())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_common_interface_names() {
+        let cases = [
+            ("wlan0", LinkKind::Wifi),
+            ("wlp3s0", LinkKind::Wifi),
+            ("wifi0", LinkKind::Wifi),
+            ("usb0", LinkKind::Usb),
+            ("rndis0", LinkKind::Usb),
+            ("enx00e04c680000", LinkKind::Usb),
+            ("enp0s20u1", LinkKind::Usb),
+            ("wwan0", LinkKind::Usb),
+            ("bnep0", LinkKind::BluetoothPan),
+            ("bt-pan0", LinkKind::BluetoothPan),
+            ("pan0", LinkKind::BluetoothPan),
+            ("eth0", LinkKind::Lan),
+            ("enp5s0", LinkKind::Lan),
+            ("eno1", LinkKind::Lan),
+            ("ens33", LinkKind::Lan),
+            ("em1", LinkKind::Lan),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                classify_interface(name),
+                Some(expected),
+                "interface {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_unusable_interfaces() {
+        for name in ["lo", "veth0", "docker0", "virbr0", "tun0", "br0", "mystery0"] {
+            assert_eq!(classify_interface(name), None, "interface {name}");
+        }
+    }
+
+    #[test]
+    fn classification_is_case_insensitive() {
+        assert_eq!(classify_interface("WLAN0"), Some(LinkKind::Wifi));
+        assert_eq!(classify_interface("USB0"), Some(LinkKind::Usb));
+    }
+
+    #[test]
+    fn policy_orders_usb_first_and_lan_last() {
+        assert!(LinkKind::Usb < LinkKind::Wifi);
+        assert!(LinkKind::Wifi < LinkKind::BluetoothPan);
+        assert!(LinkKind::BluetoothPan < LinkKind::Lan);
+    }
+
+    #[test]
+    fn preference_parsing_round_trips() {
+        for preference in [
+            TransportPreference::Auto,
+            TransportPreference::Usb,
+            TransportPreference::Wifi,
+            TransportPreference::Bluetooth,
+            TransportPreference::Lan,
+        ] {
+            let parsed: TransportPreference = preference.as_str().parse().unwrap();
+            assert_eq!(parsed, preference);
+        }
+        assert_eq!("bt".parse(), Ok(TransportPreference::Bluetooth));
+        assert_eq!("ethernet".parse(), Ok(TransportPreference::Lan));
+        assert_eq!("".parse(), Ok(TransportPreference::Auto));
+        assert!("carrier-pigeon".parse::<TransportPreference>().is_err());
+    }
+
+    fn fixture_links() -> Vec<LocalLink> {
+        let mk = |name: &str, addr: [u8; 4], kind: LinkKind| LocalLink {
+            name: name.into(),
+            addr: Ipv4Addr::from(addr),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            kind,
+        };
+        vec![
+            mk("enp5s0", [192, 168, 1, 10], LinkKind::Lan),
+            mk("usb0", [192, 168, 42, 129], LinkKind::Usb),
+            mk("wlan0", [192, 168, 1, 11], LinkKind::Wifi),
+            mk("bnep0", [10, 7, 0, 1], LinkKind::BluetoothPan),
+        ]
+    }
+
+    #[test]
+    fn select_links_ranks_by_policy() {
+        let mut links = fixture_links();
+        links.sort_by(|a, b| a.kind.cmp(&b.kind));
+        let ranked = select_links(&links, TransportPreference::Auto);
+        let kinds: Vec<LinkKind> = ranked.iter().map(|link| link.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                LinkKind::Usb,
+                LinkKind::Wifi,
+                LinkKind::BluetoothPan,
+                LinkKind::Lan
+            ]
+        );
+        let wifi_only = select_links(&links, TransportPreference::Wifi);
+        assert_eq!(wifi_only.len(), 1);
+        assert_eq!(wifi_only[0].kind, LinkKind::Wifi);
+    }
+
+    #[test]
+    fn bind_addr_prefers_same_subnet_over_rank() {
+        let links = fixture_links();
+        // Same subnet as wlan0/enp5s0: Wi-Fi wins over the (higher-ranked)
+        // USB link because traffic must not leave the local segment.
+        let target = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 50).into(), 48123);
+        let bind = outbound_bind_addr(&links, target, TransportPreference::Auto);
+        assert!(matches!(
+            bind,
+            Some(Ipv4Addr::V4(_)) | None
+        ));
+        let chosen = bind.expect("a link matches the target subnet");
+        assert!(
+            chosen == Ipv4Addr::new(192, 168, 1, 10)
+                || chosen == Ipv4Addr::new(192, 168, 1, 11),
+            "expected a 192.168.1.x link, got {chosen}"
+        );
+        // Off-subnet target falls back to the policy leader (USB).
+        let remote = SocketAddr::new(Ipv4Addr::new(172, 31, 0, 5).into(), 48123);
+        assert_eq!(
+            outbound_bind_addr(&links, remote, TransportPreference::Auto),
+            Some(Ipv4Addr::new(192, 168, 42, 129))
+        );
+        // An explicit preference is honoured even off-subnet.
+        assert_eq!(
+            outbound_bind_addr(&links, remote, TransportPreference::Lan),
+            Some(Ipv4Addr::new(192, 168, 1, 10))
+        );
+        // No matching links at all.
+        assert_eq!(
+            outbound_bind_addr(&[], remote, TransportPreference::Auto),
+            None
+        );
+    }
+
+    #[test]
+    fn subnet_membership_is_mask_based() {
+        let link = LocalLink {
+            name: "wlan0".into(),
+            addr: Ipv4Addr::new(192, 168, 1, 11),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            kind: LinkKind::Wifi,
+        };
+        assert!(link.contains(Ipv4Addr::new(192, 168, 1, 200)));
+        assert!(!link.contains(Ipv4Addr::new(192, 168, 2, 1)));
+    }
+}

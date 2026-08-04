@@ -25,6 +25,8 @@ mod effects;
 mod links;
 mod metering;
 mod properties;
+#[cfg(feature = "relay")]
+mod relay;
 mod registry;
 
 use effects::NativeEffect;
@@ -81,6 +83,10 @@ pub struct PipewireDriver {
     /// recreate an application's link when it resumes; the next synchronized
     /// snapshot removes only those links the user explicitly deleted.
     blocked_connections: Vec<(PortKey, PortKey)>,
+    /// Relay engine plus the two virtual devices. Created on first relay use
+    /// and kept until the driver drops so reconnects stay cheap.
+    #[cfg(feature = "relay")]
+    relay: Option<relay::RelayRuntimeSet>,
 }
 
 impl PipewireDriver {
@@ -207,6 +213,8 @@ impl PipewireDriver {
             effect_host: EffectHost::new(),
             effects: BTreeMap::new(),
             blocked_connections: Vec::new(),
+            #[cfg(feature = "relay")]
+            relay: None,
         };
 
         let loop_for_initial_sync = driver.thread_loop.clone();
@@ -934,6 +942,8 @@ impl Drop for PipewireDriver {
         self.meters.clear();
         // Each raw `pw_filter` owns callbacks on this loop, so destroy them
         // before releasing the registry/core that created their globals.
+        #[cfg(feature = "relay")]
+        self.relay.take();
         self.effects.clear();
         self.registry_listener.take();
         self.registry.take();
@@ -1178,6 +1188,132 @@ impl EffectDriver for PipewireDriver {
         self.roundtrip_locked()?;
         self.rebuild_graph_locked()?;
         self.remove_effect_locked(instance_id)
+    }
+}
+
+#[cfg(feature = "relay")]
+impl RelayDriver for PipewireDriver {
+    fn relay_available(&self) -> bool {
+        true
+    }
+
+    fn relay_status(&self) -> RelayEngineStatus {
+        self.relay
+            .as_ref()
+            .map(|set| set.handle().status())
+            .unwrap_or_default()
+    }
+
+    fn relay_devices_active(&self) -> bool {
+        self.relay.is_some()
+    }
+
+    fn relay_start_host(&mut self, request: RelayHostRequest) -> BackendResult<u16> {
+        let loop_for_relay = self.thread_loop.clone();
+        let _guard = loop_for_relay.lock();
+        let set = self.ensure_relay_devices_locked(&request.device_name)?;
+        let config = pw_graph_relay::EngineConfig {
+            device_name: request.device_name,
+            pin: request.pin,
+            port: request.port,
+            codec: request.codec,
+            frame_ms: request.frame_ms,
+            transport: request.transport,
+            ..Default::default()
+        };
+        set.handle().update_config(config);
+        set.handle().host_start().map_err(|error| {
+            BackendError::Native(format!("relay host start failed: {error}"))
+        })
+    }
+
+    fn relay_stop_host(&mut self) -> BackendResult<()> {
+        if let Some(set) = self.relay.as_mut() {
+            set.handle()
+                .host_stop()
+                .map_err(|error| BackendError::Native(format!("relay host stop failed: {error}")))?;
+        }
+        Ok(())
+    }
+
+    fn relay_connect(
+        &mut self,
+        target: std::net::SocketAddr,
+        pin: &str,
+        roles: RelayRoles,
+    ) -> BackendResult<()> {
+        let loop_for_relay = self.thread_loop.clone();
+        let _guard = loop_for_relay.lock();
+        let device_name = self
+            .relay
+            .as_ref()
+            .map(|set| set.handle().config().device_name)
+            .unwrap_or_else(|| "qpwgraph-rs".into());
+        let set = self.ensure_relay_devices_locked(&device_name)?;
+        set.handle().connect(target, pin, roles);
+        Ok(())
+    }
+
+    fn relay_disconnect(&mut self, session: RelaySessionId) -> BackendResult<()> {
+        let Some(set) = self.relay.as_mut() else {
+            return Err(BackendError::Native(
+                "no relay session exists to disconnect".into(),
+            ));
+        };
+        set.handle()
+            .disconnect(session)
+            .map_err(|error| BackendError::Native(format!("relay disconnect failed: {error}")))
+    }
+
+    fn relay_events(&mut self) -> Vec<RelayEvent> {
+        self.relay
+            .as_mut()
+            .map(|set| set.handle().events())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "relay")]
+impl PipewireDriver {
+    /// Create the relay engine and virtual devices on first use. The caller
+    /// must hold the ThreadLoop lock.
+    fn ensure_relay_devices_locked(
+        &mut self,
+        device_name: &str,
+    ) -> BackendResult<&mut relay::RelayRuntimeSet> {
+        if self.relay.is_none() {
+            let set = relay::RelayRuntimeSet::create(&self.thread_loop, device_name)?;
+            self.relay = Some(set);
+            // `pw_filter_new_simple` owns a small client connection of its
+            // own, so the new virtual devices are published across clients.
+            // Mirror the effect-creation synchronization: one round-trip
+            // normally observes the globals, and a bounded second pass
+            // covers the publication race without ever waiting in a loop.
+            for _ in 0..2 {
+                self.roundtrip_locked()?;
+                self.rebuild_graph_locked()?;
+                if self.relay_devices_visible_locked() {
+                    break;
+                }
+            }
+        }
+        Ok(self
+            .relay
+            .as_mut()
+            .expect("relay set was just created above"))
+    }
+
+    /// Whether both relay virtual devices are present in the current graph.
+    fn relay_devices_visible_locked(&self) -> bool {
+        self.graph
+            .nodes
+            .values()
+            .any(|node| node.name == relay::RELAY_SOURCE_NAME)
+            && self
+                .graph
+                .nodes
+                .values()
+                .any(|node| node.name == relay::RELAY_SINK_NAME)
     }
 }
 

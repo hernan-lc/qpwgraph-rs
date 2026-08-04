@@ -1,0 +1,20 @@
+[package]
+name = "pw-graph-relay-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Public SDK for the qpwgraph-rs audio relay: host and client roles for any app"
+
+[dependencies]
+pw-graph-relay = { path = "../pw-graph-relay" }
+thiserror.workspace = true
+
+[[example]]
+name = "relay-host"
+
+[[example]]
+name = "relay-emit"
+
+[[example]]
+name = "relay-receive"

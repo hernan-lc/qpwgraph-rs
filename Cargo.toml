@@ -11,6 +11,8 @@ members = [
     "crates/pw-graph-i18n",
     "crates/pw-graph-ui",
     "crates/pw-graph-app",
+    "crates/pw-graph-relay",
+    "crates/pw-graph-relay-sdk",
     "vendor/nnnoiseless",
 ]
 
@@ -32,3 +34,10 @@ serde_json = "1.0"
 thiserror = "1.0"
 toml = "0.8"
 pipewire = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+opus = "0.3"
+socket2 = "0.5"
+if-addrs = "0.13"
+mdns-sd = "0.13"

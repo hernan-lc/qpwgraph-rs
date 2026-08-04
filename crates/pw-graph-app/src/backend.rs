@@ -328,3 +328,86 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
         Ok(())
     }
 }
+
+#[cfg(feature = "relay")]
+impl pw_graph_backend::RelayDriver for CompositeDriver {
+    fn relay_available(&self) -> bool {
+        self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.relay_available())
+    }
+
+    fn relay_status(&self) -> pw_graph_backend::RelayEngineStatus {
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.relay_status())
+            .unwrap_or_default()
+    }
+
+    fn relay_devices_active(&self) -> bool {
+        self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.relay_devices_active())
+    }
+
+    fn relay_start_host(
+        &mut self,
+        request: pw_graph_backend::RelayHostRequest,
+    ) -> pw_graph_backend::BackendResult<u16> {
+        let port = self
+            .pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .relay_start_host(request)?;
+        // Starting the host lazily creates the virtual relay devices; mirror
+        // them into the composite graph the same way effect creation does.
+        self.rebuild_after_effect_mutation();
+        Ok(port)
+    }
+
+    fn relay_stop_host(&mut self) -> pw_graph_backend::BackendResult<()> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.relay_stop_host(),
+            None => Err(pw_graph_backend::BackendError::Unsupported(
+                "PipeWire backend is disabled".into(),
+            )),
+        }
+    }
+
+    fn relay_connect(
+        &mut self,
+        target: std::net::SocketAddr,
+        pin: &str,
+        roles: pw_graph_backend::RelayRoles,
+    ) -> pw_graph_backend::BackendResult<()> {
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| {
+                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
+            })?
+            .relay_connect(target, pin, roles)?;
+        self.rebuild_after_effect_mutation();
+        Ok(())
+    }
+
+    fn relay_disconnect(
+        &mut self,
+        session: pw_graph_backend::RelaySessionId,
+    ) -> pw_graph_backend::BackendResult<()> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.relay_disconnect(session),
+            None => Err(pw_graph_backend::BackendError::Unsupported(
+                "PipeWire backend is disabled".into(),
+            )),
+        }
+    }
+
+    fn relay_events(&mut self) -> Vec<pw_graph_backend::RelayEvent> {
+        match self.pipewire.as_mut() {
+            Some(driver) => driver.relay_events(),
+            None => Vec::new(),
+        }
+    }
+}

@@ -91,7 +91,18 @@ fn number_input_surface(
                     if !suffix.is_empty() {
                         input = input.suffix(suffix);
                     }
-                    let field_response = ui.add_sized(vec2(field_width, height), input);
+                    // `add_sized` gives the child a centered-and-justified
+                    // layout, which makes short values look like they are
+                    // floating in the field. Give DragValue the full field
+                    // size while retaining the surrounding left-to-right
+                    // layout so its text editor starts at the field inset
+                    // and uses all space before the stepper.
+                    let field_response = ui
+                        .scope(|ui| {
+                            ui.spacing_mut().interact_size = vec2(field_width, height);
+                            ui.add(input)
+                        })
+                        .inner;
                     let stepper = ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         let incremented = number_step_button(

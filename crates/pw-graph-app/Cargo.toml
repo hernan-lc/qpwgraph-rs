@@ -10,9 +10,10 @@ name = "qpwgraph-rs"
 path = "src/main.rs"
 
 [features]
-default = ["pipewire", "alsa", "tray"]
+default = ["pipewire", "alsa", "tray", "relay"]
 pipewire = ["pw-graph-backend/pipewire"]
 alsa = ["pw-graph-alsamidi/alsa"]
+relay = ["pw-graph-backend/relay", "pipewire"]
 tray = ["dep:ksni"]
 
 [dependencies]
