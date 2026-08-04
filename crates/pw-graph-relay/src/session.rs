@@ -17,9 +17,7 @@ use crate::pairing::{generate_salt, pair_digest, verify_digest};
 use crate::protocol::{
     read_frame, write_frame, CodecKind, ControlMessage, DeviceKind, Roles, PROTOCOL_VERSION,
 };
-use crate::{
-    EngineInner, PeerInfo, RelayError, RelayEvent, RelayResult, SessionId, SessionRecord,
-};
+use crate::{EngineInner, PeerInfo, RelayError, RelayEvent, RelayResult, SessionId, SessionRecord};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,10 +52,7 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
     std::thread::Builder::new()
         .name("relay-host".into())
         .spawn(move || accept_loop(inner, listener, thread_stop))?;
-    Ok(HostRecord {
-        port: bound,
-        stop,
-    })
+    Ok(HostRecord { port: bound, stop })
 }
 
 pub(crate) fn stop_host(inner: &EngineInner) {
@@ -138,10 +133,11 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
             return;
         }
         ControlMessage::Hello {
+            protocol,
             device_name,
             device_kind,
             ..
-        } => (device_name, device_kind),
+        } if protocol == PROTOCOL_VERSION as u32 => (device_name, device_kind),
         _ => return,
     };
 
@@ -226,8 +222,23 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
     }
 
     let format = AudioFormat::new(sample_rate, channels, frame_ms);
+    if let Err(error) =
+        make_encoder(codec, format).and_then(|_| make_decoder(codec, format).map(|_| ()))
+    {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: error.to_string(),
+            },
+        );
+        return;
+    }
+    if write_frame(&mut stream, &ControlMessage::SessionReady {}).is_err() {
+        return;
+    }
     let record = Arc::new(SessionRecord {
         id,
+        wire_id: id.0,
         peer: PeerInfo {
             name: peer_name,
             kind: peer_kind,
@@ -245,6 +256,7 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
         control_generation: AtomicU64::new(0),
         resuming: AtomicBool::new(false),
         peer_audio_addr: Mutex::new(None),
+        outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
     });
     inner.insert_session(Arc::clone(&record));
     inner.emit(RelayEvent::SessionEstablished {
@@ -430,8 +442,10 @@ fn client_thread(
 
     let (salt, host_name) = match read_frame(&mut stream) {
         Ok(ControlMessage::Challenge {
-            salt, host_name, ..
-        }) => (salt, host_name),
+            protocol,
+            salt,
+            host_name,
+        }) if protocol == PROTOCOL_VERSION as u32 => (salt, host_name),
         Ok(_) => {
             fail_attempt(&inner, id, "host sent an unexpected message".into());
             return;
@@ -448,8 +462,11 @@ fn client_thread(
         return;
     }
 
-    let audio_port = match read_frame(&mut stream) {
-        Ok(ControlMessage::PairOk { audio_port, .. }) => audio_port,
+    let (audio_port, wire_id) = match read_frame(&mut stream) {
+        Ok(ControlMessage::PairOk {
+            audio_port,
+            session_id,
+        }) => (audio_port, session_id),
         Ok(ControlMessage::PairFail { reason }) => {
             fail_attempt(&inner, id, format!("host rejected pairing: {reason}"));
             return;
@@ -471,6 +488,25 @@ fn client_thread(
         fail_attempt(&inner, id, "handshake failed during session setup".into());
         return;
     }
+    match read_frame(&mut stream) {
+        Ok(ControlMessage::SessionReady {}) => {}
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(&inner, id, format!("host rejected session: {reason}"));
+            return;
+        }
+        Ok(_) => {
+            fail_attempt(
+                &inner,
+                id,
+                "host sent an unexpected session response".into(),
+            );
+            return;
+        }
+        Err(error) => {
+            fail_attempt(&inner, id, format!("session setup failed: {error}"));
+            return;
+        }
+    }
 
     let socket = match UdpSocket::bind((bind.unwrap_or(Ipv4Addr::UNSPECIFIED), 0)) {
         Ok(socket) => socket,
@@ -486,6 +522,7 @@ fn client_thread(
     let format = AudioFormat::new(config.sample_rate, config.channels, config.frame_ms);
     let record = Arc::new(SessionRecord {
         id,
+        wire_id,
         peer: PeerInfo {
             name: host_name,
             kind: DeviceKind::Other,
@@ -502,6 +539,7 @@ fn client_thread(
         control_generation: AtomicU64::new(0),
         resuming: AtomicBool::new(false),
         peer_audio_addr: Mutex::new(Some(host_audio_addr)),
+        outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
     });
     inner.insert_session(Arc::clone(&record));
     inner.emit(RelayEvent::SessionEstablished {
@@ -555,16 +593,12 @@ fn client_control_loop(
                 return;
             }
             ControlExit::Dropped(reason) => {
-                if record.bye_requested.load(Ordering::Relaxed)
-                    || !inner.session_alive(record.id)
-                {
+                if record.bye_requested.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
                     teardown(&inner, record.id, reason);
                     return;
                 }
                 inner.emit(RelayEvent::Error {
-                    message: format!(
-                        "control link to host lost ({reason}); attempting to resume"
-                    ),
+                    message: format!("control link to host lost ({reason}); attempting to resume"),
                 });
                 match resume_client_control(&inner, &record, target, &pin) {
                     Some(new_stream) => {
@@ -617,7 +651,7 @@ fn resume_client_control(
         if write_frame(
             &mut stream,
             &ControlMessage::Resume {
-                session_id: record.id.0,
+                session_id: record.wire_id,
             },
         )
         .is_err()
@@ -625,7 +659,11 @@ fn resume_client_control(
             continue;
         }
         let salt = match read_frame(&mut stream) {
-            Ok(ControlMessage::Challenge { salt, .. }) => salt,
+            Ok(ControlMessage::Challenge { protocol, salt, .. })
+                if protocol == PROTOCOL_VERSION as u32 =>
+            {
+                salt
+            }
             Ok(ControlMessage::PairFail { reason }) => {
                 inner.emit(RelayEvent::Error {
                     message: format!("host rejected resume: {reason}"),
@@ -816,16 +854,12 @@ fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSo
         }
         // The host learns the peer address from received datagrams; wait
         // briefly until it is known.
-        let peer_addr = record
-            .peer_audio_addr
-            .lock()
-            .ok()
-            .and_then(|slot| *slot);
+        let peer_addr = record.peer_audio_addr.lock().ok().and_then(|slot| *slot);
         let Some(peer_addr) = peer_addr else {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
-        let Some(samples) = inner.outgoing.pop_exact(frame_samples) else {
+        let Some(samples) = record.outgoing.pop_exact(frame_samples) else {
             std::thread::sleep(Duration::from_millis(2));
             continue;
         };

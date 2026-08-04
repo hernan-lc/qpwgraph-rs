@@ -62,7 +62,13 @@ fn ramp(samples: usize) -> Vec<f32> {
     (0..samples).map(|i| i as f32 / samples as f32).collect()
 }
 
-fn establish(host: &RelayHandle, client: &RelayHandle, port: u16, pin: &str, roles: Roles) -> SessionId {
+fn establish(
+    host: &RelayHandle,
+    client: &RelayHandle,
+    port: u16,
+    pin: &str,
+    roles: Roles,
+) -> SessionId {
     let target: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let session = client.connect(target, pin, roles);
     assert!(
@@ -74,7 +80,11 @@ fn establish(host: &RelayHandle, client: &RelayHandle, port: u16, pin: &str, rol
         "client session should establish"
     );
     assert!(
-        await_event(host, |event| matches!(event, RelayEvent::SessionEstablished { .. })).is_some(),
+        await_event(host, |event| matches!(
+            event,
+            RelayEvent::SessionEstablished { .. }
+        ))
+        .is_some(),
         "host session should establish"
     );
     session
@@ -84,7 +94,13 @@ fn establish(host: &RelayHandle, client: &RelayHandle, port: u16, pin: &str, rol
 fn client_emit_delivers_audio_to_host() {
     let (_host, host_handle, port) = host_engine("123456");
     let (_client, client_handle) = client_engine();
-    let session = establish(&host_handle, &client_handle, port, "123456", Roles::emit_only());
+    let session = establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::emit_only(),
+    );
 
     const FRAME: usize = 960;
     let signal = ramp(FRAME * 10);
@@ -119,7 +135,13 @@ fn client_emit_delivers_audio_to_host() {
 fn host_sends_audio_to_receiving_client() {
     let (_host, host_handle, port) = host_engine("123456");
     let (_client, client_handle) = client_engine();
-    establish(&host_handle, &client_handle, port, "123456", Roles::receive_only());
+    establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::receive_only(),
+    );
 
     const FRAME: usize = 960;
     let signal = ramp(FRAME * 8);
@@ -140,16 +162,56 @@ fn host_sends_audio_to_receiving_client() {
 }
 
 #[test]
+fn host_capture_fans_out_to_multiple_receivers() {
+    let (_host, host_handle, port) = host_engine("123456");
+    let (_client_a, client_a_handle) = client_engine();
+    let (_client_b, client_b_handle) = client_engine();
+    establish(
+        &host_handle,
+        &client_a_handle,
+        port,
+        "123456",
+        Roles::receive_only(),
+    );
+    establish(
+        &host_handle,
+        &client_b_handle,
+        port,
+        "123456",
+        Roles::receive_only(),
+    );
+
+    const FRAME: usize = 960;
+    let signal = ramp(FRAME * 4);
+    host_handle.push_capture(&signal);
+    let mut received_a = Vec::new();
+    let mut received_b = Vec::new();
+    let mut buffer_a = [0.0f32; FRAME];
+    let mut buffer_b = [0.0f32; FRAME];
+    assert!(wait_until(|| {
+        let count_a = client_a_handle.pull_playback(&mut buffer_a);
+        let count_b = client_b_handle.pull_playback(&mut buffer_b);
+        received_a.extend_from_slice(&buffer_a[..count_a]);
+        received_b.extend_from_slice(&buffer_b[..count_b]);
+        received_a.len() >= signal.len() && received_b.len() >= signal.len()
+    }));
+    assert_eq!(&received_a[..signal.len()], &signal[..]);
+    assert_eq!(&received_b[..signal.len()], &signal[..]);
+}
+
+#[test]
 fn wrong_pin_is_rejected() {
     let (_host, _host_handle, port) = host_engine("123456");
     let (_client, client_handle) = client_engine();
     let target: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let session = client_handle.connect(target, "999999", Roles::emit_only());
 
-    let event = await_event(&client_handle, |event| matches!(
-        event,
-        RelayEvent::SessionLost { id, .. } if *id == session
-    ));
+    let event = await_event(&client_handle, |event| {
+        matches!(
+            event,
+            RelayEvent::SessionLost { id, .. } if *id == session
+        )
+    });
     match event {
         Some(RelayEvent::SessionLost { reason, .. }) => {
             assert!(
@@ -178,7 +240,13 @@ fn status_reflects_host_and_sessions() {
     assert_eq!(status.host_port, Some(port));
     assert!(status.sessions.is_empty());
 
-    establish(&host_handle, &client_handle, port, "123456", Roles::emit_only());
+    establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::emit_only(),
+    );
     let status = host_handle.status();
     assert_eq!(status.sessions.len(), 1);
     assert!(status.sessions[0].receiving);

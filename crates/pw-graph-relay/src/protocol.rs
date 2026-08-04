@@ -138,6 +138,8 @@ pub enum ControlMessage {
         sample_rate: u32,
         channels: u16,
     },
+    /// H→C: negotiated session parameters accepted and audio may start.
+    SessionReady {},
     /// Bidirectional liveness ping, every ~2 s.
     Keepalive {},
     /// C→H: request to resume an established session after the control link
@@ -259,6 +261,7 @@ mod tests {
                 sample_rate: 48_000,
                 channels: 1,
             },
+            ControlMessage::SessionReady {},
             ControlMessage::Keepalive {},
             ControlMessage::Resume { session_id: 42 },
             ControlMessage::ResumeOk {},
@@ -308,8 +311,14 @@ mod tests {
 
     #[test]
     fn codec_ids_round_trip() {
-        assert_eq!(CodecKind::from_id(CodecKind::Pcm.id()), Some(CodecKind::Pcm));
-        assert_eq!(CodecKind::from_id(CodecKind::Opus.id()), Some(CodecKind::Opus));
+        assert_eq!(
+            CodecKind::from_id(CodecKind::Pcm.id()),
+            Some(CodecKind::Pcm)
+        );
+        assert_eq!(
+            CodecKind::from_id(CodecKind::Opus.id()),
+            Some(CodecKind::Opus)
+        );
         assert_eq!(CodecKind::from_id(9), None);
     }
 }

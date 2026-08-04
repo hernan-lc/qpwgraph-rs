@@ -218,24 +218,35 @@ pub fn outbound_bind_addr(
 }
 
 /// Connect a TCP stream, optionally bound to a specific local address.
+///
+/// When no bind address is requested the standard
+/// [`TcpStream::connect_timeout`](std::net::TcpStream::connect_timeout) path
+/// is used — it is simpler and works for loopback tests. Binding to a local
+/// address needs socket2 so the interface selection policy can stick.
 pub fn connect_tcp(
     target: SocketAddr,
     bind: Option<Ipv4Addr>,
     timeout: Duration,
 ) -> std::io::Result<std::net::TcpStream> {
+    let Some(local) = bind else {
+        let stream = std::net::TcpStream::connect_timeout(&target, timeout)?;
+        let _ = stream.set_nodelay(true);
+        return Ok(stream);
+    };
+
     let domain = if target.is_ipv4() {
         Domain::IPV4
     } else {
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    if let Some(addr) = bind {
-        socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(addr), 0)))?;
-    }
+    socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(local), 0)))?;
     socket.set_nonblocking(true)?;
     match socket.connect(&SockAddr::from(target)) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        // Non-blocking connect is in progress (EINPROGRESS on Linux, often
+        // WouldBlock elsewhere). Poll until connected or the deadline hits.
+        Err(error) if is_connect_in_progress(&error) => {
             wait_for_connect(&socket, timeout)?;
         }
         Err(error) => return Err(error),
@@ -245,16 +256,21 @@ pub fn connect_tcp(
     Ok(socket.into())
 }
 
+fn is_connect_in_progress(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+    ) || error.raw_os_error() == Some(115) // EINPROGRESS on Linux
+}
+
 fn wait_for_connect(socket: &Socket, timeout: Duration) -> std::io::Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        match socket.take_error()? {
-            Some(error) => return Err(error),
-            None => {
-                if socket.peer_addr().is_ok() {
-                    return Ok(());
-                }
-            }
+        if let Some(error) = socket.take_error()? {
+            return Err(error);
+        }
+        if socket.peer_addr().is_ok() {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(std::io::Error::new(
@@ -303,17 +319,15 @@ mod tests {
             ("em1", LinkKind::Lan),
         ];
         for (name, expected) in cases {
-            assert_eq!(
-                classify_interface(name),
-                Some(expected),
-                "interface {name}"
-            );
+            assert_eq!(classify_interface(name), Some(expected), "interface {name}");
         }
     }
 
     #[test]
     fn ignores_unusable_interfaces() {
-        for name in ["lo", "veth0", "docker0", "virbr0", "tun0", "br0", "mystery0"] {
+        for name in [
+            "lo", "veth0", "docker0", "virbr0", "tun0", "br0", "mystery0",
+        ] {
             assert_eq!(classify_interface(name), None, "interface {name}");
         }
     }
@@ -367,7 +381,7 @@ mod tests {
     #[test]
     fn select_links_ranks_by_policy() {
         let mut links = fixture_links();
-        links.sort_by(|a, b| a.kind.cmp(&b.kind));
+        links.sort_by_key(|a| a.kind);
         let ranked = select_links(&links, TransportPreference::Auto);
         let kinds: Vec<LinkKind> = ranked.iter().map(|link| link.kind).collect();
         assert_eq!(
@@ -391,14 +405,9 @@ mod tests {
         // USB link because traffic must not leave the local segment.
         let target = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 50).into(), 48123);
         let bind = outbound_bind_addr(&links, target, TransportPreference::Auto);
-        assert!(matches!(
-            bind,
-            Some(Ipv4Addr::V4(_)) | None
-        ));
         let chosen = bind.expect("a link matches the target subnet");
         assert!(
-            chosen == Ipv4Addr::new(192, 168, 1, 10)
-                || chosen == Ipv4Addr::new(192, 168, 1, 11),
+            chosen == Ipv4Addr::new(192, 168, 1, 10) || chosen == Ipv4Addr::new(192, 168, 1, 11),
             "expected a 192.168.1.x link, got {chosen}"
         );
         // Off-subnet target falls back to the policy leader (USB).

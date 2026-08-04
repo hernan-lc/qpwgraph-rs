@@ -75,7 +75,10 @@ impl RelayCallbackState {
             return;
         }
         let frames = frames as u32 as usize;
-        let ports = self.ports.each_ref().map(|port| port.load(Ordering::Acquire));
+        let ports = self
+            .ports
+            .each_ref()
+            .map(|port| port.load(Ordering::Acquire));
         let Ok(mut scratch_guard) = self.scratch.try_lock() else {
             return;
         };
@@ -97,11 +100,10 @@ impl RelayCallbackState {
                 if available < frames {
                     scratch[available..].fill(0.0);
                 }
-                for frame in 0..frames {
-                    let sample = scratch[frame];
-                    for channel in 0..RELAY_CHANNELS {
-                        if !outputs[channel].is_null() {
-                            *outputs[channel].cast::<f32>().add(frame) = sample;
+                for (frame, sample) in scratch.iter().take(frames).enumerate() {
+                    for output in outputs.iter().take(RELAY_CHANNELS) {
+                        if !output.is_null() {
+                            *(*output).cast::<f32>().add(frame) = *sample;
                         }
                     }
                 }
@@ -117,16 +119,16 @@ impl RelayCallbackState {
                 if inputs.iter().all(|buffer| buffer.is_null()) {
                     return;
                 }
-                for frame in 0..frames {
+                for (frame, sample) in scratch.iter_mut().take(frames).enumerate() {
                     let mut sum = 0.0f32;
                     let mut count = 0.0f32;
-                    for channel in 0..RELAY_CHANNELS {
-                        if !inputs[channel].is_null() {
-                            sum += *inputs[channel].cast::<f32>().add(frame);
+                    for input in inputs.iter().take(RELAY_CHANNELS) {
+                        if !input.is_null() {
+                            sum += *(*input).cast::<f32>().add(frame);
                             count += 1.0;
                         }
                     }
-                    scratch[frame] = if count > 0.0 { sum / count } else { 0.0 };
+                    *sample = if count > 0.0 { sum / count } else { 0.0 };
                 }
                 self.handle.try_push_capture(scratch);
             }
@@ -184,12 +186,9 @@ impl RelayNodeRuntime {
                 "Audio/Source/Virtual",
                 "audio-input-microphone",
             ),
-            RelayNodeKind::Speaker => (
-                RELAY_SINK_NAME,
-                "Relay Speaker",
-                "Audio/Sink",
-                "audio-card",
-            ),
+            RelayNodeKind::Speaker => {
+                (RELAY_SINK_NAME, "Relay Speaker", "Audio/Sink", "audio-card")
+            }
         };
 
         let callback = Box::new(RelayCallbackState::new(kind, handle));
@@ -263,8 +262,8 @@ impl RelayNodeRuntime {
                 )));
             }
         }
-        for channel in 0..RELAY_CHANNELS {
-            callback.ports[channel].store(ports[channel], Ordering::Release);
+        for (callback_port, port) in callback.ports.iter().zip(ports.iter()) {
+            callback_port.store(*port, Ordering::Release);
         }
 
         let result = unsafe {
@@ -324,16 +323,17 @@ impl RelayRuntimeSet {
         let engine = RelayEngine::start(config)
             .map_err(|error| BackendError::Native(format!("relay engine start: {error}")))?;
         let handle = engine.handle();
-        let source = RelayNodeRuntime::create(thread_loop, handle.clone(), RelayNodeKind::Microphone)?;
-        let sink = match RelayNodeRuntime::create(thread_loop, handle.clone(), RelayNodeKind::Speaker)
-        {
-            Ok(created) => created,
-            Err(error) => {
-                // The engine must not outlive a half-built device set.
-                engine.shutdown();
-                return Err(error);
-            }
-        };
+        let source =
+            RelayNodeRuntime::create(thread_loop, handle.clone(), RelayNodeKind::Microphone)?;
+        let sink =
+            match RelayNodeRuntime::create(thread_loop, handle.clone(), RelayNodeKind::Speaker) {
+                Ok(created) => created,
+                Err(error) => {
+                    // The engine must not outlive a half-built device set.
+                    engine.shutdown();
+                    return Err(error);
+                }
+            };
         Ok(Self {
             _engine: engine,
             handle,

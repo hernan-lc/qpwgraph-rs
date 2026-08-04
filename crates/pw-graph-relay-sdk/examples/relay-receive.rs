@@ -23,7 +23,10 @@ fn main() {
         .connect(target, &pin)
         .expect("connects to host");
 
-    println!("connected to host {:?}, receiving audio", client.host_name());
+    println!(
+        "connected to host {:?}, receiving audio",
+        client.host_name()
+    );
 
     let mut buffer = [0.0f32; 960];
     loop {
@@ -32,12 +35,8 @@ fn main() {
         }
         let samples = client.pull_playback(&mut buffer);
         if samples > 0 {
-            let rms = (buffer[..samples]
-                .iter()
-                .map(|s| s * s)
-                .sum::<f32>()
-                / samples as f32)
-                .sqrt();
+            let rms =
+                (buffer[..samples].iter().map(|s| s * s).sum::<f32>() / samples as f32).sqrt();
             let bars = (rms * 200.0).min(40.0) as usize;
             println!("|{}{}", "#".repeat(bars), " ".repeat(40 - bars));
         }

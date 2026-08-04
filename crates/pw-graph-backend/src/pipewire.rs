@@ -25,9 +25,9 @@ mod effects;
 mod links;
 mod metering;
 mod properties;
+mod registry;
 #[cfg(feature = "relay")]
 mod relay;
-mod registry;
 
 use effects::NativeEffect;
 use metering::{process_meter_buffer, MeterCallbackState, MeterHandle, MeterReadingState};
@@ -1222,16 +1222,16 @@ impl RelayDriver for PipewireDriver {
             ..Default::default()
         };
         set.handle().update_config(config);
-        set.handle().host_start().map_err(|error| {
-            BackendError::Native(format!("relay host start failed: {error}"))
-        })
+        set.handle()
+            .host_start()
+            .map_err(|error| BackendError::Native(format!("relay host start failed: {error}")))
     }
 
     fn relay_stop_host(&mut self) -> BackendResult<()> {
         if let Some(set) = self.relay.as_mut() {
-            set.handle()
-                .host_stop()
-                .map_err(|error| BackendError::Native(format!("relay host stop failed: {error}")))?;
+            set.handle().host_stop().map_err(|error| {
+                BackendError::Native(format!("relay host stop failed: {error}"))
+            })?;
         }
         Ok(())
     }

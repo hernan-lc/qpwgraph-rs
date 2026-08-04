@@ -22,7 +22,10 @@ fn main() {
         .connect(target, &pin)
         .expect("connects to host");
 
-    println!("connected to host {:?}, emitting a 440 Hz tone", client.host_name());
+    println!(
+        "connected to host {:?}, emitting a 440 Hz tone",
+        client.host_name()
+    );
 
     const FRAME: usize = 960; // 20 ms at 48 kHz mono
     let mut phase = 0.0f32;

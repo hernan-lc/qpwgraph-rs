@@ -354,8 +354,8 @@ pub trait GraphDriver: EffectDriver {
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
     CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, PeerInfo as RelayPeerInfo,
-    RelayEvent, SessionId as RelaySessionId, SessionStatus as RelaySessionStatus,
-    Roles as RelayRoles, TransportPreference as RelayTransportPreference,
+    RelayEvent, Roles as RelayRoles, SessionId as RelaySessionId,
+    SessionStatus as RelaySessionStatus, TransportPreference as RelayTransportPreference,
 };
 
 /// Parameters for starting the relay host.

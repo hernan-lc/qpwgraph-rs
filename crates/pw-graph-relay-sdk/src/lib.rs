@@ -392,14 +392,66 @@ pub fn discover_hosts(timeout: Duration) -> RelayResult<Vec<PeerInfo>> {
 }
 
 fn resolve(target: &str) -> RelayResult<SocketAddr> {
-    let with_default_port = if target.contains(':') {
-        target.to_owned()
-    } else {
-        format!("{target}:0")
-    };
-    with_default_port
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(RelayError::Engine("relay target cannot be empty".into()));
+    }
+    if let Ok(address) = target.parse::<SocketAddr>() {
+        if address.port() == 0 {
+            return Err(RelayError::Engine(format!(
+                "relay target has an invalid control port: {target:?}"
+            )));
+        }
+        return Ok(address);
+    }
+    if target.starts_with('[') {
+        let end = target.find(']').ok_or_else(|| {
+            RelayError::Engine(format!(
+                "relay target must use [ipv6]:port syntax: {target:?}"
+            ))
+        })?;
+        if target.get(end + 1..end + 2) != Some(":") {
+            return Err(RelayError::Engine(format!(
+                "relay target is missing a control port: {target:?}"
+            )));
+        }
+    } else if target.matches(':').count() != 1 {
+        return Err(RelayError::Engine(format!(
+            "relay target must be host:port: {target:?}"
+        )));
+    }
+    target
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            RelayError::Engine(format!(
+                "relay target has an invalid control port: {target:?}"
+            ))
+        })?;
+    target
         .to_socket_addrs()
         .map_err(RelayError::Io)?
         .next()
         .ok_or_else(|| RelayError::Engine(format!("could not resolve host address {target:?}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_missing_or_zero_control_ports() {
+        assert!(resolve("127.0.0.1").is_err());
+        assert!(resolve("127.0.0.1:0").is_err());
+        assert!(resolve("[::1]").is_err());
+        assert!(resolve("[::1]:0").is_err());
+        assert!(resolve("").is_err());
+    }
+
+    #[test]
+    fn accepts_ipv4_and_ipv6_control_targets() {
+        assert_eq!(resolve("127.0.0.1:48123").unwrap().port(), 48123);
+        assert_eq!(resolve("[::1]:48123").unwrap().port(), 48123);
+    }
 }

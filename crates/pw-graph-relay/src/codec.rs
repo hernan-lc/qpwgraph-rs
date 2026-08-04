@@ -131,9 +131,8 @@ struct OpusEncoderState {
 impl OpusEncoderState {
     fn new(format: AudioFormat) -> Result<Self, RelayError> {
         let channels = opus_channels(format.channels)?;
-        let encoder =
-            opus::Encoder::new(format.sample_rate, channels, opus::Application::Voip)
-                .map_err(|error| RelayError::Codec(format!("Opus encoder init: {error}")))?;
+        let encoder = opus::Encoder::new(format.sample_rate, channels, opus::Application::Voip)
+            .map_err(|error| RelayError::Codec(format!("Opus encoder init: {error}")))?;
         Ok(Self { encoder })
     }
 }

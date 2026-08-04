@@ -22,7 +22,10 @@ fn main() {
         .start()
         .expect("host starts");
 
-    println!("relay host listening on TCP port {} (PIN {pin})", host.port());
+    println!(
+        "relay host listening on TCP port {} (PIN {pin})",
+        host.port()
+    );
     println!("press Ctrl-C to stop");
 
     loop {

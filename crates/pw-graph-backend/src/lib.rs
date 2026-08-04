@@ -214,6 +214,7 @@ mod tests {
                 port: 0,
                 codec: RelayCodecKind::Opus,
                 frame_ms: 20,
+                transport: Default::default(),
             })
             .expect("relay host should start");
         assert!(port > 0);

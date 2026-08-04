@@ -31,8 +31,8 @@ pub fn generate_salt() -> String {
 
 /// The digest a client must return for a given PIN and challenge salt.
 pub fn pair_digest(pin: &str, salt: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(pin.as_bytes())
-        .expect("HMAC-SHA256 accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(pin.as_bytes()).expect("HMAC-SHA256 accepts any key length");
     mac.update(salt.as_bytes());
     hex_encode(&mac.finalize().into_bytes())
 }

@@ -164,6 +164,8 @@ pub struct EngineStatus {
 /// Internal session bookkeeping shared with worker threads.
 pub(crate) struct SessionRecord {
     pub id: SessionId,
+    /// Session identifier assigned by the host and used on resume.
+    pub wire_id: u64,
     pub peer: PeerInfo,
     pub roles: Roles,
     pub codec: CodecKind,
@@ -185,6 +187,9 @@ pub(crate) struct SessionRecord {
     /// UDP address of the peer's audio socket, learned from its first
     /// datagram. Senders poll this until it is known.
     pub peer_audio_addr: Mutex<Option<SocketAddr>>,
+    /// Per-session transmit queue so one capture stream fans out to every
+    /// receiving peer without competing consumers.
+    pub outgoing: PcmQueue,
 }
 
 pub(crate) struct EngineInner {
@@ -192,12 +197,12 @@ pub(crate) struct EngineInner {
     events: Mutex<VecDeque<RelayEvent>>,
     /// Decoded audio arriving from peers; drained by `pull_playback`.
     pub incoming: PcmQueue,
-    /// Audio to transmit; filled by `push_capture`.
-    pub outgoing: PcmQueue,
     sessions: Mutex<BTreeMap<SessionId, Arc<SessionRecord>>>,
     host: Mutex<Option<session::HostRecord>>,
     /// Discovered (not necessarily connected) relay hosts, keyed by address.
     peers: Mutex<BTreeMap<SocketAddr, PeerInfo>>,
+    /// Resolved addresses grouped by mDNS service identity.
+    peer_services: Mutex<BTreeMap<String, BTreeMap<SocketAddr, PeerInfo>>>,
     advertiser: Mutex<Option<discovery::Advertiser>>,
     browser: Mutex<Option<discovery::Browser>>,
     next_session: AtomicU64,
@@ -210,10 +215,10 @@ impl EngineInner {
             config: Mutex::new(config),
             events: Mutex::new(VecDeque::new()),
             incoming: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
-            outgoing: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
             sessions: Mutex::new(BTreeMap::new()),
             host: Mutex::new(None),
             peers: Mutex::new(BTreeMap::new()),
+            peer_services: Mutex::new(BTreeMap::new()),
             advertiser: Mutex::new(None),
             browser: Mutex::new(None),
             next_session: AtomicU64::new(1),
@@ -262,6 +267,31 @@ impl EngineInner {
                 .lock()
                 .map(|sessions| sessions.contains_key(&id))
                 .unwrap_or(false)
+    }
+
+    fn broadcast_capture(&self, samples: &[f32], realtime: bool) -> bool {
+        let sessions = if realtime {
+            let Ok(sessions) = self.sessions.try_lock() else {
+                return false;
+            };
+            sessions
+        } else {
+            let Ok(sessions) = self.sessions.lock() else {
+                return false;
+            };
+            sessions
+        };
+        let mut accepted = true;
+        for record in sessions.values().filter(|record| record.sending) {
+            let pushed = if realtime {
+                record.outgoing.try_push(samples)
+            } else {
+                record.outgoing.push(samples);
+                true
+            };
+            accepted &= pushed;
+        }
+        accepted
     }
 
     fn remove_session(&self, id: SessionId) -> Option<Arc<SessionRecord>> {
@@ -383,7 +413,9 @@ impl RelayHandle {
             .lock()
             .map_err(|_| RelayError::Engine("host state is locked".into()))?;
         if host.is_some() {
-            return Err(RelayError::Engine("the relay host is already running".into()));
+            return Err(RelayError::Engine(
+                "the relay host is already running".into(),
+            ));
         }
         let record = session::start_host(&self.inner, config.port)?;
         let port = record.port;
@@ -451,12 +483,12 @@ impl RelayHandle {
     /// Feed audio to transmit (e.g. the virtual relay sink tap). Oldest
     /// samples are dropped when the queue overflows.
     pub fn push_capture(&self, samples: &[f32]) {
-        self.inner.outgoing.push(samples);
+        self.inner.broadcast_capture(samples, false);
     }
 
     /// Realtime-safe variant of [`Self::push_capture`].
     pub fn try_push_capture(&self, samples: &[f32]) -> bool {
-        self.inner.outgoing.try_push(samples)
+        self.inner.broadcast_capture(samples, true)
     }
 
     /// Take decoded audio received from peers (e.g. into the virtual relay

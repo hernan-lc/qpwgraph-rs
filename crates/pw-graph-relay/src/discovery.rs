@@ -5,7 +5,7 @@
 //! records are small and versioned (`v=1`) so third-party browsers can list
 //! relay hosts without speaking the control protocol.
 
-use crate::netlink::{LinkKind, LocalLink};
+use crate::netlink::{select_links, LinkKind, LocalLink};
 use crate::protocol::{DeviceKind, Roles};
 use crate::{EngineInner, PeerInfo, RelayError, RelayResult};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -107,9 +107,9 @@ impl Advertiser {
         )
         .map_err(|error| RelayError::Engine(format!("mDNS service info invalid: {error}")))?;
         let fullname = info.get_fullname().to_string();
-        daemon.register(info).map_err(|error| {
-            RelayError::Engine(format!("mDNS registration failed: {error}"))
-        })?;
+        daemon
+            .register(info)
+            .map_err(|error| RelayError::Engine(format!("mDNS registration failed: {error}")))?;
         Ok(Self { daemon, fullname })
     }
 
@@ -173,21 +173,24 @@ fn browse_loop(
                     properties.insert(property.key().to_string(), property.val_str().to_string());
                 }
                 let meta = parse_txt_properties(&properties);
-                let name = meta
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| info.get_fullname().to_string());
-                for addr in info.get_addresses_v4() {
-                    let peer = PeerInfo {
+                if meta.version != TXT_VERSION {
+                    continue;
+                }
+                let service_id = info.get_fullname().to_string();
+                let name = meta.name.clone().unwrap_or_else(|| service_id.clone());
+                let peers = info
+                    .get_addresses_v4()
+                    .iter()
+                    .map(|addr| PeerInfo {
                         name: name.clone(),
                         kind: meta.kind,
-                        addr: SocketAddr::new(IpAddr::V4(*addr), info.get_port()),
-                    };
-                    inner.discovered_peer(peer);
-                }
+                        addr: SocketAddr::new(IpAddr::V4(**addr), info.get_port()),
+                    })
+                    .collect();
+                inner.refresh_service(&service_id, peers);
             }
             ServiceEvent::ServiceRemoved(_ty, fullname) => {
-                inner.lost_peer_by_name(&fullname);
+                inner.lost_peer(&fullname);
             }
             _ => {}
         }
@@ -201,12 +204,18 @@ impl EngineInner {
     pub(crate) fn start_advertiser(&self, port: u16) {
         let config = self.config();
         let links = crate::netlink::local_links();
+        let selected = select_links(&links, config.transport);
+        let advertised_links = if selected.is_empty() {
+            &links
+        } else {
+            &selected
+        };
         match Advertiser::start(
             &config.device_name,
             config.device_kind,
             port,
             Roles::both(),
-            &links,
+            advertised_links,
         ) {
             Ok(advertiser) => {
                 if let Ok(mut slot) = self.advertiser.lock() {
@@ -253,31 +262,55 @@ impl EngineInner {
         }
     }
 
-    pub(crate) fn discovered_peer(&self, peer: PeerInfo) {
-        let fresh = if let Ok(mut peers) = self.peers.lock() {
-            peers.insert(peer.addr, peer.clone()).is_none()
-        } else {
-            false
-        };
-        if fresh {
+    pub(crate) fn refresh_service(&self, service_id: &str, current: Vec<PeerInfo>) {
+        let mut discovered = Vec::new();
+        let mut lost = Vec::new();
+        if let (Ok(mut services), Ok(mut peers)) = (self.peer_services.lock(), self.peers.lock()) {
+            let previous = services.insert(
+                service_id.to_owned(),
+                current
+                    .iter()
+                    .map(|peer| (peer.addr, peer.clone()))
+                    .collect(),
+            );
+            for peer in &current {
+                if previous
+                    .as_ref()
+                    .is_none_or(|old| !old.contains_key(&peer.addr))
+                {
+                    discovered.push(peer.clone());
+                }
+                peers.insert(peer.addr, peer.clone());
+            }
+            if let Some(previous) = previous {
+                for (addr, peer) in previous {
+                    if !current.iter().any(|current| current.addr == addr)
+                        && !services.values().any(|service| service.contains_key(&addr))
+                    {
+                        peers.remove(&addr);
+                        lost.push(peer);
+                    }
+                }
+            }
+        }
+        for peer in discovered {
             self.emit(crate::RelayEvent::PeerDiscovered { peer });
+        }
+        for peer in lost {
+            self.emit(crate::RelayEvent::PeerLost { peer });
         }
     }
 
-    pub(crate) fn lost_peer_by_name(&self, fullname: &str) {
-        // The removed instance name carries the label prefix; match by the
-        // leading instance label before the service type.
-        let label = fullname.split('.').next().unwrap_or(fullname);
+    pub(crate) fn lost_peer(&self, service_id: &str) {
         let mut lost = Vec::new();
-        if let Ok(mut peers) = self.peers.lock() {
-            let stale: Vec<SocketAddr> = peers
-                .iter()
-                .filter(|(_, peer)| peer.name == label)
-                .map(|(addr, _)| *addr)
-                .collect();
-            for addr in stale {
-                if let Some(peer) = peers.remove(&addr) {
-                    lost.push(peer);
+        if let (Ok(mut services), Ok(mut peers)) = (self.peer_services.lock(), self.peers.lock()) {
+            if let Some(addresses) = services.remove(service_id) {
+                for (addr, peer) in addresses {
+                    let still_advertised =
+                        services.values().any(|service| service.contains_key(&addr));
+                    if !still_advertised && peers.remove(&addr).is_some() {
+                        lost.push(peer);
+                    }
                 }
             }
         }
@@ -291,5 +324,83 @@ impl EngineInner {
             .lock()
             .map(|peers| peers.values().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn txt_properties_round_trip() {
+        let properties = txt_properties(
+            "studio-pc",
+            DeviceKind::Linux,
+            Roles::both(),
+            Some(LinkKind::Wifi),
+        );
+        assert_eq!(properties.get("v").map(String::as_str), Some(TXT_VERSION));
+        assert_eq!(
+            properties.get("name").map(String::as_str),
+            Some("studio-pc")
+        );
+        assert_eq!(properties.get("kind").map(String::as_str), Some("linux"));
+        assert_eq!(
+            properties.get("caps").map(String::as_str),
+            Some("emit,recv")
+        );
+        assert_eq!(properties.get("link").map(String::as_str), Some("wifi"));
+
+        let meta = parse_txt_properties(&properties);
+        assert_eq!(meta.version, TXT_VERSION);
+        assert_eq!(meta.name.as_deref(), Some("studio-pc"));
+        assert_eq!(meta.kind, DeviceKind::Linux);
+        assert!(meta.caps_emit);
+        assert!(meta.caps_receive);
+        assert_eq!(meta.link.as_deref(), Some("wifi"));
+    }
+
+    #[test]
+    fn unsupported_txt_versions_are_not_accepted() {
+        let mut properties = BTreeMap::new();
+        properties.insert("v".into(), "2".into());
+        let meta = parse_txt_properties(&properties);
+        assert_ne!(meta.version, TXT_VERSION);
+    }
+
+    #[test]
+    fn service_refresh_replaces_stale_addresses() {
+        let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
+        let inner = &engine.inner;
+        let first = PeerInfo {
+            name: "host".into(),
+            kind: DeviceKind::Linux,
+            addr: "192.168.1.10:48123".parse().unwrap(),
+        };
+        let second = PeerInfo {
+            name: "host".into(),
+            kind: DeviceKind::Linux,
+            addr: "192.168.1.11:48123".parse().unwrap(),
+        };
+        inner.refresh_service("host._qpw-relay._udp.local.", vec![first.clone()]);
+        assert_eq!(inner.discovered_peers(), vec![first.clone()]);
+        inner.refresh_service("host._qpw-relay._udp.local.", vec![second.clone()]);
+        assert_eq!(inner.discovered_peers(), vec![second]);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn emit_only_caps_omit_recv() {
+        let properties = txt_properties(
+            "phone",
+            DeviceKind::Android,
+            Roles::emit_only(),
+            Some(LinkKind::Usb),
+        );
+        assert_eq!(properties.get("caps").map(String::as_str), Some("emit"));
+        assert_eq!(properties.get("kind").map(String::as_str), Some("android"));
+        let meta = parse_txt_properties(&properties);
+        assert!(meta.caps_emit);
+        assert!(!meta.caps_receive);
     }
 }
