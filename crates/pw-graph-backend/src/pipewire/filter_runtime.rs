@@ -22,6 +22,10 @@ use std::ptr::{self, NonNull};
 pub(super) struct FilterRuntime<T> {
     filter: NonNull<pw::sys::pw_filter>,
     callback: Box<T>,
+    /// `pw_filter_new_simple` registers this table by pointer (it becomes the
+    /// `spa_hook`'s callback funcs), so it must stay at a stable address for
+    /// as long as the filter lives. Never make this a local or a plain field.
+    _events: Box<pw::sys::pw_filter_events>,
 }
 
 impl<T> FilterRuntime<T> {
@@ -44,10 +48,11 @@ impl<T> FilterRuntime<T> {
         }
 
         // `pw_filter_new_simple` creates the helper core/listener internally
-        // while still running on the driver's existing thread loop. The
-        // events table is copied into the filter, so a per-call struct is
-        // enough even though the previous owners kept statics.
-        let events = pw::sys::pw_filter_events {
+        // while still running on the driver's existing thread loop. It
+        // registers the events table by pointer rather than copying it, so the
+        // table is heap-allocated and kept alive by the runtime; a stack local
+        // here would dangle as soon as `create` returns.
+        let events = Box::new(pw::sys::pw_filter_events {
             version: pw::sys::PW_VERSION_FILTER_EVENTS,
             destroy: None,
             state_changed: None,
@@ -58,7 +63,7 @@ impl<T> FilterRuntime<T> {
             process,
             drained: None,
             command: None,
-        };
+        });
         let filter = unsafe {
             pw::sys::pw_filter_new_simple(
                 loop_,
@@ -66,7 +71,7 @@ impl<T> FilterRuntime<T> {
                     .expect("filter node names are validated before reaching FFI")
                     .as_ptr(),
                 properties.into_raw(),
-                &events,
+                events.as_ref(),
                 callback_ptr,
             )
         };
@@ -75,7 +80,11 @@ impl<T> FilterRuntime<T> {
                 "PipeWire filter creation returned null",
             ));
         };
-        Ok(Self { filter, callback })
+        Ok(Self {
+            filter,
+            callback,
+            _events: events,
+        })
     }
 
     /// Adds a mapped DSP port with the standard stereo property set. The
