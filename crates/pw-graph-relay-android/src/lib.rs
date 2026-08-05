@@ -275,6 +275,424 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_release(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Host (emitter broadcast) support: an Android device can also be the host
+// that other relay peers connect to.
+// ---------------------------------------------------------------------------
+
+static HOSTS: OnceLock<Mutex<HashMap<i64, HostSlot>>> = OnceLock::new();
+
+fn hosts() -> &'static Mutex<HashMap<i64, HostSlot>> {
+    HOSTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+enum HostSlot {
+    Prepared(RelayHostPrepared),
+    Running(RelayHost),
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostCreate(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    device_name: JString<'_>,
+    pin: JString<'_>,
+    port: jint,
+    codec: JString<'_>,
+    transport: JString<'_>,
+    sample_rate: jint,
+    channels: jint,
+    frame_ms: jint,
+) -> jlong {
+    let value = (|| -> Result<jlong, String> {
+        let device_name = string(&mut env, device_name)?;
+        let pin = string(&mut env, pin)?;
+        let codec = parse_codec(&string(&mut env, codec)?);
+        let transport = parse_transport(&string(&mut env, transport)?);
+        let host = RelayHostBuilder::new()
+            .device_name(device_name)
+            .device_kind(DeviceKind::Android)
+            .pin(pin)
+            .port(port.clamp(0, 65535) as u16)
+            .codec(codec)
+            .transport(transport)
+            .audio(
+                sample_rate.max(1) as u32,
+                channels.max(1) as u16,
+                frame_ms.max(1) as u16,
+            )
+            .build()
+            .map_err(|error| error.to_string())?;
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        let mut guard = hosts()
+            .lock()
+            .map_err(|_| "host store poisoned".to_string())?;
+        guard.insert(handle, HostSlot::Prepared(host));
+        Ok(handle)
+    })();
+    value.unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStart(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let mut guard = hosts()
+            .lock()
+            .map_err(|_| "host store poisoned".to_string())?;
+        let slot = guard
+            .remove(&handle)
+            .ok_or_else(|| "unknown host handle".to_string())?;
+        let HostSlot::Prepared(prepared) = slot else {
+            return Err("host is already running".into());
+        };
+        match prepared.start() {
+            Ok(host) => {
+                let port = host.port();
+                guard.insert(handle, HostSlot::Running(host));
+                Ok(json!({"type": "host_started", "port": port}))
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStop(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let removed = hosts()
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.remove(&handle))
+        .is_some();
+    let value = if removed {
+        json!({"type": "host_stopped"})
+    } else {
+        json!({"type": "error", "message": "unknown host handle"})
+    };
+    json_string(&mut env, value).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostPollEvents(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = hosts()
+        .lock()
+        .map_err(|_| "host store poisoned".to_string())
+        .map(|mut guard| {
+            Ok(match guard.get_mut(&handle) {
+                Some(HostSlot::Running(host)) => host
+                    .events()
+                    .into_iter()
+                    .map(event_json)
+                    .collect::<Vec<_>>(),
+                Some(HostSlot::Prepared(_)) => Vec::new(),
+                None => {
+                    return Err::<Vec<serde_json::Value>, String>("unknown host handle".into())
+                }
+            })
+        });
+    match result {
+        Ok(Ok(events)) => json_string(&mut env, json!(events)).unwrap_or(std::ptr::null_mut()),
+        Ok(Err(error)) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStatus(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let guard = hosts()
+            .lock()
+            .map_err(|_| "host store poisoned".to_string())?;
+        match guard.get(&handle) {
+            Some(HostSlot::Running(host)) => {
+                let status = host.status();
+                let sessions = status
+                    .sessions
+                    .iter()
+                    .map(|session| {
+                        json!({
+                            "id": session.id.0,
+                            "name": session.peer.name,
+                            "address": session.peer.addr.to_string(),
+                            "sending": session.sending,
+                            "receiving": session.receiving,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({
+                    "type": "status",
+                    "host_active": status.host_active,
+                    "port": status.host_port,
+                    "sessions": sessions,
+                }))
+            }
+            Some(HostSlot::Prepared(_)) => Ok(json!({
+                "type": "status",
+                "host_active": false,
+                "port": null,
+                "sessions": [],
+            })),
+            None => Err("unknown host handle".into()),
+        }
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostDisconnectSession(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let guard = hosts()
+            .lock()
+            .map_err(|_| "host store poisoned".to_string())?;
+        match guard.get(&handle) {
+            Some(HostSlot::Running(host)) => host
+                .disconnect(SessionId(session.max(0) as u64))
+                .map(|()| json!({"type": "disconnecting", "session": session}))
+                .map_err(|error| error.to_string()),
+            Some(HostSlot::Prepared(_)) => Err("host is not running".into()),
+            None => Err("unknown host handle".into()),
+        }
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostPushCapture(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    samples: JFloatArray<'_>,
+) -> jint {
+    let result = (|| -> Result<jint, String> {
+        let length = env
+            .get_array_length(&samples)
+            .map_err(|error| error.to_string())?;
+        let mut values = vec![0.0f32; length as usize];
+        env.get_float_array_region(&samples, 0, &mut values)
+            .map_err(|error| error.to_string())?;
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err("PCM contains a non-finite sample".into());
+        }
+        let guard = hosts()
+            .lock()
+            .map_err(|_| "host store poisoned".to_string())?;
+        let Some(HostSlot::Running(host)) = guard.get(&handle) else {
+            return Ok(0);
+        };
+        host.push_capture(&values);
+        Ok(values.len() as jint)
+    })();
+    result.unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostPullPlayback(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    output: JFloatArray<'_>,
+) -> jint {
+    let result = (|| -> Result<jint, String> {
+        let length = env
+            .get_array_length(&output)
+            .map_err(|error| error.to_string())?;
+        let mut values = vec![0.0f32; length as usize];
+        let guard = hosts()
+            .lock()
+            .map_err(|_| "host store poisoned".to_string())?;
+        let Some(HostSlot::Running(host)) = guard.get(&handle) else {
+            return Ok(0);
+        };
+        let count = host.pull_playback(&mut values);
+        drop(guard);
+        env.set_float_array_region(&output, 0, &values[..count])
+            .map_err(|error| error.to_string())?;
+        Ok(count as jint)
+    })();
+    result.unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostRelease(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    if let Ok(mut guard) = hosts().lock() {
+        guard.remove(&handle);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery support: browse the LAN for relay hosts from Android.
+// ---------------------------------------------------------------------------
+
+static BROWSERS: OnceLock<Mutex<HashMap<i64, RelayBrowser>>> = OnceLock::new();
+
+fn browsers() -> &'static Mutex<HashMap<i64, RelayBrowser>> {
+    BROWSERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryCreate(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    device_name: JString<'_>,
+) -> jlong {
+    let value = (|| -> Result<jlong, String> {
+        let device_name = string(&mut env, device_name)?;
+        let browser = RelayBrowser::start(device_name).map_err(|error| error.to_string())?;
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        let mut guard = browsers()
+            .lock()
+            .map_err(|_| "browser store poisoned".to_string())?;
+        guard.insert(handle, browser);
+        Ok(handle)
+    })();
+    value.unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryStart(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let guard = browsers()
+            .lock()
+            .map_err(|_| "browser store poisoned".to_string())?;
+        let browser = guard
+            .get(&handle)
+            .ok_or_else(|| "unknown discovery handle".to_string())?;
+        browser
+            .discovery_start()
+            .map(|()| json!({"type": "discovery_started"}))
+            .map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryStop(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let guard = browsers()
+            .lock()
+            .map_err(|_| "browser store poisoned".to_string())?;
+        let browser = guard
+            .get(&handle)
+            .ok_or_else(|| "unknown discovery handle".to_string())?;
+        browser.discovery_stop();
+        Ok(json!({"type": "discovery_stopped"}))
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryPeers(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let guard = browsers()
+            .lock()
+            .map_err(|_| "browser store poisoned".to_string())?;
+        let browser = guard
+            .get(&handle)
+            .ok_or_else(|| "unknown discovery handle".to_string())?;
+        let peers = browser
+            .peers()
+            .into_iter()
+            .map(|peer| json!({"name": peer.name, "address": peer.addr.to_string()}))
+            .collect::<Vec<_>>();
+        Ok(json!(peers))
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryPollEvents(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let guard = browsers()
+            .lock()
+            .map_err(|_| "browser store poisoned".to_string())?;
+        let browser = guard
+            .get(&handle)
+            .ok_or_else(|| "unknown discovery handle".to_string())?;
+        let events = browser
+            .events()
+            .into_iter()
+            .map(event_json)
+            .collect::<Vec<_>>();
+        Ok(json!(events))
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryRelease(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    if let Ok(mut guard) = browsers().lock() {
+        if let Some(browser) = guard.remove(&handle) {
+            browser.shutdown();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

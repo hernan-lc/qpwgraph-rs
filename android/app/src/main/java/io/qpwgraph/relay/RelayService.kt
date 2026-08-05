@@ -16,13 +16,25 @@ import androidx.core.app.NotificationCompat
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
+/**
+ * Foreground audio pump shared by both relay roles.
+ *
+ * In client mode the capture thread feeds the microphone into the relay
+ * connection and the playback thread renders audio arriving from the host.
+ * In host mode the directions are the same but the native calls target the
+ * local host engine: captured audio is broadcast to connected receivers and
+ * pulled audio is what connected emitters sent.
+ */
 class RelayService : Service() {
     companion object {
+        const val EXTRA_MODE = "mode"
         const val EXTRA_HANDLE = "handle"
         const val EXTRA_ROLE = "role"
         const val EXTRA_SAMPLE_RATE = "sample_rate"
         const val EXTRA_CHANNELS = "channels"
         const val EXTRA_FRAME_MS = "frame_ms"
+        const val MODE_CLIENT = "client"
+        const val MODE_HOST = "host"
         private const val CHANNEL = "relay-audio"
         private const val NOTIFICATION_ID = 48123
     }
@@ -30,6 +42,7 @@ class RelayService : Service() {
     private val running = AtomicBoolean(false)
     private var captureThread: Thread? = null
     private var playbackThread: Thread? = null
+    private var mode = MODE_CLIENT
     private var handle = 0L
     private var role = "emit"
     private var sampleRate = 48_000
@@ -42,6 +55,7 @@ class RelayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_CLIENT
         handle = intent?.getLongExtra(EXTRA_HANDLE, 0L) ?: 0L
         role = intent?.getStringExtra(EXTRA_ROLE) ?: "emit"
         sampleRate = intent?.getIntExtra(EXTRA_SAMPLE_RATE, 48_000) ?: 48_000
@@ -52,10 +66,24 @@ class RelayService : Service() {
         return START_NOT_STICKY
     }
 
+    /** Push one frame of captured PCM into whichever engine owns the handle. */
+    private fun pushCapture(samples: FloatArray): Int = when (mode) {
+        MODE_HOST -> NativeBridge.hostPushCapture(handle, samples)
+        else -> NativeBridge.pushCapture(handle, samples)
+    }
+
+    /** Pull one frame of playback PCM from whichever engine owns the handle. */
+    private fun pullPlayback(output: FloatArray): Int = when (mode) {
+        MODE_HOST -> NativeBridge.hostPullPlayback(handle, output)
+        else -> NativeBridge.pullPlayback(handle, output)
+    }
+
     private fun startAudio() {
         if (handle == 0L || !running.compareAndSet(false, true)) return
         val frameSamples = sampleRate * frameMs / 1000 * channels
-        if (role == "emit" || role == "both") {
+        val captureWanted = mode == MODE_HOST || role == "emit" || role == "both"
+        val playbackWanted = mode == MODE_HOST || role == "receive" || role == "both"
+        if (captureWanted) {
             captureThread = Thread {
                 val minimum = AudioRecord.getMinBufferSize(
                     sampleRate,
@@ -78,7 +106,7 @@ class RelayService : Service() {
                         val count = recorder.read(pcm, 0, pcm.size)
                         if (count <= 0) continue
                         for (index in 0 until count) floats[index] = pcm[index] / 32768f
-                        NativeBridge.pushCapture(handle, if (count == floats.size) floats else floats.copyOf(count))
+                        pushCapture(if (count == floats.size) floats else floats.copyOf(count))
                     }
                 } finally {
                     recorder.stop()
@@ -86,7 +114,7 @@ class RelayService : Service() {
                 }
             }.also { it.start() }
         }
-        if (role == "receive" || role == "both") {
+        if (playbackWanted) {
             playbackThread = Thread {
                 val minimum = AudioTrack.getMinBufferSize(
                     sampleRate,
@@ -115,7 +143,7 @@ class RelayService : Service() {
                 try {
                     track.play()
                     while (running.get()) {
-                        val count = NativeBridge.pullPlayback(handle, floats)
+                        val count = pullPlayback(floats)
                         if (count <= 0) {
                             Thread.sleep(2)
                             continue
@@ -141,8 +169,17 @@ class RelayService : Service() {
         captureThread = null
         playbackThread = null
         if (handle != 0L) {
-            NativeBridge.disconnect(handle)
-            NativeBridge.release(handle)
+            when (mode) {
+                MODE_HOST -> {
+                    NativeBridge.hostStop(handle)
+                    NativeBridge.hostRelease(handle)
+                }
+
+                else -> {
+                    NativeBridge.disconnect(handle)
+                    NativeBridge.release(handle)
+                }
+            }
             handle = 0L
         }
         super.onDestroy()
@@ -154,7 +191,7 @@ class RelayService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL,
-                "Relay audio",
+                getString(R.string.relay_notification_channel),
                 NotificationManager.IMPORTANCE_LOW,
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -162,8 +199,8 @@ class RelayService : Service() {
     }
 
     private fun notification(): Notification = NotificationCompat.Builder(this, CHANNEL)
-        .setContentTitle("qpwgraph Relay")
-        .setContentText("Audio relay is active")
+        .setContentTitle(getString(R.string.relay_app_title))
+        .setContentText(getString(R.string.relay_notification_active))
         .setSmallIcon(android.R.drawable.ic_btn_speak_now)
         .setOngoing(true)
         .build()
