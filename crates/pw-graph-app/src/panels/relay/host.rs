@@ -130,13 +130,13 @@ impl QpwgraphApp {
                         }),
                         true,
                     ) {
-                        let mut relay = std::mem::take(&mut self.relay);
-                        if running {
-                            relay.stop_host(self);
-                        } else {
-                            relay.start_host(self);
-                        }
-                        self.relay = relay;
+                        self.with_relay(|app, relay| {
+                            if running {
+                                relay.stop_host(app);
+                            } else {
+                                relay.start_host(app);
+                            }
+                        });
                     }
                     if running {
                         if let Some(port) = self.driver.relay_status().host_port {

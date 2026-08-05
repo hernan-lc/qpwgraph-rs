@@ -107,9 +107,7 @@ impl QpwgraphApp {
         // already be populated when the user switches back to it. A failed
         // start is not retried until the user presses refresh.
         if !self.relay.discovery_active && !self.relay.discovery_failed {
-            let mut relay = std::mem::take(&mut self.relay);
-            relay.start_discovery(self);
-            self.relay = relay;
+            self.with_relay(|app, relay| relay.start_discovery(app));
         }
         self.show_relay_tab_bar(document, ui);
         ui.separator();

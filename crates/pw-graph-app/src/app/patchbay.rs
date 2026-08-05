@@ -207,7 +207,7 @@ impl QpwgraphApp {
                 )
             }
             Err(error) => {
-                self.status = self.tf("status.activation_failed", &[("error", error.to_string())])
+                self.status_error("status.activation_failed", &error);
             }
         }
     }
@@ -228,9 +228,7 @@ impl QpwgraphApp {
                     &[("error", report.failed.join("; "))],
                 );
             }
-            Err(error) => {
-                self.status = self.tf("status.activation_failed", &[("error", error.to_string())])
-            }
+            Err(error) => self.status_error("status.activation_failed", &error),
         }
     }
 

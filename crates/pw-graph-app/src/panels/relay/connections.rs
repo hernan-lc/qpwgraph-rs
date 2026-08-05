@@ -62,9 +62,7 @@ impl QpwgraphApp {
                     IconButtonProps::new("relay.panel.connections.refresh", Icon::Refresh.source())
                         .tooltip(self.i18n.text("relay.refresh_help")),
                 ) {
-                    let mut relay = std::mem::take(&mut self.relay);
-                    relay.refresh(self);
-                    self.relay = relay;
+                    self.with_relay(|app, relay| relay.refresh(app));
                 }
             });
         });
@@ -125,16 +123,12 @@ impl QpwgraphApp {
             RelayRowAction::None => {}
             RelayRowAction::Connect => {
                 self.config.relay_client_target = row.addr.to_string();
-                let mut relay = std::mem::take(&mut self.relay);
-                relay.connect(self);
-                self.relay = relay;
+                self.with_relay(|app, relay| relay.connect(app));
             }
             RelayRowAction::CancelConnect => self.relay.cancel_connect(),
             RelayRowAction::Disconnect => {
                 if let RelayDeviceState::Connected(session) = row.state {
-                    let mut relay = std::mem::take(&mut self.relay);
-                    relay.disconnect(self, session);
-                    self.relay = relay;
+                    self.with_relay(|app, relay| relay.disconnect(app, session));
                 }
             }
             RelayRowAction::ToggleDetails => {
@@ -185,10 +179,10 @@ impl QpwgraphApp {
                 can_connect,
             ) {
                 let target = self.relay.quick_target.clone();
-                let mut relay = std::mem::take(&mut self.relay);
-                relay.connect_target(self, &target);
-                relay.quick_target.clear();
-                self.relay = relay;
+                self.with_relay(|app, relay| {
+                    relay.connect_target(app, &target);
+                    relay.quick_target.clear();
+                });
             }
         });
     }

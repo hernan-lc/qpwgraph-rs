@@ -81,4 +81,26 @@ impl QpwgraphApp {
     pub(crate) fn tf(&self, key: &str, variables: &[(&str, String)]) -> String {
         self.i18n.format(key, variables)
     }
+
+    /// Reports an operation failure in the status bar. Every fallible driver
+    /// call funnels through this so the "… failed" message shape stays one
+    /// definition instead of fourteen inline copies.
+    pub(crate) fn status_error(&mut self, key: &str, error: &impl std::fmt::Display) {
+        self.status = self.tf(key, &[("error", error.to_string())]);
+    }
+
+    /// Runs a relay-panel method that needs both the app and `&mut` relay
+    /// state at once. `RelayUiState` owns several long-lived handles that
+    /// borrow the app while it mutates them, so callers must take the state
+    /// out, call, and put it back — this helper owns that take/restore pair.
+    #[cfg(feature = "relay")]
+    pub(crate) fn with_relay<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut RelayUiState) -> R,
+    ) -> R {
+        let mut relay = std::mem::take(&mut self.relay);
+        let result = f(self, &mut relay);
+        self.relay = relay;
+        result
+    }
 }

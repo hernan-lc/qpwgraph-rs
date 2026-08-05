@@ -12,9 +12,7 @@ impl QpwgraphApp {
                 self.last_graph_refresh = Instant::now();
                 self.status = self.tf("status.refreshed", &[("count", nodes.len().to_string())])
             }
-            Err(error) => {
-                self.status = self.tf("status.refresh_failed", &[("error", error.to_string())])
-            }
+            Err(error) => self.status_error("status.refresh_failed", &error),
         }
     }
 
@@ -30,7 +28,7 @@ impl QpwgraphApp {
                 // Keep the dirty bit eligible for the next frame. A failed
                 // retry must not hide a short-lived PipeWire transition for
                 // another half second.
-                self.status = self.tf("status.refresh_failed", &[("error", error.to_string())]);
+                self.status_error("status.refresh_failed", &error);
             }
         }
     }
@@ -65,9 +63,7 @@ impl eframe::App for QpwgraphApp {
         self.sync_meter_policy();
         #[cfg(feature = "relay")]
         {
-            let mut relay = std::mem::take(&mut self.relay);
-            relay.poll(self);
-            self.relay = relay;
+            self.with_relay(|app, relay| relay.poll(app));
         }
         self.refresh_graph_if_dirty();
         if self.last_meter_refresh.elapsed() >= Duration::from_millis(50) {

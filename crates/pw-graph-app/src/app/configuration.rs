@@ -95,9 +95,7 @@ impl QpwgraphApp {
                 self.config_dirty_since = None;
                 self.status = self.t("status.config_saved");
             }
-            Err(error) => {
-                self.status = self.tf("status.config_save_failed", &[("error", error.to_string())])
-            }
+            Err(error) => self.status_error("status.config_save_failed", &error),
         }
     }
 
@@ -118,7 +116,7 @@ impl QpwgraphApp {
             }
             Err(error) => {
                 self.config_dirty_since = Some(Instant::now());
-                self.status = self.tf("status.config_save_failed", &[("error", error.to_string())]);
+                self.status_error("status.config_save_failed", &error);
             }
         }
     }

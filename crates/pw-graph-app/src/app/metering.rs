@@ -45,9 +45,7 @@ impl QpwgraphApp {
         self.canvas.port_meters.clear();
         match self.driver.reset_audio_config() {
             Ok(()) => self.status = self.t("status.audio_reset"),
-            Err(error) => {
-                self.status = self.tf("status.audio_reset_failed", &[("error", error.to_string())])
-            }
+            Err(error) => self.status_error("status.audio_reset_failed", &error),
         }
     }
 

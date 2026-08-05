@@ -1,5 +1,5 @@
 use super::QpwgraphApp;
-use pw_graph_backend::{EffectInsertRequest, EffectInstance, EffectNodeRequest, GraphDriver};
+use pw_graph_backend::{BackendResult, EffectDriver, EffectInsertRequest, EffectInstance, EffectNodeRequest, GraphDriver};
 use pw_graph_config::PersistedEffect;
 use pw_graph_core::NodeId;
 use pw_graph_effects::EffectDescriptor;
@@ -189,12 +189,21 @@ impl QpwgraphApp {
         }
     }
 
-    pub(crate) fn set_effect_enabled_for_node(&mut self, node_id: NodeId, enabled: bool) {
+    /// Resolves the effect node to its persisted driver instance and runs an
+    /// update against the driver, applying `update` to the matching saved
+    /// config entry on success. Both enabled and parameter writes share this
+    /// lookup-and-persist shell so their failure reporting cannot drift.
+    fn update_effect_for_node(
+        &mut self,
+        node_id: NodeId,
+        apply: impl FnOnce(&mut dyn EffectDriver, &str) -> BackendResult<()>,
+        persist: impl FnOnce(&mut PersistedEffect),
+    ) {
         let Some(instance_id) = self.effect_instance_id(node_id) else {
             self.status = self.t("effects.not_found");
             return;
         };
-        match self.driver.set_effect_enabled(&instance_id, enabled) {
+        match apply(self.driver.as_mut(), &instance_id) {
             Ok(()) => {
                 if let Some(saved) = self
                     .config
@@ -202,13 +211,19 @@ impl QpwgraphApp {
                     .iter_mut()
                     .find(|effect| effect.instance.instance_id == instance_id)
                 {
-                    saved.instance.enabled = enabled;
+                    persist(saved);
                 }
             }
-            Err(error) => {
-                self.status = self.tf("effects.update_failed", &[("error", error.to_string())]);
-            }
+            Err(error) => self.status_error("effects.update_failed", &error),
         }
+    }
+
+    pub(crate) fn set_effect_enabled_for_node(&mut self, node_id: NodeId, enabled: bool) {
+        self.update_effect_for_node(
+            node_id,
+            |driver, instance_id| driver.set_effect_enabled(instance_id, enabled),
+            |saved| saved.instance.enabled = enabled,
+        );
     }
 
     pub(crate) fn set_effect_parameter_for_node(
@@ -217,31 +232,16 @@ impl QpwgraphApp {
         parameter: &str,
         value: f32,
     ) {
-        let Some(instance_id) = self.effect_instance_id(node_id) else {
-            self.status = self.t("effects.not_found");
-            return;
-        };
-        match self
-            .driver
-            .set_effect_parameter(&instance_id, parameter, value)
-        {
-            Ok(()) => {
-                if let Some(saved) = self
-                    .config
-                    .effects
-                    .iter_mut()
-                    .find(|effect| effect.instance.instance_id == instance_id)
-                {
-                    saved
-                        .instance
-                        .parameters
-                        .insert(parameter.to_owned(), value);
-                }
-            }
-            Err(error) => {
-                self.status = self.tf("effects.update_failed", &[("error", error.to_string())]);
-            }
-        }
+        self.update_effect_for_node(
+            node_id,
+            |driver, instance_id| driver.set_effect_parameter(instance_id, parameter, value),
+            |saved| {
+                saved
+                    .instance
+                    .parameters
+                    .insert(parameter.to_owned(), value);
+            },
+        );
     }
 
     pub(crate) fn remove_effect_node(&mut self, node_id: NodeId) {

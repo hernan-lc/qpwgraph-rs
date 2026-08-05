@@ -1,5 +1,5 @@
 use pw_graph_alsamidi::AlsaMidiDriver;
-use pw_graph_backend::{AudioMeter, GraphDriver, MeterPolicy, PipewireDriver};
+use pw_graph_backend::{AudioMeter, BackendError, BackendResult, GraphDriver, MeterPolicy, PipewireDriver};
 
 #[cfg(feature = "relay")]
 use pw_graph_backend::RelayDriver;
@@ -17,6 +17,14 @@ pub(crate) trait AppDriver: GraphDriver {}
 
 #[cfg(not(feature = "relay"))]
 impl<T> AppDriver for T where T: GraphDriver {}
+
+/// The high bit of backend IDs marks ALSA MIDI resources, keeping the merged
+/// graph namespaces apart so a PipeWire and an ALSA ID can never collide.
+const ALSA_FLAG: u64 = 1_u64 << 63;
+
+fn unsupported(message: &str) -> BackendError {
+    BackendError::Unsupported(message.into())
+}
 
 #[derive(Default)]
 pub(crate) struct CompositeDriver {
@@ -65,10 +73,39 @@ impl CompositeDriver {
             eprintln!("could not rebuild merged graph after effect mutation: {error}");
         }
     }
+
+    fn pipewire_mut(&mut self) -> BackendResult<&mut PipewireDriver> {
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| unsupported("PipeWire backend is disabled"))
+    }
+
+    fn pipewire_ref(&self) -> BackendResult<&PipewireDriver> {
+        self.pipewire
+            .as_ref()
+            .ok_or_else(|| unsupported("PipeWire backend is disabled"))
+    }
+
+    fn alsa_mut(&mut self) -> BackendResult<&mut AlsaMidiDriver> {
+        self.alsa
+            .as_mut()
+            .ok_or_else(|| unsupported("ALSA backend is disabled"))
+    }
+
+    /// Runs a native mutation and mirrors the driver's new registry snapshot
+    /// into the composite graph without a second round-trip.
+    fn mutate_pipewire<T>(
+        &mut self,
+        f: impl FnOnce(&mut PipewireDriver) -> BackendResult<T>,
+    ) -> BackendResult<T> {
+        let value = f(self.pipewire_mut()?)?;
+        self.rebuild_after_effect_mutation();
+        Ok(value)
+    }
 }
 
 impl GraphDriver for CompositeDriver {
-    fn refresh(&mut self) -> pw_graph_backend::BackendResult<Vec<Node>> {
+    fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         if let Some(driver) = self.pipewire.as_mut() {
             driver.refresh()?;
         }
@@ -79,56 +116,30 @@ impl GraphDriver for CompositeDriver {
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
-    fn connect(&mut self, src: PortId, dst: PortId) -> pw_graph_backend::BackendResult<Link> {
-        let alsa = 1_u64 << 63;
-        let link = if src.0 & alsa != 0 && dst.0 & alsa != 0 {
-            self.alsa
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
-                })?
-                .connect(src, dst)?
-        } else if src.0 & alsa == 0 && dst.0 & alsa == 0 {
-            self.pipewire
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported(
-                        "PipeWire backend is disabled".into(),
-                    )
-                })?
-                .connect(src, dst)?
+    fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+        let link = if src.0 & ALSA_FLAG != 0 && dst.0 & ALSA_FLAG != 0 {
+            self.alsa_mut()?.connect(src, dst)?
+        } else if src.0 & ALSA_FLAG == 0 && dst.0 & ALSA_FLAG == 0 {
+            self.pipewire_mut()?.connect(src, dst)?
         } else {
-            return Err(pw_graph_backend::BackendError::Unsupported(
-                "connections cannot cross PipeWire and ALSA MIDI backends".into(),
+            return Err(unsupported(
+                "connections cannot cross PipeWire and ALSA MIDI backends",
             ));
         };
         self.refresh()?;
         Ok(link)
     }
 
-    fn disconnect(&mut self, link: LinkId) -> pw_graph_backend::BackendResult<Link> {
-        let alsa = 1_u64 << 63;
+    fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
         let existing = self
             .graph
             .link(link)
             .cloned()
             .ok_or(GraphError::MissingLink(link))?;
-        if link.0 & alsa != 0 {
-            self.alsa
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
-                })?
-                .disconnect(link)?;
+        if link.0 & ALSA_FLAG != 0 {
+            self.alsa_mut()?.disconnect(link)?;
         } else {
-            self.pipewire
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported(
-                        "PipeWire backend is disabled".into(),
-                    )
-                })?
-                .disconnect(link)?;
+            self.pipewire_mut()?.disconnect(link)?;
         }
         self.refresh()?;
         Ok(existing)
@@ -138,23 +149,11 @@ impl GraphDriver for CompositeDriver {
         &mut self,
         node: NodeId,
         position: [f32; 2],
-    ) -> pw_graph_backend::BackendResult<()> {
-        if node.0 & (1_u64 << 63) != 0 {
-            self.alsa
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported("ALSA backend is disabled".into())
-                })?
-                .set_node_position(node, position)?;
+    ) -> BackendResult<()> {
+        if node.0 & ALSA_FLAG != 0 {
+            self.alsa_mut()?.set_node_position(node, position)?;
         } else {
-            self.pipewire
-                .as_mut()
-                .ok_or_else(|| {
-                    pw_graph_backend::BackendError::Unsupported(
-                        "PipeWire backend is disabled".into(),
-                    )
-                })?
-                .set_node_position(node, position)?;
+            self.pipewire_mut()?.set_node_position(node, position)?;
         }
         if let Some(node_data) = self.graph.nodes.get_mut(&node) {
             node_data.position = position;
@@ -162,38 +161,22 @@ impl GraphDriver for CompositeDriver {
         Ok(())
     }
 
-    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> pw_graph_backend::BackendResult<()> {
-        let alsa = 1_u64 << 63;
-        if node.0 & alsa != 0 {
-            return Err(pw_graph_backend::BackendError::Unsupported(
-                "ALSA MIDI nodes do not expose audio mute".into(),
-            ));
+    fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        if node.0 & ALSA_FLAG != 0 {
+            return Err(unsupported("ALSA MIDI nodes do not expose audio mute"));
         }
-        self.pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .set_node_mute(node, muted)
+        self.pipewire_mut()?.set_node_mute(node, muted)
     }
 
     fn set_node_volume(
         &mut self,
         node: NodeId,
         volume: f32,
-    ) -> pw_graph_backend::BackendResult<()> {
-        let alsa = 1_u64 << 63;
-        if node.0 & alsa != 0 {
-            return Err(pw_graph_backend::BackendError::Unsupported(
-                "ALSA MIDI nodes do not expose audio volume".into(),
-            ));
+    ) -> BackendResult<()> {
+        if node.0 & ALSA_FLAG != 0 {
+            return Err(unsupported("ALSA MIDI nodes do not expose audio volume"));
         }
-        self.pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .set_node_volume(node, volume)
+        self.pipewire_mut()?.set_node_volume(node, volume)
     }
 
     fn graph(&self) -> &Graph {
@@ -223,28 +206,28 @@ impl GraphDriver for CompositeDriver {
                 .is_some_and(|driver| driver.is_port_type(port_type))
     }
 
-    fn audio_meters(&mut self) -> pw_graph_backend::BackendResult<Vec<AudioMeter>> {
+    fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
         if let Some(driver) = self.pipewire.as_mut() {
             return driver.audio_meters();
         }
         Ok(Vec::new())
     }
 
-    fn set_meter_policy(&mut self, policy: MeterPolicy) -> pw_graph_backend::BackendResult<()> {
+    fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {
         match self.pipewire.as_mut() {
             Some(driver) => driver.set_meter_policy(policy),
             None => Ok(()),
         }
     }
 
-    fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> pw_graph_backend::BackendResult<()> {
+    fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
         match self.pipewire.as_mut() {
             Some(driver) => driver.request_meters(nodes),
             None => Ok(()),
         }
     }
 
-    fn reset_audio_config(&mut self) -> pw_graph_backend::BackendResult<()> {
+    fn reset_audio_config(&mut self) -> BackendResult<()> {
         match self.pipewire.as_mut() {
             Some(driver) => driver.reset_audio_config(),
             None => Ok(()),
@@ -276,46 +259,23 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
     fn create_effect_node(
         &mut self,
         request: pw_graph_backend::EffectNodeRequest,
-    ) -> pw_graph_backend::BackendResult<pw_graph_backend::EffectInstance> {
-        let instance = self
-            .pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .create_effect_node(request)?;
-        // `PipewireDriver` has already rebuilt its native registry snapshot;
-        // mirror it into the composite without a second round-trip.
-        self.rebuild_after_effect_mutation();
-        Ok(instance)
+    ) -> BackendResult<pw_graph_backend::EffectInstance> {
+        self.mutate_pipewire(|driver| driver.create_effect_node(request))
     }
 
     fn insert_effect(
         &mut self,
         request: pw_graph_backend::EffectInsertRequest,
-    ) -> pw_graph_backend::BackendResult<pw_graph_backend::EffectInstance> {
-        let instance = self
-            .pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .insert_effect(request)?;
-        self.rebuild_after_effect_mutation();
-        Ok(instance)
+    ) -> BackendResult<pw_graph_backend::EffectInstance> {
+        self.mutate_pipewire(|driver| driver.insert_effect(request))
     }
 
     fn set_effect_enabled(
         &mut self,
         instance_id: &str,
         enabled: bool,
-    ) -> pw_graph_backend::BackendResult<()> {
-        self.pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .set_effect_enabled(instance_id, enabled)
+    ) -> BackendResult<()> {
+        self.pipewire_mut()?.set_effect_enabled(instance_id, enabled)
     }
 
     fn set_effect_parameter(
@@ -323,24 +283,13 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
         instance_id: &str,
         parameter: &str,
         value: f32,
-    ) -> pw_graph_backend::BackendResult<()> {
-        self.pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
+    ) -> BackendResult<()> {
+        self.pipewire_mut()?
             .set_effect_parameter(instance_id, parameter, value)
     }
 
-    fn remove_effect(&mut self, instance_id: &str) -> pw_graph_backend::BackendResult<()> {
-        self.pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .remove_effect(instance_id)?;
-        self.rebuild_after_effect_mutation();
-        Ok(())
+    fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
+        self.mutate_pipewire(|driver| driver.remove_effect(instance_id))
     }
 }
 
@@ -368,27 +317,12 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
     fn relay_start_host(
         &mut self,
         request: pw_graph_backend::RelayHostRequest,
-    ) -> pw_graph_backend::BackendResult<u16> {
-        let port = self
-            .pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .relay_start_host(request)?;
-        // Starting the host lazily creates the virtual relay devices; mirror
-        // them into the composite graph the same way effect creation does.
-        self.rebuild_after_effect_mutation();
-        Ok(port)
+    ) -> BackendResult<u16> {
+        self.mutate_pipewire(|driver| driver.relay_start_host(request))
     }
 
-    fn relay_stop_host(&mut self) -> pw_graph_backend::BackendResult<()> {
-        match self.pipewire.as_mut() {
-            Some(driver) => driver.relay_stop_host(),
-            None => Err(pw_graph_backend::BackendError::Unsupported(
-                "PipeWire backend is disabled".into(),
-            )),
-        }
+    fn relay_stop_host(&mut self) -> BackendResult<()> {
+        self.pipewire_mut()?.relay_stop_host()
     }
 
     fn relay_connect(
@@ -396,27 +330,15 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         target: std::net::SocketAddr,
         pin: &str,
         roles: pw_graph_backend::RelayRoles,
-    ) -> pw_graph_backend::BackendResult<()> {
-        self.pipewire
-            .as_mut()
-            .ok_or_else(|| {
-                pw_graph_backend::BackendError::Unsupported("PipeWire backend is disabled".into())
-            })?
-            .relay_connect(target, pin, roles)?;
-        self.rebuild_after_effect_mutation();
-        Ok(())
+    ) -> BackendResult<()> {
+        self.mutate_pipewire(|driver| driver.relay_connect(target, pin, roles))
     }
 
     fn relay_disconnect(
         &mut self,
         session: pw_graph_backend::RelaySessionId,
-    ) -> pw_graph_backend::BackendResult<()> {
-        match self.pipewire.as_mut() {
-            Some(driver) => driver.relay_disconnect(session),
-            None => Err(pw_graph_backend::BackendError::Unsupported(
-                "PipeWire backend is disabled".into(),
-            )),
-        }
+    ) -> BackendResult<()> {
+        self.pipewire_mut()?.relay_disconnect(session)
     }
 
     fn relay_events(&mut self) -> Vec<pw_graph_backend::RelayEvent> {
@@ -426,13 +348,8 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         }
     }
 
-    fn relay_discovery_start(&mut self) -> pw_graph_backend::BackendResult<()> {
-        match self.pipewire.as_mut() {
-            Some(driver) => driver.relay_discovery_start(),
-            None => Err(pw_graph_backend::BackendError::Unsupported(
-                "PipeWire backend is disabled".into(),
-            )),
-        }
+    fn relay_discovery_start(&mut self) -> BackendResult<()> {
+        self.pipewire_mut()?.relay_discovery_start()
     }
 
     fn relay_discovery_stop(&mut self) {
