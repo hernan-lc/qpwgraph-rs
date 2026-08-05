@@ -458,81 +458,79 @@ where
     document.text(id).unwrap_or(current).to_owned()
 }
 
-pub(super) fn document_icon_button(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    label: String,
-    explanation: String,
-) -> bool {
-    let clicked = draw_icon_button(ui, id, icon, label, explanation);
-    document.record_click(id, clicked)
+/// Generates a `document_*` adapter that paints a custom icon button via the
+/// icons module and reports the click through [`UiDocument::record_click`], so
+/// the custom controls join the same ID/event system as the shared widgets.
+///
+/// The three shapes match the underlying draw helpers: a plain button, one
+/// with a trailing `enabled` flag, and one whose `selected` flag slots before
+/// the label (as the toggle/nav buttons declare it).
+macro_rules! document_record_click_button {
+    ($adapter:ident, $draw:ident) => {
+        pub(super) fn $adapter(
+            document: &mut UiDocument,
+            ui: &mut Ui,
+            id: &str,
+            icon: Icon,
+            label: String,
+            explanation: String,
+        ) -> bool {
+            let clicked = $draw(ui, id, icon, label, explanation);
+            document.record_click(id, clicked)
+        }
+    };
+    ($adapter:ident, $draw:ident, $extra:ident: $ty:ty) => {
+        pub(super) fn $adapter(
+            document: &mut UiDocument,
+            ui: &mut Ui,
+            id: &str,
+            icon: Icon,
+            label: String,
+            explanation: String,
+            $extra: $ty,
+        ) -> bool {
+            let clicked = $draw(ui, id, icon, label, explanation, $extra);
+            document.record_click(id, clicked)
+        }
+    };
+    ($adapter:ident, $draw:ident, before_label $extra:ident: $ty:ty) => {
+        pub(super) fn $adapter(
+            document: &mut UiDocument,
+            ui: &mut Ui,
+            id: &str,
+            icon: Icon,
+            $extra: $ty,
+            label: String,
+            explanation: String,
+        ) -> bool {
+            let clicked = $draw(ui, id, icon, $extra, label, explanation);
+            document.record_click(id, clicked)
+        }
+    };
 }
 
-pub(super) fn document_icon_button_enabled(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    label: String,
-    explanation: String,
-    enabled: bool,
-) -> bool {
-    let clicked = draw_icon_button_enabled(ui, id, icon, label, explanation, enabled);
-    document.record_click(id, clicked)
-}
-
-pub(super) fn document_sidebar_icon_button(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    label: String,
-    explanation: String,
-) -> bool {
-    let clicked = draw_sidebar_icon_button(ui, id, icon, label, explanation);
-    document.record_click(id, clicked)
-}
-
-pub(super) fn document_sidebar_icon_button_enabled(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    label: String,
-    explanation: String,
-    enabled: bool,
-) -> bool {
-    let clicked = draw_sidebar_icon_button_enabled(ui, id, icon, label, explanation, enabled);
-    document.record_click(id, clicked)
-}
-
-pub(super) fn document_sidebar_icon_toggle_button(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    selected: bool,
-    label: String,
-    explanation: String,
-) -> bool {
-    let clicked = draw_sidebar_icon_toggle_button(ui, id, icon, selected, label, explanation);
-    document.record_click(id, clicked)
-}
-
-pub(super) fn document_sidebar_nav_icon_button(
-    document: &mut UiDocument,
-    ui: &mut Ui,
-    id: &str,
-    icon: Icon,
-    selected: bool,
-    label: String,
-    explanation: String,
-) -> bool {
-    let clicked = draw_sidebar_nav_icon_button(ui, id, icon, selected, label, explanation);
-    document.record_click(id, clicked)
-}
+document_record_click_button!(document_icon_button, draw_icon_button);
+document_record_click_button!(
+    document_icon_button_enabled,
+    draw_icon_button_enabled,
+    enabled: bool
+);
+document_record_click_button!(document_sidebar_icon_button, draw_sidebar_icon_button);
+document_record_click_button!(
+    document_sidebar_icon_button_enabled,
+    draw_sidebar_icon_button_enabled,
+    enabled: bool
+);
+document_record_click_button!(
+    document_sidebar_icon_toggle_button,
+    draw_sidebar_icon_toggle_button,
+    before_label selected: bool
+);
+document_record_click_button!(
+    document_sidebar_nav_icon_button,
+    draw_sidebar_nav_icon_button,
+    before_label selected: bool
+);
 
 pub(super) fn document_selectable_label(
     document: &mut UiDocument,

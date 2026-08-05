@@ -40,7 +40,7 @@ pub(super) fn dominant_port<'a>(ports: &[&'a Port]) -> Option<&'a Port> {
         })
 }
 
-pub(super) fn node_color(node_type: NodeType) -> Color32 {
+pub(crate) fn node_color(node_type: NodeType) -> Color32 {
     match node_type {
         NodeType::PipeWire => Color32::from_rgb(91, 172, 224),
         NodeType::Effect => Color32::from_rgb(224, 155, 73),

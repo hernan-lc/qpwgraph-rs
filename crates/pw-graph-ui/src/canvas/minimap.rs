@@ -6,6 +6,7 @@ use pw_graph_core::{Graph, NodeType};
 use pw_graph_i18n::I18n;
 use std::collections::BTreeSet;
 
+use super::node::node_color;
 use super::ports::{link_color, port_color, port_role};
 
 const PANEL_SIZE: egui::Vec2 = vec2(238.0, 164.0);
@@ -48,12 +49,7 @@ fn node_accent(
                     .next()
             })
         })
-        .unwrap_or(match node_type {
-            NodeType::PipeWire => Color32::from_rgb(91, 172, 224),
-            NodeType::Effect => Color32::from_rgb(224, 155, 73),
-            NodeType::AlsaMidi => Color32::from_rgb(180, 128, 220),
-            NodeType::Unknown => Color32::from_rgb(153, 163, 175),
-        })
+        .unwrap_or(node_color(node_type))
 }
 
 impl GraphCanvas {

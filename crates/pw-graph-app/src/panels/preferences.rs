@@ -598,42 +598,51 @@ impl QpwgraphApp {
                 self.config.panel_text_scale = 1.20;
                 self.config.node_text_scale = 1.15;
             }
-            self.config.ui_text_scale = document_setting_number(
+            self.config.ui_text_scale = self.typography_setting(
                 document,
                 ui,
                 "typography.ui_scale",
+                "ui_text_scale",
                 self.config.ui_text_scale,
-                0.80,
-                2.0,
-                0.05,
-                self.i18n.text("inspector.ui_text_scale"),
-                self.i18n.text("help.ui_text_scale"),
-                82.0,
             );
-            self.config.panel_text_scale = document_setting_number(
+            self.config.panel_text_scale = self.typography_setting(
                 document,
                 ui,
                 "typography.panel_scale",
+                "panel_text_scale",
                 self.config.panel_text_scale,
-                0.80,
-                2.0,
-                0.05,
-                self.i18n.text("inspector.panel_text_scale"),
-                self.i18n.text("help.panel_text_scale"),
-                82.0,
             );
-            self.config.node_text_scale = document_setting_number(
+            self.config.node_text_scale = self.typography_setting(
                 document,
                 ui,
                 "typography.node_scale",
+                "node_text_scale",
                 self.config.node_text_scale,
-                0.80,
-                2.0,
-                0.05,
-                self.i18n.text("inspector.node_text_scale"),
-                self.i18n.text("help.node_text_scale"),
-                82.0,
             );
         });
+    }
+
+    /// A clamped text-scaling number input. UI, panel and node scale all share
+    /// the same bounds and step, so the three rows are built from one helper.
+    fn typography_setting(
+        &self,
+        document: &mut UiDocument,
+        ui: &mut Ui,
+        id: &str,
+        scale_name: &str,
+        value: f32,
+    ) -> f32 {
+        document_setting_number(
+            document,
+            ui,
+            id,
+            value,
+            0.80,
+            2.0,
+            0.05,
+            self.i18n.text(&format!("inspector.{scale_name}")),
+            self.i18n.text(&format!("help.{scale_name}")),
+            82.0,
+        )
     }
 }

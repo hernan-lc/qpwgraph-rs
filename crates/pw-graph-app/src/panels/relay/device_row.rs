@@ -15,13 +15,23 @@ use super::super::components::document_button;
 use super::connected_accent_color;
 use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
 use crate::icons::Icon;
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{self, RichText, Ui};
 use pw_graph_backend::{RelayCodecKind, RelayDeviceKind};
-use pw_graph_ui::{icon_image, CardProps, IconButtonProps, MeterProps, UiDocument};
+use pw_graph_ui::{icon_image, CardProps, IconButtonProps, MeterProps, Theme, ThemeToken, UiDocument};
 
-const ROW_BACKGROUND: Color32 = Color32::from_rgb(38, 44, 54);
-const CONNECTED_BACKGROUND: Color32 = Color32::from_rgb(34, 52, 44);
 const DEVICE_ICON_SIZE: f32 = 20.0;
+
+/// Fill for a device row card, derived from the theme so both palettes stay
+/// coherent: plain rows use the surface token and connected rows are the same
+/// surface tinted toward the connected accent.
+fn row_fill(theme: &Theme, connected: bool) -> egui::Color32 {
+    let surface = theme.color(ThemeToken::Surface);
+    if connected {
+        surface.lerp_to_gamma(theme.color(ThemeToken::AccentConnected), 0.12)
+    } else {
+        surface
+    }
+}
 
 /// What the user asked the row to do, resolved by the caller so this module
 /// stays free of engine access.
@@ -42,13 +52,10 @@ impl QpwgraphApp {
     ) -> RelayRowAction {
         let connected = row.is_connected();
         let expanded = self.relay_row_expanded(row);
+        let theme = document.theme();
         let card = CardProps::new(format!("relay.panel.device.card.{}", row.addr))
-            .fill(if connected {
-                CONNECTED_BACKGROUND
-            } else {
-                ROW_BACKGROUND
-            })
-            .accent_option(connected.then_some(connected_accent_color(document.theme())));
+            .fill(row_fill(theme, connected))
+            .accent_option(connected.then_some(connected_accent_color(theme)));
         document
             .card(ui, card, |ui, document| {
                 let action = ui
