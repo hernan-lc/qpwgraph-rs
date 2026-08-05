@@ -15,14 +15,32 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
-    private val mutableState = MutableStateFlow(RelayUiState())
+    private val preferences = application.getSharedPreferences("relay", 0)
+    private val mutableState = MutableStateFlow(RelayUiState(loadSettings()))
     val state: StateFlow<RelayUiState> = mutableState.asStateFlow()
     private var handle = 0L
     private var polling: Job? = null
 
     fun update(settings: RelaySettings) {
         mutableState.value = mutableState.value.copy(settings = settings)
+        preferences.edit()
+            .putString("target", settings.target)
+            .putString("pin", settings.pin)
+            .putString("role", settings.role)
+            .putString("codec", settings.codec)
+            .putString("transport", settings.transport)
+            .putString("device_name", settings.deviceName)
+            .apply()
     }
+
+    private fun loadSettings(): RelaySettings = RelaySettings(
+        target = preferences.getString("target", "") ?: "",
+        pin = preferences.getString("pin", "") ?: "",
+        role = preferences.getString("role", "emit") ?: "emit",
+        codec = preferences.getString("codec", "opus") ?: "opus",
+        transport = preferences.getString("transport", "auto") ?: "auto",
+        deviceName = preferences.getString("device_name", "android-relay") ?: "android-relay",
+    )
 
     fun connect() {
         if (mutableState.value.connection == RelayConnectionState.Connecting) return
@@ -139,11 +157,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         stopPolling()
-        if (handle != 0L) {
-            NativeBridge.disconnect(handle)
-            NativeBridge.release(handle)
-            handle = 0L
-        }
+        getApplication<Application>().stopService(Intent(getApplication(), RelayService::class.java))
+        handle = 0L
         super.onCleared()
     }
 }

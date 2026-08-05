@@ -161,7 +161,11 @@ private fun DropdownField(
     display: Map<String, String> = emptyMap(),
 ) {
     var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }, modifier) {
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded },
+        modifier = modifier,
+    ) {
         OutlinedTextField(
             value = display[value] ?: value,
             onValueChange = {},

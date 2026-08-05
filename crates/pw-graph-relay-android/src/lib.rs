@@ -1,7 +1,9 @@
 use jni::objects::{JClass, JFloatArray, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
-use pw_graph_relay_sdk::{CodecKind, DeviceKind, RelayClient, RelayClientBuilder, RelayEvent, Role, TransportPreference};
+use pw_graph_relay_sdk::{
+    CodecKind, DeviceKind, RelayClient, RelayClientBuilder, RelayEvent, Role, TransportPreference,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -20,12 +22,18 @@ fn string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-fn json_string(env: &mut JNIEnv<'_>, value: serde_json::Value) -> jni::errors::Result<jni::sys::jstring> {
+fn json_string(
+    env: &mut JNIEnv<'_>,
+    value: serde_json::Value,
+) -> jni::errors::Result<jni::sys::jstring> {
     let text = env.new_string(value.to_string())?;
     Ok(text.into_raw())
 }
 
-fn error_json(env: &mut JNIEnv<'_>, error: impl ToString) -> jni::errors::Result<jni::sys::jstring> {
+fn error_json(
+    env: &mut JNIEnv<'_>,
+    error: impl ToString,
+) -> jni::errors::Result<jni::sys::jstring> {
     json_string(env, json!({"type":"error","message":error.to_string()}))
 }
 
@@ -95,18 +103,21 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_create(
             .role(role)
             .codec(codec)
             .transport(transport)
-            .audio(sample_rate.max(1) as u32, channels.max(1) as u16, frame_ms.max(1) as u16)
+            .audio(
+                sample_rate.max(1) as u32,
+                channels.max(1) as u16,
+                frame_ms.max(1) as u16,
+            )
             .build()
             .map_err(|error| error.to_string())?;
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        let mut guard = clients().lock().map_err(|_| "client store poisoned".to_string())?;
+        let mut guard = clients()
+            .lock()
+            .map_err(|_| "client store poisoned".to_string())?;
         guard.insert(handle, ClientSlot::Prepared(client));
         Ok(handle)
     })();
-    match value {
-        Ok(handle) => handle,
-        Err(_) => 0,
-    }
+    value.unwrap_or_default()
 }
 
 enum ClientSlot {
@@ -125,8 +136,12 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
     let result = (|| -> Result<serde_json::Value, String> {
         let target = string(&mut env, target)?;
         let pin = string(&mut env, pin)?;
-        let mut guard = clients().lock().map_err(|_| "client store poisoned".to_string())?;
-        let slot = guard.remove(&handle).ok_or_else(|| "unknown client handle".to_string())?;
+        let mut guard = clients()
+            .lock()
+            .map_err(|_| "client store poisoned".to_string())?;
+        let slot = guard
+            .remove(&handle)
+            .ok_or_else(|| "unknown client handle".to_string())?;
         let ClientSlot::Prepared(client) = slot else {
             return Err("client is already connected".into());
         };
@@ -135,9 +150,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
                 guard.insert(handle, ClientSlot::Connected(client));
                 Ok(json!({"type":"connected"}))
             }
-            Err(error) => {
-                Err(error.to_string())
-            }
+            Err(error) => Err(error.to_string()),
         }
     })();
     match result {
@@ -180,7 +193,9 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_pollEvents(
                     .map(event_json)
                     .collect::<Vec<_>>(),
                 Some(ClientSlot::Prepared(_)) => Vec::new(),
-                None => return Err::<Vec<serde_json::Value>, String>("unknown client handle".into()),
+                None => {
+                    return Err::<Vec<serde_json::Value>, String>("unknown client handle".into())
+                }
             })
         });
     match result {
@@ -207,7 +222,9 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_pushCapture(
         if values.iter().any(|value| !value.is_finite()) {
             return Err("PCM contains a non-finite sample".into());
         }
-        let guard = clients().lock().map_err(|_| "client store poisoned".to_string())?;
+        let guard = clients()
+            .lock()
+            .map_err(|_| "client store poisoned".to_string())?;
         let Some(ClientSlot::Connected(client)) = guard.get(&handle) else {
             return Ok(0);
         };
@@ -229,7 +246,9 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_pullPlayback(
             .get_array_length(&output)
             .map_err(|error| error.to_string())?;
         let mut values = vec![0.0f32; length as usize];
-        let guard = clients().lock().map_err(|_| "client store poisoned".to_string())?;
+        let guard = clients()
+            .lock()
+            .map_err(|_| "client store poisoned".to_string())?;
         let Some(ClientSlot::Connected(client)) = guard.get(&handle) else {
             return Ok(0);
         };
@@ -249,10 +268,8 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_release(
     handle: jlong,
 ) {
     if let Ok(mut guard) = clients().lock() {
-        if let Some(slot) = guard.remove(&handle) {
-            if let ClientSlot::Connected(client) = slot {
-                let _ = client.disconnect();
-            }
+        if let Some(ClientSlot::Connected(client)) = guard.remove(&handle) {
+            let _ = client.disconnect();
         }
     }
 }
