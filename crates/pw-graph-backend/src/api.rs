@@ -353,7 +353,6 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
-    netlink::set_debug_logging as relay_set_debug_logging,
     pairing::{
         build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
         QrPayload as RelayQrPayload,
