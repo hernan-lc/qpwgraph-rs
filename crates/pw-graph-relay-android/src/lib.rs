@@ -2,7 +2,8 @@ use jni::objects::{JClass, JFloatArray, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use pw_graph_relay_sdk::{
-    CodecKind, DeviceKind, RelayClient, RelayClientBuilder, RelayEvent, Role, TransportPreference,
+    CodecKind, DeviceKind, RelayBrowser, RelayClient, RelayClientBuilder, RelayEvent, RelayHost,
+    RelayHostBuilder, RelayHostPrepared, SessionId, Role, TransportPreference,
 };
 use serde_json::json;
 use std::collections::HashMap;

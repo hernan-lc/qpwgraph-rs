@@ -16,6 +16,8 @@ pub(crate) enum Icon {
     Patchbay,
     Pin,
     Refresh,
+    #[cfg(feature = "relay")]
+    Relay,
     Repel,
     Redo,
     Save,
@@ -50,6 +52,8 @@ fn icon_source(icon: Icon) -> ImageSource<'static> {
         Icon::Patchbay => include_image!("../assets/icons/patchbay.svg"),
         Icon::Pin => include_image!("../assets/icons/pin.svg"),
         Icon::Refresh => include_image!("../assets/icons/refresh.svg"),
+        #[cfg(feature = "relay")]
+        Icon::Relay => include_image!("../assets/icons/relay.svg"),
         Icon::Repel => include_image!("../assets/icons/repel.svg"),
         Icon::Redo => include_image!("../assets/icons/redo.svg"),
         Icon::Save => include_image!("../assets/icons/save.svg"),

@@ -163,6 +163,8 @@ impl QpwgraphApp {
             effect_gallery_scroll_epoch: 0,
             #[cfg(feature = "relay")]
             relay: RelayUiState::default(),
+            #[cfg(feature = "relay")]
+            show_relay: false,
             #[cfg(all(target_os = "linux", feature = "tray"))]
             tray,
         };

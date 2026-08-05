@@ -50,6 +50,25 @@ impl QpwgraphApp {
                             self.preferences_scroll_epoch.wrapping_add(1);
                     }
                 }
+                #[cfg(feature = "relay")]
+                if document_sidebar_nav_icon_button(
+                    &mut self.ui_document,
+                    ui,
+                    "nav.relay",
+                    Icon::Relay,
+                    self.show_relay,
+                    self.i18n.text("nav.relay"),
+                    self.i18n.text("help.navigation_relay"),
+                ) {
+                    if self.show_relay {
+                        self.show_relay = false;
+                    } else {
+                        self.show_relay = true;
+                        self.show_preferences = false;
+                        self.show_shortcuts = false;
+                        self.effect_gallery = None;
+                    }
+                }
                 if document_sidebar_nav_icon_button(
                     &mut self.ui_document,
                     ui,

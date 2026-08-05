@@ -84,6 +84,8 @@ impl eframe::App for QpwgraphApp {
         self.handle_shortcuts(ctx);
         self.update_window_size(ctx);
         self.show_gui_panels(ctx);
+        #[cfg(feature = "relay")]
+        self.show_relay_panel(ctx);
         self.update_canvas_from_config();
         self.sync_effect_controls();
 

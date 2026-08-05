@@ -67,6 +67,8 @@ pub(crate) struct QpwgraphApp {
     pub(crate) effect_gallery_scroll_epoch: u32,
     #[cfg(feature = "relay")]
     pub(crate) relay: RelayUiState,
+    #[cfg(feature = "relay")]
+    pub(crate) show_relay: bool,
     #[cfg(all(target_os = "linux", feature = "tray"))]
     pub(crate) tray: Option<tray_support::State>,
 }

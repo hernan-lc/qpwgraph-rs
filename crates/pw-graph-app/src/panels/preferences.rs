@@ -25,8 +25,6 @@ pub(crate) enum PreferencesTab {
     #[default]
     Interface,
     Patchbay,
-    #[cfg(feature = "relay")]
-    Relay,
 }
 
 impl QpwgraphApp {
@@ -108,15 +106,11 @@ impl QpwgraphApp {
                     let tabs = [
                         (PreferencesTab::Interface, "screen.interface"),
                         (PreferencesTab::Patchbay, "inspector.patchbay_options"),
-                        #[cfg(feature = "relay")]
-                        (PreferencesTab::Relay, "relay.title"),
                     ];
                     for (tab, label_key) in tabs {
                         let tab_id = match tab {
                             PreferencesTab::Interface => "preferences.tab.interface",
                             PreferencesTab::Patchbay => "preferences.tab.patchbay",
-                            #[cfg(feature = "relay")]
-                            PreferencesTab::Relay => "preferences.tab.relay",
                         };
                         if document_selectable_label(
                             document,
@@ -150,8 +144,6 @@ impl QpwgraphApp {
                         PreferencesTab::Patchbay => {
                             self.show_preferences_patchbay_tab(document, ui)
                         }
-                        #[cfg(feature = "relay")]
-                        PreferencesTab::Relay => self.show_preferences_relay_tab(document, ui),
                     });
                 ui.add_space(8.0);
                 if show_close_button(
@@ -428,230 +420,6 @@ impl QpwgraphApp {
                 self.patchbay.connections.remove(index);
             }
         });
-    }
-
-    #[cfg(feature = "relay")]
-    fn show_preferences_relay_tab(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        let available = self.driver.relay_available();
-        if !available {
-            panel_section(ui, self.i18n.text("relay.title"), |ui| {
-                ui.label(RichText::new(self.i18n.text("relay.unavailable")).weak());
-            });
-            return;
-        }
-
-        panel_section(ui, self.i18n.text("relay.host_section"), |ui| {
-            let (_, device_name) = document_text_input(
-                document,
-                ui,
-                "relay.device_name",
-                &self.config.relay_device_name,
-                self.i18n.text("relay.device_name"),
-                Some(self.i18n.text("relay.device_name_help")),
-            );
-            self.config.relay_device_name = device_name;
-            let (_, pin) = document_text_input(
-                document,
-                ui,
-                "relay.host_pin",
-                &self.config.relay_host_pin,
-                self.i18n.text("relay.pin"),
-                Some(self.i18n.text("relay.pin_help")),
-            );
-            self.config.relay_host_pin = pin;
-            self.config.relay_host_port = document_setting_number(
-                document,
-                ui,
-                "relay.host_port",
-                self.config.relay_host_port as f32,
-                0.0,
-                65535.0,
-                1.0,
-                self.i18n.text("relay.port"),
-                self.i18n.text("relay.port_help"),
-                100.0,
-            ) as u16;
-            ui.horizontal(|ui| {
-                let running = self.driver.relay_status().host_active;
-                if document_button(
-                    document,
-                    ui,
-                    "relay.host_toggle",
-                    self.i18n.text(if running {
-                        "relay.stop_host"
-                    } else {
-                        "relay.start_host"
-                    }),
-                    true,
-                ) {
-                    let mut relay = std::mem::take(&mut self.relay);
-                    if running {
-                        relay.stop_host(self);
-                    } else {
-                        relay.start_host(self);
-                    }
-                    self.relay = relay;
-                }
-                if running {
-                    if let Some(port) = self.driver.relay_status().host_port {
-                        ui.label(self.tf("relay.listening", &[("port", port.to_string())]));
-                    }
-                }
-            });
-        });
-
-        panel_section(ui, self.i18n.text("relay.client_section"), |ui| {
-            let (_, target) = document_text_input(
-                document,
-                ui,
-                "relay.client_target",
-                &self.config.relay_client_target,
-                self.i18n.text("relay.target"),
-                Some(self.i18n.text("relay.target_help")),
-            );
-            self.config.relay_client_target = target;
-            let (_, pin) = document_text_input(
-                document,
-                ui,
-                "relay.client_pin",
-                &self.config.relay_client_pin,
-                self.i18n.text("relay.pin"),
-                Some(self.i18n.text("relay.pin_help")),
-            );
-            self.config.relay_client_pin = pin;
-            self.config.relay_role = document_setting_select(
-                document,
-                ui,
-                "relay.role",
-                &self.config.relay_role,
-                None,
-                self.i18n.text("relay.role"),
-                self.i18n.text("relay.role_help"),
-                [
-                    OptionItem::new("emit", self.i18n.text("relay.role_emit")),
-                    OptionItem::new("receive", self.i18n.text("relay.role_receive")),
-                    OptionItem::new("both", self.i18n.text("relay.role_both")),
-                ],
-                PREFERENCES_SELECT_WIDTH,
-            );
-            self.config.relay_codec = document_setting_select(
-                document,
-                ui,
-                "relay.codec",
-                &self.config.relay_codec,
-                None,
-                self.i18n.text("relay.codec"),
-                self.i18n.text("relay.codec_help"),
-                [
-                    OptionItem::new("opus", "Opus"),
-                    OptionItem::new("pcm", "PCM"),
-                ],
-                PREFERENCES_SELECT_WIDTH,
-            );
-            self.config.relay_frame_ms = document_setting_number(
-                document,
-                ui,
-                "relay.frame_ms",
-                self.config.relay_frame_ms as f32,
-                5.0,
-                60.0,
-                5.0,
-                self.i18n.text("relay.frame_ms"),
-                self.i18n.text("relay.frame_ms_help"),
-                100.0,
-            ) as u16;
-            self.config.relay_transport = document_setting_select(
-                document,
-                ui,
-                "relay.transport",
-                &self.config.relay_transport,
-                None,
-                self.i18n.text("relay.transport"),
-                self.i18n.text("relay.transport_help"),
-                [
-                    OptionItem::new("auto", "Auto"),
-                    OptionItem::new("usb", "USB"),
-                    OptionItem::new("wifi", "Wi-Fi"),
-                    OptionItem::new("bluetooth", "Bluetooth PAN"),
-                    OptionItem::new("lan", "LAN"),
-                ],
-                PREFERENCES_SELECT_WIDTH,
-            );
-            if document_button(
-                document,
-                ui,
-                "relay.connect",
-                self.i18n.text("relay.connect"),
-                true,
-            ) {
-                let mut relay = std::mem::take(&mut self.relay);
-                relay.connect(self);
-                self.relay = relay;
-            }
-        });
-
-        panel_section(ui, self.i18n.text("relay.discovery_section"), |ui| {
-            if document_button(
-                document,
-                ui,
-                "relay.discovery_toggle",
-                self.i18n.text(if self.relay.discovery_active {
-                    "relay.stop_discovery"
-                } else {
-                    "relay.discover"
-                }),
-                true,
-            ) {
-                let mut relay = std::mem::take(&mut self.relay);
-                relay.toggle_discovery(self);
-                self.relay = relay;
-            }
-            let peers = self.relay.peers.clone();
-            for peer in peers {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} — {}", peer.name, peer.addr));
-                    if document_button(
-                        document,
-                        ui,
-                        &format!("relay.peer.connect.{}", peer.addr),
-                        self.i18n.text("relay.connect"),
-                        true,
-                    ) {
-                        self.config.relay_client_target = peer.addr.to_string();
-                        let mut relay = std::mem::take(&mut self.relay);
-                        relay.connect(self);
-                        self.relay = relay;
-                    }
-                });
-            }
-        });
-
-        panel_section(ui, self.i18n.text("relay.sessions"), |ui| {
-            let sessions = self.driver.relay_status().sessions;
-            if sessions.is_empty() {
-                ui.label(RichText::new(self.i18n.text("relay.no_sessions")).weak());
-            }
-            for session in sessions {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} — {}", session.peer.name, session.peer.addr));
-                    if document_button(
-                        document,
-                        ui,
-                        &format!("relay.session.disconnect.{}", session.id.0),
-                        self.i18n.text("relay.disconnect"),
-                        true,
-                    ) {
-                        let mut relay = std::mem::take(&mut self.relay);
-                        relay.disconnect(self, session.id);
-                        self.relay = relay;
-                    }
-                });
-            }
-        });
-
-        if !self.relay.message.is_empty() {
-            ui.label(RichText::new(&self.relay.message).small().weak());
-        }
     }
 
     fn show_preferences_interface_tab(&mut self, document: &mut UiDocument, ui: &mut Ui) {

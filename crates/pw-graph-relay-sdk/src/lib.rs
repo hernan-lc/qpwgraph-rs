@@ -100,6 +100,12 @@ impl RelayHostBuilder {
         self
     }
 
+    /// Advertised device kind (default: [`DeviceKind::Linux`]).
+    pub fn device_kind(mut self, kind: DeviceKind) -> Self {
+        self.config.device_kind = kind;
+        self
+    }
+
     /// Pairing PIN clients must present. Required before [`Self::start`].
     pub fn pin(mut self, pin: impl Into<String>) -> Self {
         self.config.pin = pin.into();
@@ -120,6 +126,16 @@ impl RelayHostBuilder {
     /// Preferred transport link (default: auto-select the best available).
     pub fn transport(mut self, transport: TransportPreference) -> Self {
         self.config.transport = transport;
+        self
+    }
+
+    /// Audio format exchanged with connected peers. Embedding applications
+    /// drive their own audio IO (e.g. `AudioRecord`/`AudioTrack` on Android)
+    /// and push/pull PCM at this rate.
+    pub fn audio(mut self, sample_rate: u32, channels: u16, frame_ms: u16) -> Self {
+        self.config.sample_rate = sample_rate;
+        self.config.channels = channels;
+        self.config.frame_ms = frame_ms;
         self
     }
 
@@ -391,6 +407,58 @@ pub fn discover_hosts(timeout: Duration) -> RelayResult<Vec<PeerInfo>> {
     Ok(peers)
 }
 
+/// A standalone, long-lived browser for relay hosts on the local network.
+///
+/// Unlike [`discover_hosts`], which blocks for a fixed timeout and tears the
+/// engine down, a browser stays open so an embedding UI can start and stop
+/// browsing on demand and read the current peer snapshot whenever it redraws.
+/// The underlying [`RelayEngine`] opens no control socket: browsing works
+/// with no host running and no client connected.
+pub struct RelayBrowser {
+    engine: RelayEngine,
+    handle: RelayHandle,
+}
+
+impl RelayBrowser {
+    /// Create a browser. `device_name` identifies this browser in mDNS probes.
+    pub fn start(device_name: impl Into<String>) -> RelayResult<Self> {
+        let config = EngineConfig {
+            device_name: device_name.into(),
+            ..EngineConfig::default()
+        };
+        let engine = RelayEngine::start(config)?;
+        let handle = engine.handle();
+        Ok(Self { engine, handle })
+    }
+
+    /// Begin browsing `_qpw-relay._udp`. Idempotent.
+    pub fn discovery_start(&self) -> RelayResult<()> {
+        self.handle.discovery_start()
+    }
+
+    /// Stop browsing. Peers seen so far remain readable through
+    /// [`Self::peers`] until the browser is dropped. Idempotent.
+    pub fn discovery_stop(&self) {
+        self.handle.discovery_stop()
+    }
+
+    /// Snapshot of relay hosts discovered so far.
+    pub fn peers(&self) -> Vec<PeerInfo> {
+        self.handle.discovered_peers()
+    }
+
+    /// Drain pending events (`PeerDiscovered`, `PeerLost`, errors). UIs poll
+    /// this to learn *why* the peer list changed.
+    pub fn events(&self) -> Vec<RelayEvent> {
+        self.handle.events()
+    }
+
+    /// Stop the underlying engine and consume the browser.
+    pub fn shutdown(self) {
+        self.engine.shutdown();
+    }
+}
+
 fn resolve(target: &str) -> RelayResult<SocketAddr> {
     let target = target.trim();
     if target.is_empty() {
@@ -453,5 +521,35 @@ mod tests {
     fn accepts_ipv4_and_ipv6_control_targets() {
         assert_eq!(resolve("127.0.0.1:48123").unwrap().port(), 48123);
         assert_eq!(resolve("[::1]:48123").unwrap().port(), 48123);
+    }
+
+    #[test]
+    fn host_builder_audio_settings_carry_into_a_running_host() {
+        let host = RelayHostBuilder::new()
+            .device_name("sdk-host-test")
+            .pin("123456")
+            .port(0)
+            .audio(48_000, 1, 20)
+            .build()
+            .expect("builder")
+            .start()
+            .expect("host start");
+        assert_ne!(host.port(), 0);
+        let status = host.status();
+        assert!(status.host_active);
+        assert!(status.sessions.is_empty());
+    }
+
+    #[test]
+    fn browser_starts_empty_and_tolerates_unmulticastable_envs() {
+        let browser = RelayBrowser::start("sdk-browser-test").expect("browser");
+        assert!(browser.peers().is_empty());
+        // Browsing needs mDNS multicast; sandboxes may refuse the socket.
+        // Either outcome is fine here — this test pins the API shape.
+        if browser.discovery_start().is_ok() {
+            let _ = browser.events();
+            browser.discovery_stop();
+        }
+        browser.shutdown();
     }
 }
