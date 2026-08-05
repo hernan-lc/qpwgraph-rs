@@ -11,6 +11,7 @@
 //! observable through `value`/`on_change` like any other control.
 
 use super::icons::{icon_image, Icon, IconSource};
+use super::theme::{Theme, ThemeToken};
 use super::{CommonProps, ElementId, ElementKind, EventType, Style, UiDocument, Value};
 use egui::{Align, Color32, Frame, Layout, Margin, Response, RichText, Sense, Stroke, Ui, Vec2};
 
@@ -34,11 +35,12 @@ pub struct CardProps {
 
 impl CardProps {
     /// Creates a card with the layer's default surface styling.
+    /// The fill is resolved from [`ThemeToken::Surface`] at render time.
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             common: CommonProps::new(id).style(
                 Style::default()
-                    .fill(Color32::from_rgb(38, 44, 54))
+                    .fill_token(ThemeToken::Surface)
                     .rounding(6.0)
                     .inner_margin(8.0),
             ),
@@ -308,7 +310,7 @@ impl UiDocument {
         }
         let style = props.common.style.clone();
         let rounding = style.rounding.unwrap_or(0.0);
-        let frame = frame_from_style(&style).show(ui, |ui| {
+        let frame = frame_from_style(&style, &self.theme).show(ui, |ui| {
             if let Some(width) = style.width {
                 ui.set_width(width);
             }
@@ -354,6 +356,8 @@ impl UiDocument {
         let title = props.title.clone();
         let summary = props.summary.clone();
 
+        let text_primary = self.theme.color(ThemeToken::TextPrimary);
+        let text_weak = self.theme.color(ThemeToken::TextWeak);
         let mut response = ui
             .scope(|ui| {
                 let row = ui.horizontal(|ui| {
@@ -361,12 +365,12 @@ impl UiDocument {
                     ui.add(icon_image(
                         &Icon::disclosure(open).into(),
                         CHROME_ICON_SIZE,
-                        ui.visuals().text_color(),
+                        text_primary,
                     ));
-                    ui.label(RichText::new(title).strong());
+                    ui.label(RichText::new(title).strong().color(text_primary));
                     if let Some(summary) = summary {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new(summary).small().weak());
+                            ui.label(RichText::new(summary).small().color(text_weak));
                         });
                     }
                 });
@@ -470,10 +474,11 @@ impl UiDocument {
         accent: Color32,
     ) -> Response {
         let text_color = if active {
-            ui.visuals().strong_text_color()
+            self.theme.color(ThemeToken::TextPrimary)
         } else {
-            ui.visuals().weak_text_color()
+            self.theme.color(ThemeToken::TextSecondary)
         };
+        let hover_fill = self.theme.color(ThemeToken::SurfaceHover);
         let response = ui
             .scope(|ui| {
                 let inner = Frame::none()
@@ -510,8 +515,7 @@ impl UiDocument {
                         Stroke::new(2.0_f32, accent),
                     );
                 } else if response.hovered() {
-                    ui.painter()
-                        .rect_filled(inner.rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+                    ui.painter().rect_filled(inner.rect, 4.0, hover_fill);
                 }
                 response
             })
@@ -596,11 +600,9 @@ fn step_marker(
     accent: Color32,
 ) -> bool {
     let active = index == current;
-    let color = if item.done || active {
-        accent
-    } else {
-        ui.visuals().weak_text_color()
-    };
+    let inactive_color = ui.visuals().weak_text_color();
+    let color = if item.done || active { accent } else { inactive_color };
+    let number_on_active = ui.visuals().extreme_bg_color;
     let response = ui
         .horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(STEP_MARKER_SIZE), Sense::hover());
@@ -619,11 +621,7 @@ fn step_marker(
                     egui::Rect::from_center_size(rect.center(), Vec2::splat(CHROME_ICON_SIZE));
                 icon_image(&Icon::Check.into(), CHROME_ICON_SIZE, color).paint_at(ui, icon_rect);
             } else {
-                let number_color = if active {
-                    ui.visuals().extreme_bg_color
-                } else {
-                    color
-                };
+                let number_color = if active { number_on_active } else { color };
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -646,9 +644,10 @@ fn step_marker(
     .clicked()
 }
 
-fn frame_from_style(style: &Style) -> Frame {
+fn frame_from_style(style: &Style, theme: &Theme) -> Frame {
     let mut frame = Frame::none();
-    if let Some(fill) = style.fill {
+    // Resolve fill: explicit color wins, otherwise fall back to theme token.
+    if let Some(fill) = style.resolve_fill(theme) {
         frame = frame.fill(fill);
     }
     if let Some(stroke) = style.stroke {

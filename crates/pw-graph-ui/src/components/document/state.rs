@@ -1,7 +1,8 @@
 use super::super::{
-    CommonProps, Element, ElementId, ElementKind, EventType, Form, FormValues, OptionItem,
-    UiDocument, UiEvent, Value,
+    CommonProps, Element, ElementId, ElementKind, EventType, Form, FormValues, OptionItem, Theme,
+    ThemeMode, ThemeToken, UiDocument, UiEvent, Value,
 };
+use egui::Color32;
 use std::collections::{BTreeMap, VecDeque};
 
 impl Default for UiDocument {
@@ -11,6 +12,7 @@ impl Default for UiDocument {
             listeners: BTreeMap::new(),
             pending_events: VecDeque::new(),
             next_listener_id: 1,
+            theme: Theme::default(),
         }
     }
 }
@@ -19,6 +21,35 @@ impl UiDocument {
     /// Creates an empty document.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the active theme.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Returns the active theme mode.
+    pub fn theme_mode(&self) -> ThemeMode {
+        self.theme.mode
+    }
+
+    /// Sets the active theme mode (Dark or Light).
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        if self.theme.mode != mode {
+            self.theme = Theme::new(mode);
+        }
+    }
+
+    /// Toggles between Dark and Light themes and returns the new mode.
+    pub fn toggle_theme(&mut self) -> ThemeMode {
+        let new_mode = self.theme.mode.toggled();
+        self.set_theme_mode(new_mode);
+        new_mode
+    }
+
+    /// Resolves a semantic theme token to a [`Color32`].
+    pub fn theme_color(&self, token: ThemeToken) -> Color32 {
+        self.theme.color(token)
     }
 
     /// Clears per-frame flags and starts a new UI frame.

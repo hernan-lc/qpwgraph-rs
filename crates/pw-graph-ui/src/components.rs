@@ -64,6 +64,7 @@ mod icons;
 mod ids;
 mod indicators;
 mod props;
+mod theme;
 #[cfg(test)]
 mod tests;
 
@@ -83,6 +84,7 @@ pub use props::{
     ButtonProps, CheckboxProps, CommonProps, LabelProps, NumberInputProps, RadioGroupProps,
     SelectProps, SliderProps, Style, SwitchProps, TextInputProps,
 };
+pub use theme::{Theme, ThemeMode, ThemePalette, ThemeToken};
 
 /// Renders a setting row with descriptive content on the leading side and
 /// its control aligned to the trailing edge.
@@ -118,4 +120,5 @@ pub struct UiDocument {
     listeners: BTreeMap<(ElementId, EventType), Vec<Listener>>,
     pending_events: VecDeque<UiEvent>,
     next_listener_id: u64,
+    theme: Theme,
 }

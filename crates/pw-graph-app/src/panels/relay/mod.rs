@@ -20,22 +20,25 @@ mod host;
 mod qr;
 
 use super::components::document_button;
-use super::shared::{apply_panel_text_scale, fresh_scroll_area, PANEL_FILL};
+use super::shared::{apply_panel_text_scale, fresh_scroll_area, panel_fill};
 use crate::app::{QpwgraphApp, RelayPanelTab};
 use crate::icons::Icon;
-use eframe::egui::{self, Color32, RichText, Ui};
-use pw_graph_ui::{TabItem, TabsProps, UiDocument};
+use eframe::egui::{self, RichText, Ui};
+use pw_graph_ui::{TabItem, TabsProps, Theme, ThemeToken, UiDocument};
 
 const RELAY_PANEL_MIN_WIDTH: f32 = 320.0;
 const RELAY_PANEL_DEFAULT_WIDTH: f32 = 380.0;
 /// Wide enough for the option labels used by the role/codec/link selects.
 pub(super) const RELAY_SELECT_WIDTH: f32 = 260.0;
-const PANEL_TITLE_COLOR: Color32 = Color32::from_rgb(205, 216, 230);
-/// Selection accent shared by the tab strip and the stepper, so "this is the
-/// active thing" reads the same throughout the panel.
-pub(super) const ACCENT: Color32 = Color32::from_rgb(96, 165, 250);
-/// Live-session accent, matching the canvas link colour.
-pub(super) const CONNECTED_ACCENT: Color32 = Color32::from_rgb(96, 190, 130);
+
+/// Selection accent from theme (shared by tab strip and stepper).
+pub(super) fn accent_color(theme: &Theme) -> egui::Color32 {
+    theme.color(ThemeToken::Accent)
+}
+/// Live-session accent matching the canvas link colour.
+pub(super) fn connected_accent_color(theme: &Theme) -> egui::Color32 {
+    theme.color(ThemeToken::AccentConnected)
+}
 
 /// Tab identity in the document. The enum stays the app's source of truth;
 /// these map it onto the stable string values the tab strip retains.
@@ -60,11 +63,12 @@ impl QpwgraphApp {
             return;
         }
         let mut document = std::mem::take(&mut self.ui_document);
+        let fill = panel_fill(document.theme());
         egui::SidePanel::right("relay")
             .resizable(true)
             .min_width(RELAY_PANEL_MIN_WIDTH)
             .default_width(RELAY_PANEL_DEFAULT_WIDTH)
-            .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(8.0))
+            .frame(egui::Frame::none().fill(fill).inner_margin(8.0))
             .show(ctx, |ui| {
                 apply_panel_text_scale(ui, self.config.panel_text_scale);
                 self.show_relay_contents(&mut document, ui);
@@ -74,11 +78,12 @@ impl QpwgraphApp {
     }
 
     fn show_relay_contents(&mut self, document: &mut UiDocument, ui: &mut Ui) {
+        let title_color = document.theme_color(ThemeToken::TextSecondary);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(self.i18n.text("relay.title"))
                     .strong()
-                    .color(PANEL_TITLE_COLOR),
+                    .color(title_color),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if document_button(
@@ -127,6 +132,7 @@ impl QpwgraphApp {
     /// Connections label as a badge, so it stays visible from the Host tab.
     fn show_relay_tab_bar(&mut self, document: &mut UiDocument, ui: &mut Ui) {
         let session_count = self.driver.relay_status().sessions.len();
+        let accent = accent_color(document.theme());
         let selected = document.tabs(
             ui,
             TabsProps::new(
@@ -140,7 +146,7 @@ impl QpwgraphApp {
                 ],
             )
             .selected(relay_tab_value(self.relay.tab))
-            .accent(ACCENT),
+            .accent(accent),
         );
         self.relay.tab = relay_tab_from_value(&selected);
     }

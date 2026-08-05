@@ -3,10 +3,20 @@ use eframe::egui;
 use eframe::egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
 use pw_graph_ui::{DialogProps, DialogResponse, MediaFilter, UiDocument};
+use pw_graph_ui::{Theme, ThemeToken};
 
-pub(super) const PANEL_FILL: Color32 = Color32::from_rgb(25, 29, 36);
-pub(super) const SECTION_FILL: Color32 = Color32::from_rgb(30, 35, 43);
-pub(super) const SECTION_STROKE: Color32 = Color32::from_rgb(59, 70, 84);
+/// Resolves the panel background using the active theme.
+pub(super) fn panel_fill(theme: &Theme) -> Color32 {
+    theme.color(ThemeToken::Background)
+}
+/// Resolves the section surface color using the active theme.
+pub(super) fn section_fill(theme: &Theme) -> Color32 {
+    theme.color(ThemeToken::Surface)
+}
+/// Resolves the section border color using the active theme.
+pub(super) fn section_stroke_color(theme: &Theme) -> Color32 {
+    theme.color(ThemeToken::Border)
+}
 pub(super) const NAV_RAIL_WIDTH: f32 = 76.0;
 
 pub(super) fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
@@ -18,19 +28,23 @@ pub(super) fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {
     ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
 }
 
-pub(super) fn panel_section(ui: &mut Ui, title: String, contents: impl FnOnce(&mut Ui)) {
+pub(super) fn panel_section(
+    ui: &mut Ui,
+    title: String,
+    theme: &Theme,
+    contents: impl FnOnce(&mut Ui),
+) {
     let available_width = ui.available_width();
+    let fill = section_fill(theme);
+    let border = section_stroke_color(theme);
+    let title_color = theme.color(ThemeToken::TextPrimary);
     egui::Frame::group(ui.style())
-        .fill(SECTION_FILL)
-        .stroke(Stroke::new(1.0_f32, SECTION_STROKE))
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, border))
         .inner_margin(9.0)
         .show(ui, |ui| {
             ui.set_min_width((available_width - 18.0).max(0.0));
-            ui.label(
-                RichText::new(title)
-                    .strong()
-                    .color(Color32::from_rgb(205, 216, 230)),
-            );
+            ui.label(RichText::new(title).strong().color(title_color));
             ui.add_space(5.0);
             contents(ui);
         });

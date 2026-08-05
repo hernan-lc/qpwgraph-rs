@@ -1,3 +1,4 @@
+use super::super::super::theme::{Theme, ThemeToken};
 use super::super::super::{CommonProps, ElementId, Style};
 use egui::{vec2, Color32, Frame, Key, Margin, Response, Sense, Stroke, Ui, Vec2};
 
@@ -37,11 +38,12 @@ pub(super) fn add_sized<W: egui::Widget>(ui: &mut Ui, style: &Style, widget: W) 
 pub(super) fn labelled(
     ui: &mut Ui,
     label: Option<&str>,
+    text_color: Color32,
     render: impl FnOnce(&mut Ui) -> Response,
 ) -> Response {
     if let Some(label) = label.filter(|label| !label.is_empty()) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(label).color(Color32::from_rgb(220, 230, 242)));
+            ui.label(egui::RichText::new(label).color(text_color));
             render(ui)
         })
         .inner
@@ -53,6 +55,7 @@ pub(super) fn labelled(
 pub(super) fn with_common(
     ui: &mut Ui,
     common: &CommonProps,
+    theme: &Theme,
     render: impl FnOnce(&mut Ui) -> Response,
 ) -> Response {
     if !common.visible {
@@ -62,6 +65,8 @@ pub(super) fn with_common(
     let style = common.style.clone();
     let draw_style = style.clone();
     let enabled = common.enabled;
+    // Resolve text color: explicit override, then theme token, then none.
+    let resolved_text_color = draw_style.resolve_text_color(theme);
     let draw = move |ui: &mut Ui| {
         if let Some(width) = draw_style.width {
             ui.set_width(width);
@@ -69,8 +74,8 @@ pub(super) fn with_common(
         if let Some(height) = draw_style.height {
             ui.set_height(height);
         }
-        if let Some(text_color) = draw_style.text_color {
-            ui.visuals_mut().override_text_color = Some(text_color);
+        if let Some(tc) = resolved_text_color {
+            ui.visuals_mut().override_text_color = Some(tc);
         }
         if enabled {
             render(ui)
@@ -81,7 +86,8 @@ pub(super) fn with_common(
 
     let mut response = if style.has_frame() {
         let mut frame = Frame::none();
-        if let Some(fill) = style.fill {
+        // Resolve fill: explicit color wins, then theme token.
+        if let Some(fill) = style.resolve_fill(theme) {
             frame = frame.fill(fill);
         }
         if let Some(stroke) = style.stroke {
@@ -109,11 +115,14 @@ pub(super) fn switch_widget(
     checked: &mut bool,
     label: Option<&str>,
     style: &Style,
+    theme: &Theme,
 ) -> Response {
     let track_size = vec2(style.width.unwrap_or(36.0), style.height.unwrap_or(20.0))
         .max(vec2(0.0, ui.spacing().interact_size.y));
-    let on_fill = style.fill.unwrap_or(Color32::from_rgb(42, 169, 244));
-    let off_fill = Color32::from_rgb(76, 84, 96);
+    let on_fill = style
+        .resolve_fill(theme)
+        .unwrap_or_else(|| theme.color(ThemeToken::Accent));
+    let off_fill = theme.color(ThemeToken::SurfaceHover);
     ui.horizontal(|ui| {
         let widget_id = ui.make_persistent_id(("ui-document-switch", id));
         let (rect, _) = ui.allocate_exact_size(track_size, Sense::hover());

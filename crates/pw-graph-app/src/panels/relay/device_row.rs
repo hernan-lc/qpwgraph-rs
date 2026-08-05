@@ -12,7 +12,7 @@
 //! row inherits the shared styling instead of restating it locally.
 
 use super::super::components::document_button;
-use super::CONNECTED_ACCENT;
+use super::connected_accent_color;
 use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
 use crate::icons::Icon;
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -48,13 +48,13 @@ impl QpwgraphApp {
             } else {
                 ROW_BACKGROUND
             })
-            .accent_option(connected.then_some(CONNECTED_ACCENT));
+            .accent_option(connected.then_some(connected_accent_color(document.theme())));
         document
             .card(ui, card, |ui, document| {
                 let action = ui
                     .horizontal(|ui| {
                         let tint = if connected {
-                            CONNECTED_ACCENT
+                            connected_accent_color(document.theme())
                         } else {
                             ui.visuals().weak_text_color()
                         };
@@ -152,7 +152,7 @@ impl QpwgraphApp {
                     ui,
                     MeterProps::new(format!("relay.panel.device.level.{}", session.0))
                         .level_option(self.relay.levels.get(&session.0).copied())
-                        .color(CONNECTED_ACCENT)
+                        .color(connected_accent_color(document.theme()))
                         .tooltip(self.i18n.text("relay.level_tip")),
                 );
             }

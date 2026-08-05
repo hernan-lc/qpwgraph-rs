@@ -6,7 +6,7 @@ use super::components::{
     document_text_input_sized,
 };
 use super::shared::{
-    apply_panel_text_scale, fresh_scroll_area, media_filter_key, NAV_RAIL_WIDTH, PANEL_FILL,
+    apply_panel_text_scale, fresh_scroll_area, media_filter_key, panel_fill, NAV_RAIL_WIDTH,
 };
 use crate::app::QpwgraphApp;
 use crate::icons::Icon;
@@ -19,7 +19,11 @@ impl QpwgraphApp {
             egui::SidePanel::left("navigation")
                 .resizable(false)
                 .exact_width(NAV_RAIL_WIDTH)
-                .frame(egui::Frame::none().fill(PANEL_FILL).inner_margin(6.0))
+                .frame(
+                    egui::Frame::none()
+                        .fill(panel_fill(self.ui_document.theme()))
+                        .inner_margin(6.0),
+                )
                 .show(ctx, |ui| {
                     apply_panel_text_scale(ui, self.config.panel_text_scale);
                     self.show_navigation(ui)

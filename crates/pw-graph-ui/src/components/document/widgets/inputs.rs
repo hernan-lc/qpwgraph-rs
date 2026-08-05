@@ -1,5 +1,6 @@
 use super::super::super::{
-    ElementKind, EventType, NumberInputProps, SliderProps, TextInputProps, UiDocument, Value,
+    ElementKind, EventType, NumberInputProps, SliderProps, TextInputProps, ThemeToken, UiDocument,
+    Value,
 };
 use super::shared::{add_sized, labelled, normalize_optional_range, normalize_range, with_common};
 use super::{finish_control, prepare_control};
@@ -160,8 +161,9 @@ impl UiDocument {
         let hint = props.hint.clone();
         let multiline = props.multiline;
         let password = props.password;
-        let response = with_common(ui, &props.common, |ui| {
-            labelled(ui, label.as_deref(), |ui| {
+        let text_color = self.theme.color(ThemeToken::TextPrimary);
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
+            labelled(ui, label.as_deref(), text_color, |ui| {
                 let mut editor = if multiline {
                     egui::TextEdit::multiline(&mut text)
                 } else {
@@ -209,8 +211,9 @@ impl UiDocument {
         let step = props.step;
         let prefix = props.prefix.clone();
         let suffix = props.suffix.clone();
-        let response = with_common(ui, &props.common, |ui| {
-            labelled(ui, label.as_deref(), |ui| {
+        let text_color = self.theme.color(ThemeToken::TextPrimary);
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
+            labelled(ui, label.as_deref(), text_color, |ui| {
                 let (minimum, maximum) = normalize_optional_range(minimum, maximum);
                 number_input_surface(
                     ui, &style, &mut value, minimum, maximum, step, &prefix, &suffix,
@@ -244,8 +247,9 @@ impl UiDocument {
         let show_value = props.show_value;
         let prefix = props.prefix.clone();
         let suffix = props.suffix.clone();
-        let response = with_common(ui, &props.common, |ui| {
-            labelled(ui, label.as_deref(), |ui| {
+        let text_color = self.theme.color(ThemeToken::TextPrimary);
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
+            labelled(ui, label.as_deref(), text_color, |ui| {
                 let mut slider =
                     egui::Slider::new(&mut value, minimum..=maximum).show_value(show_value);
                 if let Some(step) =

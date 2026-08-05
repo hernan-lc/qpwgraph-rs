@@ -10,15 +10,18 @@
 
 use super::super::components::{document_button, document_setting_number, document_text_input};
 use super::super::shared::panel_section;
-use super::{ACCENT, CONNECTED_ACCENT};
+use super::{accent_color, connected_accent_color};
 use crate::app::QpwgraphApp;
 use crate::icons::Icon;
 use eframe::egui::{RichText, Ui};
-use pw_graph_ui::{BadgeProps, CardProps, IconButtonProps, StepItem, StepsProps, UiDocument};
+use pw_graph_ui::{
+    BadgeProps, CardProps, IconButtonProps, StepItem, StepsProps, ThemeToken, UiDocument,
+};
 
 impl QpwgraphApp {
     pub(super) fn show_relay_host_section(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        panel_section(ui, self.i18n.text("relay.emitter_section"), |ui| {
+        let theme = document.theme().clone();
+        panel_section(ui, self.i18n.text("relay.emitter_section"), &theme, |ui| {
             let running = self.driver.relay_status().host_active;
             self.show_relay_host_steps(document, ui, running);
             ui.add_space(6.0);
@@ -30,7 +33,7 @@ impl QpwgraphApp {
             ui.label(
                 RichText::new(self.i18n.text("relay.emitter_hint"))
                     .small()
-                    .color(eframe::egui::Color32::from_rgb(180, 195, 215)),
+                    .color(document.theme_color(ThemeToken::TextWeak)),
             );
         });
     }
@@ -60,7 +63,11 @@ impl QpwgraphApp {
             )
             .current(current)
             .navigable(false)
-            .accent(if running { CONNECTED_ACCENT } else { ACCENT }),
+            .accent(if running {
+                connected_accent_color(document.theme())
+            } else {
+                accent_color(document.theme())
+            }),
         );
     }
 
@@ -97,7 +104,7 @@ impl QpwgraphApp {
         document.card(
             ui,
             CardProps::new("relay.panel.host.network_card")
-                .accent_option(running.then_some(CONNECTED_ACCENT)),
+                .accent_option(running.then_some(connected_accent_color(document.theme()))),
             |ui, document| {
                 self.config.relay_host_port = document_setting_number(
                     document,
@@ -139,7 +146,7 @@ impl QpwgraphApp {
                                     "relay.panel.host.port_badge",
                                     self.tf("relay.listening", &[("port", port.to_string())]),
                                 )
-                                .color(CONNECTED_ACCENT),
+                                .color(connected_accent_color(document.theme())),
                             );
                         }
                     }
@@ -156,7 +163,11 @@ impl QpwgraphApp {
             CardProps::new("relay.panel.host.share_card"),
             |ui, document| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(self.i18n.text("relay.step_share")).strong().color(eframe::egui::Color32::from_rgb(240, 244, 250)));
+                    ui.label(
+                        RichText::new(self.i18n.text("relay.step_share"))
+                            .strong()
+                            .color(document.theme_color(ThemeToken::TextPrimary)),
+                    );
                     if document.icon_button(
                         ui,
                         IconButtonProps::new("relay.panel.host.qr", Icon::QrCode.source())
@@ -165,7 +176,7 @@ impl QpwgraphApp {
                         self.relay.show_qr = true;
                     }
                 });
-                self.show_relay_host_endpoints(ui);
+                self.show_relay_host_endpoints(document, ui);
             },
         );
     }
@@ -173,10 +184,13 @@ impl QpwgraphApp {
     /// Connection details peers need: every reachable `address:port` (the
     /// QR's primary endpoint first and highlighted) and the pairing PIN.
     /// Monospace keeps the endpoints readable as one unit.
-    fn show_relay_host_endpoints(&self, ui: &mut Ui) {
+    fn show_relay_host_endpoints(&self, document: &UiDocument, ui: &mut Ui) {
         let Some(port) = self.driver.relay_status().host_port else {
             return;
         };
+        let weak = document.theme_color(ThemeToken::TextWeak);
+        let primary = document.theme_color(ThemeToken::TextPrimary);
+        let secondary = document.theme_color(ThemeToken::TextSecondary);
         let links = if self.relay.links.is_empty() {
             self.driver.relay_local_links()
         } else {
@@ -186,30 +200,36 @@ impl QpwgraphApp {
             ui.label(
                 RichText::new(self.i18n.text("relay.no_links"))
                     .small()
-                    .color(eframe::egui::Color32::from_rgb(180, 195, 215)),
+                    .color(weak),
             );
         }
         for (index, link) in links.iter().enumerate() {
             let endpoint = format!("{}:{}", link.addr, port);
             if index == 0 {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(endpoint).monospace().strong().color(eframe::egui::Color32::from_rgb(240, 244, 250)));
+                    ui.label(RichText::new(endpoint).monospace().strong().color(primary));
                     ui.label(
                         RichText::new(self.i18n.text("relay.endpoint_primary"))
                             .small()
-                            .color(eframe::egui::Color32::from_rgb(180, 195, 215)),
+                            .color(weak),
                     );
                 });
             } else {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{} · ", link.name)).small().color(eframe::egui::Color32::from_rgb(180, 195, 215)));
-                    ui.label(RichText::new(endpoint).monospace().color(eframe::egui::Color32::from_rgb(215, 225, 238)));
+                    ui.label(
+                        RichText::new(format!("{} · ", link.name))
+                            .small()
+                            .color(weak),
+                    );
+                    ui.label(RichText::new(endpoint).monospace().color(secondary));
                 });
             }
         }
         let pin = self.config.relay_host_pin.trim();
         if !pin.is_empty() {
-            ui.label(RichText::new(self.tf("relay.qr_pin", &[("pin", pin.to_owned())])).color(eframe::egui::Color32::from_rgb(215, 225, 238)));
+            ui.label(
+                RichText::new(self.tf("relay.qr_pin", &[("pin", pin.to_owned())])).color(secondary),
+            );
         }
     }
 }

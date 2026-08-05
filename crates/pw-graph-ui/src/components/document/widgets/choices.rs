@@ -1,5 +1,5 @@
 use super::super::super::{
-    ElementKind, EventType, OptionItem, RadioGroupProps, SelectProps, UiDocument, Value,
+    ElementKind, EventType, OptionItem, RadioGroupProps, SelectProps, ThemeToken, UiDocument, Value,
 };
 use super::shared::{labelled, with_common};
 use super::{finish_control, prepare_control};
@@ -28,7 +28,7 @@ impl UiDocument {
             .find(|option| option.value == selected)
             .map(|option| option.label.clone())
             .unwrap_or_else(|| selected.clone());
-        let response = with_common(ui, &props.common, |ui| {
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
             let width = style
                 .width
                 .unwrap_or_else(|| (ui.available_width() - 4.0).max(120.0));
@@ -79,8 +79,9 @@ impl UiDocument {
         let options = props.options.clone();
         let label = props.common.label.clone();
         let horizontal = props.horizontal;
-        let response = with_common(ui, &props.common, |ui| {
-            labelled(ui, label.as_deref(), |ui| {
+        let text_color = self.theme.color(ThemeToken::TextPrimary);
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
+            labelled(ui, label.as_deref(), text_color, |ui| {
                 let mut combined: Option<Response> = None;
                 let mut selected_changed = false;
                 let mut draw_options = |ui: &mut Ui| {

@@ -163,63 +163,69 @@ impl QpwgraphApp {
     }
 
     fn show_preferences_patchbay_tab(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        panel_section(ui, self.i18n.text("inspector.patchbay_options"), |ui| {
-            let exclusive_label = self.i18n.text("inspector.exclusive");
-            let exclusive_help = self.i18n.text("help.exclusive");
-            self.config.patchbay_exclusive = document_setting_switch(
-                document,
-                ui,
-                "patchbay.exclusive",
-                self.config.patchbay_exclusive,
-                Icon::Exclusive,
-                exclusive_label,
-                exclusive_help,
-            );
-            let auto_disconnect_label = self.i18n.text("inspector.auto_disconnect");
-            let auto_disconnect_help = self.i18n.text("help.auto_disconnect");
-            self.config.patchbay_auto_disconnect = document_setting_switch(
-                document,
-                ui,
-                "patchbay.auto_disconnect",
-                self.config.patchbay_auto_disconnect,
-                Icon::AutoDisconnect,
-                auto_disconnect_label,
-                auto_disconnect_help,
-            );
-            let auto_pin_label = self.i18n.text("inspector.auto_pin");
-            let auto_pin_help = self.i18n.text("help.auto_pin");
-            self.config.patchbay_auto_pin = document_setting_switch(
-                document,
-                ui,
-                "patchbay.auto_pin",
-                self.config.patchbay_auto_pin,
-                Icon::Pin,
-                auto_pin_label,
-                auto_pin_help,
-            );
-            let patchbay_activated_before = self.config.patchbay_activated;
-            let patchbay_activated_label = self.i18n.text("inspector.patchbay_activated");
-            let patchbay_activated_help = self.i18n.text("help.patchbay_activated");
-            self.config.patchbay_activated = document_setting_switch(
-                document,
-                ui,
-                "patchbay.activated",
-                self.config.patchbay_activated,
-                Icon::Timer,
-                patchbay_activated_label,
-                patchbay_activated_help,
-            );
-            if self.config.patchbay_activated && !patchbay_activated_before {
-                self.activate_patchbay();
-            }
-        });
+        let theme = document.theme().clone();
+        panel_section(
+            ui,
+            self.i18n.text("inspector.patchbay_options"),
+            &theme,
+            |ui| {
+                let exclusive_label = self.i18n.text("inspector.exclusive");
+                let exclusive_help = self.i18n.text("help.exclusive");
+                self.config.patchbay_exclusive = document_setting_switch(
+                    document,
+                    ui,
+                    "patchbay.exclusive",
+                    self.config.patchbay_exclusive,
+                    Icon::Exclusive,
+                    exclusive_label,
+                    exclusive_help,
+                );
+                let auto_disconnect_label = self.i18n.text("inspector.auto_disconnect");
+                let auto_disconnect_help = self.i18n.text("help.auto_disconnect");
+                self.config.patchbay_auto_disconnect = document_setting_switch(
+                    document,
+                    ui,
+                    "patchbay.auto_disconnect",
+                    self.config.patchbay_auto_disconnect,
+                    Icon::AutoDisconnect,
+                    auto_disconnect_label,
+                    auto_disconnect_help,
+                );
+                let auto_pin_label = self.i18n.text("inspector.auto_pin");
+                let auto_pin_help = self.i18n.text("help.auto_pin");
+                self.config.patchbay_auto_pin = document_setting_switch(
+                    document,
+                    ui,
+                    "patchbay.auto_pin",
+                    self.config.patchbay_auto_pin,
+                    Icon::Pin,
+                    auto_pin_label,
+                    auto_pin_help,
+                );
+                let patchbay_activated_before = self.config.patchbay_activated;
+                let patchbay_activated_label = self.i18n.text("inspector.patchbay_activated");
+                let patchbay_activated_help = self.i18n.text("help.patchbay_activated");
+                self.config.patchbay_activated = document_setting_switch(
+                    document,
+                    ui,
+                    "patchbay.activated",
+                    self.config.patchbay_activated,
+                    Icon::Timer,
+                    patchbay_activated_label,
+                    patchbay_activated_help,
+                );
+                if self.config.patchbay_activated && !patchbay_activated_before {
+                    self.activate_patchbay();
+                }
+            },
+        );
 
         let current_path = self.patchbay_file.display().to_string();
         let choose_directory = self.i18n.text("patchbay.choose_directory");
         let recent_label = self.i18n.text("patchbay.recent_files");
         let profile_label = self.i18n.text("patchbay.profile");
         let save_profile_label = self.i18n.text("patchbay.save_profile");
-        panel_section(ui, self.i18n.text("patchbay.file_options"), |ui| {
+        panel_section(ui, self.i18n.text("patchbay.file_options"), &theme, |ui| {
             ui.horizontal(|ui| {
                 ui.label(profile_label.clone());
                 let (_, profile_name) = document_text_input(
@@ -316,7 +322,7 @@ impl QpwgraphApp {
         let output_label = self.i18n.text("patchbay.output");
         let input_label = self.i18n.text("patchbay.input");
         let pinned_label = self.i18n.text("inspector.pinned");
-        panel_section(ui, self.i18n.text("patchbay.connections"), |ui| {
+        panel_section(ui, self.i18n.text("patchbay.connections"), &theme, |ui| {
             if self.patchbay.connections.is_empty() {
                 ui.label(RichText::new(self.i18n.text("patchbay.no_connections")).weak());
             }
@@ -434,65 +440,71 @@ impl QpwgraphApp {
             selected_locale_code
         };
         let mut selected_locale = current_locale;
-        panel_section(ui, self.i18n.text("inspector.configuration"), |ui| {
-            ui.label(
-                RichText::new(self.i18n.text("help.configuration"))
-                    .small()
-                    .weak(),
-            );
-            ui.add_space(4.0);
-            let selected = document_setting_select(
-                document,
-                ui,
-                "preferences.configuration.language",
-                &selected_locale_code,
-                Some(Icon::Language),
-                self.i18n.text("language.label"),
-                self.i18n.text("help.language"),
-                Locale::ALL
-                    .into_iter()
-                    .map(|locale| OptionItem::new(locale.code(), locale.native_name())),
-                PREFERENCES_SELECT_WIDTH,
-            );
-            selected_locale = Locale::parse(&selected);
-
-            ui.horizontal(|ui| {
-                ui.set_min_width(ui.available_width());
-                icon_label(ui, Icon::Save, self.i18n.text("help.save_configuration"));
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(self.i18n.text("inspector.save_configuration")).strong(),
-                    );
-                    ui.label(
-                        RichText::new(self.tf(
-                            "inspector.config_path",
-                            &[("path", self.config_file.display().to_string())],
-                        ))
+        let theme = document.theme().clone();
+        panel_section(
+            ui,
+            self.i18n.text("inspector.configuration"),
+            &theme,
+            |ui| {
+                ui.label(
+                    RichText::new(self.i18n.text("help.configuration"))
                         .small()
                         .weak(),
-                    );
+                );
+                ui.add_space(4.0);
+                let selected = document_setting_select(
+                    document,
+                    ui,
+                    "preferences.configuration.language",
+                    &selected_locale_code,
+                    Some(Icon::Language),
+                    self.i18n.text("language.label"),
+                    self.i18n.text("help.language"),
+                    Locale::ALL
+                        .into_iter()
+                        .map(|locale| OptionItem::new(locale.code(), locale.native_name())),
+                    PREFERENCES_SELECT_WIDTH,
+                );
+                selected_locale = Locale::parse(&selected);
+
+                ui.horizontal(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    icon_label(ui, Icon::Save, self.i18n.text("help.save_configuration"));
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(self.i18n.text("inspector.save_configuration")).strong(),
+                        );
+                        ui.label(
+                            RichText::new(self.tf(
+                                "inspector.config_path",
+                                &[("path", self.config_file.display().to_string())],
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if document_button(
+                            document,
+                            ui,
+                            "configuration.save",
+                            self.i18n.text("shortcuts.save_config"),
+                            true,
+                        ) {
+                            self.save_config_now();
+                        }
+                    });
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if document_button(
-                        document,
-                        ui,
-                        "configuration.save",
-                        self.i18n.text("shortcuts.save_config"),
-                        true,
-                    ) {
-                        self.save_config_now();
-                    }
-                });
-            });
-        });
+            },
+        );
         if selected_locale != current_locale {
             self.i18n.set_locale(selected_locale);
             self.config.language = selected_locale.code().to_owned();
             self.status = self.i18n.text("status.language_changed");
         }
 
-        panel_section(ui, self.i18n.text("inspector.interface"), |ui| {
+        panel_section(ui, self.i18n.text("inspector.interface"), &theme, |ui| {
             let toolbar_label = self.i18n.text("inspector.toolbar_visible");
             let toolbar_help = self.i18n.text("help.toolbar_visible");
             self.config.toolbar = document_setting_switch(
@@ -528,7 +540,7 @@ impl QpwgraphApp {
             );
         });
 
-        panel_section(ui, self.i18n.text("inspector.behavior"), |ui| {
+        panel_section(ui, self.i18n.text("inspector.behavior"), &theme, |ui| {
             let repel_label = self.i18n.text("inspector.repel_overlaps");
             let repel_help = self.i18n.text("help.repel_overlaps");
             self.config.repel_overlapping_nodes = document_setting_switch(
@@ -564,11 +576,16 @@ impl QpwgraphApp {
             );
         });
 
-        panel_section(ui, self.i18n.text("inspector.audio_metering"), |ui| {
-            self.show_meter_controls(document, ui);
-        });
+        panel_section(
+            ui,
+            self.i18n.text("inspector.audio_metering"),
+            &theme,
+            |ui| {
+                self.show_meter_controls(document, ui);
+            },
+        );
 
-        panel_section(ui, self.i18n.text("inspector.typography"), |ui| {
+        panel_section(ui, self.i18n.text("inspector.typography"), &theme, |ui| {
             ui.label(
                 RichText::new(self.i18n.text("help.typography_controls"))
                     .small()

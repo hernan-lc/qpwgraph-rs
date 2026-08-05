@@ -20,7 +20,7 @@ impl UiDocument {
         if let Some(element) = self.elements.get_mut(&id) {
             element.value = Value::String(props.text.clone());
         }
-        with_common(ui, &props.common, |ui| ui.label(props.text))
+        with_common(ui, &props.common, &self.theme, |ui| ui.label(props.text))
     }
 
     /// Renders a push button and emits a click event when activated.
@@ -38,9 +38,10 @@ impl UiDocument {
             .action_value
             .map(Value::String)
             .unwrap_or(Value::Bool(true));
-        let response = with_common(ui, &props.common, |ui| {
+        let theme = self.theme.clone();
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
             let mut button = egui::Button::new(text);
-            if let Some(fill) = style.fill {
+            if let Some(fill) = style.resolve_fill(&theme) {
                 button = button.fill(fill);
             }
             if let Some(stroke) = style.stroke {
@@ -78,7 +79,7 @@ impl UiDocument {
         let mut checked = before.as_bool().unwrap_or(props.checked);
         let style = props.common.style.clone();
         let label = props.common.label.clone();
-        let response = with_common(ui, &props.common, |ui| {
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
             let checkbox = egui::Checkbox::new(&mut checked, label.unwrap_or_default());
             add_sized(ui, &style, checkbox)
         });
@@ -104,8 +105,8 @@ impl UiDocument {
         let mut checked = before.as_bool().unwrap_or(props.checked);
         let label = props.common.label.clone();
         let style = props.common.style.clone();
-        let response = with_common(ui, &props.common, |ui| {
-            switch_widget(ui, &id, &mut checked, label.as_deref(), &style)
+        let response = with_common(ui, &props.common, &self.theme, |ui| {
+            switch_widget(ui, &id, &mut checked, label.as_deref(), &style, &self.theme)
         });
         finish_control(
             self,

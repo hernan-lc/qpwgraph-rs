@@ -1,4 +1,4 @@
-use super::{ElementId, OptionItem};
+use super::{ElementId, OptionItem, Theme, ThemeToken};
 use egui::{Color32, Stroke};
 
 /// Common visual options shared by all controls.
@@ -13,9 +13,13 @@ pub struct Style {
     pub height: Option<f32>,
     /// Text color override.
     pub text_color: Option<Color32>,
+    /// Symbolic text token override.
+    pub text_token: Option<ThemeToken>,
     /// Background fill. For controls that paint their own background this is
     /// also passed to the widget when possible.
     pub fill: Option<Color32>,
+    /// Symbolic fill token override.
+    pub fill_token: Option<ThemeToken>,
     /// Border stroke.
     pub stroke: Option<Stroke>,
     /// Frame corner radius.
@@ -47,13 +51,41 @@ impl Style {
     /// Sets the text color.
     pub fn text_color(mut self, color: Color32) -> Self {
         self.text_color = Some(color);
+        self.text_token = None;
+        self
+    }
+
+    /// Sets text color using a symbolic theme token.
+    pub fn text_token(mut self, token: ThemeToken) -> Self {
+        self.text_token = Some(token);
+        self.text_color = None;
         self
     }
 
     /// Sets the background fill.
     pub fn fill(mut self, color: Color32) -> Self {
         self.fill = Some(color);
+        self.fill_token = None;
         self
+    }
+
+    /// Sets background fill using a symbolic theme token.
+    pub fn fill_token(mut self, token: ThemeToken) -> Self {
+        self.fill_token = Some(token);
+        self.fill = None;
+        self
+    }
+
+    /// Resolves text color against a theme.
+    pub fn resolve_text_color(&self, theme: &Theme) -> Option<Color32> {
+        self.text_color
+            .or_else(|| self.text_token.map(|token| theme.color(token)))
+    }
+
+    /// Resolves fill color against a theme.
+    pub fn resolve_fill(&self, theme: &Theme) -> Option<Color32> {
+        self.fill
+            .or_else(|| self.fill_token.map(|token| theme.color(token)))
     }
 
     /// Sets the border stroke.
@@ -76,6 +108,7 @@ impl Style {
 
     pub(super) fn has_frame(&self) -> bool {
         self.fill.is_some()
+            || self.fill_token.is_some()
             || self.stroke.is_some()
             || self.rounding.is_some()
             || self.inner_margin.is_some()
@@ -188,9 +221,21 @@ impl CommonProps {
         self
     }
 
+    /// Sets text color using a symbolic theme token.
+    pub fn text_token(mut self, token: ThemeToken) -> Self {
+        self.style = self.style.text_token(token);
+        self
+    }
+
     /// Sets background fill.
     pub fn fill(mut self, color: Color32) -> Self {
         self.style = self.style.fill(color);
+        self
+    }
+
+    /// Sets background fill using a symbolic theme token.
+    pub fn fill_token(mut self, token: ThemeToken) -> Self {
+        self.style = self.style.fill_token(token);
         self
     }
 
@@ -288,9 +333,21 @@ macro_rules! impl_common_builders {
                 self
             }
 
+            /// Sets text color using a symbolic theme token.
+            pub fn text_token(mut self, token: ThemeToken) -> Self {
+                self.common = self.common.text_token(token);
+                self
+            }
+
             /// Sets background fill.
             pub fn fill(mut self, color: egui::Color32) -> Self {
                 self.common = self.common.fill(color);
+                self
+            }
+
+            /// Sets background fill using a symbolic theme token.
+            pub fn fill_token(mut self, token: ThemeToken) -> Self {
+                self.common = self.common.fill_token(token);
                 self
             }
 

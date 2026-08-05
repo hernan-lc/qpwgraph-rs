@@ -9,8 +9,8 @@
 
 use super::super::components::{document_button, document_text_input};
 use super::super::shared::panel_section;
+use super::connected_accent_color;
 use super::device_row::RelayRowAction;
-use super::CONNECTED_ACCENT;
 use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
 use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
@@ -22,15 +22,21 @@ impl QpwgraphApp {
         document: &mut UiDocument,
         ui: &mut Ui,
     ) {
-        panel_section(ui, self.i18n.text("relay.connections_section"), |ui| {
-            self.show_relay_connections_header(document, ui);
-            self.show_relay_usb_status(ui);
-            ui.add_space(4.0);
-            self.show_relay_device_groups(document, ui);
-            ui.add_space(6.0);
-            self.show_relay_manual_entry(document, ui);
-            self.show_relay_advanced_settings(document, ui);
-        });
+        let theme = document.theme().clone();
+        panel_section(
+            ui,
+            self.i18n.text("relay.connections_section"),
+            &theme,
+            |ui| {
+                self.show_relay_connections_header(document, ui);
+                self.show_relay_usb_status(ui);
+                ui.add_space(4.0);
+                self.show_relay_device_groups(document, ui);
+                ui.add_space(6.0);
+                self.show_relay_manual_entry(document, ui);
+                self.show_relay_advanced_settings(document, ui);
+            },
+        );
     }
 
     /// Scan state plus the refresh action, mirroring the header of a system
@@ -81,7 +87,7 @@ impl QpwgraphApp {
                         "relay.panel.connections.connected_count",
                         connected.len().to_string(),
                     )
-                    .color(CONNECTED_ACCENT),
+                    .color(connected_accent_color(document.theme())),
                 );
             });
             for row in &connected {

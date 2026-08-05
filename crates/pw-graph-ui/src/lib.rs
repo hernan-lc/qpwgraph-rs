@@ -16,7 +16,7 @@ pub use components::{
     Document, Element, ElementId, ElementKind, EventType, Form, FormValues, Icon, IconButtonProps,
     IconSource, LabelProps, ListenerId, MeterProps, NumberInputProps, OptionItem, RadioGroupProps,
     SelectProps, SliderProps, StepItem, StepsProps, Style, SwitchProps, TabItem, TabsProps,
-    TextInputProps, UiDocument, UiEvent, Value,
+    TextInputProps, Theme, ThemeMode, ThemePalette, ThemeToken, UiDocument, UiEvent, Value,
 };
 
 /// User-facing appearance overrides for a node. The backend keeps the native
