@@ -16,9 +16,13 @@ use crate::icons::{
 };
 use eframe::egui::{Response, RichText, Ui};
 use pw_graph_ui::{
-    setting_row, ButtonProps, CheckboxProps, EventType, NumberInputProps, OptionItem, SelectProps,
-    SliderProps, SwitchProps, TextInputProps, UiDocument, Value,
+    setting_row_sized, ButtonProps, CheckboxProps, EventType, NumberInputProps, OptionItem,
+    SelectProps, SliderProps, SwitchProps, TextInputProps, UiDocument, Value,
 };
+
+/// Trailing width reserved for a switch, so its description column wraps
+/// instead of shouldering the control out of the row.
+const SWITCH_WIDTH: f32 = 48.0;
 
 pub(super) fn modal_hint(ui: &mut Ui, text: String) {
     ui.label(RichText::new(text).weak());
@@ -121,8 +125,9 @@ pub(super) fn document_setting_switch(
     label: String,
     explanation: String,
 ) -> bool {
-    let checked = setting_row(
+    let checked = setting_row_sized(
         ui,
+        SWITCH_WIDTH,
         |ui| {
             crate::icons::icon_label(ui, icon, explanation.clone());
             ui.add_space(8.0);
@@ -161,8 +166,10 @@ pub(super) fn document_setting_select<I>(
 where
     I: IntoIterator<Item = OptionItem>,
 {
-    let selected = setting_row(
+    let width = width.min(ui.available_width());
+    let selected = setting_row_sized(
         ui,
+        width,
         |ui| {
             if let Some(icon) = icon {
                 crate::icons::icon_label(ui, icon, explanation.clone());
@@ -189,6 +196,100 @@ where
     selected
 }
 
+/// A label-and-control row whose explanation lives in a tooltip.
+///
+/// [`document_setting_select`] prints the explanation under the label, which
+/// is right for a preferences page the user is reading through. A disclosure
+/// full of rarely-touched options is scanned, not read: four stacked
+/// paragraphs bury the four values that actually matter. These rows stay one
+/// line each and keep the prose on hover.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn document_compact_select<I>(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: &str,
+    label: String,
+    explanation: String,
+    options: I,
+    width: f32,
+) -> String
+where
+    I: IntoIterator<Item = OptionItem>,
+{
+    let width = width.min(ui.available_width());
+    let selected = setting_row_sized(
+        ui,
+        width,
+        |ui| {
+            ui.label(RichText::new(label).strong())
+                .on_hover_text(explanation);
+        },
+        |ui| {
+            document_select_sized(
+                document,
+                ui,
+                id,
+                current,
+                String::new(),
+                options,
+                Some(width),
+            )
+        },
+    );
+    ui.add_space(2.0);
+    selected
+}
+
+/// The numeric counterpart of [`document_compact_select`].
+#[allow(clippy::too_many_arguments)]
+pub(super) fn document_compact_number(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: f32,
+    minimum: f32,
+    maximum: f32,
+    step: f64,
+    label: String,
+    explanation: String,
+    width: f32,
+) -> f32 {
+    let width = width.min(ui.available_width());
+    let value = setting_row_sized(
+        ui,
+        width,
+        |ui| {
+            ui.label(RichText::new(label).strong())
+                .on_hover_text(explanation.clone());
+        },
+        |ui| {
+            document_number_input_sized(
+                document,
+                ui,
+                id,
+                current as f64,
+                minimum as f64,
+                maximum as f64,
+                step,
+                String::new(),
+                Some(width),
+                Some(explanation.clone()),
+            )
+            .1
+        },
+    );
+    let value = value.clamp(minimum as f64, maximum as f64);
+    if document
+        .number(id)
+        .is_some_and(|number| (number - value).abs() > f64::EPSILON)
+    {
+        document.set_value_and_emit(id, Value::Number(value), EventType::Change);
+    }
+    ui.add_space(2.0);
+    value as f32
+}
+
 pub(super) fn document_setting_switch_plain(
     document: &mut UiDocument,
     ui: &mut Ui,
@@ -197,8 +298,9 @@ pub(super) fn document_setting_switch_plain(
     label: String,
     explanation: String,
 ) -> bool {
-    let checked = setting_row(
+    let checked = setting_row_sized(
         ui,
+        SWITCH_WIDTH,
         |ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(label).strong());
@@ -220,6 +322,39 @@ pub(super) fn document_setting_switch_plain(
     );
     ui.add_space(2.0);
     checked
+}
+
+/// A text field stacked under its own label, with the explanation beneath.
+///
+/// The inline `label [field]` shape that [`document_text_input`] produces only
+/// works where the label is short and the surface is wide. In a docked panel
+/// the field inherits egui's generous default width and runs off the edge, so
+/// address and PIN entry get this layout instead: the label owns its line and
+/// the field takes exactly the width the panel has left.
+pub(super) fn document_setting_text(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    id: &str,
+    current: &str,
+    label: String,
+    explanation: String,
+) -> String {
+    ui.label(RichText::new(label).strong());
+    let width = ui.available_width();
+    let (_, value) = document_text_input_sized(
+        document,
+        ui,
+        id,
+        current,
+        String::new(),
+        Some(explanation.clone()),
+        Some(width),
+    );
+    if !explanation.is_empty() {
+        ui.label(RichText::new(explanation).small().weak());
+    }
+    ui.add_space(4.0);
+    value
 }
 
 pub(super) fn document_text_input(
@@ -315,8 +450,10 @@ pub(super) fn document_setting_slider(
     explanation: String,
     width: f32,
 ) -> f32 {
-    let value = setting_row(
+    let width = width.min(ui.available_width());
+    let value = setting_row_sized(
         ui,
+        width,
         |ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(label).strong());
@@ -359,8 +496,10 @@ pub(super) fn document_setting_number(
     explanation: String,
     width: f32,
 ) -> f32 {
-    let value = setting_row(
+    let width = width.min(ui.available_width());
+    let value = setting_row_sized(
         ui,
+        width,
         |ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(label).strong());

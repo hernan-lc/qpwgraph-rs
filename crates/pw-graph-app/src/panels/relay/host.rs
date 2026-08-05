@@ -8,9 +8,9 @@
 //! the honest shape for a task whose later parts are not yet reachable, which
 //! a tab strip (where everything is always available) would misrepresent.
 
-use super::super::components::{document_button, document_setting_number, document_text_input};
-use super::super::shared::{panel_section, text_colors};
-use super::{accent_color, connected_accent_color};
+use super::super::components::{document_button, document_compact_number, document_setting_text};
+use super::super::shared::text_colors;
+use super::{accent_color, connected_accent_color, RELAY_NUMBER_WIDTH};
 use crate::app::QpwgraphApp;
 use crate::icons::Icon;
 use eframe::egui::{RichText, Ui};
@@ -19,23 +19,25 @@ use pw_graph_ui::{
 };
 
 impl QpwgraphApp {
+    /// Like the Connections tab, this drops the outer titled frame: the
+    /// stepper is a stronger and more honest header for the activity than a
+    /// box labelled "Host (broadcast)" under a tab already labelled "Host",
+    /// and the cards below carry the grouping on their own.
     pub(super) fn show_relay_host_section(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        let theme = document.theme().clone();
-        panel_section(ui, self.i18n.text("relay.emitter_section"), &theme, |ui| {
-            let running = self.driver.relay_status().host_active;
-            self.show_relay_host_steps(document, ui, running);
-            ui.add_space(6.0);
-            self.show_relay_host_identity(document, ui);
-            self.show_relay_host_network(document, ui, running);
-            if running {
-                self.show_relay_host_share(document, ui);
-            }
-            ui.label(
-                RichText::new(self.i18n.text("relay.emitter_hint"))
-                    .small()
-                    .color(document.theme_color(ThemeToken::TextWeak)),
-            );
-        });
+        let running = self.driver.relay_status().host_active;
+        self.show_relay_host_steps(document, ui, running);
+        ui.add_space(8.0);
+        self.show_relay_host_identity(document, ui);
+        self.show_relay_host_network(document, ui, running);
+        if running {
+            self.show_relay_host_share(document, ui);
+        }
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(self.i18n.text("relay.emitter_hint"))
+                .small()
+                .color(document.theme_color(ThemeToken::TextWeak)),
+        );
     }
 
     /// Progress header. The identity step is complete once the device has a
@@ -77,24 +79,22 @@ impl QpwgraphApp {
             ui,
             CardProps::new("relay.panel.host.identity_card"),
             |ui, document| {
-                let (_, device_name) = document_text_input(
+                self.config.relay_device_name = document_setting_text(
                     document,
                     ui,
                     "relay.panel.host.device_name",
                     &self.config.relay_device_name,
                     self.i18n.text("relay.device_name"),
-                    Some(self.i18n.text("relay.device_name_help")),
+                    self.i18n.text("relay.device_name_help"),
                 );
-                self.config.relay_device_name = device_name;
-                let (_, pin) = document_text_input(
+                self.config.relay_host_pin = document_setting_text(
                     document,
                     ui,
                     "relay.panel.host.pin",
                     &self.config.relay_host_pin,
                     self.i18n.text("relay.pin"),
-                    Some(self.i18n.text("relay.pin_help")),
+                    self.i18n.text("relay.pin_help"),
                 );
-                self.config.relay_host_pin = pin;
             },
         );
     }
@@ -106,7 +106,7 @@ impl QpwgraphApp {
             CardProps::new("relay.panel.host.network_card")
                 .accent_option(running.then_some(connected_accent_color(document.theme()))),
             |ui, document| {
-                self.config.relay_host_port = document_setting_number(
+                self.config.relay_host_port = document_compact_number(
                     document,
                     ui,
                     "relay.panel.host.port",
@@ -116,7 +116,7 @@ impl QpwgraphApp {
                     1.0,
                     self.i18n.text("relay.port"),
                     self.i18n.text("relay.port_help"),
-                    100.0,
+                    RELAY_NUMBER_WIDTH,
                 ) as u16;
                 ui.horizontal(|ui| {
                     if document_button(

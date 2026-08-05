@@ -19,17 +19,20 @@ mod device_row;
 mod host;
 mod qr;
 
-use super::components::document_button;
 use super::shared::{apply_panel_text_scale, fresh_scroll_area, panel_fill};
 use crate::app::{QpwgraphApp, RelayPanelTab};
 use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
-use pw_graph_ui::{TabItem, TabsProps, Theme, ThemeToken, UiDocument};
+use pw_graph_ui::{IconButtonProps, TabItem, TabsProps, Theme, ThemeToken, UiDocument};
 
 const RELAY_PANEL_MIN_WIDTH: f32 = 320.0;
 const RELAY_PANEL_DEFAULT_WIDTH: f32 = 380.0;
-/// Wide enough for the option labels used by the role/codec/link selects.
-pub(super) const RELAY_SELECT_WIDTH: f32 = 260.0;
+/// Wide enough for the longest option label the role/codec/link selects show
+/// ("Both directions"), and no wider: the panel is a side dock, so every
+/// point a control does not need belongs to the label beside it.
+pub(super) const RELAY_SELECT_WIDTH: f32 = 168.0;
+/// Steppers only ever hold two or three digits.
+pub(super) const RELAY_NUMBER_WIDTH: f32 = 92.0;
 
 /// Selection accent from theme (shared by tab strip and stepper).
 pub(super) fn accent_color(theme: &Theme) -> egui::Color32 {
@@ -78,7 +81,11 @@ impl QpwgraphApp {
     }
 
     fn show_relay_contents(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        let title_color = document.theme_color(ThemeToken::TextSecondary);
+        // The close affordance is an icon rather than a labelled button: at
+        // this width a "Close the relay panel" button consumed more than half
+        // the header, and the panel's own title is what the row is for. The
+        // label survives as the tooltip.
+        let title_color = document.theme_color(ThemeToken::TextPrimary);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(self.i18n.text("relay.title"))
@@ -86,12 +93,10 @@ impl QpwgraphApp {
                     .color(title_color),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if document_button(
-                    document,
+                if document.icon_button(
                     ui,
-                    "relay.panel.close",
-                    self.i18n.text("relay.panel_close"),
-                    true,
+                    IconButtonProps::new("relay.panel.close", Icon::Close.source())
+                        .tooltip(self.i18n.text("relay.panel_close")),
                 ) {
                     self.show_relay = false;
                 }

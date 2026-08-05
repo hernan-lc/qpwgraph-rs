@@ -108,6 +108,59 @@ pub fn setting_row<T>(
     .inner
 }
 
+/// Narrowest description column worth keeping beside a control. Below this a
+/// label and its explanation are unreadable as a column, so the row stacks.
+const MIN_LEADING_WIDTH: f32 = 116.0;
+
+/// A [`setting_row`] that knows how wide its control wants to be, and so can
+/// keep the two sides from colliding.
+///
+/// Plain `setting_row` lets the description take its natural width and then
+/// draws the control right-to-left over whatever is left, which in a docked
+/// side panel means a wide select painted on top of its own explanation. Here
+/// the description is given an explicit column bounded by what the control
+/// leaves over — so it wraps instead of growing — and when even that column
+/// would be too narrow to read, the control drops onto its own line beneath.
+///
+/// Callers pass the control's intended width; it is clamped to the row, so a
+/// control can never be wider than the panel it lives in.
+pub fn setting_row_sized<T>(
+    ui: &mut Ui,
+    trailing_width: f32,
+    leading: impl FnOnce(&mut Ui),
+    trailing: impl FnOnce(&mut Ui) -> T,
+) -> T {
+    let available_width = ui.available_width();
+    let spacing = ui.spacing().item_spacing.x;
+    let trailing_width = trailing_width.min(available_width);
+    let leading_width = available_width - trailing_width - spacing;
+    if leading_width >= MIN_LEADING_WIDTH {
+        ui.horizontal(|ui| {
+            ui.set_min_width(available_width);
+            ui.allocate_ui_with_layout(
+                egui::vec2(leading_width, 0.0),
+                Layout::left_to_right(Align::Min),
+                leading,
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), trailing)
+                .inner
+        })
+        .inner
+    } else {
+        ui.vertical(|ui| {
+            ui.set_min_width(available_width);
+            ui.allocate_ui_with_layout(
+                egui::vec2(available_width, 0.0),
+                Layout::left_to_right(Align::Min),
+                leading,
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), trailing)
+                .inner
+        })
+        .inner
+    }
+}
+
 /// Retained DOM-like state and reusable `egui` controls.
 ///
 /// Keep one document alongside the application or panel state. Call

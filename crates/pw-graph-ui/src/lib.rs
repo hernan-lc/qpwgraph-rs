@@ -13,7 +13,8 @@ mod canvas;
 pub mod components;
 
 pub use components::{
-    icon_image, record_custom_click, setting_row, BadgeProps, ButtonProps, CardProps,
+    icon_image, record_custom_click, setting_row, setting_row_sized, BadgeProps, ButtonProps,
+    CardProps,
     CheckboxProps, CommonProps, DialogPlacement, DialogProps, DialogResponse, DisclosureProps,
     Document, Element, ElementId, ElementKind, EventType, Form, FormValues, Icon, IconButtonProps,
     IconSource, LabelProps, ListenerId, MeterProps, NumberInputProps, OptionItem, RadioGroupProps,

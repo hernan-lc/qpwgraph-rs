@@ -7,8 +7,8 @@
 //! without changing tabs. Manual entry and the codec/role settings sit in
 //! disclosures below, out of the way of the common path.
 
-use super::super::components::{document_button, document_text_input};
-use super::super::shared::panel_section;
+use super::super::components::{document_button, document_setting_text};
+use super::super::shared::text_colors;
 use super::connected_accent_color;
 use super::device_row::RelayRowAction;
 use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
@@ -16,27 +16,37 @@ use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
 use pw_graph_ui::{BadgeProps, DisclosureProps, IconButtonProps, UiDocument};
 
+/// A list separator, not a title. Device names are already `strong`, so the
+/// group labels above them are set small and coloured instead of bold —
+/// otherwise the section headings outweigh the rows they organise.
+fn group_heading(ui: &mut Ui, text: String, color: egui::Color32) {
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .small()
+            .strong()
+            .color(color),
+    );
+}
+
 impl QpwgraphApp {
+    /// The tab is laid out directly on the panel surface rather than inside a
+    /// titled section frame. The window title already says "Audio relay" and
+    /// the tab already says "Connections", so a third box labelled "Devices"
+    /// only spent width — which is the one thing a 380 pt side dock cannot
+    /// spare. Structure comes from the device cards and the two disclosures.
     pub(super) fn show_relay_connections_section(
         &mut self,
         document: &mut UiDocument,
         ui: &mut Ui,
     ) {
-        let theme = document.theme().clone();
-        panel_section(
-            ui,
-            self.i18n.text("relay.connections_section"),
-            &theme,
-            |ui| {
-                self.show_relay_connections_header(document, ui);
-                self.show_relay_usb_status(ui);
-                ui.add_space(4.0);
-                self.show_relay_device_groups(document, ui);
-                ui.add_space(6.0);
-                self.show_relay_manual_entry(document, ui);
-                self.show_relay_advanced_settings(document, ui);
-            },
-        );
+        self.show_relay_connections_header(document, ui);
+        self.show_relay_usb_status(ui);
+        ui.add_space(6.0);
+        self.show_relay_device_groups(document, ui);
+        ui.add_space(10.0);
+        ui.separator();
+        self.show_relay_manual_entry(document, ui);
+        self.show_relay_advanced_settings(document, ui);
     }
 
     /// Scan state plus the refresh action, mirroring the header of a system
@@ -77,35 +87,46 @@ impl QpwgraphApp {
             rows.into_iter().partition(RelayDeviceRow::is_connected);
 
         if !connected.is_empty() {
+            let accent = connected_accent_color(document.theme());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(self.i18n.text("relay.group_connected")).strong());
+                group_heading(ui, self.i18n.text("relay.group_connected"), accent);
                 document.badge(
                     ui,
                     BadgeProps::new(
                         "relay.panel.connections.connected_count",
                         connected.len().to_string(),
                     )
-                    .color(connected_accent_color(document.theme())),
+                    .color(accent),
                 );
             });
             for row in &connected {
                 self.show_relay_row_with_actions(document, ui, row);
             }
-            ui.add_space(6.0);
+            ui.add_space(8.0);
         }
 
-        ui.label(RichText::new(self.i18n.text("relay.group_available")).strong());
+        let heading_color = text_colors(document.theme()).weak;
+        group_heading(ui, self.i18n.text("relay.group_available"), heading_color);
         if available.is_empty() {
-            ui.label(
-                RichText::new(self.i18n.text("relay.no_peers"))
-                    .small()
-                    .weak(),
-            );
+            self.show_relay_empty_state(ui);
         }
         for row in &available {
             self.show_relay_row_with_actions(document, ui, row);
         }
-        ui.add_space(4.0);
+    }
+
+    /// Nothing found yet. This is the only place the discovery explanation
+    /// appears: it answers "why is my phone not here?", which stops being a
+    /// question the moment a row shows up, and printing it permanently under
+    /// a populated list is a paragraph of noise on every frame.
+    fn show_relay_empty_state(&self, ui: &mut Ui) {
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(self.i18n.text("relay.no_peers"))
+                .small()
+                .weak(),
+        );
+        ui.add_space(2.0);
         ui.label(
             RichText::new(self.i18n.text("relay.discovery_help"))
                 .small()
@@ -152,24 +173,22 @@ impl QpwgraphApp {
             self.i18n.text("relay.add_manually"),
         );
         document.disclosure(ui, props, |ui, document| {
-            let (_, target) = document_text_input(
+            self.relay.quick_target = document_setting_text(
                 document,
                 ui,
                 "relay.panel.connections.quick",
                 &self.relay.quick_target,
                 self.i18n.text("relay.target"),
-                Some(self.i18n.text("relay.quick_target_help")),
+                self.i18n.text("relay.quick_target_help"),
             );
-            self.relay.quick_target = target;
-            let (_, pin) = document_text_input(
+            self.config.relay_client_pin = document_setting_text(
                 document,
                 ui,
                 "relay.panel.connections.pin",
                 &self.config.relay_client_pin,
                 self.i18n.text("relay.pin"),
-                Some(self.i18n.text("relay.pin_help")),
+                self.i18n.text("relay.pin_help"),
             );
-            self.config.relay_client_pin = pin;
             let can_connect = !self.relay.quick_target.trim().is_empty();
             if document_button(
                 document,
