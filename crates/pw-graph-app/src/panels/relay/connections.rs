@@ -7,13 +7,14 @@
 //! without changing tabs. Manual entry and the codec/role settings sit in
 //! disclosures below, out of the way of the common path.
 
-use super::super::components::{document_button, document_icon_button, document_text_input};
+use super::super::components::{document_button, document_text_input};
 use super::super::shared::panel_section;
 use super::device_row::RelayRowAction;
+use super::CONNECTED_ACCENT;
 use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
 use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
-use pw_graph_ui::UiDocument;
+use pw_graph_ui::{BadgeProps, DisclosureProps, IconButtonProps, UiDocument};
 
 impl QpwgraphApp {
     pub(super) fn show_relay_connections_section(
@@ -37,16 +38,10 @@ impl QpwgraphApp {
     fn show_relay_connections_header(&mut self, document: &mut UiDocument, ui: &mut Ui) {
         ui.horizontal(|ui| {
             if self.relay.discovery_active {
-                ui.add(egui::Spinner::new().size(13.0));
-                let time = ui.ctx().input(|input| input.time);
-                let dots = ".".repeat(1 + (time * 1.5) as usize % 3);
-                ui.label(
-                    RichText::new(format!(
-                        "{}{dots}",
-                        self.i18n.text("relay.discovery_searching")
-                    ))
-                    .small()
-                    .weak(),
+                document.activity(
+                    ui,
+                    "relay.panel.connections.searching",
+                    self.i18n.text("relay.discovery_searching"),
                 );
             } else {
                 ui.label(
@@ -56,13 +51,10 @@ impl QpwgraphApp {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if document_icon_button(
-                    document,
+                if document.icon_button(
                     ui,
-                    "relay.panel.connections.refresh",
-                    Icon::Refresh,
-                    self.i18n.text("relay.refresh"),
-                    self.i18n.text("relay.refresh_help"),
+                    IconButtonProps::new("relay.panel.connections.refresh", Icon::Refresh.source())
+                        .tooltip(self.i18n.text("relay.refresh_help")),
                 ) {
                     let mut relay = std::mem::take(&mut self.relay);
                     relay.refresh(self);
@@ -81,7 +73,17 @@ impl QpwgraphApp {
             rows.into_iter().partition(RelayDeviceRow::is_connected);
 
         if !connected.is_empty() {
-            ui.label(RichText::new(self.i18n.text("relay.group_connected")).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.i18n.text("relay.group_connected")).strong());
+                document.badge(
+                    ui,
+                    BadgeProps::new(
+                        "relay.panel.connections.connected_count",
+                        connected.len().to_string(),
+                    )
+                    .color(CONNECTED_ACCENT),
+                );
+            });
             for row in &connected {
                 self.show_relay_row_with_actions(document, ui, row);
             }
@@ -113,7 +115,6 @@ impl QpwgraphApp {
         ui: &mut Ui,
         row: &RelayDeviceRow,
     ) {
-        ui.add_space(3.0);
         match self.show_relay_device_row(document, ui, row) {
             RelayRowAction::None => {}
             RelayRowAction::Connect => {
@@ -146,54 +147,43 @@ impl QpwgraphApp {
     /// or a pasted QR payload. Collapsed by default so the discovered list
     /// stays the primary path.
     fn show_relay_manual_entry(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        let open = self.relay.show_manual;
-        if document_button(
-            document,
-            ui,
-            "relay.panel.connections.manual.toggle",
-            format!(
-                "{} {}",
-                if open { "▾" } else { "▸" },
-                self.i18n.text("relay.add_manually")
-            ),
-            true,
-        ) {
-            self.relay.show_manual = !open;
-        }
-        if !self.relay.show_manual {
-            return;
-        }
-        let (_, target) = document_text_input(
-            document,
-            ui,
-            "relay.panel.connections.quick",
-            &self.relay.quick_target,
-            self.i18n.text("relay.target"),
-            Some(self.i18n.text("relay.quick_target_help")),
+        let props = DisclosureProps::new(
+            "relay.panel.connections.manual",
+            self.i18n.text("relay.add_manually"),
         );
-        self.relay.quick_target = target;
-        let (_, pin) = document_text_input(
-            document,
-            ui,
-            "relay.panel.connections.pin",
-            &self.config.relay_client_pin,
-            self.i18n.text("relay.pin"),
-            Some(self.i18n.text("relay.pin_help")),
-        );
-        self.config.relay_client_pin = pin;
-        let can_connect = !self.relay.quick_target.trim().is_empty();
-        if document_button(
-            document,
-            ui,
-            "relay.panel.connections.quick.connect",
-            self.i18n.text("relay.connect"),
-            can_connect,
-        ) {
-            let target = self.relay.quick_target.clone();
-            let mut relay = std::mem::take(&mut self.relay);
-            relay.connect_target(self, &target);
-            relay.quick_target.clear();
-            self.relay = relay;
-        }
+        document.disclosure(ui, props, |ui, document| {
+            let (_, target) = document_text_input(
+                document,
+                ui,
+                "relay.panel.connections.quick",
+                &self.relay.quick_target,
+                self.i18n.text("relay.target"),
+                Some(self.i18n.text("relay.quick_target_help")),
+            );
+            self.relay.quick_target = target;
+            let (_, pin) = document_text_input(
+                document,
+                ui,
+                "relay.panel.connections.pin",
+                &self.config.relay_client_pin,
+                self.i18n.text("relay.pin"),
+                Some(self.i18n.text("relay.pin_help")),
+            );
+            self.config.relay_client_pin = pin;
+            let can_connect = !self.relay.quick_target.trim().is_empty();
+            if document_button(
+                document,
+                ui,
+                "relay.panel.connections.quick.connect",
+                self.i18n.text("relay.connect"),
+                can_connect,
+            ) {
+                let target = self.relay.quick_target.clone();
+                let mut relay = std::mem::take(&mut self.relay);
+                relay.connect_target(self, &target);
+                relay.quick_target.clear();
+                self.relay = relay;
+            }
+        });
     }
 }

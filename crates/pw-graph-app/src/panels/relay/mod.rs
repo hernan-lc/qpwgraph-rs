@@ -19,17 +19,39 @@ mod device_row;
 mod host;
 mod qr;
 
-use super::components::{document_button, document_selectable_label};
+use super::components::document_button;
 use super::shared::{apply_panel_text_scale, fresh_scroll_area, PANEL_FILL};
 use crate::app::{QpwgraphApp, RelayPanelTab};
+use crate::icons::Icon;
 use eframe::egui::{self, Color32, RichText, Ui};
-use pw_graph_ui::UiDocument;
+use pw_graph_ui::{TabItem, TabsProps, UiDocument};
 
 const RELAY_PANEL_MIN_WIDTH: f32 = 320.0;
 const RELAY_PANEL_DEFAULT_WIDTH: f32 = 380.0;
 /// Wide enough for the option labels used by the role/codec/link selects.
 pub(super) const RELAY_SELECT_WIDTH: f32 = 260.0;
 const PANEL_TITLE_COLOR: Color32 = Color32::from_rgb(205, 216, 230);
+/// Selection accent shared by the tab strip and the stepper, so "this is the
+/// active thing" reads the same throughout the panel.
+pub(super) const ACCENT: Color32 = Color32::from_rgb(96, 165, 250);
+/// Live-session accent, matching the canvas link colour.
+pub(super) const CONNECTED_ACCENT: Color32 = Color32::from_rgb(96, 190, 130);
+
+/// Tab identity in the document. The enum stays the app's source of truth;
+/// these map it onto the stable string values the tab strip retains.
+fn relay_tab_value(tab: RelayPanelTab) -> &'static str {
+    match tab {
+        RelayPanelTab::Connections => "connections",
+        RelayPanelTab::Host => "host",
+    }
+}
+
+fn relay_tab_from_value(value: &str) -> RelayPanelTab {
+    match value {
+        "host" => RelayPanelTab::Host,
+        _ => RelayPanelTab::Connections,
+    }
+}
 
 impl QpwgraphApp {
     /// Right-docked relay panel, visible while the canvas stays interactive.
@@ -101,41 +123,26 @@ impl QpwgraphApp {
         }
     }
 
-    /// Two tabs: the device list, and hosting. The connected-session count
-    /// rides on the Connections label so it stays visible from the Host tab.
+    /// Two tabs: the device list, and hosting. The session count rides on the
+    /// Connections label as a badge, so it stays visible from the Host tab.
     fn show_relay_tab_bar(&mut self, document: &mut UiDocument, ui: &mut Ui) {
         let session_count = self.driver.relay_status().sessions.len();
-        let tabs = [
-            (
-                RelayPanelTab::Connections,
-                "relay.tab_connections",
-                "relay.panel.tab.connections",
-            ),
-            (
-                RelayPanelTab::Host,
-                "relay.tab_host",
-                "relay.panel.tab.host",
-            ),
-        ];
-        ui.horizontal(|ui| {
-            for (tab, label_key, tab_id) in tabs {
-                let mut label = self.i18n.text(label_key);
-                if tab == RelayPanelTab::Connections && session_count > 0 {
-                    label = format!("{label} ({session_count})");
-                }
-                if document_selectable_label(
-                    document,
-                    ui,
-                    tab_id,
-                    self.relay.tab == tab,
-                    &label,
-                    label.clone(),
-                ) && self.relay.tab != tab
-                {
-                    self.relay.tab = tab;
-                }
-            }
-        });
+        let selected = document.tabs(
+            ui,
+            TabsProps::new(
+                "relay.panel.tabs",
+                [
+                    TabItem::new("connections", self.i18n.text("relay.tab_connections"))
+                        .icon(Icon::Connect.source())
+                        .badge_count(session_count),
+                    TabItem::new("host", self.i18n.text("relay.tab_host"))
+                        .icon(Icon::Relay.source()),
+                ],
+            )
+            .selected(relay_tab_value(self.relay.tab))
+            .accent(ACCENT),
+        );
+        self.relay.tab = relay_tab_from_value(&selected);
     }
 
     /// Status line for an auto-detected USB tether: USB is preferred by the

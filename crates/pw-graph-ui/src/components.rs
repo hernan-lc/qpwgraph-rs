@@ -56,10 +56,13 @@
 //! # }
 //! ```
 
+mod containers;
 mod dialog;
 mod document;
 mod events;
+mod icons;
 mod ids;
+mod indicators;
 mod props;
 #[cfg(test)]
 mod tests;
@@ -69,10 +72,13 @@ use std::collections::{BTreeMap, VecDeque};
 use egui::{Align, Layout, Ui};
 use events::Listener;
 
+pub use containers::{CardProps, DisclosureProps, StepItem, StepsProps, TabItem, TabsProps};
 pub use dialog::{DialogPlacement, DialogProps, DialogResponse};
 pub use document::Document;
 pub use events::{Element, EventType, Form, FormValues, ListenerId, UiEvent};
+pub use icons::{icon_image, Icon, IconSource};
 pub use ids::{ElementId, ElementKind, OptionItem, Value};
+pub use indicators::{record_custom_click, BadgeProps, IconButtonProps, MeterProps};
 pub use props::{
     ButtonProps, CheckboxProps, CommonProps, LabelProps, NumberInputProps, RadioGroupProps,
     SelectProps, SliderProps, Style, SwitchProps, TextInputProps,

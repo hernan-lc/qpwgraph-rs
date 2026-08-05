@@ -198,6 +198,20 @@ pub enum ElementKind {
     RadioGroup,
     /// A modal dialog container.
     Dialog,
+    /// A grouping surface.
+    Card,
+    /// A collapsible section; its value is its open state.
+    Disclosure,
+    /// A tab strip; its value is the selected tab.
+    Tabs,
+    /// A step progress header; its value is the current step index.
+    Steps,
+    /// A small status pill.
+    Badge,
+    /// A level meter; its value is the current reading.
+    Meter,
+    /// An icon-only button.
+    IconButton,
 }
 
 /// An option used by [`SelectProps`] and [`RadioGroupProps`].

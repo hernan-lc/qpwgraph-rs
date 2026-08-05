@@ -4,8 +4,15 @@ use egui::{include_image, vec2, Color32, Image, ImageSource, Rect, Sense, Ui, Ve
 pub(crate) enum Icon {
     Activate,
     AutoDisconnect,
+    Close,
     Connect,
     Delete,
+    #[cfg(feature = "relay")]
+    DeviceDesktop,
+    #[cfg(feature = "relay")]
+    DeviceGeneric,
+    #[cfg(feature = "relay")]
+    DevicePhone,
     Effects,
     Exclusive,
     Filter,
@@ -36,12 +43,28 @@ const ICON_BUTTON_SIZE: Vec2 = vec2(34.0, 30.0);
 const SIDEBAR_ICON_BUTTON_SIZE: Vec2 = vec2(46.0, 42.0);
 const SIDEBAR_NAV_BUTTON_SIZE: Vec2 = vec2(52.0, 48.0);
 
+impl Icon {
+    /// The icon as a `pw-graph-ui` component icon source, so shared
+    /// components render the application's artwork instead of shipping a
+    /// duplicate set of their own.
+    pub(crate) fn source(self) -> pw_graph_ui::IconSource {
+        pw_graph_ui::IconSource::Custom(icon_source(self))
+    }
+}
+
 fn icon_source(icon: Icon) -> ImageSource<'static> {
     match icon {
         Icon::Activate => include_image!("../assets/icons/activate.svg"),
         Icon::AutoDisconnect => include_image!("../assets/icons/auto_disconnect.svg"),
+        Icon::Close => include_image!("../assets/icons/close.svg"),
         Icon::Connect => include_image!("../assets/icons/connect.svg"),
         Icon::Delete => include_image!("../assets/icons/delete.svg"),
+        #[cfg(feature = "relay")]
+        Icon::DeviceDesktop => include_image!("../assets/icons/device_desktop.svg"),
+        #[cfg(feature = "relay")]
+        Icon::DeviceGeneric => include_image!("../assets/icons/device_generic.svg"),
+        #[cfg(feature = "relay")]
+        Icon::DevicePhone => include_image!("../assets/icons/device_phone.svg"),
         Icon::Effects => include_image!("../assets/icons/effects.svg"),
         Icon::Exclusive => include_image!("../assets/icons/exclusive.svg"),
         Icon::Filter => include_image!("../assets/icons/filter.svg"),

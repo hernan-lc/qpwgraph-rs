@@ -118,7 +118,7 @@ impl UiDocument {
         }
     }
 
-    pub(super) fn observe(
+    pub(in crate::components) fn observe(
         &mut self,
         id: &ElementId,
         before: &Value,
@@ -147,14 +147,14 @@ impl UiDocument {
         }
     }
 
-    pub(super) fn observe_focus(&mut self, id: &ElementId, response: &Response) {
+    pub(in crate::components) fn observe_focus(&mut self, id: &ElementId, response: &Response) {
         if response.gained_focus() {
             let value = self.value(id).cloned().unwrap_or(Value::None);
             self.queue_event(UiEvent::new(id.clone(), EventType::Focus, value));
         }
     }
 
-    pub(super) fn record_button_click(&mut self, id: &ElementId, value: Value) {
+    pub(in crate::components) fn record_button_click(&mut self, id: &ElementId, value: Value) {
         if let Some(element) = self.elements.get_mut(id) {
             element.value = value.clone();
             element.changed = true;

@@ -198,3 +198,105 @@ fn props_have_useful_defaults_and_options_are_retained() {
     assert_eq!(props.options.len(), 2);
     assert_eq!(Style::default(), Style::default());
 }
+
+#[test]
+fn disclosure_retains_its_open_state_and_gates_its_body() {
+    let mut document = UiDocument::new();
+    let ctx = egui::Context::default();
+    let body_rendered = Rc::new(RefCell::new(0usize));
+
+    let frame = |document: &mut UiDocument, body_rendered: Rc<RefCell<usize>>| {
+        ctx.begin_pass(egui::RawInput::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            document.disclosure(
+                ui,
+                DisclosureProps::new("relay.advanced", "Advanced settings"),
+                |ui, _document| {
+                    *body_rendered.borrow_mut() += 1;
+                    ui.label("body");
+                },
+            );
+        });
+        let _ = ctx.end_pass();
+    };
+
+    frame(&mut document, Rc::clone(&body_rendered));
+    assert_eq!(document.checked("relay.advanced"), Some(false));
+    assert_eq!(
+        *body_rendered.borrow(),
+        0,
+        "a closed section renders nothing"
+    );
+
+    // Opening it programmatically is the same operation the header click
+    // performs, and the body must follow on the next frame.
+    assert!(document.set_value("relay.advanced", true));
+    frame(&mut document, Rc::clone(&body_rendered));
+    assert_eq!(*body_rendered.borrow(), 1);
+}
+
+#[test]
+fn tabs_retain_the_selection_and_recover_from_a_vanished_tab() {
+    let mut document = UiDocument::new();
+    let ctx = egui::Context::default();
+
+    ctx.begin_pass(egui::RawInput::default());
+    egui::CentralPanel::default().show(&ctx, |ui| {
+        let selected = document.tabs(
+            ui,
+            TabsProps::new(
+                "relay.tabs",
+                [
+                    TabItem::new("connections", "Connections").badge_count(2),
+                    TabItem::new("host", "Host"),
+                ],
+            ),
+        );
+        assert_eq!(selected, "connections");
+    });
+    let _ = ctx.end_pass();
+
+    assert!(document.set_value("relay.tabs", "host"));
+    ctx.begin_pass(egui::RawInput::default());
+    egui::CentralPanel::default().show(&ctx, |ui| {
+        // The retained "host" tab is gone from this frame's item list, so the
+        // strip must fall back rather than render with nothing active.
+        let selected = document.tabs(
+            ui,
+            TabsProps::new("relay.tabs", [TabItem::new("connections", "Connections")]),
+        );
+        assert_eq!(selected, "connections");
+    });
+    let _ = ctx.end_pass();
+}
+
+#[test]
+fn a_badge_count_of_zero_is_omitted() {
+    assert!(TabItem::new("sessions", "Sessions")
+        .badge_count(0)
+        .badge
+        .is_none());
+    assert_eq!(
+        TabItem::new("sessions", "Sessions").badge_count(3).badge,
+        Some("3".to_owned())
+    );
+}
+
+#[test]
+fn custom_clicks_are_recorded_like_built_in_controls() {
+    let mut document = UiDocument::new();
+    let seen = Rc::new(RefCell::new(0usize));
+    let counter = Rc::clone(&seen);
+    document.on_click("canvas.custom", move |_| {
+        *counter.borrow_mut() += 1;
+    });
+
+    record_custom_click(&mut document, "canvas.custom", false);
+    document.dispatch_pending_events();
+    assert_eq!(*seen.borrow(), 0);
+
+    record_custom_click(&mut document, "canvas.custom", true);
+    document.dispatch_pending_events();
+    assert_eq!(*seen.borrow(), 1);
+    assert!(document.clicked("canvas.custom"));
+}

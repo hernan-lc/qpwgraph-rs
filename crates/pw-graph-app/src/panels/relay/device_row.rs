@@ -6,21 +6,22 @@
 //! Connected rows additionally carry a live level bar and expand in place to
 //! show what the session negotiated, so nothing about a connection requires
 //! leaving the list.
+//!
+//! Everything here is assembled from `pw-graph-ui` components — a card for
+//! the surface, a meter for the level, icon buttons for the actions — so the
+//! row inherits the shared styling instead of restating it locally.
 
-use super::super::components::{document_button, document_icon_button};
+use super::super::components::document_button;
+use super::CONNECTED_ACCENT;
 use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
 use crate::icons::Icon;
-use eframe::egui::{self, Color32, RichText, Sense, Ui, Vec2};
+use eframe::egui::{self, Color32, RichText, Ui};
 use pw_graph_backend::{RelayCodecKind, RelayDeviceKind};
-use pw_graph_ui::UiDocument;
+use pw_graph_ui::{icon_image, CardProps, IconButtonProps, MeterProps, UiDocument};
 
-/// Accent used for the connected group; matches the canvas link colour so
-/// "carrying audio" reads the same in the panel as it does on the graph.
-const CONNECTED_ACCENT: Color32 = Color32::from_rgb(96, 190, 130);
 const ROW_BACKGROUND: Color32 = Color32::from_rgb(38, 44, 54);
 const CONNECTED_BACKGROUND: Color32 = Color32::from_rgb(34, 52, 44);
-const LEVEL_BAR_SIZE: Vec2 = Vec2::new(52.0, 6.0);
-const ROW_ROUNDING: f32 = 6.0;
+const DEVICE_ICON_SIZE: f32 = 20.0;
 
 /// What the user asked the row to do, resolved by the caller so this module
 /// stays free of engine access.
@@ -40,42 +41,53 @@ impl QpwgraphApp {
         row: &RelayDeviceRow,
     ) -> RelayRowAction {
         let connected = row.is_connected();
-        let fill = if connected {
-            CONNECTED_BACKGROUND
-        } else {
-            ROW_BACKGROUND
-        };
-        let mut action = RelayRowAction::None;
-        egui::Frame::none()
-            .fill(fill)
-            .rounding(ROW_ROUNDING)
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    self.paint_relay_device_glyph(ui, row);
-                    ui.add_space(6.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(row.name.clone()).strong());
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                self.relay_peer_kind_label(row.kind),
-                                row.addr
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        action = self.show_relay_row_action(document, ui, row);
-                    });
-                });
-                if connected && self.relay_row_expanded(row) {
-                    ui.add_space(4.0);
+        let expanded = self.relay_row_expanded(row);
+        let card = CardProps::new(format!("relay.panel.device.card.{}", row.addr))
+            .fill(if connected {
+                CONNECTED_BACKGROUND
+            } else {
+                ROW_BACKGROUND
+            })
+            .accent_option(connected.then_some(CONNECTED_ACCENT));
+        document
+            .card(ui, card, |ui, document| {
+                let action = ui
+                    .horizontal(|ui| {
+                        let tint = if connected {
+                            CONNECTED_ACCENT
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        ui.add(icon_image(
+                            &relay_device_icon(row.kind).source(),
+                            DEVICE_ICON_SIZE,
+                            tint,
+                        ));
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(row.name.clone()).strong());
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {}",
+                                    self.relay_peer_kind_label(row.kind),
+                                    row.addr
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.show_relay_row_action(document, ui, row)
+                        })
+                        .inner
+                    })
+                    .inner;
+                if expanded {
                     self.show_relay_row_details(ui, row);
                 }
-            });
-        action
+                action
+            })
+            .unwrap_or(RelayRowAction::None)
     }
 
     /// Trailing controls. Connected rows lead with the level bar so the eye
@@ -99,44 +111,50 @@ impl QpwgraphApp {
                 }
             }
             RelayDeviceState::Connecting => {
-                if document_button(
-                    document,
+                if document.icon_button(
                     ui,
-                    &format!("relay.panel.device.cancel.{}", row.addr),
-                    self.i18n.text("shortcuts.close"),
-                    true,
+                    IconButtonProps::new(
+                        format!("relay.panel.device.cancel.{}", row.addr),
+                        Icon::Close.source(),
+                    )
+                    .tooltip(self.i18n.text("relay.cancel_connect")),
                 ) {
                     return RelayRowAction::CancelConnect;
                 }
-                ui.add(egui::Spinner::new().size(14.0));
-                ui.label(
-                    RichText::new(self.i18n.text("relay.state_connecting"))
-                        .small()
-                        .weak(),
+                document.activity(
+                    ui,
+                    format!("relay.panel.device.connecting.{}", row.addr),
+                    self.i18n.text("relay.state_connecting"),
                 );
             }
             RelayDeviceState::Connected(session) => {
-                if document_icon_button(
-                    document,
+                if document.icon_button(
                     ui,
-                    &format!("relay.panel.device.disconnect.{}", session.0),
-                    Icon::AutoDisconnect,
-                    self.i18n.text("relay.disconnect"),
-                    self.i18n.text("relay.disconnect_tip"),
+                    IconButtonProps::new(
+                        format!("relay.panel.device.disconnect.{}", session.0),
+                        Icon::AutoDisconnect.source(),
+                    )
+                    .tooltip(self.i18n.text("relay.disconnect_tip")),
                 ) {
                     return RelayRowAction::Disconnect;
                 }
-                if document_icon_button(
-                    document,
+                if document.icon_button(
                     ui,
-                    &format!("relay.panel.device.details.{}", session.0),
-                    Icon::Settings,
-                    self.i18n.text("relay.details_tip"),
-                    self.i18n.text("relay.details_tip"),
+                    IconButtonProps::new(
+                        format!("relay.panel.device.details.{}", session.0),
+                        Icon::Settings.source(),
+                    )
+                    .tooltip(self.i18n.text("relay.details_tip")),
                 ) {
                     return RelayRowAction::ToggleDetails;
                 }
-                self.paint_relay_level_bar(ui, self.relay.levels.get(&session.0).copied());
+                document.meter(
+                    ui,
+                    MeterProps::new(format!("relay.panel.device.level.{}", session.0))
+                        .level_option(self.relay.levels.get(&session.0).copied())
+                        .color(CONNECTED_ACCENT)
+                        .tooltip(self.i18n.text("relay.level_tip")),
+                );
             }
         }
         RelayRowAction::None
@@ -160,97 +178,22 @@ impl QpwgraphApp {
             RelayCodecKind::Opus => "Opus",
             RelayCodecKind::Pcm => "PCM",
         };
-        ui.label(
-            RichText::new(self.tf("relay.detail_codec", &[("codec", codec.to_owned())]))
-                .small()
-                .weak(),
-        );
         let direction = match (session.sending, session.receiving) {
             (true, true) => self.i18n.text("relay.role_both"),
             (true, false) => self.i18n.text("relay.role_emit"),
             (false, true) => self.i18n.text("relay.role_receive"),
             (false, false) => "—".to_owned(),
         };
-        ui.label(
-            RichText::new(self.tf("relay.detail_direction", &[("direction", direction)]))
-                .small()
-                .weak(),
-        );
-        ui.label(
-            RichText::new(self.tf(
+        for line in [
+            self.tf("relay.detail_codec", &[("codec", codec.to_owned())]),
+            self.tf("relay.detail_direction", &[("direction", direction)]),
+            self.tf(
                 "relay.detail_frame",
                 &[("frame", self.config.relay_frame_ms.to_string())],
-            ))
-            .small()
-            .weak(),
-        );
-    }
-
-    /// Device kind badge. The kinds are drawn rather than themed with icon
-    /// assets because they are glyph-sized and need to tint with the row's
-    /// state.
-    fn paint_relay_device_glyph(&self, ui: &mut Ui, row: &RelayDeviceRow) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-        let painter = ui.painter();
-        let color = if row.is_connected() {
-            CONNECTED_ACCENT
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        let stroke = egui::Stroke::new(1.4_f32, color);
-        match row.kind {
-            RelayDeviceKind::Android => {
-                // Portrait slab with a speaker slit: a phone.
-                let body = egui::Rect::from_center_size(rect.center(), Vec2::new(11.0, 17.0));
-                painter.rect_stroke(body, 2.0, stroke);
-                painter.line_segment(
-                    [
-                        egui::pos2(body.center().x - 2.5, body.top() + 3.0),
-                        egui::pos2(body.center().x + 2.5, body.top() + 3.0),
-                    ],
-                    stroke,
-                );
-            }
-            RelayDeviceKind::Linux => {
-                // Screen over a base line: a desktop or laptop.
-                let screen = egui::Rect::from_center_size(
-                    rect.center() - Vec2::new(0.0, 2.0),
-                    Vec2::new(16.0, 11.0),
-                );
-                painter.rect_stroke(screen, 2.0, stroke);
-                painter.line_segment(
-                    [
-                        egui::pos2(rect.left() + 1.0, screen.bottom() + 4.0),
-                        egui::pos2(rect.right() - 1.0, screen.bottom() + 4.0),
-                    ],
-                    stroke,
-                );
-            }
-            RelayDeviceKind::Other => {
-                painter.circle_stroke(rect.center(), 7.0, stroke);
-            }
+            ),
+        ] {
+            ui.label(RichText::new(line).small().weak());
         }
-    }
-
-    /// Live incoming level for a connected session. An absent reading (a
-    /// send-only session, or one that has not reported yet) draws the empty
-    /// track rather than nothing, so rows keep a stable width.
-    fn paint_relay_level_bar(&self, ui: &mut Ui, rms: Option<f32>) {
-        let (rect, _) = ui.allocate_exact_size(LEVEL_BAR_SIZE, Sense::hover());
-        let painter = ui.painter();
-        painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
-        let Some(rms) = rms else {
-            return;
-        };
-        // RMS is small for ordinary speech; a square-root curve keeps the
-        // bar legible instead of pinned near zero.
-        let level = rms.clamp(0.0, 1.0).sqrt();
-        if level <= f32::EPSILON {
-            return;
-        }
-        let filled =
-            egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * level, rect.height()));
-        painter.rect_filled(filled, 3.0, CONNECTED_ACCENT);
     }
 
     pub(super) fn relay_peer_kind_label(&self, kind: RelayDeviceKind) -> String {
@@ -260,5 +203,15 @@ impl QpwgraphApp {
             RelayDeviceKind::Other => "relay.peer_kind_other",
         };
         self.i18n.text(key)
+    }
+}
+
+/// Device-kind artwork. Real SVGs rather than painted primitives, so the
+/// badge carries the same weight and tinting as every other icon in the app.
+fn relay_device_icon(kind: RelayDeviceKind) -> Icon {
+    match kind {
+        RelayDeviceKind::Android => Icon::DevicePhone,
+        RelayDeviceKind::Linux => Icon::DeviceDesktop,
+        RelayDeviceKind::Other => Icon::DeviceGeneric,
     }
 }

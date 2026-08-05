@@ -11,10 +11,12 @@ mod canvas;
 pub mod components;
 
 pub use components::{
-    setting_row, ButtonProps, CheckboxProps, CommonProps, DialogPlacement, DialogProps,
-    DialogResponse, Document, Element, ElementId, ElementKind, EventType, Form, FormValues,
-    LabelProps, ListenerId, NumberInputProps, OptionItem, RadioGroupProps, SelectProps,
-    SliderProps, Style, SwitchProps, TextInputProps, UiDocument, UiEvent, Value,
+    icon_image, record_custom_click, setting_row, BadgeProps, ButtonProps, CardProps,
+    CheckboxProps, CommonProps, DialogPlacement, DialogProps, DialogResponse, DisclosureProps,
+    Document, Element, ElementId, ElementKind, EventType, Form, FormValues, Icon, IconButtonProps,
+    IconSource, LabelProps, ListenerId, MeterProps, NumberInputProps, OptionItem, RadioGroupProps,
+    SelectProps, SliderProps, StepItem, StepsProps, Style, SwitchProps, TabItem, TabsProps,
+    TextInputProps, UiDocument, UiEvent, Value,
 };
 
 /// User-facing appearance overrides for a node. The backend keeps the native

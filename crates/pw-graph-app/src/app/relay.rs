@@ -74,9 +74,6 @@ pub(crate) struct RelayUiState {
     pub(crate) connecting: Option<(SocketAddr, Instant)>,
     /// Row the user expanded for connection details, keyed by session id.
     pub(crate) expanded: Option<u64>,
-    /// Disclosure state for the manual-address and advanced-settings blocks.
-    pub(crate) show_manual: bool,
-    pub(crate) show_advanced: bool,
     /// Latest RMS reported per session, for the connected rows' level bars.
     pub(crate) levels: HashMap<u64, f32>,
     /// Local IPv4 links, ranked best-first; refreshed on an interval.
