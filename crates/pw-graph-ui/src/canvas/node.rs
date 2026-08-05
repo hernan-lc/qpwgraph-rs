@@ -20,8 +20,8 @@ mod controls;
 mod helpers;
 mod layout;
 mod ports;
-use helpers::{dominant_port, node_tooltip, node_type_label};
 pub(super) use helpers::node_color;
+use helpers::{dominant_port, node_tooltip, node_type_label};
 
 const NODE_WIDTH: f32 = 244.0;
 const NODE_HEADER_HEIGHT: f32 = 42.0;

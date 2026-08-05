@@ -17,7 +17,9 @@ use crate::app::{QpwgraphApp, RelayDeviceRow, RelayDeviceState};
 use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
 use pw_graph_backend::{RelayCodecKind, RelayDeviceKind};
-use pw_graph_ui::{icon_image, CardProps, IconButtonProps, MeterProps, Theme, ThemeToken, UiDocument};
+use pw_graph_ui::{
+    icon_image, CardProps, IconButtonProps, MeterProps, Theme, ThemeToken, UiDocument,
+};
 
 const DEVICE_ICON_SIZE: f32 = 20.0;
 

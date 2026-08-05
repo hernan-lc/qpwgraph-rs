@@ -1,6 +1,5 @@
 use super::super::components::{
-    document_button, document_setting_slider, document_setting_switch_plain,
-    modal_step_heading,
+    document_button, document_setting_slider, document_setting_switch_plain, modal_step_heading,
 };
 use super::super::shared::fresh_scroll_area;
 use crate::app::effects::{available_descriptors, EffectGalleryPhase, EffectGalleryState};

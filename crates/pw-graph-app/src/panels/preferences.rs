@@ -138,9 +138,7 @@ impl QpwgraphApp {
                         PreferencesTab::Interface => {
                             app.show_preferences_interface_tab(document, ui)
                         }
-                        PreferencesTab::Patchbay => {
-                            app.show_preferences_patchbay_tab(document, ui)
-                        }
+                        PreferencesTab::Patchbay => app.show_preferences_patchbay_tab(document, ui),
                     });
                 ui.add_space(8.0);
                 if show_close_button(
