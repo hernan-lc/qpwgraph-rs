@@ -2,7 +2,7 @@ package io.qpwgraph.relay
 
 data class RelaySettings(
     val target: String = "",
-    val pin: String = "",
+    val pin: String = "123456",
     val role: String = "emit",
     val codec: String = "opus",
     val transport: String = "auto",

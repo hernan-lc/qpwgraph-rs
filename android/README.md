@@ -31,7 +31,30 @@ the Android SDK configured:
 
 The app requests microphone permission because Emit and Both capture audio.
 Android 13+ notification permission is requested for the foreground audio
-service.
+service. The default PIN is `123456`; change it directly in the Pairing PIN
+field whenever you need a different PIN.
+
+## Test over USB tethering
+
+ADB USB debugging alone is only for installing and inspecting the app. For
+relay audio over USB, enable **USB tethering** on the Android device and use
+the USB network address assigned to the phone/Linux host:
+
+1. Enable Android **USB tethering** and keep the phone unlocked.
+2. On Linux, run `ip -4 addr` and identify the USB/RNDIS interface, usually
+   `usb0`, `rndis0`, or an `enx...` address.
+3. Start the desktop relay host with PIN `123456`; use a fixed TCP port such as
+   `48123` so the address is easy to enter.
+4. In desktop Preferences → Relay, select **USB** as the preferred link and
+   start the host.
+5. In Android, enter the Linux USB/RNDIS address as `host:port`, keep PIN
+   `123456`, choose Emit/Receive/Both, and connect.
+6. Confirm the desktop shows a relay session and that the Relay Microphone or
+   Relay Speaker node carries audio.
+
+Do not use the ADB device serial or `127.0.0.1` as the relay target. If Linux
+cannot ping the phone-side USB address, USB tethering is not active; ADB
+connectivity does not prove network reachability.
 
 ## Use
 

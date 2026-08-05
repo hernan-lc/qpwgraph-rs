@@ -17,6 +17,9 @@ members = [
     "vendor/nnnoiseless",
 ]
 
+[patch.crates-io]
+audiopus_sys = { path = "vendor/audiopus_sys" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

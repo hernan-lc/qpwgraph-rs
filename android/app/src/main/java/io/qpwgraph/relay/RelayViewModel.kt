@@ -35,7 +35,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadSettings(): RelaySettings = RelaySettings(
         target = preferences.getString("target", "") ?: "",
-        pin = preferences.getString("pin", "") ?: "",
+        pin = preferences.getString("pin", "123456") ?: "123456",
         role = preferences.getString("role", "emit") ?: "emit",
         codec = preferences.getString("codec", "opus") ?: "opus",
         transport = preferences.getString("transport", "auto") ?: "auto",

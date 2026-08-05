@@ -83,13 +83,13 @@ pub struct AppConfig {
     pub effects: Vec<PersistedEffect>,
     #[serde(default = "default_relay_device_name")]
     pub relay_device_name: String,
-    #[serde(default)]
+    #[serde(default = "default_relay_pin")]
     pub relay_host_pin: String,
     #[serde(default)]
     pub relay_host_port: u16,
     #[serde(default)]
     pub relay_client_target: String,
-    #[serde(default)]
+    #[serde(default = "default_relay_pin")]
     pub relay_client_pin: String,
     #[serde(default = "default_relay_role")]
     pub relay_role: String,
@@ -103,6 +103,10 @@ pub struct AppConfig {
 
 fn default_relay_device_name() -> String {
     "qpwgraph-rs".into()
+}
+
+fn default_relay_pin() -> String {
+    "123456".into()
 }
 
 fn default_relay_role() -> String {
@@ -177,10 +181,10 @@ impl Default for AppConfig {
             active_patchbay_profile: "default".into(),
             effects: Vec::new(),
             relay_device_name: default_relay_device_name(),
-            relay_host_pin: String::new(),
+            relay_host_pin: default_relay_pin(),
             relay_host_port: 0,
             relay_client_target: String::new(),
-            relay_client_pin: String::new(),
+            relay_client_pin: default_relay_pin(),
             relay_role: default_relay_role(),
             relay_codec: default_relay_codec(),
             relay_frame_ms: default_relay_frame_ms(),
@@ -225,6 +229,8 @@ mod tests {
 
     #[test]
     fn defaults_round_trip() {
+        assert_eq!(AppConfig::default().relay_host_pin, "123456");
+        assert_eq!(AppConfig::default().relay_client_pin, "123456");
         let directory =
             std::env::temp_dir().join(format!("pw-graph-config-{}", std::process::id()));
         let path = directory.join("config.toml");
