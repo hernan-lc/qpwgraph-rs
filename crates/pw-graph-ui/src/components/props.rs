@@ -181,6 +181,36 @@ impl CommonProps {
         self.style = self.style.size(width, height);
         self
     }
+
+    /// Sets text color.
+    pub fn text_color(mut self, color: Color32) -> Self {
+        self.style = self.style.text_color(color);
+        self
+    }
+
+    /// Sets background fill.
+    pub fn fill(mut self, color: Color32) -> Self {
+        self.style = self.style.fill(color);
+        self
+    }
+
+    /// Sets border stroke.
+    pub fn stroke(mut self, stroke: Stroke) -> Self {
+        self.style = self.style.stroke(stroke);
+        self
+    }
+
+    /// Sets corner rounding.
+    pub fn rounding(mut self, radius: f32) -> Self {
+        self.style = self.style.rounding(radius);
+        self
+    }
+
+    /// Sets inner margin.
+    pub fn inner_margin(mut self, margin: f32) -> Self {
+        self.style = self.style.inner_margin(margin);
+        self
+    }
 }
 
 macro_rules! impl_common_builders {
@@ -249,6 +279,36 @@ macro_rules! impl_common_builders {
             /// Sets both dimensions.
             pub fn size(mut self, width: f32, height: f32) -> Self {
                 self.common = self.common.size(width, height);
+                self
+            }
+
+            /// Sets text color.
+            pub fn text_color(mut self, color: egui::Color32) -> Self {
+                self.common = self.common.text_color(color);
+                self
+            }
+
+            /// Sets background fill.
+            pub fn fill(mut self, color: egui::Color32) -> Self {
+                self.common = self.common.fill(color);
+                self
+            }
+
+            /// Sets border stroke.
+            pub fn stroke(mut self, stroke: egui::Stroke) -> Self {
+                self.common = self.common.stroke(stroke);
+                self
+            }
+
+            /// Sets corner rounding.
+            pub fn rounding(mut self, radius: f32) -> Self {
+                self.common = self.common.rounding(radius);
+                self
+            }
+
+            /// Sets inner margin.
+            pub fn inner_margin(mut self, margin: f32) -> Self {
+                self.common = self.common.inner_margin(margin);
                 self
             }
         }

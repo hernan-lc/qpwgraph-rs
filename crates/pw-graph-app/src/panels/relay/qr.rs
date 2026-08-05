@@ -76,24 +76,38 @@ impl QpwgraphApp {
                     // Human-readable fallback for phones that cannot scan:
                     // the endpoint and PIN as text.
                     if let Some(parsed) = relay_parse_qr_payload(payload) {
-                        ui.label(RichText::new(parsed.target).monospace().strong());
+                        ui.label(
+                            RichText::new(parsed.target)
+                                .monospace()
+                                .strong()
+                                .color(Color32::from_rgb(240, 244, 250)),
+                        );
                         if let Some(pin) = parsed.pin {
-                            ui.label(self.tf("relay.qr_pin", &[("pin", pin)]));
+                            ui.label(
+                                RichText::new(self.tf("relay.qr_pin", &[("pin", pin)]))
+                                    .color(Color32::from_rgb(215, 225, 238)),
+                            );
                         }
                     }
                 }
             } else if self.driver.relay_status().host_active {
                 // The host is already listening; only the link is missing, so
                 // do not tell the user to start the host again.
-                ui.label(RichText::new(self.i18n.text("relay.qr_no_link")).weak());
+                ui.label(
+                    RichText::new(self.i18n.text("relay.qr_no_link"))
+                        .color(Color32::from_rgb(180, 195, 215)),
+                );
             } else {
-                ui.label(RichText::new(self.i18n.text("relay.qr_unavailable")).weak());
+                ui.label(
+                    RichText::new(self.i18n.text("relay.qr_unavailable"))
+                        .color(Color32::from_rgb(180, 195, 215)),
+                );
             }
             ui.add_space(4.0);
             ui.label(
                 RichText::new(self.i18n.text("relay.qr_hint"))
                     .small()
-                    .weak(),
+                    .color(Color32::from_rgb(180, 195, 215)),
             );
         });
         ui.add_space(6.0);

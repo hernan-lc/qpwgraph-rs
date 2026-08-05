@@ -30,7 +30,7 @@ impl QpwgraphApp {
             ui.label(
                 RichText::new(self.i18n.text("relay.emitter_hint"))
                     .small()
-                    .weak(),
+                    .color(eframe::egui::Color32::from_rgb(180, 195, 215)),
             );
         });
     }
@@ -156,7 +156,7 @@ impl QpwgraphApp {
             CardProps::new("relay.panel.host.share_card"),
             |ui, document| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(self.i18n.text("relay.step_share")).strong());
+                    ui.label(RichText::new(self.i18n.text("relay.step_share")).strong().color(eframe::egui::Color32::from_rgb(240, 244, 250)));
                     if document.icon_button(
                         ui,
                         IconButtonProps::new("relay.panel.host.qr", Icon::QrCode.source())
@@ -186,30 +186,30 @@ impl QpwgraphApp {
             ui.label(
                 RichText::new(self.i18n.text("relay.no_links"))
                     .small()
-                    .weak(),
+                    .color(eframe::egui::Color32::from_rgb(180, 195, 215)),
             );
         }
         for (index, link) in links.iter().enumerate() {
             let endpoint = format!("{}:{}", link.addr, port);
             if index == 0 {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(endpoint).monospace().strong());
+                    ui.label(RichText::new(endpoint).monospace().strong().color(eframe::egui::Color32::from_rgb(240, 244, 250)));
                     ui.label(
                         RichText::new(self.i18n.text("relay.endpoint_primary"))
                             .small()
-                            .weak(),
+                            .color(eframe::egui::Color32::from_rgb(180, 195, 215)),
                     );
                 });
             } else {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{} · ", link.name)).small().weak());
-                    ui.label(RichText::new(endpoint).monospace().weak());
+                    ui.label(RichText::new(format!("{} · ", link.name)).small().color(eframe::egui::Color32::from_rgb(180, 195, 215)));
+                    ui.label(RichText::new(endpoint).monospace().color(eframe::egui::Color32::from_rgb(215, 225, 238)));
                 });
             }
         }
         let pin = self.config.relay_host_pin.trim();
         if !pin.is_empty() {
-            ui.label(self.tf("relay.qr_pin", &[("pin", pin.to_owned())]));
+            ui.label(RichText::new(self.tf("relay.qr_pin", &[("pin", pin.to_owned())])).color(eframe::egui::Color32::from_rgb(215, 225, 238)));
         }
     }
 }

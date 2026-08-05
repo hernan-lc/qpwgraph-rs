@@ -41,7 +41,7 @@ pub(super) fn labelled(
 ) -> Response {
     if let Some(label) = label.filter(|label| !label.is_empty()) {
         ui.horizontal(|ui| {
-            ui.label(label);
+            ui.label(egui::RichText::new(label).color(Color32::from_rgb(220, 230, 242)));
             render(ui)
         })
         .inner

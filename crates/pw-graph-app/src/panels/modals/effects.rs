@@ -1,117 +1,13 @@
-use super::components::{
+use super::super::components::{
     document_button, document_setting_slider, document_setting_switch_plain,
-    document_text_input_sized, modal_step_heading,
+    modal_step_heading,
 };
-use super::shared::{fresh_scroll_area, show_centered_dialog, show_close_button};
+use super::super::shared::{fresh_scroll_area, show_centered_dialog};
 use crate::app::effects::{available_descriptors, EffectGalleryPhase, EffectGalleryState};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui};
 use pw_graph_effects::{EffectDescriptor, EffectParameter};
 use pw_graph_ui::UiDocument;
-
-fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
-    ui.label(RichText::new(keys).strong().monospace());
-    ui.label(description);
-    ui.end_row();
-}
-
-fn shortcut_matches_query(keys: &str, description: &str, query: &str) -> bool {
-    query.is_empty()
-        || keys.to_lowercase().contains(query)
-        || description.to_lowercase().contains(query)
-}
-
-struct ShortcutEntry {
-    keys: &'static str,
-    description_key: &'static str,
-}
-
-const SHORTCUT_ENTRIES: &[ShortcutEntry] = &[
-    ShortcutEntry {
-        keys: "F1",
-        description_key: "shortcuts.help",
-    },
-    ShortcutEntry {
-        keys: "Esc",
-        description_key: "shortcuts.close_cancel",
-    },
-    ShortcutEntry {
-        keys: "Delete / Backspace",
-        description_key: "shortcuts.delete_link",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+Z",
-        description_key: "shortcuts.undo",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+Shift+Z",
-        description_key: "shortcuts.redo",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+Y",
-        description_key: "shortcuts.redo",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+S",
-        description_key: "shortcuts.save_config",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+Shift+S",
-        description_key: "shortcuts.save_patchbay",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+O",
-        description_key: "shortcuts.load_patchbay",
-    },
-    ShortcutEntry {
-        keys: "R",
-        description_key: "shortcuts.refresh",
-    },
-    ShortcutEntry {
-        keys: "A",
-        description_key: "shortcuts.arrange",
-    },
-    ShortcutEntry {
-        keys: "T",
-        description_key: "shortcuts.thumbnail",
-    },
-    ShortcutEntry {
-        keys: "Arrow keys",
-        description_key: "shortcuts.pan_keyboard",
-    },
-    ShortcutEntry {
-        keys: "0",
-        description_key: "shortcuts.filter_all",
-    },
-    ShortcutEntry {
-        keys: "1",
-        description_key: "shortcuts.filter_audio",
-    },
-    ShortcutEntry {
-        keys: "2",
-        description_key: "shortcuts.filter_video",
-    },
-    ShortcutEntry {
-        keys: "3",
-        description_key: "shortcuts.filter_midi",
-    },
-    ShortcutEntry {
-        keys: "+ / -",
-        description_key: "shortcuts.zoom",
-    },
-    ShortcutEntry {
-        keys: "Scroll",
-        description_key: "shortcuts.scroll_pan",
-    },
-    ShortcutEntry {
-        keys: "Shift+Scroll",
-        description_key: "shortcuts.scroll_pan_horizontal",
-    },
-    ShortcutEntry {
-        keys: "Ctrl/Cmd+Scroll",
-        description_key: "shortcuts.scroll_zoom",
-    },
-];
 
 fn effect_gallery_card(
     document: &mut UiDocument,
@@ -126,12 +22,12 @@ fn effect_gallery_card(
     let fill = if selected {
         Color32::from_rgb(35, 86, 119)
     } else if response.hovered() {
-        Color32::from_rgb(42, 50, 62)
+        Color32::from_rgb(45, 54, 68)
     } else {
-        Color32::from_rgb(33, 39, 49)
+        Color32::from_rgb(34, 40, 50)
     };
     let stroke = if selected {
-        Stroke::new(1.5_f32, Color32::from_rgb(74, 183, 240))
+        Stroke::new(1.5_f32, Color32::from_rgb(96, 190, 250))
     } else {
         visuals.bg_stroke
     };
@@ -141,17 +37,17 @@ fn effect_gallery_card(
             .max_rect(rect.shrink(10.0))
             .id_salt(("effect-gallery-card", &descriptor.id)),
         |ui| {
-            ui.label(RichText::new(&descriptor.name).strong());
+            ui.label(RichText::new(&descriptor.name).strong().color(Color32::from_rgb(240, 244, 250)));
             ui.label(
                 RichText::new(format!("{} · {}", descriptor.vendor, descriptor.version))
                     .small()
-                    .weak(),
+                    .color(Color32::from_rgb(180, 195, 215)),
             );
             ui.add_space(8.0);
             ui.label(
                 RichText::new(summary)
                     .small()
-                    .color(Color32::from_rgb(174, 197, 216)),
+                    .color(Color32::from_rgb(205, 222, 240)),
             );
         },
     );
@@ -182,8 +78,8 @@ fn show_effect_initial_settings(
     egui::Frame::group(ui.style())
         .inner_margin(10.0)
         .show(ui, |ui| {
-            ui.label(RichText::new(initial_settings_label).strong());
-            ui.label(RichText::new(setup_hint).small().weak());
+            ui.label(RichText::new(initial_settings_label).strong().color(Color32::from_rgb(240, 244, 250)));
+            ui.label(RichText::new(setup_hint).small().color(Color32::from_rgb(180, 195, 215)));
             ui.add_space(6.0);
             gallery.enabled = document_setting_switch_plain(
                 document,
@@ -291,7 +187,7 @@ impl QpwgraphApp {
                         EffectGalleryPhase::Choose => self.i18n.text("effects.choose_effect_hint"),
                         EffectGalleryPhase::Configure => setup_hint.clone(),
                     })
-                    .weak(),
+                    .color(Color32::from_rgb(180, 195, 215)),
                 );
                 if !supports_effect_nodes {
                     ui.add_space(6.0);
@@ -307,12 +203,15 @@ impl QpwgraphApp {
                     |ui| match gallery.phase {
                         EffectGalleryPhase::Choose => {
                             ui.label(
-                                RichText::new(self.i18n.text("effects.choose_effect")).strong(),
+                                RichText::new(self.i18n.text("effects.choose_effect"))
+                                    .strong()
+                                    .color(Color32::from_rgb(240, 244, 250)),
                             );
                             ui.add_space(6.0);
                             if descriptors.is_empty() {
                                 ui.label(
-                                    RichText::new(self.i18n.text("effects.no_available")).weak(),
+                                    RichText::new(self.i18n.text("effects.no_available"))
+                                        .color(Color32::from_rgb(180, 195, 215)),
                                 );
                             } else if ui.available_width() < 440.0 {
                                 for descriptor in &descriptors {
@@ -374,7 +273,8 @@ impl QpwgraphApp {
                                 );
                             } else {
                                 ui.label(
-                                    RichText::new(self.i18n.text("effects.no_available")).weak(),
+                                    RichText::new(self.i18n.text("effects.no_available"))
+                                        .color(Color32::from_rgb(180, 195, 215)),
                                 );
                             }
                         }
@@ -451,182 +351,5 @@ impl QpwgraphApp {
         if !cancel {
             self.effect_gallery = Some(gallery);
         }
-    }
-
-    pub(crate) fn show_shortcuts_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_shortcuts {
-            return;
-        }
-        let mut document = std::mem::take(&mut self.ui_document);
-        let dialog_response = show_centered_dialog(
-            &mut document,
-            ctx,
-            "shortcuts",
-            self.i18n.text("shortcuts.title"),
-            560.0,
-            |ui, document| {
-                ui.label(RichText::new(self.i18n.text("shortcuts.hint")).weak());
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(self.i18n.text("shortcuts.search")).strong());
-                    let clear_width = if self.shortcut_search.is_empty() {
-                        0.0
-                    } else {
-                        ui.spacing().button_padding.x * 2.0 + 42.0
-                    };
-                    let search_width = (ui.available_width() - clear_width).max(140.0);
-                    let search_hint = self.i18n.text("shortcuts.search_hint");
-                    let current_search = self.shortcut_search.clone();
-                    let (search_response, search_value) = document_text_input_sized(
-                        document,
-                        ui,
-                        "modals.shortcuts.search",
-                        &current_search,
-                        String::new(),
-                        Some(search_hint),
-                        Some(search_width),
-                    );
-                    self.shortcut_search = search_value;
-                    if self.shortcut_focus_search
-                        || ui.input(|input| {
-                            input.modifiers.command && input.key_pressed(egui::Key::F)
-                        })
-                    {
-                        search_response.request_focus();
-                        self.shortcut_focus_search = false;
-                    }
-                    if !self.shortcut_search.is_empty()
-                        && document_button(
-                            document,
-                            ui,
-                            "modals.shortcuts.clear_search",
-                            self.i18n.text("shortcuts.clear_search"),
-                            true,
-                        )
-                    {
-                        self.shortcut_search.clear();
-                        self.shortcut_focus_search = true;
-                    }
-                });
-                ui.add_space(6.0);
-
-                let query = self.shortcut_search.trim().to_lowercase();
-                let matching_entries: Vec<_> = SHORTCUT_ENTRIES
-                    .iter()
-                    .filter_map(|entry| {
-                        let description = self.i18n.text(entry.description_key);
-                        shortcut_matches_query(entry.keys, &description, &query)
-                            .then_some((entry.keys, description))
-                    })
-                    .collect();
-                ui.label(
-                    RichText::new(self.tf(
-                        "shortcuts.result_count",
-                        &[("count", matching_entries.len().to_string())],
-                    ))
-                    .small()
-                    .weak(),
-                );
-                fresh_scroll_area(("shortcuts-scroll", self.shortcut_scroll_epoch), 420.0).show(
-                    ui,
-                    |ui| {
-                        if matching_entries.is_empty() {
-                            ui.label(RichText::new(self.i18n.text("shortcuts.no_results")).weak());
-                        } else {
-                            egui::Grid::new("shortcuts-grid")
-                                .num_columns(2)
-                                .spacing(egui::vec2(18.0, 7.0))
-                                .show(ui, |ui| {
-                                    for (keys, description) in matching_entries {
-                                        shortcut_row(ui, keys, description);
-                                    }
-                                });
-                        }
-                    },
-                );
-                ui.add_space(10.0);
-                if show_close_button(
-                    document,
-                    ui,
-                    "modals.shortcuts.close",
-                    self.i18n.text("shortcuts.close"),
-                ) {
-                    self.close_shortcuts();
-                }
-            },
-        );
-        self.ui_document = document;
-        if dialog_response.backdrop_clicked {
-            self.close_shortcuts();
-        }
-    }
-
-    pub(crate) fn show_history_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_history {
-            return;
-        }
-        let mut document = std::mem::take(&mut self.ui_document);
-        let dialog_response = show_centered_dialog(
-            &mut document,
-            ctx,
-            "history",
-            self.i18n.text("history.title"),
-            520.0,
-            |ui, document| {
-                ui.label(RichText::new(self.i18n.text("history.hint")).weak());
-                ui.add_space(8.0);
-                ui.label(RichText::new(self.i18n.text("history.undoable")).strong());
-                let undo_history = self.commands.undo_history();
-                if undo_history.is_empty() {
-                    ui.label(RichText::new(self.i18n.text("history.empty")).weak());
-                } else {
-                    for (index, entry) in undo_history.iter().enumerate() {
-                        ui.label(format!("{}. {}", index + 1, entry));
-                    }
-                }
-                ui.add_space(8.0);
-                ui.label(RichText::new(self.i18n.text("history.redoable")).strong());
-                let redo_history = self.commands.redo_history();
-                if redo_history.is_empty() {
-                    ui.label(RichText::new(self.i18n.text("history.empty")).weak());
-                } else {
-                    for (index, entry) in redo_history.iter().enumerate() {
-                        ui.label(format!("{}. {}", index + 1, entry));
-                    }
-                }
-                ui.add_space(10.0);
-                if show_close_button(
-                    document,
-                    ui,
-                    "modals.history.close",
-                    self.i18n.text("shortcuts.close"),
-                ) {
-                    self.show_history = false;
-                }
-            },
-        );
-        self.ui_document = document;
-        if dialog_response.backdrop_clicked {
-            self.show_history = false;
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shortcut_matches_query;
-
-    #[test]
-    fn shortcut_search_matches_translated_descriptions() {
-        assert!(shortcut_matches_query(
-            "Ctrl/Cmd+Z",
-            "Deshacer el último cambio",
-            "deshacer"
-        ));
-        assert!(!shortcut_matches_query(
-            "Ctrl/Cmd+Z",
-            "Deshacer el último cambio",
-            "volumen"
-        ));
     }
 }
