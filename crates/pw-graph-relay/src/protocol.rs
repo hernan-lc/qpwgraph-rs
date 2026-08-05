@@ -22,7 +22,7 @@ pub const MAX_CONTROL_FRAME: u32 = 64 * 1024;
 
 /// Which kind of device a peer runs on. Informational for display only.
 pw_graph_utils::enum_str! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize)]
     #[serde(rename_all = "lowercase")]
     pub enum DeviceKind {
         Android = "android",
@@ -70,7 +70,7 @@ impl Roles {
 
 /// Audio codec carried on the UDP audio channel.
 pw_graph_utils::enum_str! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize)]
     #[serde(rename_all = "lowercase")]
     pub enum CodecKind {
         Pcm = "pcm",

@@ -1,7 +1,7 @@
 use super::{layout, QpwgraphApp};
 use eframe::egui;
-use pw_graph_config::NodeViewConfig;
-use pw_graph_ui::{MediaFilter, NodeAppearance};
+use pw_graph_core::NodeAppearance;
+use pw_graph_ui::MediaFilter;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -52,14 +52,7 @@ impl QpwgraphApp {
                     return None;
                 }
                 let appearance = self.canvas.node_appearance(node.id);
-                (appearance != NodeAppearance::default()).then_some((
-                    key,
-                    NodeViewConfig {
-                        collapsed: appearance.collapsed,
-                        custom_name: appearance.custom_name,
-                        color: appearance.color,
-                    },
-                ))
+                (appearance != NodeAppearance::default()).then_some((key, appearance))
             })
             .collect();
         self.config.node_positions = node_positions;

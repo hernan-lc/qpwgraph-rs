@@ -12,7 +12,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// DNS-SD service type used by all relay peers.
@@ -326,27 +326,32 @@ impl EngineInner {
     }
 }
 
-/// A background service that can be started and stopped with an `Arc<AtomicBool>` flag.
+/// A background service that can be stopped and checked for liveness.
 trait Stoppable: Send + Sync {
-    fn stop(&self);
+    fn stop(self);
     fn stopped(&self) -> bool;
 }
 
 impl Stoppable for Browser {
-    fn stop(&self) {
-        Browser::stop(self)
-    }
+    fn stop(self) {}
     fn stopped(&self) -> bool {
         Browser::stopped(self)
     }
 }
 
-impl Stoppable for usb_probe::UsbScanner {
-    fn stop(&self) {
-        usb_probe::UsbScanner::stop(self)
+impl Stoppable for Advertiser {
+    fn stop(self) {
+        Advertiser::stop(self)
     }
     fn stopped(&self) -> bool {
-        usb_probe::UsbScanner::stopped(self)
+        false
+    }
+}
+
+impl Stoppable for crate::usb_probe::UsbScanner {
+    fn stop(self) {}
+    fn stopped(&self) -> bool {
+        crate::usb_probe::UsbScanner::stopped(self)
     }
 }
 

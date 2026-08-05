@@ -15,20 +15,29 @@ use thiserror::Error;
 /// that for every audio node continuously can visibly rewrite the user's audio
 /// configuration, so metering defaults to [`MeterPolicy::OnDemand`], which is
 /// limited to nodes represented by a currently visible application window.
-///
-/// `parse` accepts multiple aliases per variant. Unknown values fall back to
-/// the safe default so a hand-edited or older config file still starts.
-pw_graph_utils::enum_str! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    pub enum MeterPolicy {
-        Disabled = "off",
-        OnDemand = "on-demand",
-        Always = "always",
-    }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MeterPolicy {
+    Disabled,
+    #[default]
+    OnDemand,
+    Always,
 }
 
 impl MeterPolicy {
-    /// Parse with extended aliases. Unknown values fall back to the default.
+    /// All variants, in declaration order.
+    pub const ALL: [Self; 3] = [Self::Disabled, Self::OnDemand, Self::Always];
+
+    /// Stable string representation of each variant.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "off",
+            Self::OnDemand => "on-demand",
+            Self::Always => "always",
+        }
+    }
+
+    /// Parse with extended aliases per variant. Unknown values fall back to
+    /// the default so a hand-edited or older config file still starts.
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" | "disabled" | "none" => Self::Disabled,
@@ -372,8 +381,8 @@ pub trait GraphDriver: EffectDriver {
         let (output, input) = self.effect_resolve_and_validate_endpoints(
             source,
             destination,
-            BackendError::effect_source_unavailable,
-            BackendError::effect_destination_unavailable,
+            BackendError::effect_source_unavailable(),
+            BackendError::effect_destination_unavailable(),
         )?;
         let link = self
             .graph()
@@ -396,8 +405,8 @@ pub trait GraphDriver: EffectDriver {
         self.effect_resolve_and_validate_endpoints(
             source,
             destination,
-            BackendError::effect_source_disappeared,
-            BackendError::effect_destination_disappeared,
+            BackendError::effect_source_disappeared(),
+            BackendError::effect_destination_disappeared(),
         )
     }
 
@@ -407,14 +416,11 @@ pub trait GraphDriver: EffectDriver {
         &self,
         source: &PortKey,
         destination: &PortKey,
-        source_error: impl FnOnce() -> BackendError,
-        destination_error: impl FnOnce() -> BackendError,
+        source_error: BackendError,
+        destination_error: BackendError,
     ) -> BackendResult<(PortId, PortId)> {
-        let output = self.graph().resolve_port_key(source).ok_or_else(source_error)?;
-        let input = self
-            .graph()
-            .resolve_port_key(destination)
-            .ok_or_else(destination_error)?;
+        let output = self.graph().resolve_port_key(source).ok_or(source_error)?;
+        let input = self.graph().resolve_port_key(destination).ok_or(destination_error)?;
         let output_port = self
             .graph()
             .port(output)

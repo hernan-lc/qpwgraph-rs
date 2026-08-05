@@ -2,8 +2,10 @@
 //! never owns the driver or command stack.
 
 use egui::{vec2, Pos2, Vec2};
-use pw_graph_core::{Graph, LinkId, NodeAppearance, NodeId, PortId, PortType};
+use pw_graph_core::{Graph, LinkId, NodeId, PortId, PortType};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub use pw_graph_core::NodeAppearance;
 
 mod canvas;
 
@@ -92,24 +94,32 @@ pub enum CanvasAction {
 
 /// How dragging from a node's ports/body creates connections.
 pw_graph_utils::enum_str! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum ConnectMode {
         Advanced = "advanced",
         Easy = "easy",
     }
 }
 
-impl ConnectMode {
-    pub const ALL: [Self; 2] = [Self::Easy, Self::Advanced];
+impl Default for ConnectMode {
+    fn default() -> Self {
+        Self::Advanced
+    }
 }
 
+
+
 pw_graph_utils::enum_str! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum MediaFilter {
         All = "all",
         Audio = "audio",
         Video = "video",
         Midi = "midi",
+    }
+}
+
+impl Default for MediaFilter {
+    fn default() -> Self {
+        Self::All
     }
 }
 

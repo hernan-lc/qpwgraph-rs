@@ -19,9 +19,6 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
 }
 
-#[deprecated(since = "0.1.0", note = "use pw_graph_core::NodeAppearance instead")]
-pub type NodeViewConfig = NodeAppearance;
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default = "AppConfig::default")]
 pub struct AppConfig {
@@ -34,7 +31,7 @@ pub struct AppConfig {
     pub node_positions_by_name: std::collections::BTreeMap<String, [f32; 2]>,
     /// Visual node overrides keyed by the same stable backend-independent key
     /// as the saved layout.
-    pub node_view_by_name: std::collections::BTreeMap<String, NodeViewConfig>,
+    pub node_view_by_name: std::collections::BTreeMap<String, NodeAppearance>,
     pub thumbnail_view: bool,
     pub minimap_visible: bool,
     pub window_width: f32,
@@ -228,7 +225,7 @@ mod tests {
             .insert("PipeWire:Capture".into(), [120.5, -18.0]);
         expected.node_view_by_name.insert(
             "PipeWire:Capture".into(),
-            NodeViewConfig {
+            NodeAppearance {
                 collapsed: true,
                 custom_name: Some("Microphone".into()),
                 color: Some([82, 207, 133, 255]),

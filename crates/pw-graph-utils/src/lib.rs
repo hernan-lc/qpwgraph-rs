@@ -5,8 +5,9 @@ pub mod hex;
 /// Generate `as_str`, `parse`, and an `ALL` constant for a string-enum.
 ///
 /// Each variant is mapped to a fixed string. `parse` is case-insensitive and
-/// trims input. An optional catch-all string can be provided with
-/// `_default` to set which variant `parse` returns for unknown inputs.
+/// trims input. The macro automatically derives `Clone, Copy, Debug,
+/// PartialEq, Eq`. Any additional derives or attributes can be passed at the
+/// top level (e.g. `#[serde(rename_all = "lowercase")]`).
 ///
 /// # Example
 ///
@@ -20,6 +21,33 @@ pub mod hex;
 ///
 /// assert_eq!(Direction::Source.as_str(), "source");
 /// assert_eq!(Direction::parse("SOURCE"), Direction::Source);
+/// ```
+///
+/// For enums that need `Default`, implement it separately:
+///
+/// ```ignore
+/// enum_str! {
+///     #[derive(Default)]
+///     pub enum Direction {
+///         Source = "source",
+///         Sink = "sink",
+///     }
+/// }
+/// impl Default for Direction {
+///     fn default() -> Self { Self::Source }
+/// }
+/// ```
+///
+/// The `ALL` constant can also be used as a const:
+///
+/// ```ignore
+/// enum_str! {
+///     pub enum Direction {
+///         #[default]
+///         Source = "source",
+///         Sink = "sink",
+///     }
+/// }
 /// ```
 #[macro_export]
 macro_rules! enum_str {
@@ -54,19 +82,6 @@ macro_rules! enum_str {
                     $($value => $name::$variant),+,
                     _ => <$name>::ALL[0],
                 }
-            }
-        }
-    };
-}
-
-/// Generate a constant constructor that returns `Self` with the given value.
-/// Used to keep "both"/"only" constructors on generated enums.
-#[macro_export]
-macro_rules! enum_default {
-    ($name:ident => $variant:ident) => {
-        impl Default for $name {
-            fn default() -> Self {
-                Self::$variant
             }
         }
     };

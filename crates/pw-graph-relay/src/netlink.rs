@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 /// A kind of local network link, declared in preference order: USB
 /// tethering first (lowest latency, most stable), wired LAN last.
 pw_graph_utils::enum_str! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(PartialOrd, Ord, Hash)]
     pub enum LinkKind {
         Usb = "usb",
         Wifi = "wifi",
@@ -74,27 +74,23 @@ pub fn classify_interface(name: &str) -> Option<LinkKind> {
 
 /// Which transport the user asked for. `Auto` (the default) picks the best
 /// available link by policy.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TransportPreference {
-    #[default]
-    Auto,
-    Usb,
-    Wifi,
-    Bluetooth,
-    Lan,
+pw_graph_utils::enum_str! {
+    pub enum TransportPreference {
+        Auto = "auto",
+        Usb = "usb",
+        Wifi = "wifi",
+        Bluetooth = "bluetooth",
+        Lan = "lan",
+    }
+}
+
+impl Default for TransportPreference {
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 impl TransportPreference {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Usb => "usb",
-            Self::Wifi => "wifi",
-            Self::Bluetooth => "bluetooth",
-            Self::Lan => "lan",
-        }
-    }
-
     fn matches(self, kind: LinkKind) -> bool {
         match self {
             Self::Auto => true,

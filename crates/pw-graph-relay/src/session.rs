@@ -374,7 +374,7 @@ fn handle_teardown_exit(
     inner: &Arc<EngineInner>,
     record: &Arc<SessionRecord>,
     exit: ControlExit,
-    on_drop: impl FnOnce(String),
+    on_drop: impl FnOnce(String) -> bool,
 ) -> bool {
     match exit {
         ControlExit::Stopped => {
@@ -395,9 +395,11 @@ fn handle_teardown_exit(
 fn host_control_loop(inner: Arc<EngineInner>, record: Arc<SessionRecord>, stream: TcpStream) {
     let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream);
     handle_teardown_exit(&inner, &record, result, |reason| {
-        if !await_resume_grace(&inner, &record) {
-            teardown(&inner, record.id, reason);
+        if await_resume_grace(&inner, &record) {
+            return false;
         }
+        teardown(&inner, record.id, reason);
+        true
     });
 }
 
@@ -603,13 +605,14 @@ fn client_control_loop(
     pin: String,
 ) {
     let socket_codec = record.codec;
-    let mut stream = stream;
+    let mut stream = Some(stream);
     loop {
-        let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream);
-        let resume = handle_teardown_exit(&inner, &record, result, |reason| {
+        let taken = stream.take().expect("stream is set between iterations");
+        let result = watch_control(Arc::clone(&inner), Arc::clone(&record), taken);
+        let torn_down = handle_teardown_exit(&inner, &record, result, |reason| {
             if record.bye_requested.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
                 teardown(&inner, record.id, reason);
-                return;
+                return true;
             }
             inner.emit(RelayEvent::Error {
                 message: format!("control link to host lost ({reason}); attempting to resume"),
@@ -625,18 +628,16 @@ fn client_control_loop(
                             let _ = socket.send_to(&announce_packet(socket_codec), addr);
                         }
                     }
-                    stream = new_stream;
-                    true
+                    stream = Some(new_stream);
+                    false
                 }
                 None => {
                     teardown(&inner, record.id, reason);
-                    false
+                    true
                 }
             }
         });
-        if resume {
-            continue;
-        } else {
+        if torn_down {
             return;
         }
     }
