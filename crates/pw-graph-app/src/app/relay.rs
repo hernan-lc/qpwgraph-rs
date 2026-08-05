@@ -146,7 +146,11 @@ impl RelayUiState {
     pub(crate) fn qr_payload(app: &QpwgraphApp) -> Option<String> {
         let port = app.driver.relay_status().host_port?;
         let link = app.relay.links.first()?;
-        Some(relay_build_qr_payload(link.addr, port, &app.config.relay_host_pin))
+        Some(relay_build_qr_payload(
+            link.addr,
+            port,
+            &app.config.relay_host_pin,
+        ))
     }
 
     pub(crate) fn start_host(&mut self, app: &mut QpwgraphApp) {

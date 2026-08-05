@@ -31,12 +31,16 @@ fn main() {
     };
 
     println!("payload : {payload}");
-    println!("modules : {}x{} code, {scale}px/module, {}px quiet zone",
+    println!(
+        "modules : {}x{} code, {scale}px/module, {}px quiet zone",
         bitmap.width / scale - DEFAULT_QUIET_MODULES * 2,
         bitmap.height / scale - DEFAULT_QUIET_MODULES * 2,
         DEFAULT_QUIET_MODULES,
     );
-    println!("texture : {}x{} px (display budget {DISPLAY_SIZE}px)", bitmap.width, bitmap.height);
+    println!(
+        "texture : {}x{} px (display budget {DISPLAY_SIZE}px)",
+        bitmap.width, bitmap.height
+    );
     println!();
     println!("{}", bitmap.to_text());
 

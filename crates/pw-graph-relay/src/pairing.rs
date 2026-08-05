@@ -46,9 +46,7 @@ pub fn parse_qr_payload(text: &str) -> Option<QrPayload> {
     if let Some(rest) = text.strip_prefix(QR_SCHEME) {
         let (target, query) = rest.split_once('?').unwrap_or((rest, ""));
         let target = target.trim_end_matches('/');
-        if split_host_port(target).is_none() {
-            return None;
-        }
+        split_host_port(target)?;
         let pin = query
             .split('&')
             .find_map(|pair| pair.strip_prefix("pin="))
@@ -60,10 +58,7 @@ pub fn parse_qr_payload(text: &str) -> Option<QrPayload> {
             pin,
         });
     }
-    split_host_port(text).map(|target| QrPayload {
-        target,
-        pin: None,
-    })
+    split_host_port(text).map(|target| QrPayload { target, pin: None })
 }
 
 /// Validate a bare `host:port` string and return it normalized.

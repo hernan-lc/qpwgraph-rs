@@ -51,7 +51,7 @@ impl QrBitmap {
     /// not need an image library.
     pub fn to_bmp(&self) -> Vec<u8> {
         let row_bytes = self.width * 3;
-        let padded = (row_bytes + 3) / 4 * 4;
+        let padded = row_bytes.div_ceil(4) * 4;
         let pixel_data = padded * self.height;
         let file_size = 54 + pixel_data;
         let mut bytes = Vec::with_capacity(file_size);
@@ -75,7 +75,7 @@ impl QrBitmap {
                 let value = if self.get(x, y) { 0 } else { 255 };
                 bytes.extend_from_slice(&[value, value, value]);
             }
-            bytes.extend(std::iter::repeat(0u8).take(padded - row_bytes));
+            bytes.extend(std::iter::repeat_n(0u8, padded - row_bytes));
         }
         bytes
     }
@@ -176,6 +176,9 @@ mod tests {
         let width = u32::from_le_bytes(bytes[18..22].try_into().unwrap()) as usize;
         let height = u32::from_le_bytes(bytes[22..26].try_into().unwrap()) as usize;
         assert_eq!((width, height), (bitmap.width, bitmap.height));
-        assert_eq!(bytes.len(), u32::from_le_bytes(bytes[2..6].try_into().unwrap()) as usize);
+        assert_eq!(
+            bytes.len(),
+            u32::from_le_bytes(bytes[2..6].try_into().unwrap()) as usize
+        );
     }
 }

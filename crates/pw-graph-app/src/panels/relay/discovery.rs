@@ -49,9 +49,12 @@ impl QpwgraphApp {
         let time = ui.ctx().input(|input| input.time);
         let dots = ".".repeat(1 + (time * 1.5) as usize % 3);
         ui.label(
-            RichText::new(format!("{}{dots}", self.i18n.text("relay.discovery_searching")))
-                .small()
-                .strong(),
+            RichText::new(format!(
+                "{}{dots}",
+                self.i18n.text("relay.discovery_searching")
+            ))
+            .small()
+            .strong(),
         );
     }
 

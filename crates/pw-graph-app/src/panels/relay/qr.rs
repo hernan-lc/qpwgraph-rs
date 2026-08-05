@@ -117,7 +117,13 @@ fn render_qr_image(text: &str) -> Option<ColorImage> {
     let pixels = bitmap
         .dark
         .iter()
-        .map(|dark| if *dark { Color32::BLACK } else { Color32::WHITE })
+        .map(|dark| {
+            if *dark {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            }
+        })
         .collect();
     Some(ColorImage {
         size: [bitmap.width, bitmap.height],
@@ -141,10 +147,7 @@ mod tests {
         // Quiet zone corners stay white; the finder pattern puts dark
         // modules near the top-left inside the quiet zone.
         assert_eq!(image.pixels[0], eframe::egui::Color32::WHITE);
-        let has_dark = image
-            .pixels
-            .iter()
-            .any(|pixel| *pixel == eframe::egui::Color32::BLACK);
+        let has_dark = image.pixels.contains(&eframe::egui::Color32::BLACK);
         assert!(has_dark, "an all-white texture would scan as nothing");
     }
 
