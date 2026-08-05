@@ -1,5 +1,5 @@
 use super::{ElementId, OptionItem, Theme, ThemeToken};
-use egui::{Color32, Stroke};
+use egui::{Color32, Frame, Margin, Stroke};
 
 /// Common visual options shared by all controls.
 ///
@@ -104,6 +104,29 @@ impl Style {
     pub fn inner_margin(mut self, margin: f32) -> Self {
         self.inner_margin = Some(margin.max(0.0));
         self
+    }
+
+    /// Builds a themed [`egui::Frame`] from the style's resolved values.
+    ///
+    /// This is the single place that translates a [`Style`] into frame
+    /// chrome, so components that paint their own surface (cards, dialogs,
+    /// framed inputs) share one fill/stroke/rounding/margin policy.
+    pub fn to_frame(&self, theme: &Theme) -> Frame {
+        let mut frame = Frame::none();
+        // Resolve fill: explicit color wins, otherwise fall back to theme token.
+        if let Some(fill) = self.resolve_fill(theme) {
+            frame = frame.fill(fill);
+        }
+        if let Some(stroke) = self.stroke {
+            frame = frame.stroke(stroke);
+        }
+        if let Some(rounding) = self.rounding {
+            frame = frame.rounding(rounding);
+        }
+        if let Some(inner_margin) = self.inner_margin {
+            frame = frame.inner_margin(Margin::same(inner_margin));
+        }
+        frame
     }
 
     pub(super) fn has_frame(&self) -> bool {

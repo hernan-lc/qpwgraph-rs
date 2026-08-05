@@ -11,7 +11,7 @@
 //! observable through `value`/`on_change` like any other control.
 
 use super::icons::{icon_image, Icon, IconSource};
-use super::theme::{Theme, ThemeToken};
+use super::theme::ThemeToken;
 use super::{CommonProps, ElementId, ElementKind, EventType, Style, UiDocument, Value};
 use egui::{Align, Color32, Frame, Layout, Margin, Response, RichText, Sense, Stroke, Ui, Vec2};
 
@@ -310,7 +310,7 @@ impl UiDocument {
         }
         let style = props.common.style.clone();
         let rounding = style.rounding.unwrap_or(0.0);
-        let frame = frame_from_style(&style, &self.theme).show(ui, |ui| {
+        let frame = style.to_frame(&self.theme).show(ui, |ui| {
             if let Some(width) = style.width {
                 ui.set_width(width);
             }
@@ -642,22 +642,4 @@ fn step_marker(
         Sense::click(),
     )
     .clicked()
-}
-
-fn frame_from_style(style: &Style, theme: &Theme) -> Frame {
-    let mut frame = Frame::none();
-    // Resolve fill: explicit color wins, otherwise fall back to theme token.
-    if let Some(fill) = style.resolve_fill(theme) {
-        frame = frame.fill(fill);
-    }
-    if let Some(stroke) = style.stroke {
-        frame = frame.stroke(stroke);
-    }
-    if let Some(rounding) = style.rounding {
-        frame = frame.rounding(rounding);
-    }
-    if let Some(inner_margin) = style.inner_margin {
-        frame = frame.inner_margin(Margin::same(inner_margin));
-    }
-    frame
 }

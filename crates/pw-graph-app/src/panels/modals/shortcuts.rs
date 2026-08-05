@@ -1,11 +1,12 @@
 use super::super::components::{document_button, document_text_input_sized};
-use super::super::shared::{fresh_scroll_area, show_centered_dialog, show_close_button};
+use super::super::shared::{fresh_scroll_area, show_close_button};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Ui};
+use pw_graph_ui::ThemeToken;
 
-fn shortcut_row(ui: &mut Ui, keys: &str, description: String) {
-    ui.label(RichText::new(keys).strong().monospace().color(Color32::from_rgb(240, 244, 250)));
-    ui.label(RichText::new(description).color(Color32::from_rgb(215, 225, 238)));
+fn shortcut_row(ui: &mut Ui, keys: &str, description: String, primary: Color32, secondary: Color32) {
+    ui.label(RichText::new(keys).strong().monospace().color(primary));
+    ui.label(RichText::new(description).color(secondary));
     ui.end_row();
 }
 
@@ -112,116 +113,104 @@ impl QpwgraphApp {
         if !self.show_shortcuts {
             return;
         }
-        let mut document = std::mem::take(&mut self.ui_document);
-        let dialog_response = show_centered_dialog(
-            &mut document,
-            ctx,
-            "shortcuts",
-            self.i18n.text("shortcuts.title"),
-            560.0,
-            |ui, document| {
+        if self.run_dialog(ctx, "shortcuts", self.i18n.text("shortcuts.title"), 560.0, |app, ui, document| {
+            let primary = document.theme_color(ThemeToken::TextPrimary);
+            let secondary = document.theme_color(ThemeToken::TextSecondary);
+            let weak = document.theme_color(ThemeToken::TextWeak);
+            ui.label(
+                RichText::new(app.i18n.text("shortcuts.hint")).color(weak),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(self.i18n.text("shortcuts.hint"))
-                        .color(Color32::from_rgb(180, 195, 215)),
+                    RichText::new(app.i18n.text("shortcuts.search"))
+                        .strong()
+                        .color(primary),
                 );
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(self.i18n.text("shortcuts.search"))
-                            .strong()
-                            .color(Color32::from_rgb(240, 244, 250)),
-                    );
-                    let clear_width = if self.shortcut_search.is_empty() {
-                        0.0
-                    } else {
-                        ui.spacing().button_padding.x * 2.0 + 42.0
-                    };
-                    let search_width = (ui.available_width() - clear_width).max(140.0);
-                    let search_hint = self.i18n.text("shortcuts.search_hint");
-                    let current_search = self.shortcut_search.clone();
-                    let (search_response, search_value) = document_text_input_sized(
-                        document,
-                        ui,
-                        "modals.shortcuts.search",
-                        &current_search,
-                        String::new(),
-                        Some(search_hint),
-                        Some(search_width),
-                    );
-                    self.shortcut_search = search_value;
-                    if self.shortcut_focus_search
-                        || ui.input(|input| {
-                            input.modifiers.command && input.key_pressed(egui::Key::F)
-                        })
-                    {
-                        search_response.request_focus();
-                        self.shortcut_focus_search = false;
-                    }
-                    if !self.shortcut_search.is_empty()
-                        && document_button(
-                            document,
-                            ui,
-                            "modals.shortcuts.clear_search",
-                            self.i18n.text("shortcuts.clear_search"),
-                            true,
-                        )
-                    {
-                        self.shortcut_search.clear();
-                        self.shortcut_focus_search = true;
-                    }
-                });
-                ui.add_space(6.0);
-
-                let query = self.shortcut_search.trim().to_lowercase();
-                let matching_entries: Vec<_> = SHORTCUT_ENTRIES
-                    .iter()
-                    .filter_map(|entry| {
-                        let description = self.i18n.text(entry.description_key);
-                        shortcut_matches_query(entry.keys, &description, &query)
-                            .then_some((entry.keys, description))
-                    })
-                    .collect();
-                ui.label(
-                    RichText::new(self.tf(
-                        "shortcuts.result_count",
-                        &[("count", matching_entries.len().to_string())],
-                    ))
-                    .small()
-                    .color(Color32::from_rgb(180, 195, 215)),
-                );
-                fresh_scroll_area(("shortcuts-scroll", self.shortcut_scroll_epoch), 420.0).show(
-                    ui,
-                    |ui| {
-                        if matching_entries.is_empty() {
-                            ui.label(
-                                RichText::new(self.i18n.text("shortcuts.no_results"))
-                                    .color(Color32::from_rgb(180, 195, 215)),
-                            );
-                        } else {
-                            egui::Grid::new("shortcuts-grid")
-                                .num_columns(2)
-                                .spacing(egui::vec2(18.0, 7.0))
-                                .show(ui, |ui| {
-                                    for (keys, description) in matching_entries {
-                                        shortcut_row(ui, keys, description);
-                                    }
-                                });
-                        }
-                    },
-                );
-                ui.add_space(10.0);
-                if show_close_button(
+                let clear_width = if app.shortcut_search.is_empty() {
+                    0.0
+                } else {
+                    ui.spacing().button_padding.x * 2.0 + 42.0
+                };
+                let search_width = (ui.available_width() - clear_width).max(140.0);
+                let search_hint = app.i18n.text("shortcuts.search_hint");
+                let current_search = app.shortcut_search.clone();
+                let (search_response, search_value) = document_text_input_sized(
                     document,
                     ui,
-                    "modals.shortcuts.close",
-                    self.i18n.text("shortcuts.close"),
-                ) {
-                    self.close_shortcuts();
+                    "modals.shortcuts.search",
+                    &current_search,
+                    String::new(),
+                    Some(search_hint),
+                    Some(search_width),
+                );
+                app.shortcut_search = search_value;
+                if app.shortcut_focus_search
+                    || ui.input(|input| {
+                        input.modifiers.command && input.key_pressed(egui::Key::F)
+                    })
+                {
+                    search_response.request_focus();
+                    app.shortcut_focus_search = false;
                 }
-            },
-        );
-        self.ui_document = document;
-        if dialog_response.backdrop_clicked {
+                if !app.shortcut_search.is_empty()
+                    && document_button(
+                        document,
+                        ui,
+                        "modals.shortcuts.clear_search",
+                        app.i18n.text("shortcuts.clear_search"),
+                        true,
+                    )
+                {
+                    app.shortcut_search.clear();
+                    app.shortcut_focus_search = true;
+                }
+            });
+            ui.add_space(6.0);
+
+            let query = app.shortcut_search.trim().to_lowercase();
+            let matching_entries: Vec<_> = SHORTCUT_ENTRIES
+                .iter()
+                .filter_map(|entry| {
+                    let description = app.i18n.text(entry.description_key);
+                    shortcut_matches_query(entry.keys, &description, &query)
+                        .then_some((entry.keys, description))
+                })
+                .collect();
+            ui.label(
+                RichText::new(app.tf(
+                    "shortcuts.result_count",
+                    &[("count", matching_entries.len().to_string())],
+                ))
+                .small()
+                .color(weak),
+            );
+            fresh_scroll_area(("shortcuts-scroll", app.shortcut_scroll_epoch), 420.0).show(ui, |ui| {
+                if matching_entries.is_empty() {
+                    ui.label(
+                        RichText::new(app.i18n.text("shortcuts.no_results")).color(weak),
+                    );
+                } else {
+                    egui::Grid::new("shortcuts-grid")
+                        .num_columns(2)
+                        .spacing(egui::vec2(18.0, 7.0))
+                        .show(ui, |ui| {
+                            for (keys, description) in matching_entries {
+                                shortcut_row(ui, keys, description, primary, secondary);
+                            }
+                        });
+                }
+            });
+            ui.add_space(10.0);
+            if show_close_button(
+                document,
+                ui,
+                "modals.shortcuts.close",
+                app.i18n.text("shortcuts.close"),
+            ) {
+                app.close_shortcuts();
+            }
+        }) {
             self.close_shortcuts();
         }
     }

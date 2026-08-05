@@ -327,12 +327,7 @@ impl UiDocument {
 /// while still appearing in the document, so form queries and click listeners
 /// see them like any built-in control.
 pub fn record_custom_click(document: &mut UiDocument, id: impl Into<ElementId>, clicked: bool) {
-    let id = id.into();
-    let common = CommonProps::new(id.clone());
-    document.prepare(&common, ElementKind::Button, Value::Bool(false), vec![]);
-    if clicked {
-        document.record_button_click(&id, Value::Bool(true));
-    }
+    document.record_click(id.into().as_ref(), clicked);
 }
 
 #[cfg(test)]

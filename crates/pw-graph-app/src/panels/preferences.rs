@@ -3,8 +3,7 @@ use super::components::{
     document_setting_number, document_setting_select, document_setting_switch, document_text_input,
 };
 use super::shared::{
-    apply_panel_text_scale, fresh_scroll_area, meter_policy_key, panel_section,
-    show_centered_dialog, show_close_button,
+    apply_panel_text_scale, fresh_scroll_area, meter_policy_key, panel_section, show_close_button,
 };
 use crate::app::QpwgraphApp;
 use crate::icons::{icon_label, Icon};
@@ -93,15 +92,13 @@ impl QpwgraphApp {
         let scroll_max_height = (viewport.height() - 240.0)
             .clamp(220.0, PREFERENCES_SCROLL_MAX_HEIGHT)
             .max(1.0);
-        let mut document = std::mem::take(&mut self.ui_document);
-        let dialog_response = show_centered_dialog(
-            &mut document,
+        if self.run_dialog(
             ctx,
             "preferences",
             self.i18n.text("preferences.title"),
             dialog_width,
-            |ui, document| {
-                apply_panel_text_scale(ui, self.config.panel_text_scale);
+            |app, ui, document| {
+                apply_panel_text_scale(ui, app.config.panel_text_scale);
                 ui.horizontal(|ui| {
                     let tabs = [
                         (PreferencesTab::Interface, "screen.interface"),
@@ -116,14 +113,14 @@ impl QpwgraphApp {
                             document,
                             ui,
                             tab_id,
-                            self.preferences_tab == tab,
-                            &self.i18n.text(label_key),
-                            self.i18n.text(label_key),
-                        ) && self.preferences_tab != tab
+                            app.preferences_tab == tab,
+                            &app.i18n.text(label_key),
+                            app.i18n.text(label_key),
+                        ) && app.preferences_tab != tab
                         {
-                            self.preferences_tab = tab;
-                            self.preferences_scroll_epoch =
-                                self.preferences_scroll_epoch.wrapping_add(1);
+                            app.preferences_tab = tab;
+                            app.preferences_scroll_epoch =
+                                app.preferences_scroll_epoch.wrapping_add(1);
                         }
                     }
                 });
@@ -132,17 +129,17 @@ impl QpwgraphApp {
                 ui.add_space(6.0);
                 let scroll_id = (
                     "preferences-scroll",
-                    self.preferences_tab,
-                    self.preferences_scroll_epoch,
+                    app.preferences_tab,
+                    app.preferences_scroll_epoch,
                 );
                 fresh_scroll_area(scroll_id, scroll_max_height)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| match self.preferences_tab {
+                    .show(ui, |ui| match app.preferences_tab {
                         PreferencesTab::Interface => {
-                            self.show_preferences_interface_tab(document, ui)
+                            app.show_preferences_interface_tab(document, ui)
                         }
                         PreferencesTab::Patchbay => {
-                            self.show_preferences_patchbay_tab(document, ui)
+                            app.show_preferences_patchbay_tab(document, ui)
                         }
                     });
                 ui.add_space(8.0);
@@ -150,14 +147,12 @@ impl QpwgraphApp {
                     document,
                     ui,
                     "preferences.close",
-                    self.i18n.text("shortcuts.close"),
+                    app.i18n.text("shortcuts.close"),
                 ) {
-                    self.show_preferences = false;
+                    app.show_preferences = false;
                 }
             },
-        );
-        self.ui_document = document;
-        if dialog_response.backdrop_clicked {
+        ) {
             self.show_preferences = false;
         }
     }

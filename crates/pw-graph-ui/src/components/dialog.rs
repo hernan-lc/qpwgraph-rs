@@ -1,5 +1,5 @@
 use super::{CommonProps, ElementKind, UiDocument, Value};
-use egui::{Color32, Context, Frame, Id, LayerId, Margin, Order, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, Context, Id, LayerId, Order, Rect, Sense, Stroke, Ui, Vec2};
 
 /// Placement strategy for a reusable dialog.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -184,7 +184,7 @@ impl UiDocument {
             .collapsible(props.collapsible)
             .resizable(props.resizable)
             .order(Order::Foreground)
-            .frame(dialog_frame(&props.common.style));
+            .frame(props.common.style.to_frame(&self.theme));
         match props.placement {
             DialogPlacement::Centered { width } => {
                 window = window
@@ -205,21 +205,4 @@ impl UiDocument {
             backdrop_clicked,
         }
     }
-}
-
-fn dialog_frame(style: &super::Style) -> Frame {
-    let mut frame = Frame::none();
-    if let Some(fill) = style.fill {
-        frame = frame.fill(fill);
-    }
-    if let Some(stroke) = style.stroke {
-        frame = frame.stroke(stroke);
-    }
-    if let Some(rounding) = style.rounding {
-        frame = frame.rounding(rounding);
-    }
-    if let Some(inner_margin) = style.inner_margin {
-        frame = frame.inner_margin(Margin::same(inner_margin));
-    }
-    frame
 }

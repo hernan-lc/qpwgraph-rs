@@ -1,4 +1,5 @@
 use super::components::document_button;
+use crate::app::QpwgraphApp;
 use eframe::egui;
 use eframe::egui::{Color32, RichText, Stroke, Ui};
 use pw_graph_backend::MeterPolicy;
@@ -96,6 +97,36 @@ pub(super) fn show_centered_dialog(
         DialogProps::centered(id_source, title, width),
         contents,
     )
+}
+
+impl QpwgraphApp {
+    /// Runs a retained modal dialog on top of the shared UI document.
+    ///
+    /// Every modal in the app does the same dance: temporarily take the shared
+    /// document so the dialog body can hand it out mutably while still touching
+    /// app state, then put it back. This helper owns that take/restore pair and
+    /// reports whether the backdrop was clicked so callers can treat a backdrop
+    /// click like an explicit close request.
+    pub(super) fn run_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        id_source: &str,
+        title: String,
+        width: f32,
+        body: impl FnOnce(&mut Self, &mut Ui, &mut UiDocument),
+    ) -> bool {
+        let mut document = std::mem::take(&mut self.ui_document);
+        let response = show_centered_dialog(
+            &mut document,
+            ctx,
+            id_source,
+            title,
+            width,
+            |ui, document| body(self, ui, document),
+        );
+        self.ui_document = document;
+        response.backdrop_clicked
+    }
 }
 
 /// A scroll area that always opens back at the top: reopening a dialog (or

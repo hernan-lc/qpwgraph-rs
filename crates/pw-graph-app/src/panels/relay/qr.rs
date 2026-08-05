@@ -1,11 +1,11 @@
 //! QR modal: renders the running host's connection payload (address, port,
 //! and PIN) as a QR code so phones can scan it instead of typing.
 
-use super::super::shared::{show_centered_dialog, show_close_button};
+use super::super::shared::show_close_button;
 use crate::app::{QpwgraphApp, RelayUiState};
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureOptions, Ui};
 use pw_graph_backend::{relay_parse_qr_payload, relay_qr};
-use pw_graph_ui::UiDocument;
+use pw_graph_ui::{ThemeToken, UiDocument};
 
 const QR_DIALOG_WIDTH: f32 = 380.0;
 const QR_DISPLAY_SIZE: f32 = 260.0;
@@ -18,17 +18,9 @@ impl QpwgraphApp {
         }
         let payload = RelayUiState::qr_payload(self);
         self.ensure_relay_qr_texture(ctx, payload.as_deref());
-        let mut document = std::mem::take(&mut self.ui_document);
-        let response = show_centered_dialog(
-            &mut document,
-            ctx,
-            "relay-qr",
-            self.i18n.text("relay.qr_title"),
-            QR_DIALOG_WIDTH,
-            |ui, document| self.show_relay_qr_contents(payload.as_deref(), document, ui),
-        );
-        self.ui_document = document;
-        if response.backdrop_clicked {
+        if self.run_dialog(ctx, "relay-qr", self.i18n.text("relay.qr_title"), QR_DIALOG_WIDTH, |app, ui, document| {
+            app.show_relay_qr_contents(payload.as_deref(), document, ui);
+        }) {
             self.relay.show_qr = false;
         }
     }
@@ -59,6 +51,9 @@ impl QpwgraphApp {
         ui: &mut Ui,
     ) {
         ui.vertical_centered(|ui| {
+            let primary = document.theme_color(ThemeToken::TextPrimary);
+            let secondary = document.theme_color(ThemeToken::TextSecondary);
+            let weak = document.theme_color(ThemeToken::TextWeak);
             let texture_ready = payload.is_some() && self.relay.qr_texture.is_some();
             if texture_ready {
                 if let Some(texture) = &self.relay.qr_texture {
@@ -80,12 +75,12 @@ impl QpwgraphApp {
                             RichText::new(parsed.target)
                                 .monospace()
                                 .strong()
-                                .color(Color32::from_rgb(240, 244, 250)),
+                                .color(primary),
                         );
                         if let Some(pin) = parsed.pin {
                             ui.label(
                                 RichText::new(self.tf("relay.qr_pin", &[("pin", pin)]))
-                                    .color(Color32::from_rgb(215, 225, 238)),
+                                    .color(secondary),
                             );
                         }
                     }
@@ -94,20 +89,18 @@ impl QpwgraphApp {
                 // The host is already listening; only the link is missing, so
                 // do not tell the user to start the host again.
                 ui.label(
-                    RichText::new(self.i18n.text("relay.qr_no_link"))
-                        .color(Color32::from_rgb(180, 195, 215)),
+                    RichText::new(self.i18n.text("relay.qr_no_link")).color(weak),
                 );
             } else {
                 ui.label(
-                    RichText::new(self.i18n.text("relay.qr_unavailable"))
-                        .color(Color32::from_rgb(180, 195, 215)),
+                    RichText::new(self.i18n.text("relay.qr_unavailable")).color(weak),
                 );
             }
             ui.add_space(4.0);
             ui.label(
                 RichText::new(self.i18n.text("relay.qr_hint"))
                     .small()
-                    .color(Color32::from_rgb(180, 195, 215)),
+                    .color(weak),
             );
         });
         ui.add_space(6.0);

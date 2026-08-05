@@ -1,6 +1,6 @@
 use super::super::super::theme::{Theme, ThemeToken};
 use super::super::super::{CommonProps, ElementId, Style};
-use egui::{vec2, Color32, Frame, Key, Margin, Response, Sense, Stroke, Ui, Vec2};
+use egui::{vec2, Color32, Key, Response, Sense, Stroke, Ui, Vec2};
 
 pub(super) fn normalize_range(minimum: f64, maximum: f64) -> (f64, f64) {
     let minimum = if minimum.is_finite() { minimum } else { 0.0 };
@@ -85,21 +85,7 @@ pub(super) fn with_common(
     };
 
     let mut response = if style.has_frame() {
-        let mut frame = Frame::none();
-        // Resolve fill: explicit color wins, then theme token.
-        if let Some(fill) = style.resolve_fill(theme) {
-            frame = frame.fill(fill);
-        }
-        if let Some(stroke) = style.stroke {
-            frame = frame.stroke(stroke);
-        }
-        if let Some(rounding) = style.rounding {
-            frame = frame.rounding(rounding);
-        }
-        if let Some(inner_margin) = style.inner_margin {
-            frame = frame.inner_margin(Margin::same(inner_margin));
-        }
-        frame.show(ui, draw).inner
+        style.to_frame(theme).show(ui, draw).inner
     } else {
         ui.scope(draw).inner
     };

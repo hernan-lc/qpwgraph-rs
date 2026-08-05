@@ -2,16 +2,17 @@ use super::super::components::{
     document_button, document_setting_slider, document_setting_switch_plain,
     modal_step_heading,
 };
-use super::super::shared::{fresh_scroll_area, show_centered_dialog};
+use super::super::shared::fresh_scroll_area;
 use crate::app::effects::{available_descriptors, EffectGalleryPhase, EffectGalleryState};
 use crate::app::QpwgraphApp;
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui};
+use eframe::egui::{self, RichText, Sense, Stroke, Ui};
 use pw_graph_effects::{EffectDescriptor, EffectParameter};
-use pw_graph_ui::UiDocument;
+use pw_graph_ui::{Theme, ThemeToken, UiDocument};
 
 fn effect_gallery_card(
     document: &mut UiDocument,
     ui: &mut Ui,
+    theme: &Theme,
     descriptor: &EffectDescriptor,
     summary: String,
     selected: bool,
@@ -20,14 +21,14 @@ fn effect_gallery_card(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 96.0), Sense::click());
     let visuals = ui.style().interact_selectable(&response, selected);
     let fill = if selected {
-        Color32::from_rgb(35, 86, 119)
+        theme.color(ThemeToken::SurfaceSelected)
     } else if response.hovered() {
-        Color32::from_rgb(45, 54, 68)
+        theme.color(ThemeToken::SurfaceHover)
     } else {
-        Color32::from_rgb(34, 40, 50)
+        theme.color(ThemeToken::Surface)
     };
     let stroke = if selected {
-        Stroke::new(1.5_f32, Color32::from_rgb(96, 190, 250))
+        Stroke::new(1.5_f32, theme.color(ThemeToken::Accent))
     } else {
         visuals.bg_stroke
     };
@@ -37,17 +38,21 @@ fn effect_gallery_card(
             .max_rect(rect.shrink(10.0))
             .id_salt(("effect-gallery-card", &descriptor.id)),
         |ui| {
-            ui.label(RichText::new(&descriptor.name).strong().color(Color32::from_rgb(240, 244, 250)));
+            ui.label(
+                RichText::new(&descriptor.name)
+                    .strong()
+                    .color(theme.color(ThemeToken::TextPrimary)),
+            );
             ui.label(
                 RichText::new(format!("{} · {}", descriptor.vendor, descriptor.version))
                     .small()
-                    .color(Color32::from_rgb(180, 195, 215)),
+                    .color(theme.color(ThemeToken::TextWeak)),
             );
             ui.add_space(8.0);
             ui.label(
                 RichText::new(summary)
                     .small()
-                    .color(Color32::from_rgb(205, 222, 240)),
+                    .color(theme.color(ThemeToken::TextSecondary)),
             );
         },
     );
@@ -66,27 +71,37 @@ fn effect_parameter_hint(parameter: &EffectParameter) -> String {
     }
 }
 
+/// The three copy strings rendered above the parameter list in the "Configure"
+/// step of the effect gallery. Bundled so the UI builder cannot drift the
+/// labels from the strings that choose them.
+struct EffectInitialSettingsText {
+    title: String,
+    setup_hint: String,
+    enabled_label: String,
+}
+
 fn show_effect_initial_settings(
     document: &mut UiDocument,
     ui: &mut Ui,
+    theme: &Theme,
     descriptor: &EffectDescriptor,
     gallery: &mut EffectGalleryState,
-    initial_settings_label: String,
-    setup_hint: String,
-    enabled_label: String,
+    text: EffectInitialSettingsText,
 ) {
+    let primary = theme.color(ThemeToken::TextPrimary);
+    let weak = theme.color(ThemeToken::TextWeak);
     egui::Frame::group(ui.style())
         .inner_margin(10.0)
         .show(ui, |ui| {
-            ui.label(RichText::new(initial_settings_label).strong().color(Color32::from_rgb(240, 244, 250)));
-            ui.label(RichText::new(setup_hint).small().color(Color32::from_rgb(180, 195, 215)));
+            ui.label(RichText::new(text.title).strong().color(primary));
+            ui.label(RichText::new(text.setup_hint).small().color(weak));
             ui.add_space(6.0);
             gallery.enabled = document_setting_switch_plain(
                 document,
                 ui,
                 "modals.effects.enabled",
                 gallery.enabled,
-                enabled_label,
+                text.enabled_label,
                 String::new(),
             );
             for parameter in &descriptor.parameters {
@@ -133,6 +148,19 @@ fn show_effect_initial_settings(
 }
 
 impl QpwgraphApp {
+    /// One-line card footer used by both the single- and two-column gallery
+    /// layouts so the summary text cannot drift between them.
+    fn effect_gallery_summary(&self, descriptor: &EffectDescriptor) -> String {
+        format!(
+            "{} · {}",
+            self.tf(
+                "effects.parameter_count",
+                &[("count", descriptor.parameters.len().to_string())],
+            ),
+            self.i18n.text("effects.port_flow"),
+        )
+    }
+
     pub(crate) fn show_effect_gallery_modal(&mut self, ctx: &egui::Context) {
         if self.effect_gallery.is_none() {
             return;
@@ -155,45 +183,47 @@ impl QpwgraphApp {
         let mut create = false;
         let mut next = false;
         let mut back = false;
-        let initial_settings_label = self.i18n.text("effects.initial_settings");
         let setup_hint = self.i18n.text("effects.setup_hint");
-        let enabled_label = self.i18n.text("effects.enabled");
-        let mut document = std::mem::take(&mut self.ui_document);
-        let dialog_response = show_centered_dialog(
-            &mut document,
+        let text = EffectInitialSettingsText {
+            title: self.i18n.text("effects.initial_settings"),
+            setup_hint: setup_hint.clone(),
+            enabled_label: self.i18n.text("effects.enabled"),
+        };
+        let theme = self.ui_document.theme().clone();
+        let backdrop_clicked = self.run_dialog(
             ctx,
             "effects-gallery",
             self.i18n.text("effects.gallery_title"),
             720.0,
-            |ui, document| {
+            |app, ui, document| {
                 ui.horizontal(|ui| {
                     modal_step_heading(
                         ui,
                         0,
                         gallery.phase.index(),
-                        self.i18n.text("effects.step_effect"),
+                        app.i18n.text("effects.step_effect"),
                     );
                     ui.separator();
                     modal_step_heading(
                         ui,
                         1,
                         gallery.phase.index(),
-                        self.i18n.text("effects.step_setup"),
+                        app.i18n.text("effects.step_setup"),
                     );
                 });
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(match gallery.phase {
-                        EffectGalleryPhase::Choose => self.i18n.text("effects.choose_effect_hint"),
+                        EffectGalleryPhase::Choose => app.i18n.text("effects.choose_effect_hint"),
                         EffectGalleryPhase::Configure => setup_hint.clone(),
                     })
-                    .color(Color32::from_rgb(180, 195, 215)),
+                    .color(theme.color(ThemeToken::TextWeak)),
                 );
                 if !supports_effect_nodes {
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new(self.i18n.text("effects.backend_unavailable"))
-                            .color(Color32::from_rgb(239, 169, 82)),
+                        RichText::new(app.i18n.text("effects.backend_unavailable"))
+                            .color(theme.color(ThemeToken::AccentWarning)),
                     );
                 }
                 ui.add_space(8.0);
@@ -203,29 +233,22 @@ impl QpwgraphApp {
                     |ui| match gallery.phase {
                         EffectGalleryPhase::Choose => {
                             ui.label(
-                                RichText::new(self.i18n.text("effects.choose_effect"))
+                                RichText::new(app.i18n.text("effects.choose_effect"))
                                     .strong()
-                                    .color(Color32::from_rgb(240, 244, 250)),
+                                    .color(theme.color(ThemeToken::TextPrimary)),
                             );
                             ui.add_space(6.0);
                             if descriptors.is_empty() {
                                 ui.label(
-                                    RichText::new(self.i18n.text("effects.no_available"))
-                                        .color(Color32::from_rgb(180, 195, 215)),
+                                    RichText::new(app.i18n.text("effects.no_available"))
+                                        .color(theme.color(ThemeToken::TextWeak)),
                                 );
                             } else if ui.available_width() < 440.0 {
                                 for descriptor in &descriptors {
                                     let selected = gallery.effect_id == descriptor.id;
-                                    let summary = format!(
-                                        "{} · {}",
-                                        self.tf(
-                                            "effects.parameter_count",
-                                            &[("count", descriptor.parameters.len().to_string())],
-                                        ),
-                                        self.i18n.text("effects.port_flow"),
-                                    );
+                                    let summary = app.effect_gallery_summary(descriptor);
                                     if effect_gallery_card(
-                                        document, ui, descriptor, summary, selected,
+                                        document, ui, &theme, descriptor, summary, selected,
                                     ) {
                                         gallery.select_effect(descriptor);
                                     }
@@ -236,19 +259,9 @@ impl QpwgraphApp {
                                     for (index, descriptor) in descriptors.iter().enumerate() {
                                         let column = &mut columns[index % 2];
                                         let selected = gallery.effect_id == descriptor.id;
-                                        let summary = format!(
-                                            "{} · {}",
-                                            self.tf(
-                                                "effects.parameter_count",
-                                                &[(
-                                                    "count",
-                                                    descriptor.parameters.len().to_string(),
-                                                )],
-                                            ),
-                                            self.i18n.text("effects.port_flow"),
-                                        );
+                                        let summary = app.effect_gallery_summary(descriptor);
                                         if effect_gallery_card(
-                                            document, column, descriptor, summary, selected,
+                                            document, column, &theme, descriptor, summary, selected,
                                         ) {
                                             gallery.select_effect(descriptor);
                                         }
@@ -265,16 +278,15 @@ impl QpwgraphApp {
                                 show_effect_initial_settings(
                                     document,
                                     ui,
+                                    &theme,
                                     descriptor,
                                     &mut gallery,
-                                    initial_settings_label.clone(),
-                                    setup_hint.clone(),
-                                    enabled_label.clone(),
+                                    text,
                                 );
                             } else {
                                 ui.label(
-                                    RichText::new(self.i18n.text("effects.no_available"))
-                                        .color(Color32::from_rgb(180, 195, 215)),
+                                    RichText::new(app.i18n.text("effects.no_available"))
+                                        .color(theme.color(ThemeToken::TextWeak)),
                                 );
                             }
                         }
@@ -288,7 +300,7 @@ impl QpwgraphApp {
                         document,
                         ui,
                         "modals.effects.cancel",
-                        self.i18n.text("effects.cancel"),
+                        app.i18n.text("effects.cancel"),
                         true,
                     ) {
                         cancel = true;
@@ -298,7 +310,7 @@ impl QpwgraphApp {
                             document,
                             ui,
                             "modals.effects.back",
-                            self.i18n.text("effects.back"),
+                            app.i18n.text("effects.back"),
                             true,
                         )
                     {
@@ -311,7 +323,7 @@ impl QpwgraphApp {
                                     document,
                                     ui,
                                     "modals.effects.next",
-                                    self.i18n.text("effects.next"),
+                                    app.i18n.text("effects.next"),
                                     supports_effect_nodes && !gallery.effect_id.is_empty(),
                                 ) {
                                     next = true;
@@ -322,7 +334,7 @@ impl QpwgraphApp {
                                     document,
                                     ui,
                                     "modals.effects.create_node",
-                                    self.i18n.text("effects.create_node"),
+                                    app.i18n.text("effects.create_node"),
                                     supports_effect_nodes && !gallery.effect_id.is_empty(),
                                 ) {
                                     create = true;
@@ -333,9 +345,8 @@ impl QpwgraphApp {
                 });
             },
         );
-        self.ui_document = document;
 
-        if dialog_response.backdrop_clicked {
+        if backdrop_clicked {
             self.effect_gallery = None;
             return;
         }
