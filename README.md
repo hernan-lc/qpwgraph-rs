@@ -156,7 +156,10 @@ While the host runs, the **Emitter** tab shows every reachable
 PIN, and a **Show QR** button. The QR carries a
 `qpw-relay://host:port?pin=123456` payload: the Android app scans it to fill
 in the address and PIN automatically, and the desktop Receiver tab accepts
-the same payload pasted into its host address field.
+the same payload pasted into its host address field. Only local links that are
+actually up and usable for relay traffic are listed; when none exist the
+endpoint list and QR stay empty instead of inventing an address from a virtual
+or unclassified interface.
 
 The relay requires the native PipeWire backend. Builds without relay support
 remain usable for graph editing, but the relay panel reports that relay is

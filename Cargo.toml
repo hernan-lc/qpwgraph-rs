@@ -43,6 +43,6 @@ sha2 = "0.10"
 rand = "0.8"
 opus = "0.3"
 socket2 = "0.5"
-if-addrs = "0.13"
 mdns-sd = "0.13"
+netdev = "0.31"
 qrcode = { version = "0.14", default-features = false }

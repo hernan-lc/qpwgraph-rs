@@ -1295,7 +1295,7 @@ impl RelayDriver for PipewireDriver {
     }
 
     fn relay_local_links(&self) -> Vec<pw_graph_relay::LocalLink> {
-        pw_graph_relay::netlink::display_links()
+        pw_graph_relay::netlink::local_links()
     }
 }
 

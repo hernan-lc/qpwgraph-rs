@@ -7,6 +7,7 @@
 //! a same-subnet match against the peer wins over raw ranking so traffic
 //! never leaves the local segment unnecessarily.
 
+use netdev::get_interfaces;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -156,49 +157,41 @@ impl LocalLink {
 /// Enumerate usable local IPv4 links, sorted best-first (policy rank, then
 /// address for determinism). Requires no privileges on Linux.
 pub fn local_links() -> Vec<LocalLink> {
-    enumerate_links(true)
+    enumerate_links()
 }
 
-/// Usable local IPv4 links for UI display: the classified fast links, or —
-/// on machines whose interface names the classifier does not recognize —
-/// every non-loopback IPv4 interface as a last resort, so the host QR and
-/// endpoint list still have an address to show.
-pub fn display_links() -> Vec<LocalLink> {
-    let links = enumerate_links(true);
-    if links.is_empty() {
-        enumerate_links(false)
-    } else {
-        links
-    }
-}
-
-fn enumerate_links(require_classified: bool) -> Vec<LocalLink> {
+/// Enumerate local IPv4 links that a peer can actually reach: only interfaces
+/// that are up, running (carrier present), and named like a real fast link are
+/// reported. Down interfaces, loopback, virtual bridges, and unclassified
+/// interfaces are skipped entirely, so the QR and endpoint list never show an
+/// address that is not usable for relay traffic.
+fn enumerate_links() -> Vec<LocalLink> {
     let mut links = Vec::new();
-    let interfaces = match if_addrs::get_if_addrs() {
-        Ok(interfaces) => interfaces,
-        Err(_) => return links,
-    };
-    for interface in interfaces {
-        if interface.is_loopback() {
+    for interface in get_interfaces() {
+        // A configured address on a down interface, or on an interface with no
+        // carrier, is not a usable link. `is_running` on Linux tracks the
+        // carrier state, so a disconnected ethernet or an unassociated Wi-Fi
+        // interface stays hidden even though it still has an address.
+        if interface.is_loopback() || !interface.is_up() || !interface.is_running() {
             continue;
         }
-        let if_addrs::IfAddr::V4(v4) = &interface.addr else {
+        let Some(kind) = classify_interface(&interface.name) else {
+            // Not a classified fast link (tunnel, virtual bridge, unknown
+            // name): never fall back to a generic LAN label.
             continue;
         };
-        if v4.ip.is_link_local() || v4.ip.is_unspecified() {
-            continue;
+        for v4 in &interface.ipv4 {
+            let addr = v4.addr();
+            if addr.is_link_local() || addr.is_unspecified() {
+                continue;
+            }
+            links.push(LocalLink {
+                name: interface.name.clone(),
+                addr,
+                netmask: v4.netmask(),
+                kind,
+            });
         }
-        let kind = match classify_interface(&interface.name) {
-            Some(kind) => kind,
-            None if require_classified => continue,
-            None => LinkKind::Lan,
-        };
-        links.push(LocalLink {
-            name: interface.name.clone(),
-            addr: v4.ip,
-            netmask: v4.netmask,
-            kind,
-        });
     }
     links.sort_by(|a, b| {
         (a.kind, a.addr)
