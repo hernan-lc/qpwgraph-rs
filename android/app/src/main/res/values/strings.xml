@@ -17,4 +17,5 @@
     <string name="relay_error_discovery_failed">Unable to start discovery.</string>
     <string name="relay_discovery_started">Discovery started</string>
     <string name="relay_discovery_stopped">Discovery stopped</string>
+    <string name="relay_usb_detected">USB tethering detected: %1$s · %2$s — preferred automatically</string>
 </resources>

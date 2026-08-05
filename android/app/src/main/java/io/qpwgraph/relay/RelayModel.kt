@@ -17,13 +17,17 @@ data class RelaySettings(
 data class HostSettings(
     val deviceName: String = "android-relay",
     val pin: String = "123456",
-    val port: Int = 0,
+    // Fixed default port: desktop USB probing scans for hosts on 48123, so
+    // an ephemeral port would make this host undiscoverable over USB.
+    val port: Int = DEFAULT_HOST_PORT,
     val codec: String = "opus",
     val transport: String = "auto",
     val sampleRate: Int = 48_000,
     val channels: Int = 1,
     val frameMs: Int = 20,
 )
+
+const val DEFAULT_HOST_PORT = 48123
 
 enum class RelayConnectionState {
     Disconnected,
@@ -43,7 +47,14 @@ enum class RelayHostState {
 enum class RelayMode {
     Receiver,
     Emitter,
+    Discover,
 }
+
+/** An active USB tether link, auto-detected by the native layer. */
+data class UsbLinkInfo(
+    val name: String,
+    val addr: String,
+)
 
 /** A relay host seen on the local network during discovery. */
 data class DiscoveredPeer(
@@ -80,6 +91,8 @@ data class RelayUiState(
     val discoveryActive: Boolean = false,
     val peers: List<DiscoveredPeer> = emptyList(),
     val discoveryMessage: String = "",
+    // Auto-detected USB tether link, when one is up.
+    val usbLink: UsbLinkInfo? = null,
     // Selected tab.
     val mode: RelayMode = RelayMode.Receiver,
 )

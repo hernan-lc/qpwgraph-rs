@@ -34,6 +34,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var clientPolling: Job? = null
     private var hostPolling: Job? = null
     private var discoveryPolling: Job? = null
+    private var usbPolling: Job? = null
+
+    init {
+        startUsbPolling()
+    }
 
     private fun setState(transform: (RelayUiState) -> RelayUiState) {
         mutableState.value = transform(mutableState.value)
@@ -117,6 +122,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     /** Discovery tap-to-connect: adopt the peer address, then connect. */
     fun connectToPeer(address: String) {
         update(mutableState.value.settings.copy(target = address))
+        setState { it.copy(mode = RelayMode.Receiver) }
         connect()
     }
 
@@ -430,6 +436,43 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ------------------------------------------------------------------
+    // USB tether auto-detection
+    // ------------------------------------------------------------------
+
+    /**
+     * Poll the native layer for an active USB tether. USB is never a
+     * transport choice: `auto` prefers it, the UI only reports the link.
+     */
+    private fun startUsbPolling() {
+        usbPolling?.cancel()
+        usbPolling = viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                refreshUsbLink()
+                delay(USB_LINK_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun refreshUsbLink() {
+        val response = try {
+            JSONObject(NativeBridge.usbLink())
+        } catch (_: Exception) {
+            return
+        }
+        val link = if (response.optString("type") == "usb_link") {
+            UsbLinkInfo(
+                name = response.optString("name"),
+                addr = response.optString("addr"),
+            )
+        } else {
+            null
+        }
+        if (link != mutableState.value.usbLink) {
+            setState { it.copy(usbLink = link) }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Shared plumbing
     // ------------------------------------------------------------------
 
@@ -470,7 +513,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         pin = preferences.getString("pin", "123456") ?: "123456",
         role = preferences.getString("role", "emit") ?: "emit",
         codec = preferences.getString("codec", "opus") ?: "opus",
-        transport = preferences.getString("transport", "auto") ?: "auto",
+        transport = migrateTransport(preferences.getString("transport", "auto") ?: "auto"),
         deviceName = preferences.getString("device_name", "android-relay") ?: "android-relay",
     )
 
@@ -478,15 +521,21 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         deviceName = preferences.getString("host_device_name", "android-relay")
             ?: "android-relay",
         pin = preferences.getString("host_pin", "123456") ?: "123456",
-        port = preferences.getInt("host_port", 0),
+        port = preferences.getInt("host_port", DEFAULT_HOST_PORT),
         codec = preferences.getString("host_codec", "opus") ?: "opus",
-        transport = preferences.getString("host_transport", "auto") ?: "auto",
+        transport = migrateTransport(preferences.getString("host_transport", "auto") ?: "auto"),
     )
+
+    /** USB is auto-detected now; legacy explicit selections fall back to auto. */
+    private fun migrateTransport(value: String): String =
+        if (value == "usb") "auto" else value
 
     override fun onCleared() {
         stopClientPolling()
         stopHostPolling()
         stopDiscoveryPolling()
+        usbPolling?.cancel()
+        usbPolling = null
         stopService()
         if (clientHandle != 0L) {
             NativeBridge.release(clientHandle)
@@ -507,5 +556,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val POLL_INTERVAL_MS = 100L
         const val DISCOVERY_POLL_INTERVAL_MS = 250L
+        const val USB_LINK_POLL_INTERVAL_MS = 1_000L
     }
 }

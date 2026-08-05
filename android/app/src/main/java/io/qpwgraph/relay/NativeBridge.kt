@@ -59,4 +59,8 @@ internal object NativeBridge {
     external fun discoveryPeers(handle: Long): String
     external fun discoveryPollEvents(handle: Long): String
     external fun discoveryRelease(handle: Long)
+
+    // Link detection -----------------------------------------------------
+    /** JSON snapshot of the active USB tether link, or `{"type":"none"}`. */
+    external fun usbLink(): String
 }

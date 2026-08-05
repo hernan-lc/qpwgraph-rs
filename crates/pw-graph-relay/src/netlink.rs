@@ -143,6 +143,14 @@ impl LocalLink {
         let mask = u32::from(self.netmask);
         u32::from(self.addr) & mask == u32::from(target) & mask
     }
+
+    /// The best active USB tethering link, if one is up. Links come back
+    /// ranked USB-first, so the first USB entry is the preferred one.
+    pub fn find_usb() -> Option<LocalLink> {
+        local_links()
+            .into_iter()
+            .find(|link| link.kind == LinkKind::Usb)
+    }
 }
 
 /// Enumerate usable local IPv4 links, sorted best-first (policy rank, then

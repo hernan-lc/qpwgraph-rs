@@ -58,6 +58,21 @@ fn parse_transport(value: &str) -> TransportPreference {
     value.parse().unwrap_or_default()
 }
 
+/// JSON snapshot of the first USB tether link, or `{"type":"none"}` when no
+/// USB link is up. USB is auto-detected rather than user-selected, matching
+/// the desktop panel.
+fn usb_link_json() -> serde_json::Value {
+    match pw_graph_relay_sdk::LocalLink::find_usb() {
+        Some(link) => json!({
+            "type": "usb_link",
+            "name": link.name,
+            "addr": link.addr.to_string(),
+            "kind": link.kind.as_str(),
+        }),
+        None => json!({"type": "none"}),
+    }
+}
+
 fn event_json(event: RelayEvent) -> serde_json::Value {
     match event {
         RelayEvent::SessionEstablished { id, peer, .. } => json!({
@@ -691,6 +706,19 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryRelease(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Link detection: report an active USB tether so the UI can show it without
+// exposing USB as a manual transport choice.
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_usbLink(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jni::sys::jstring {
+    json_string(&mut env, usb_link_json()).unwrap_or(std::ptr::null_mut())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,5 +729,18 @@ mod tests {
         assert_eq!(parse_role("both"), Role::Both);
         assert_eq!(parse_codec("pcm"), CodecKind::Pcm);
         assert_eq!(parse_transport("wifi"), TransportPreference::Wifi);
+    }
+
+    #[test]
+    fn usb_link_json_is_well_formed_without_a_tether() {
+        // A desktop test box normally has no USB tether up; whatever the
+        // result, it must be a JSON object with a `type` field.
+        let value = usb_link_json();
+        let kind = value.get("type").and_then(|field| field.as_str());
+        assert!(matches!(kind, Some("usb_link") | Some("none")));
+        if kind == Some("usb_link") {
+            assert!(value.get("name").is_some());
+            assert!(value.get("addr").is_some());
+        }
     }
 }
