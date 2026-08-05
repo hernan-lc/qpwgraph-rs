@@ -45,8 +45,9 @@ the USB network address assigned to the phone/Linux host:
    `usb0`, `rndis0`, or an `enx...` address.
 3. Start the desktop relay host with PIN `123456`; use a fixed TCP port such as
    `48123` so the address is easy to enter.
-4. In desktop Preferences → Relay, select **USB** as the preferred link and
-   start the host.
+4. Keep the preferred link on **Auto**: the relay panel auto-detects the USB
+   tether and shows its address (for example `usb0 · 192.168.42.129`), and
+   prefers the USB link automatically.
 5. In Android, enter the Linux USB/RNDIS address as `host:port`, keep PIN
    `123456`, choose Emit/Receive/Both, and connect.
 6. Confirm the desktop shows a relay session and that the Relay Microphone or
@@ -76,5 +77,6 @@ network. VPNs, guest Wi-Fi isolation, and firewalls can block the connection.
 - **Connected but silent:** ensure the selected role matches the direction,
   keep the app's foreground notification active, and check the desktop graph's
   Relay Microphone/Relay Speaker virtual nodes.
-- **Discovery:** mDNS is optional; manual `host:port` remains supported when
-  multicast is unavailable.
+- **Discovery:** mDNS is optional; while discovery runs, the desktop also
+  probes USB tether subnets directly (mDNS often does not cross a USB
+  tether). Manual `host:port` remains supported when neither works.

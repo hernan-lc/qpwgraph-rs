@@ -67,6 +67,7 @@ impl QpwgraphApp {
                     }
                 }
             });
+            self.show_relay_usb_status(ui);
             ui.label(
                 RichText::new(self.i18n.text("relay.emitter_hint"))
                     .small()

@@ -262,6 +262,27 @@ impl EngineInner {
         }
     }
 
+    pub(crate) fn start_usb_scanner(self: &Arc<Self>) -> RelayResult<()> {
+        if let Ok(slot) = self.usb_scanner.lock() {
+            if slot.as_ref().is_some_and(|scanner| !scanner.stopped()) {
+                return Ok(());
+            }
+        }
+        let scanner = crate::usb_probe::UsbScanner::start(self)?;
+        if let Ok(mut slot) = self.usb_scanner.lock() {
+            *slot = Some(scanner);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stop_usb_scanner(&self) {
+        if let Ok(mut slot) = self.usb_scanner.lock() {
+            if let Some(scanner) = slot.take() {
+                scanner.stop();
+            }
+        }
+    }
+
     pub(crate) fn refresh_service(&self, service_id: &str, current: Vec<PeerInfo>) {
         let mut discovered = Vec::new();
         let mut lost = Vec::new();

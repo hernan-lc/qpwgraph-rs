@@ -3,18 +3,19 @@
 //!
 //! The panel is a first-class docked surface (opened from the navigation
 //! rail) rather than a Preferences tab, because relaying is an activity you
-//! watch — sessions and status change while you work the canvas. One renderer
-//! per section lives in its own submodule; all of them drive the shared
-//! action layer in [`crate::app::relay`] and persist through `AppConfig`.
+//! watch — sessions and status change while you work the canvas. The body is
+//! split into tabs (emitter, receiver, discovery, sessions); one renderer per
+//! tab lives in its own submodule, and all of them drive the shared action
+//! layer in [`crate::app::relay`] and persist through `AppConfig`.
 
 mod client;
 mod discovery;
 mod host;
 mod sessions;
 
-use super::components::document_button;
+use super::components::{document_button, document_selectable_label};
 use super::shared::{apply_panel_text_scale, fresh_scroll_area, PANEL_FILL};
-use crate::app::QpwgraphApp;
+use crate::app::{QpwgraphApp, RelayPanelTab};
 use eframe::egui::{self, Color32, RichText, Ui};
 use pw_graph_ui::UiDocument;
 
@@ -67,16 +68,83 @@ impl QpwgraphApp {
             ui.label(RichText::new(self.i18n.text("relay.unavailable")).weak());
             return;
         }
-        fresh_scroll_area("relay-panel-scroll", ui.available_height()).show(ui, |ui| {
-            self.show_relay_host_section(document, ui);
-            self.show_relay_client_section(document, ui);
-            self.show_relay_discovery_section(document, ui);
-            self.show_relay_sessions_section(document, ui);
+        self.show_relay_tab_bar(document, ui);
+        ui.separator();
+        fresh_scroll_area(
+            ("relay-panel-scroll", self.relay.tab),
+            ui.available_height(),
+        )
+        .show(ui, |ui| match self.relay.tab {
+            RelayPanelTab::Emitter => self.show_relay_host_section(document, ui),
+            RelayPanelTab::Receiver => self.show_relay_client_section(document, ui),
+            RelayPanelTab::Discover => self.show_relay_discovery_section(document, ui),
+            RelayPanelTab::Sessions => self.show_relay_sessions_section(document, ui),
         });
         let message = self.relay.message.clone();
         if !message.is_empty() {
             ui.separator();
             ui.label(RichText::new(message).small().weak());
+        }
+    }
+
+    /// One tab per relay activity, mirroring the Preferences tab bar.
+    fn show_relay_tab_bar(&mut self, document: &mut UiDocument, ui: &mut Ui) {
+        let session_count = self.driver.relay_status().sessions.len();
+        let tabs = [
+            (
+                RelayPanelTab::Emitter,
+                "relay.tab_emitter",
+                "relay.panel.tab.emitter",
+            ),
+            (
+                RelayPanelTab::Receiver,
+                "relay.tab_receiver",
+                "relay.panel.tab.receiver",
+            ),
+            (
+                RelayPanelTab::Discover,
+                "relay.tab_discover",
+                "relay.panel.tab.discover",
+            ),
+            (
+                RelayPanelTab::Sessions,
+                "relay.tab_sessions",
+                "relay.panel.tab.sessions",
+            ),
+        ];
+        ui.horizontal(|ui| {
+            for (tab, label_key, tab_id) in tabs {
+                let mut label = self.i18n.text(label_key);
+                if tab == RelayPanelTab::Sessions && session_count > 0 {
+                    label = format!("{label} ({session_count})");
+                }
+                if document_selectable_label(
+                    document,
+                    ui,
+                    tab_id,
+                    self.relay.tab == tab,
+                    &label,
+                    label.clone(),
+                ) && self.relay.tab != tab
+                {
+                    self.relay.tab = tab;
+                }
+            }
+        });
+    }
+
+    /// Status line for an auto-detected USB tether: USB is preferred by the
+    /// `Auto` transport policy, so the panel only reports the link.
+    pub(super) fn show_relay_usb_status(&self, ui: &mut Ui) {
+        if let Some(link) = &self.relay.usb_link {
+            ui.label(
+                RichText::new(self.tf(
+                    "relay.usb_detected",
+                    &[("name", link.name.clone()), ("addr", link.addr.to_string())],
+                ))
+                .small()
+                .weak(),
+            );
         }
     }
 }

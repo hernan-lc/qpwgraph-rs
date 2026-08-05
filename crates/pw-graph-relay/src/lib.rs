@@ -18,6 +18,7 @@ pub mod discovery;
 pub mod netlink;
 pub mod pairing;
 pub mod protocol;
+pub mod usb_probe;
 
 mod queue;
 mod session;
@@ -205,6 +206,7 @@ pub(crate) struct EngineInner {
     peer_services: Mutex<BTreeMap<String, BTreeMap<SocketAddr, PeerInfo>>>,
     advertiser: Mutex<Option<discovery::Advertiser>>,
     browser: Mutex<Option<discovery::Browser>>,
+    usb_scanner: Mutex<Option<usb_probe::UsbScanner>>,
     next_session: AtomicU64,
     running: AtomicBool,
 }
@@ -221,6 +223,7 @@ impl EngineInner {
             peer_services: Mutex::new(BTreeMap::new()),
             advertiser: Mutex::new(None),
             browser: Mutex::new(None),
+            usb_scanner: Mutex::new(None),
             next_session: AtomicU64::new(1),
             running: AtomicBool::new(true),
         })
@@ -336,6 +339,7 @@ impl EngineInner {
         self.running.store(false, Ordering::Relaxed);
         self.stop_advertiser();
         self.stop_browser();
+        self.stop_usb_scanner();
         session::stop_host(self);
         let ids: Vec<SessionId> = self
             .sessions
@@ -453,15 +457,21 @@ impl RelayHandle {
         id
     }
 
-    /// Begin browsing for relay hosts on the local network (mDNS). Discovered
-    /// peers arrive as [`RelayEvent::PeerDiscovered`]. Idempotent.
+    /// Begin browsing for relay hosts on the local network. Discovered peers
+    /// arrive as [`RelayEvent::PeerDiscovered`]. Runs mDNS alongside a direct
+    /// probe of USB tether subnets, because mDNS often does not cross a USB
+    /// tether. Idempotent.
     pub fn discovery_start(&self) -> RelayResult<()> {
-        self.inner.start_browser()
+        self.inner.start_browser()?;
+        // Best-effort: a missing USB scanner must not fail mDNS browsing.
+        let _ = self.inner.start_usb_scanner();
+        Ok(())
     }
 
     /// Stop browsing for relay hosts. Idempotent.
     pub fn discovery_stop(&self) {
         self.inner.stop_browser();
+        self.inner.stop_usb_scanner();
     }
 
     /// Snapshot of relay hosts discovered so far.

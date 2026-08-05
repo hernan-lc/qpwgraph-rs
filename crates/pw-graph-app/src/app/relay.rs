@@ -1,17 +1,36 @@
 use super::QpwgraphApp;
 use pw_graph_backend::{
-    BackendError, BackendResult, RelayCodecKind, RelayEvent, RelayHostRequest, RelayPeerInfo,
-    RelayRoles, RelaySessionId, RelayTransportPreference,
+    BackendError, BackendResult, RelayCodecKind, RelayEvent, RelayHostRequest, RelayLinkKind,
+    RelayLocalLink, RelayPeerInfo, RelayRoles, RelaySessionId, RelayTransportPreference,
 };
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
+use std::time::Instant;
+
+/// Tabs inside the relay panel, one per relay activity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub(crate) enum RelayPanelTab {
+    #[default]
+    Emitter,
+    Receiver,
+    Discover,
+    Sessions,
+}
 
 #[derive(Default)]
 pub(crate) struct RelayUiState {
+    pub(crate) tab: RelayPanelTab,
     pub(crate) discovery_active: bool,
     pub(crate) peers: Vec<RelayPeerInfo>,
     pub(crate) message: String,
+    /// Active USB tether link, when one is detected. USB is never a select
+    /// option: `Auto` prefers it and the panel simply reports the link.
+    pub(crate) usb_link: Option<RelayLocalLink>,
+    last_link_check: Option<Instant>,
 }
+
+/// How often the panel rescans network interfaces for a USB tether.
+const LINK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl RelayUiState {
     fn role(value: &str) -> RelayRoles {
@@ -45,6 +64,22 @@ impl RelayUiState {
 
     pub(crate) fn poll(&mut self, app: &mut QpwgraphApp) {
         self.peers = app.driver.relay_peers();
+        // Legacy configs may still name USB explicitly; it is now detected
+        // automatically under `Auto` and no longer offered as a choice.
+        if app.config.relay_transport == "usb" {
+            app.config.relay_transport = "auto".to_owned();
+        }
+        let refresh_due = self
+            .last_link_check
+            .is_none_or(|at| at.elapsed() >= LINK_CHECK_INTERVAL);
+        if refresh_due {
+            self.last_link_check = Some(Instant::now());
+            self.usb_link = app
+                .driver
+                .relay_local_links()
+                .into_iter()
+                .find(|link| link.kind == RelayLinkKind::Usb);
+        }
         let events = app.driver.relay_events();
         for event in events {
             match event {

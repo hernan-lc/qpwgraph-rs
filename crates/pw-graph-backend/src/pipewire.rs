@@ -1293,6 +1293,10 @@ impl RelayDriver for PipewireDriver {
             .map(|set| set.handle().discovered_peers())
             .unwrap_or_default()
     }
+
+    fn relay_local_links(&self) -> Vec<pw_graph_relay::LocalLink> {
+        pw_graph_relay::netlink::local_links()
+    }
 }
 
 #[cfg(feature = "relay")]

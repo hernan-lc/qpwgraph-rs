@@ -26,7 +26,7 @@ mod ui_state;
 
 pub(crate) use lifecycle::run;
 #[cfg(feature = "relay")]
-pub(crate) use relay::RelayUiState;
+pub(crate) use relay::{RelayPanelTab, RelayUiState};
 
 pub(crate) struct QpwgraphApp {
     pub(crate) driver: Box<dyn crate::backend::AppDriver>,

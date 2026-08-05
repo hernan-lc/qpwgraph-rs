@@ -1,0 +1,20 @@
+<resources>
+    <string name="relay_app_title">qpwgraph Relay</string>
+    <string name="relay_notification_channel">Relay audio</string>
+    <string name="relay_notification_active">Relay audio is active</string>
+    <string name="relay_validation_missing_target">Enter a host address and pairing PIN.</string>
+    <string name="relay_connecting">Connecting…</string>
+    <string name="relay_error_native_create">Unable to create the native relay handle.</string>
+    <string name="relay_connected">Connected</string>
+    <string name="relay_error_connect_failed">Connection failed</string>
+    <string name="relay_disconnected">Disconnected</string>
+    <string name="relay_validation_missing_pin">Enter a pairing PIN.</string>
+    <string name="relay_host_starting">Starting relay host…</string>
+    <string name="relay_listening">Listening on port %1$d</string>
+    <string name="relay_error_host_failed">Unable to start the relay host.</string>
+    <string name="relay_host_stopped">Relay host stopped</string>
+    <string name="relay_session_connected">Session connected: %1$s</string>
+    <string name="relay_error_discovery_failed">Unable to start discovery.</string>
+    <string name="relay_discovery_started">Discovery started</string>
+    <string name="relay_discovery_stopped">Discovery stopped</string>
+</resources>

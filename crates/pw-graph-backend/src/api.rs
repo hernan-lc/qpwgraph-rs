@@ -353,9 +353,10 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
-    CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, PeerInfo as RelayPeerInfo,
-    RelayEvent, Roles as RelayRoles, SessionId as RelaySessionId,
-    SessionStatus as RelaySessionStatus, TransportPreference as RelayTransportPreference,
+    CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, LinkKind as RelayLinkKind,
+    LocalLink as RelayLocalLink, PeerInfo as RelayPeerInfo, RelayEvent, Roles as RelayRoles,
+    SessionId as RelaySessionId, SessionStatus as RelaySessionStatus,
+    TransportPreference as RelayTransportPreference,
 };
 
 /// Parameters for starting the relay host.
@@ -438,6 +439,12 @@ pub trait RelayDriver {
     fn relay_discovery_stop(&mut self) {}
 
     fn relay_peers(&self) -> Vec<RelayPeerInfo> {
+        Vec::new()
+    }
+
+    /// Local IPv4 links the relay can use, ranked best-first. Lets the UI
+    /// auto-detect an active USB tether without exposing it as an option.
+    fn relay_local_links(&self) -> Vec<RelayLocalLink> {
         Vec::new()
     }
 }

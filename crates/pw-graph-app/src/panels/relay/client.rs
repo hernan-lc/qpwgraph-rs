@@ -82,13 +82,13 @@ impl QpwgraphApp {
                 self.i18n.text("relay.transport_help"),
                 [
                     OptionItem::new("auto", "Auto"),
-                    OptionItem::new("usb", "USB"),
                     OptionItem::new("wifi", "Wi-Fi"),
                     OptionItem::new("bluetooth", "Bluetooth PAN"),
                     OptionItem::new("lan", "LAN"),
                 ],
                 RELAY_SELECT_WIDTH,
             );
+            self.show_relay_usb_status(ui);
             if document_button(
                 document,
                 ui,

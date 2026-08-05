@@ -3,7 +3,7 @@ use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use pw_graph_relay_sdk::{
     CodecKind, DeviceKind, RelayBrowser, RelayClient, RelayClientBuilder, RelayEvent, RelayHost,
-    RelayHostBuilder, RelayHostPrepared, SessionId, Role, TransportPreference,
+    RelayHostBuilder, RelayHostPrepared, Role, SessionId, TransportPreference,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -400,9 +400,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostPollEvents(
                     .map(event_json)
                     .collect::<Vec<_>>(),
                 Some(HostSlot::Prepared(_)) => Vec::new(),
-                None => {
-                    return Err::<Vec<serde_json::Value>, String>("unknown host handle".into())
-                }
+                None => return Err::<Vec<serde_json::Value>, String>("unknown host handle".into()),
             })
         });
     match result {
