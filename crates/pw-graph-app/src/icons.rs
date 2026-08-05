@@ -22,6 +22,8 @@ pub(crate) enum Icon {
     Minimap,
     Patchbay,
     Pin,
+    #[cfg(feature = "relay")]
+    QrCode,
     Refresh,
     #[cfg(feature = "relay")]
     Relay,
@@ -74,6 +76,8 @@ fn icon_source(icon: Icon) -> ImageSource<'static> {
         Icon::Minimap => include_image!("../assets/icons/minimap.svg"),
         Icon::Patchbay => include_image!("../assets/icons/patchbay.svg"),
         Icon::Pin => include_image!("../assets/icons/pin.svg"),
+        #[cfg(feature = "relay")]
+        Icon::QrCode => include_image!("../assets/icons/qr.svg"),
         Icon::Refresh => include_image!("../assets/icons/refresh.svg"),
         #[cfg(feature = "relay")]
         Icon::Relay => include_image!("../assets/icons/relay.svg"),

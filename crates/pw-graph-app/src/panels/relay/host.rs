@@ -159,7 +159,7 @@ impl QpwgraphApp {
                     ui.label(RichText::new(self.i18n.text("relay.step_share")).strong());
                     if document.icon_button(
                         ui,
-                        IconButtonProps::new("relay.panel.host.qr", Icon::Patchbay.source())
+                        IconButtonProps::new("relay.panel.host.qr", Icon::QrCode.source())
                             .tooltip(self.i18n.text("relay.show_qr")),
                     ) {
                         self.relay.show_qr = true;
