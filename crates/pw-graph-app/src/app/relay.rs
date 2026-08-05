@@ -93,12 +93,7 @@ impl RelayUiState {
             .is_none_or(|at| at.elapsed() >= LINK_CHECK_INTERVAL);
         if refresh_due {
             self.last_link_check = Some(Instant::now());
-            self.links = app.driver.relay_local_links();
-            self.usb_link = self
-                .links
-                .iter()
-                .find(|link| link.kind == RelayLinkKind::Usb)
-                .cloned();
+            self.refresh_links(app);
         }
         let events = app.driver.relay_events();
         for event in events {
@@ -145,7 +140,12 @@ impl RelayUiState {
     /// back USB-first, so a tethered phone scans the tether address.
     pub(crate) fn qr_payload(app: &QpwgraphApp) -> Option<String> {
         let port = app.driver.relay_status().host_port?;
-        let link = app.relay.links.first()?;
+        let link = app
+            .relay
+            .links
+            .first()
+            .cloned()
+            .or_else(|| app.driver.relay_local_links().into_iter().next())?;
         Some(relay_build_qr_payload(
             link.addr,
             port,
@@ -153,11 +153,21 @@ impl RelayUiState {
         ))
     }
 
+    fn refresh_links(&mut self, app: &QpwgraphApp) {
+        self.links = app.driver.relay_local_links();
+        self.usb_link = self
+            .links
+            .iter()
+            .find(|link| link.kind == RelayLinkKind::Usb)
+            .cloned();
+    }
+
     pub(crate) fn start_host(&mut self, app: &mut QpwgraphApp) {
         let request = self.host_request(app);
         match app.driver.relay_start_host(request) {
             Ok(port) => {
                 self.message = app.tf("relay.host_started", &[("port", port.to_string())]);
+                self.refresh_links(app);
                 app.refresh_graph();
             }
             Err(error) => self.message = app.tf("relay.error", &[("error", error.to_string())]),

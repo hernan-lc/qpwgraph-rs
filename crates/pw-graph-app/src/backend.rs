@@ -447,4 +447,11 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
             .map(|driver| driver.relay_peers())
             .unwrap_or_default()
     }
+
+    fn relay_local_links(&self) -> Vec<pw_graph_backend::RelayLocalLink> {
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.relay_local_links())
+            .unwrap_or_default()
+    }
 }

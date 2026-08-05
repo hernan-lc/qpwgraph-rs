@@ -11,7 +11,35 @@ use netdev::get_interfaces;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+
+/// Enable verbose relay network discovery diagnostics.
+pub fn set_debug_logging(enabled: bool) {
+    DEBUG_LOGGING.store(enabled, Ordering::Relaxed);
+}
+
+fn debug_logging_enabled() -> bool {
+    if DEBUG_LOGGING.load(Ordering::Relaxed) {
+        return true;
+    }
+    std::env::var("QPWGRAPH_RELAY_DEBUG")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+fn debug_log(message: std::fmt::Arguments<'_>) {
+    if debug_logging_enabled() {
+        eprintln!("[relay-net] {message}");
+    }
+}
 
 /// A kind of local network link, declared in preference order: USB
 /// tethering first (lowest latency, most stable), wired LAN last.
@@ -157,7 +185,126 @@ impl LocalLink {
 /// Enumerate usable local IPv4 links, sorted best-first (policy rank, then
 /// address for determinism). Requires no privileges on Linux.
 pub fn local_links() -> Vec<LocalLink> {
-    enumerate_links()
+    debug_log(format_args!("local_links: scanning strict transport links"));
+    let links = enumerate_links();
+    debug_log(format_args!(
+        "local_links: result count={} links={links:?}",
+        links.len()
+    ));
+    links
+}
+
+/// Enumerate addresses that can be shown to a user as relay endpoints.
+///
+/// Transport selection stays deliberately strict in [`local_links`]: it only
+/// returns links whose carrier and interface flags prove that the relay can
+/// use them.  Some desktop environments (and sandboxed/network-managed
+/// setups) do not expose those flags consistently even though the interface
+/// has a valid address and is the default route.  In that case the UI would
+/// otherwise hide both the endpoint and the QR code while the host is already
+/// listening successfully.
+///
+/// Use the strict list whenever possible.  If it is empty, fall back to
+/// non-loopback IPv4 addresses on the default or physical interfaces.  The
+/// fallback is for displaying the address and building the pairing QR only;
+/// relay workers continue to use [`local_links`] for interface binding.
+pub fn display_links() -> Vec<LocalLink> {
+    debug_log(format_args!("display_links: begin"));
+    let links = local_links();
+    if !links.is_empty() {
+        debug_log(format_args!(
+            "display_links: using strict links count={} links={links:?}",
+            links.len()
+        ));
+        return links;
+    }
+
+    let interfaces = get_interfaces();
+    debug_log(format_args!(
+        "display_links: strict list empty; netdev returned {} interfaces",
+        interfaces.len()
+    ));
+    let preferred = collect_display_links(&interfaces, true);
+    if !preferred.is_empty() {
+        debug_log(format_args!(
+            "display_links: using preferred fallback count={} links={preferred:?}",
+            preferred.len()
+        ));
+        return preferred;
+    }
+
+    // Last resort for hosts where netdev cannot report default/physical
+    // metadata (common inside containers and some desktop sandboxes). The
+    // address is still more useful than hiding the port and QR altogether.
+    let fallback = collect_display_links(&interfaces, false);
+    debug_log(format_args!(
+        "display_links: using final fallback count={} links={fallback:?}",
+        fallback.len()
+    ));
+    fallback
+}
+
+fn collect_display_links(interfaces: &[netdev::Interface], preferred_only: bool) -> Vec<LocalLink> {
+    debug_log(format_args!(
+        "collect_display_links: preferred_only={preferred_only} interface_count={}",
+        interfaces.len()
+    ));
+    let mut links = Vec::new();
+    for interface in interfaces {
+        let is_loopback = interface.is_loopback();
+        let is_physical = interface.is_physical();
+        debug_log(format_args!(
+            "display interface name={} flags={} up={} running={} loopback={} physical={} default={} ipv4={:?}",
+            interface.name,
+            interface.flags,
+            interface.is_up(),
+            interface.is_running(),
+            is_loopback,
+            is_physical,
+            interface.default,
+            interface.ipv4
+        ));
+        if is_loopback || (preferred_only && !interface.default && !is_physical) {
+            debug_log(format_args!(
+                "display interface name={} decision=skip",
+                interface.name
+            ));
+            continue;
+        }
+        let kind = classify_interface(&interface.name).unwrap_or(LinkKind::Lan);
+        for v4 in &interface.ipv4 {
+            let addr = v4.addr();
+            debug_log(format_args!(
+                "display address interface={} addr={} netmask={} classified_kind={kind:?}",
+                interface.name,
+                addr,
+                v4.netmask()
+            ));
+            if addr.is_link_local() || addr.is_unspecified() {
+                debug_log(format_args!(
+                    "display address interface={} addr={} decision=skip_non_routable",
+                    interface.name, addr
+                ));
+                continue;
+            }
+            debug_log(format_args!(
+                "display address interface={} addr={} decision=accept",
+                interface.name, addr
+            ));
+            links.push(LocalLink {
+                name: interface.name.clone(),
+                addr,
+                netmask: v4.netmask(),
+                kind,
+            });
+        }
+    }
+    links.sort_by(|a, b| {
+        (a.kind, a.addr)
+            .partial_cmp(&(b.kind, b.addr))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    links
 }
 
 /// Enumerate local IPv4 links that a peer can actually reach: only interfaces
@@ -166,25 +313,72 @@ pub fn local_links() -> Vec<LocalLink> {
 /// interfaces are skipped entirely, so the QR and endpoint list never show an
 /// address that is not usable for relay traffic.
 fn enumerate_links() -> Vec<LocalLink> {
+    debug_log(format_args!(
+        "enumerate_links: calling netdev::get_interfaces"
+    ));
+    let interfaces = get_interfaces();
+    debug_log(format_args!(
+        "enumerate_links: netdev returned {} interfaces",
+        interfaces.len()
+    ));
     let mut links = Vec::new();
-    for interface in get_interfaces() {
+    for interface in interfaces {
+        let is_loopback = interface.is_loopback();
+        let is_up = interface.is_up();
+        let is_running = interface.is_running();
+        debug_log(format_args!(
+            "strict interface name={} flags={} up={} running={} loopback={} default={} ipv4={:?}",
+            interface.name,
+            interface.flags,
+            is_up,
+            is_running,
+            is_loopback,
+            interface.default,
+            interface.ipv4
+        ));
         // A configured address on a down interface, or on an interface with no
         // carrier, is not a usable link. `is_running` on Linux tracks the
         // carrier state, so a disconnected ethernet or an unassociated Wi-Fi
         // interface stays hidden even though it still has an address.
-        if interface.is_loopback() || !interface.is_up() || !interface.is_running() {
+        if is_loopback || !is_up || !is_running {
+            debug_log(format_args!(
+                "strict interface name={} decision=skip_state",
+                interface.name
+            ));
             continue;
         }
         let Some(kind) = classify_interface(&interface.name) else {
             // Not a classified fast link (tunnel, virtual bridge, unknown
             // name): never fall back to a generic LAN label.
+            debug_log(format_args!(
+                "strict interface name={} decision=skip_unclassified",
+                interface.name
+            ));
             continue;
         };
+        debug_log(format_args!(
+            "strict interface name={} classified_kind={kind:?}",
+            interface.name
+        ));
         for v4 in &interface.ipv4 {
             let addr = v4.addr();
+            debug_log(format_args!(
+                "strict address interface={} addr={} netmask={}",
+                interface.name,
+                addr,
+                v4.netmask()
+            ));
             if addr.is_link_local() || addr.is_unspecified() {
+                debug_log(format_args!(
+                    "strict address interface={} addr={} decision=skip_non_routable",
+                    interface.name, addr
+                ));
                 continue;
             }
+            debug_log(format_args!(
+                "strict address interface={} addr={} decision=accept",
+                interface.name, addr
+            ));
             links.push(LocalLink {
                 name: interface.name.clone(),
                 addr,

@@ -160,6 +160,8 @@ impl eframe::App for QpwgraphApp {
 }
 
 pub(crate) fn run(args: crate::args::Args) -> eframe::Result<()> {
+    #[cfg(feature = "relay")]
+    pw_graph_backend::relay_set_debug_logging(args.debug);
     let app = QpwgraphApp::new(args);
     let window_title = app.i18n.text("app.title");
     let viewport = egui::ViewportBuilder::default()

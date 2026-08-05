@@ -93,7 +93,11 @@ impl QpwgraphApp {
             return;
         };
         ui.label(self.tf("relay.listening", &[("port", port.to_string())]));
-        let links = self.relay.links.clone();
+        let links = if self.relay.links.is_empty() {
+            self.driver.relay_local_links()
+        } else {
+            self.relay.links.clone()
+        };
         if links.is_empty() {
             ui.label(
                 RichText::new(self.i18n.text("relay.no_links"))

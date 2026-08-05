@@ -353,6 +353,7 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
+    netlink::set_debug_logging as relay_set_debug_logging,
     pairing::{
         build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
         QrPayload as RelayQrPayload,
@@ -446,8 +447,9 @@ pub trait RelayDriver {
         Vec::new()
     }
 
-    /// Local IPv4 links the relay can use, ranked best-first. Lets the UI
-    /// auto-detect an active USB tether without exposing it as an option.
+    /// Local IPv4 links to display as relay endpoints, ranked best-first.
+    /// Active links are preferred; a physical/default-interface fallback keeps
+    /// the endpoint and QR visible when interface state flags are incomplete.
     fn relay_local_links(&self) -> Vec<RelayLocalLink> {
         Vec::new()
     }
