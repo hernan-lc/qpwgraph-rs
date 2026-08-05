@@ -2801,7 +2801,6 @@ dependencies = [
  "pw-graph-i18n",
  "pw-graph-patchbay",
  "pw-graph-ui",
- "qrcode",
  "rfd",
 ]
 
@@ -2882,6 +2881,7 @@ dependencies = [
  "if-addrs",
  "mdns-sd",
  "opus",
+ "qrcode",
  "rand 0.8.7",
  "serde",
  "serde_json",

@@ -17,3 +17,4 @@ socket2.workspace = true
 thiserror.workspace = true
 if-addrs.workspace = true
 mdns-sd.workspace = true
+qrcode.workspace = true

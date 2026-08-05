@@ -357,10 +357,10 @@ pub use pw_graph_relay::{
         build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
         QrPayload as RelayQrPayload,
     },
-    CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, DeviceKind as RelayDeviceKind,
-    LinkKind as RelayLinkKind, LocalLink as RelayLocalLink, PeerInfo as RelayPeerInfo, RelayEvent,
-    Roles as RelayRoles, SessionId as RelaySessionId, SessionStatus as RelaySessionStatus,
-    TransportPreference as RelayTransportPreference,
+    qr as relay_qr, CodecKind as RelayCodecKind, DeviceKind as RelayDeviceKind,
+    EngineStatus as RelayEngineStatus, LinkKind as RelayLinkKind, LocalLink as RelayLocalLink,
+    PeerInfo as RelayPeerInfo, RelayEvent, Roles as RelayRoles, SessionId as RelaySessionId,
+    SessionStatus as RelaySessionStatus, TransportPreference as RelayTransportPreference,
 };
 
 /// Parameters for starting the relay host.

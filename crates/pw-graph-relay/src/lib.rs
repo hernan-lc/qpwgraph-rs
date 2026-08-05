@@ -18,6 +18,7 @@ pub mod discovery;
 pub mod netlink;
 pub mod pairing;
 pub mod protocol;
+pub mod qr;
 pub mod usb_probe;
 
 mod queue;

@@ -94,6 +94,13 @@ impl QpwgraphApp {
         };
         ui.label(self.tf("relay.listening", &[("port", port.to_string())]));
         let links = self.relay.links.clone();
+        if links.is_empty() {
+            ui.label(
+                RichText::new(self.i18n.text("relay.no_links"))
+                    .small()
+                    .weak(),
+            );
+        }
         for (index, link) in links.iter().enumerate() {
             let endpoint = format!("{}:{}", link.addr, port);
             if index == 0 {

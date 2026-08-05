@@ -156,6 +156,23 @@ impl LocalLink {
 /// Enumerate usable local IPv4 links, sorted best-first (policy rank, then
 /// address for determinism). Requires no privileges on Linux.
 pub fn local_links() -> Vec<LocalLink> {
+    enumerate_links(true)
+}
+
+/// Usable local IPv4 links for UI display: the classified fast links, or —
+/// on machines whose interface names the classifier does not recognize —
+/// every non-loopback IPv4 interface as a last resort, so the host QR and
+/// endpoint list still have an address to show.
+pub fn display_links() -> Vec<LocalLink> {
+    let links = enumerate_links(true);
+    if links.is_empty() {
+        enumerate_links(false)
+    } else {
+        links
+    }
+}
+
+fn enumerate_links(require_classified: bool) -> Vec<LocalLink> {
     let mut links = Vec::new();
     let interfaces = match if_addrs::get_if_addrs() {
         Ok(interfaces) => interfaces,
@@ -171,8 +188,10 @@ pub fn local_links() -> Vec<LocalLink> {
         if v4.ip.is_link_local() || v4.ip.is_unspecified() {
             continue;
         }
-        let Some(kind) = classify_interface(&interface.name) else {
-            continue;
+        let kind = match classify_interface(&interface.name) {
+            Some(kind) => kind,
+            None if require_classified => continue,
+            None => LinkKind::Lan,
         };
         links.push(LocalLink {
             name: interface.name.clone(),
