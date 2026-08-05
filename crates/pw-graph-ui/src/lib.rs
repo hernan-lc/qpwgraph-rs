@@ -92,7 +92,7 @@ pub enum CanvasAction {
     },
 }
 
-/// How dragging from a node's ports/body creates connections.
+// How dragging from a node's ports/body creates connections.
 pw_graph_utils::enum_str! {
     pub enum ConnectMode {
         Advanced = "advanced",
@@ -105,8 +105,6 @@ impl Default for ConnectMode {
         Self::Advanced
     }
 }
-
-
 
 pw_graph_utils::enum_str! {
     pub enum MediaFilter {

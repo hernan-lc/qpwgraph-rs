@@ -137,12 +137,8 @@ impl UsbScanner {
         Ok(Self { stop })
     }
 
-    pub(crate) fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-
-    pub(crate) fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+    pub(crate) fn is_active(&self) -> bool {
+        !self.stop.load(Ordering::Relaxed)
     }
 }
 

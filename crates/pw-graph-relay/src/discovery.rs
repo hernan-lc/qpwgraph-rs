@@ -143,12 +143,8 @@ impl Browser {
         Ok(Self { stop })
     }
 
-    fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-
-    fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+    fn is_running(&self) -> bool {
+        !self.stop.load(Ordering::Relaxed)
     }
 }
 
@@ -238,11 +234,7 @@ impl EngineInner {
     }
 
     pub(crate) fn start_browser(self: &Arc<Self>) -> RelayResult<()> {
-        start_stoppable(
-            &self.browser,
-            |s| s.as_ref().is_some_and(|browser| !browser.stopped()),
-            || Browser::start(self),
-        )
+        start_stoppable(&self.browser, || Browser::start(self))
     }
 
     pub(crate) fn stop_browser(&self) {
@@ -250,11 +242,9 @@ impl EngineInner {
     }
 
     pub(crate) fn start_usb_scanner(self: &Arc<Self>) -> RelayResult<()> {
-        start_stoppable(
-            &self.usb_scanner,
-            |s| s.as_ref().is_some_and(|scanner| !scanner.stopped()),
-            || crate::usb_probe::UsbScanner::start(self),
-        )
+        start_stoppable(&self.usb_scanner, || {
+            crate::usb_probe::UsbScanner::start(self)
+        })
     }
 
     pub(crate) fn stop_usb_scanner(&self) {
@@ -326,16 +316,16 @@ impl EngineInner {
     }
 }
 
-/// A background service that can be stopped and checked for liveness.
+/// A background service that can be stopped by taking it out of its slot.
 trait Stoppable: Send + Sync {
     fn stop(self);
-    fn stopped(&self) -> bool;
+    fn is_active(&self) -> bool;
 }
 
 impl Stoppable for Browser {
     fn stop(self) {}
-    fn stopped(&self) -> bool {
-        Browser::stopped(self)
+    fn is_active(&self) -> bool {
+        self.is_running()
     }
 }
 
@@ -343,15 +333,15 @@ impl Stoppable for Advertiser {
     fn stop(self) {
         Advertiser::stop(self)
     }
-    fn stopped(&self) -> bool {
+    fn is_active(&self) -> bool {
         false
     }
 }
 
 impl Stoppable for crate::usb_probe::UsbScanner {
     fn stop(self) {}
-    fn stopped(&self) -> bool {
-        crate::usb_probe::UsbScanner::stopped(self)
+    fn is_active(&self) -> bool {
+        crate::usb_probe::UsbScanner::is_active(self)
     }
 }
 
@@ -367,11 +357,10 @@ fn stop_slot<T: Stoppable>(slot: &Mutex<Option<T>>) {
 /// Start a background service inside a slot, unless one is already running.
 fn start_stoppable<T: Stoppable, E, F: FnOnce() -> Result<T, E>>(
     slot: &Mutex<Option<T>>,
-    is_active: impl FnOnce(&Option<T>) -> bool,
     make: F,
 ) -> Result<(), E> {
     if let Ok(slot) = slot.lock() {
-        if is_active(&slot) {
+        if slot.as_ref().is_some_and(|s| s.is_active()) {
             return Ok(());
         }
     }

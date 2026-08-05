@@ -13,8 +13,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-/// A kind of local network link, declared in preference order: USB
-/// tethering first (lowest latency, most stable), wired LAN last.
+// A kind of local network link, declared in preference order: USB
+// tethering first (lowest latency, most stable), wired LAN last.
 pw_graph_utils::enum_str! {
     #[derive(PartialOrd, Ord, Hash)]
     pub enum LinkKind {
@@ -72,8 +72,8 @@ pub fn classify_interface(name: &str) -> Option<LinkKind> {
     None
 }
 
-/// Which transport the user asked for. `Auto` (the default) picks the best
-/// available link by policy.
+// Which transport the user asked for. `Auto` (the default) picks the best
+// available link by policy.
 pw_graph_utils::enum_str! {
     pub enum TransportPreference {
         Auto = "auto",

@@ -20,7 +20,7 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// a bigger frame indicates a broken or hostile peer.
 pub const MAX_CONTROL_FRAME: u32 = 64 * 1024;
 
-/// Which kind of device a peer runs on. Informational for display only.
+// Which kind of device a peer runs on. Informational for display only.
 pw_graph_utils::enum_str! {
     #[derive(Serialize, Deserialize)]
     #[serde(rename_all = "lowercase")]
@@ -68,7 +68,7 @@ impl Roles {
     }
 }
 
-/// Audio codec carried on the UDP audio channel.
+// Audio codec carried on the UDP audio channel.
 pw_graph_utils::enum_str! {
     #[derive(Serialize, Deserialize)]
     #[serde(rename_all = "lowercase")]
