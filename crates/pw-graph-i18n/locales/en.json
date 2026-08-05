@@ -75,6 +75,7 @@
   "relay.qr_title": "Scan to connect",
   "relay.qr_hint": "Scan with the Android app to fill in the address and PIN automatically.",
   "relay.qr_unavailable": "No QR yet: start the host and make sure this device has a local IPv4 network link.",
+  "relay.qr_no_link": "No local IPv4 link detected; the QR appears as soon as one is available.",
   "relay.no_links": "No local IPv4 link detected; the QR and endpoint list stay empty until one appears.",
   "relay.unavailable": "Audio relay requires the native PipeWire backend.",
   "relay.device_name": "Device name",

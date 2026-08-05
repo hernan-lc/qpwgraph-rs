@@ -82,6 +82,10 @@ impl QpwgraphApp {
                         }
                     }
                 }
+            } else if self.driver.relay_status().host_active {
+                // The host is already listening; only the link is missing, so
+                // do not tell the user to start the host again.
+                ui.label(RichText::new(self.i18n.text("relay.qr_no_link")).weak());
             } else {
                 ui.label(RichText::new(self.i18n.text("relay.qr_unavailable")).weak());
             }

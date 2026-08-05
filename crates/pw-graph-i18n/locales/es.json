@@ -75,6 +75,7 @@
   "relay.qr_title": "Escanea para conectar",
   "relay.qr_hint": "Escanea con la app de Android para rellenar la dirección y el PIN automáticamente.",
   "relay.qr_unavailable": "Aún no hay QR: inicia el host y asegúrate de que este dispositivo tiene un enlace de red IPv4 local.",
+  "relay.qr_no_link": "No se detectó ningún enlace IPv4 local; el QR aparecerá en cuanto haya uno disponible.",
   "relay.no_links": "No se detectó ningún enlace IPv4 local; el QR y la lista de endpoints seguirán vacíos hasta que aparezca uno.",
   "relay.unavailable": "El relé de audio requiere el backend nativo de PipeWire.",
   "relay.device_name": "Nombre del dispositivo",

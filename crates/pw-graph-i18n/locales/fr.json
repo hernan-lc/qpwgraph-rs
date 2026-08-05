@@ -48,6 +48,7 @@
   "relay.qr_title": "Scanner pour se connecter",
   "relay.qr_hint": "Scannez avec l’application Android pour remplir l’adresse et le PIN automatiquement.",
   "relay.qr_unavailable": "Pas encore de QR : démarrez l’hôte et vérifiez que cet appareil dispose d’une liaison réseau IPv4 locale.",
+  "relay.qr_no_link": "Aucune liaison IPv4 locale détectée ; le QR apparaîtra dès qu’une liaison sera disponible.",
   "relay.no_links": "Aucune liaison IPv4 locale détectée ; le QR et la liste des points d’accès restent vides en attendant.",
   "relay.unavailable": "Le relais audio nécessite le backend PipeWire natif.",
   "relay.device_name": "Nom du périphérique",
