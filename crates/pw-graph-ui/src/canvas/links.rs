@@ -39,13 +39,7 @@ impl GraphCanvas {
             ) else {
                 continue;
             };
-            if !self.media_filter.matches_port_type(source.port_type)
-                || !self.media_filter.matches_port_type(destination.port_type)
-                || !visible_node_ids.contains(&source.node_id)
-                || !visible_node_ids.contains(&destination.node_id)
-                || !self.search_matches_port(graph, source.id)
-                || !self.search_matches_port(graph, destination.id)
-            {
+            if !self.link_is_visible(graph, link, visible_node_ids) {
                 continue;
             }
             let (Some(source_pos), Some(destination_pos)) = (

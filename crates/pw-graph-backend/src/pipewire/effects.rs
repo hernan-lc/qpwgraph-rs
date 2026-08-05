@@ -277,8 +277,8 @@ impl EffectRuntime {
         let callback_ptr = callback.as_ref() as *const CallbackState as *mut c_void;
         let loop_ = unsafe { pw::sys::pw_thread_loop_get_loop(thread_loop.as_raw_ptr()) };
         if loop_.is_null() {
-            return Err(BackendError::Native(
-                "PipeWire effect filter has no thread loop".into(),
+            return Err(BackendError::native(
+                "PipeWire effect filter has no thread loop",
             ));
         }
 
@@ -286,17 +286,17 @@ impl EffectRuntime {
         // while still running on the driver's existing thread loop. It takes
         // ownership of the properties object on both success and failure.
         let filter_properties = pw::properties::properties! {
-            "node.name" => node_name,
-            "node.description" => node_name,
-            "media.type" => "Audio",
-            "media.category" => "Filter",
-            "media.role" => "DSP",
-            "media.class" => "Audio/Filter",
-            "node.virtual" => "true",
+            NODE_NAME => node_name,
+            NODE_DESCRIPTION => node_name,
+            MEDIA_TYPE => MEDIA_TYPE_AUDIO,
+            PROP_MEDIA_CATEGORY => MEDIA_CATEGORY_FILTER,
+            PROP_MEDIA_ROLE => MEDIA_ROLE_DSP,
+            MEDIA_CLASS => MEDIA_CLASS_AUDIO_FILTER,
+            PROP_NODE_VIRTUAL => "true",
             // Filters are deliberately patchable graph nodes. Never let a
             // session manager route a newly-created effect to a default device.
-            "node.autoconnect" => "false",
-            "node.group" => "qpwgraph-rs",
+            PROP_NODE_AUTOCONNECT => "false",
+            PROP_NODE_GROUP => "qpwgraph-rs",
             "qpwgraph-rs.effect.instance" => instance_id,
             "qpwgraph-rs.effect.id" => effect_id,
         };
@@ -312,8 +312,8 @@ impl EffectRuntime {
             )
         };
         let Some(filter) = NonNull::new(filter) else {
-            return Err(BackendError::Native(
-                "PipeWire effect filter creation returned null".into(),
+            return Err(BackendError::native(
+                "PipeWire effect filter creation returned null",
             ));
         };
 
@@ -321,9 +321,9 @@ impl EffectRuntime {
         let mut output_ports = [ptr::null_mut(); DSP_CHANNELS];
         for (index, channel) in ["FL", "FR"].iter().enumerate() {
             let input_properties = pw::properties::properties! {
-                "format.dsp" => "32 bit float mono audio",
-                "port.name" => format!("input_{channel}"),
-                "audio.channel" => *channel,
+                FORMAT_DSP => PROP_FORMAT_DSP_VALUE,
+                PORT_NAME => format!("input_{channel}"),
+                AUDIO_CHANNEL => *channel,
             };
             input_ports[index] = unsafe {
                 pw::sys::pw_filter_add_port(
@@ -338,15 +338,15 @@ impl EffectRuntime {
             };
             if input_ports[index].is_null() {
                 unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-                return Err(BackendError::Native(
-                    "PipeWire effect input-port creation returned null".into(),
+                return Err(BackendError::native(
+                    "PipeWire effect input-port creation returned null",
                 ));
             }
 
             let output_properties = pw::properties::properties! {
-                "format.dsp" => "32 bit float mono audio",
-                "port.name" => format!("output_{channel}"),
-                "audio.channel" => *channel,
+                FORMAT_DSP => PROP_FORMAT_DSP_VALUE,
+                PORT_NAME => format!("output_{channel}"),
+                AUDIO_CHANNEL => *channel,
             };
             output_ports[index] = unsafe {
                 pw::sys::pw_filter_add_port(
@@ -361,8 +361,8 @@ impl EffectRuntime {
             };
             if output_ports[index].is_null() {
                 unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-                return Err(BackendError::Native(
-                    "PipeWire effect output-port creation returned null".into(),
+                return Err(BackendError::native(
+                    "PipeWire effect output-port creation returned null",
                 ));
             }
         }
@@ -381,7 +381,7 @@ impl EffectRuntime {
         };
         if result < 0 {
             unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-            return Err(BackendError::Native(format!(
+            return Err(BackendError::native(format!(
                 "PipeWire effect filter connection failed ({result})"
             )));
         }
@@ -404,11 +404,11 @@ impl EffectRuntime {
             .callback
             .processor
             .lock()
-            .map_err(|_| BackendError::Native("effect processor lock was poisoned".into()))?;
+            .map_err(|_| BackendError::native("effect processor lock was poisoned"))?;
         state
             .processor
             .set_parameter(parameter, value)
-            .map_err(|error| BackendError::Native(error.to_string()))
+            .map_err(BackendError::native)
     }
 
     fn processor_failed(&self) -> bool {
@@ -441,9 +441,8 @@ impl NativeEffect {
     ) -> BackendResult<Self> {
         validate_request(&request)?;
         if request.module_path.is_some() {
-            return Err(BackendError::Unsupported(
-                "WASM/native effect modules are not yet hosted by the PipeWire filter runtime"
-                    .into(),
+            return Err(BackendError::unsupported(
+                "WASM/native effect modules are not yet hosted by the PipeWire filter runtime",
             ));
         }
 
@@ -452,16 +451,15 @@ impl NativeEffect {
         // the processor receives the matching interleaved stereo buffer.
         let mut processor = host
             .create(&request.effect_id)
-            .map_err(|error| BackendError::Native(format!("could not create effect: {error}")))?;
+            .map_err(BackendError::effect_create_failed)?;
         processor
             .prepare(AudioSpec {
                 sample_rate: PREPARED_SAMPLE_RATE,
                 channels: DSP_CHANNELS as u16,
                 max_frames: MAX_DSP_FRAMES,
             })
-            .map_err(|error| BackendError::Native(error.to_string()))?;
-        apply_parameters(&mut *processor, &request.parameters)
-            .map_err(|error| BackendError::Native(error.to_string()))?;
+            .map_err(BackendError::native)?;
+        apply_parameters(&mut *processor, &request.parameters).map_err(BackendError::native)?;
 
         let effect_name = processor.descriptor().name.clone();
         validate_pipewire_text("effect name", &effect_name)?;
@@ -559,9 +557,7 @@ impl NativeEffect {
 
 fn validate_request(request: &EffectNodeRequest) -> BackendResult<()> {
     if request.instance_id.trim().is_empty() {
-        return Err(BackendError::Native(
-            "effect instance id cannot be empty".into(),
-        ));
+        return Err(BackendError::native("effect instance id cannot be empty"));
     }
     validate_pipewire_text("effect instance id", &request.instance_id)?;
     validate_pipewire_text("effect id", &request.effect_id)?;
@@ -570,7 +566,7 @@ fn validate_request(request: &EffectNodeRequest) -> BackendResult<()> {
 
 fn validate_pipewire_text(label: &str, value: &str) -> BackendResult<()> {
     if value.contains('\0') {
-        return Err(BackendError::Native(format!(
+        return Err(BackendError::native(format!(
             "{label} contains a NUL byte and cannot be passed to PipeWire"
         )));
     }

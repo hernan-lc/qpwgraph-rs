@@ -98,6 +98,35 @@ impl GraphCanvas {
         Rect::from_min_size(top_left, size)
     }
 
+    /// The x offset at which a port dot sits on its side of `node_rect`.
+    /// Link anchors and painted port rows share this so dots line up with
+    /// where links attach.
+    fn port_side_x(&self, node_rect: Rect, direction: Direction) -> f32 {
+        if direction == Direction::Source {
+            node_rect.right() - 12.0 * self.zoom
+        } else {
+            node_rect.left() + 12.0 * self.zoom
+        }
+    }
+
+    /// Scene position of a port row on `node_rect`. Layout (link anchors) and
+    /// painting (port dots) both derive their anchors here so they can never
+    /// drift apart.
+    pub(crate) fn port_row_anchor(
+        &self,
+        node_rect: Rect,
+        direction: Direction,
+        row_index: usize,
+        controls_height: f32,
+    ) -> Pos2 {
+        pos2(
+            self.port_side_x(node_rect, direction),
+            node_rect.top()
+                + (NODE_HEADER_HEIGHT + controls_height + 13.0 + row_index as f32 * PORT_ROW_HEIGHT)
+                    * self.zoom,
+        )
+    }
+
     pub(crate) fn port_anchor(&self, rect: Rect, graph: &Graph, port: &Port) -> Option<Pos2> {
         let node = graph.nodes.get(&port.node_id)?;
         let ordered = self.ordered_ports(graph, node);
@@ -107,28 +136,16 @@ impl GraphCanvas {
             .position(|row| row.iter().any(|item| item.id == port.id))?;
         let node_rect = self.node_rect(rect, graph, node);
         if self.node_appearance(node.id).collapsed {
-            let x = if port.direction == Direction::Source {
-                node_rect.right() - 12.0 * self.zoom
-            } else {
-                node_rect.left() + 12.0 * self.zoom
-            };
-            return Some(pos2(x, node_rect.center().y));
+            return Some(pos2(
+                self.port_side_x(node_rect, port.direction),
+                node_rect.center().y,
+            ));
         }
-        let x = if port.direction == Direction::Source {
-            node_rect.right() - 12.0 * self.zoom
-        } else {
-            node_rect.left() + 12.0 * self.zoom
-        };
         let controls_height = self.node_controls_height(
             node,
             ordered.iter().any(|item| item.port_type == PortType::Audio),
         );
-        Some(pos2(
-            x,
-            node_rect.top()
-                + (NODE_HEADER_HEIGHT + controls_height + 13.0 + index as f32 * PORT_ROW_HEIGHT)
-                    * self.zoom,
-        ))
+        Some(self.port_row_anchor(node_rect, port.direction, index, controls_height))
     }
 
     /// The topmost visible node (other than `exclude`) whose rect contains

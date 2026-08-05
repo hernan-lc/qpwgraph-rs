@@ -16,6 +16,86 @@ fn stable_pair(graph: &Graph, output: PortId, input: PortId) -> Option<(PortKey,
     Some((graph.port_key(output)?, graph.port_key(input)?))
 }
 
+/// Collapse repeated endpoint pairs while preserving order.
+fn dedup_pairs(pairs: impl IntoIterator<Item = (PortKey, PortKey)>) -> Vec<(PortKey, PortKey)> {
+    let mut unique = Vec::new();
+    for pair in pairs {
+        if !unique.contains(&pair) {
+            unique.push(pair);
+        }
+    }
+    unique
+}
+
+fn pair_description(name: &str, keys: &Option<(PortKey, PortKey)>) -> String {
+    keys.as_ref()
+        .map(|(output, input)| {
+            format!(
+                "{name}: {} → {}",
+                port_description(output),
+                port_description(input)
+            )
+        })
+        .unwrap_or_else(|| name.to_owned())
+}
+
+/// Disconnect every stable pair, recording which ones were actually removed.
+/// Shared by the many/all disconnect commands.
+fn disconnect_keys(
+    driver: &mut dyn GraphDriver,
+    keys: &[(PortKey, PortKey)],
+    removed_keys: &mut Vec<(PortKey, PortKey)>,
+) -> Result<Vec<Link>, CommandError> {
+    removed_keys.clear();
+    let mut disconnected = Vec::with_capacity(keys.len());
+    for (output, input) in keys {
+        if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
+            disconnected.push(link);
+            removed_keys.push((output.clone(), input.clone()));
+        }
+    }
+    Ok(disconnected)
+}
+
+/// Reconnect every previously removed pair, returning the restored links.
+fn restore_keys(
+    driver: &mut dyn GraphDriver,
+    removed_keys: &[(PortKey, PortKey)],
+) -> Result<Vec<Link>, CommandError> {
+    let mut restored = Vec::with_capacity(removed_keys.len());
+    for (output, input) in removed_keys {
+        if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
+            restored.push(link);
+        }
+    }
+    Ok(restored)
+}
+
+/// Apply node positions transactionally, rolling back to `rollback` positions
+/// if any node rejects its target. Used by move execute and undo, which are
+/// mirror images of each other.
+fn apply_positions(
+    driver: &mut dyn GraphDriver,
+    targets: &[(NodeId, [f32; 2])],
+    rollback: &[(NodeId, [f32; 2])],
+) -> Result<(), CommandError> {
+    let mut applied = Vec::new();
+    for (node, position) in targets {
+        match driver.set_node_position(*node, *position) {
+            Ok(()) => applied.push(*node),
+            Err(error) => {
+                for applied_node in applied.iter().rev() {
+                    if let Some((_, before)) = rollback.iter().find(|(id, _)| id == applied_node) {
+                        let _ = driver.set_node_position(*applied_node, *before);
+                    }
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub trait Command {
     fn name(&self) -> &'static str;
     fn description(&self) -> String {
@@ -142,12 +222,7 @@ impl ConnectManyCommand {
     }
 
     pub fn with_keys(pairs: Vec<(PortId, PortId)>, keys: Vec<(PortKey, PortKey)>) -> Self {
-        let keys = keys.into_iter().fold(Vec::new(), |mut unique, pair| {
-            if !unique.contains(&pair) {
-                unique.push(pair);
-            }
-            unique
-        });
+        let keys = dedup_pairs(keys);
         Self {
             pairs,
             keys,
@@ -173,16 +248,11 @@ impl Command for ConnectManyCommand {
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         driver.refresh()?;
         if self.keys.is_empty() {
-            self.keys = self
-                .pairs
-                .iter()
-                .filter_map(|(src, dst)| stable_pair(driver.graph(), *src, *dst))
-                .fold(Vec::new(), |mut keys, pair| {
-                    if !keys.contains(&pair) {
-                        keys.push(pair);
-                    }
-                    keys
-                });
+            self.keys = dedup_pairs(
+                self.pairs
+                    .iter()
+                    .filter_map(|(src, dst)| stable_pair(driver.graph(), *src, *dst)),
+            );
         }
         self.links.clear();
         self.created_keys.clear();
@@ -243,17 +313,7 @@ impl Command for ConnectCommand {
     }
 
     fn description(&self) -> String {
-        self.keys
-            .as_ref()
-            .map(|(output, input)| {
-                format!(
-                    "{}: {} → {}",
-                    self.name(),
-                    port_description(output),
-                    port_description(input)
-                )
-            })
-            .unwrap_or_else(|| self.name().to_owned())
+        pair_description(self.name(), &self.keys)
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
@@ -345,26 +405,12 @@ impl Command for DisconnectManyCommand {
                 .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
                 .collect();
         }
-        self.removed_keys.clear();
-        let mut disconnected = Vec::with_capacity(self.keys.len());
-        for (output, input) in &self.keys {
-            if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
-                disconnected.push(link);
-                self.removed_keys.push((output.clone(), input.clone()));
-            }
-        }
-        self.links = disconnected;
+        self.links = disconnect_keys(driver, &self.keys, &mut self.removed_keys)?;
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        let mut restored = Vec::with_capacity(self.links.len());
-        for (output, input) in &self.removed_keys {
-            if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
-                restored.push(link);
-            }
-        }
-        self.links = restored;
+        self.links = restore_keys(driver, &self.removed_keys)?;
         Ok(())
     }
 }
@@ -402,26 +448,12 @@ impl Command for DisconnectAllCommand {
             .values()
             .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
             .collect();
-        self.removed_keys.clear();
-        let mut disconnected = Vec::with_capacity(self.keys.len());
-        for (output, input) in &self.keys {
-            if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
-                disconnected.push(link);
-                self.removed_keys.push((output.clone(), input.clone()));
-            }
-        }
-        self.links = disconnected;
+        self.links = disconnect_keys(driver, &self.keys, &mut self.removed_keys)?;
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        let mut restored = Vec::with_capacity(self.links.len());
-        for (output, input) in &self.removed_keys {
-            if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
-                restored.push(link);
-            }
-        }
-        self.links = restored;
+        self.links = restore_keys(driver, &self.removed_keys)?;
         Ok(())
     }
 }
@@ -452,17 +484,7 @@ impl Command for DisconnectCommand {
     }
 
     fn description(&self) -> String {
-        self.keys
-            .as_ref()
-            .map(|(output, input)| {
-                format!(
-                    "{}: {} → {}",
-                    self.name(),
-                    port_description(output),
-                    port_description(input)
-                )
-            })
-            .unwrap_or_else(|| self.name().to_owned())
+        pair_description(self.name(), &self.keys)
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
@@ -524,43 +546,11 @@ impl Command for MoveNodesCommand {
     }
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        let mut applied = Vec::new();
-        for (node, position) in &self.after {
-            match driver.set_node_position(*node, *position) {
-                Ok(()) => applied.push(*node),
-                Err(error) => {
-                    for applied_node in applied.iter().rev() {
-                        if let Some((_, before)) =
-                            self.before.iter().find(|(id, _)| id == applied_node)
-                        {
-                            let _ = driver.set_node_position(*applied_node, *before);
-                        }
-                    }
-                    return Err(error.into());
-                }
-            }
-        }
-        Ok(())
+        apply_positions(driver, &self.after, &self.before)
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        let mut applied = Vec::new();
-        for (node, position) in &self.before {
-            match driver.set_node_position(*node, *position) {
-                Ok(()) => applied.push(*node),
-                Err(error) => {
-                    for applied_node in applied.iter().rev() {
-                        if let Some((_, after)) =
-                            self.after.iter().find(|(id, _)| id == applied_node)
-                        {
-                            let _ = driver.set_node_position(*applied_node, *after);
-                        }
-                    }
-                    return Err(error.into());
-                }
-            }
-        }
-        Ok(())
+        apply_positions(driver, &self.before, &self.after)
     }
 }
 

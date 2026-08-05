@@ -26,7 +26,7 @@ pub struct NodeViewConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(default)]
+#[serde(default = "AppConfig::default")]
 pub struct AppConfig {
     pub language: String,
     /// TOML table keys are strings, so node IDs are stored as decimal strings.
@@ -79,55 +79,16 @@ pub struct AppConfig {
     /// Effect definitions are kept in application config rather than the
     /// qpwgraph XML format, which has no portable representation for DSP
     /// modules.
-    #[serde(default)]
     pub effects: Vec<PersistedEffect>,
-    #[serde(default = "default_relay_device_name")]
     pub relay_device_name: String,
-    #[serde(default = "default_relay_pin")]
     pub relay_host_pin: String,
-    #[serde(default)]
     pub relay_host_port: u16,
-    #[serde(default)]
     pub relay_client_target: String,
-    #[serde(default = "default_relay_pin")]
     pub relay_client_pin: String,
-    #[serde(default = "default_relay_role")]
     pub relay_role: String,
-    #[serde(default = "default_relay_codec")]
     pub relay_codec: String,
-    #[serde(default = "default_relay_frame_ms")]
     pub relay_frame_ms: u16,
-    #[serde(default = "default_relay_transport")]
     pub relay_transport: String,
-}
-
-fn default_relay_device_name() -> String {
-    "qpwgraph-rs".into()
-}
-
-fn default_relay_pin() -> String {
-    "123456".into()
-}
-
-fn default_relay_role() -> String {
-    "both".into()
-}
-
-fn default_relay_codec() -> String {
-    "opus".into()
-}
-
-/// Default audio packet duration. Ten milliseconds halves the codec-side
-/// latency floor of the previous 20 ms default at the cost of doubling the
-/// packet rate to 100/s, which local Wi-Fi and USB tether links carry
-/// comfortably. The relay panel's advanced settings still expose 5–60 ms for
-/// links that prefer fewer, larger packets.
-fn default_relay_frame_ms() -> u16 {
-    10
-}
-
-fn default_relay_transport() -> String {
-    "auto".into()
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -185,15 +146,20 @@ impl Default for AppConfig {
             patchbay_profiles: std::collections::BTreeMap::new(),
             active_patchbay_profile: "default".into(),
             effects: Vec::new(),
-            relay_device_name: default_relay_device_name(),
-            relay_host_pin: default_relay_pin(),
+            relay_device_name: "qpwgraph-rs".into(),
+            relay_host_pin: "123456".into(),
             relay_host_port: 0,
             relay_client_target: String::new(),
-            relay_client_pin: default_relay_pin(),
-            relay_role: default_relay_role(),
-            relay_codec: default_relay_codec(),
-            relay_frame_ms: default_relay_frame_ms(),
-            relay_transport: default_relay_transport(),
+            relay_client_pin: "123456".into(),
+            relay_role: "both".into(),
+            relay_codec: "opus".into(),
+            // Ten milliseconds halves the codec-side latency floor of the
+            // previous 20 ms default at the cost of doubling the packet rate
+            // to 100/s, which local Wi-Fi and USB tether links carry
+            // comfortably. The relay panel's advanced settings still expose
+            // 5–60 ms for links that prefer fewer, larger packets.
+            relay_frame_ms: 10,
+            relay_transport: "auto".into(),
         }
     }
 }

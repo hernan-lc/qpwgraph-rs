@@ -1,8 +1,24 @@
+use crate::NodeAppearance;
 use egui::Color32;
 use pw_graph_core::{Direction, Node, NodeType, Port, PortType};
 use pw_graph_i18n::I18n;
 
 use super::super::ports::{port_role, PortRole};
+
+/// Resolves the accent color for a node card: an explicit user-chosen color
+/// wins, then the port-derived accent, then the per-type default. Shared by
+/// the node cards and the minimap so both use identical fallback semantics.
+pub(crate) fn accent_color(
+    appearance: &NodeAppearance,
+    port_accent: Option<Color32>,
+    node_type: NodeType,
+) -> Color32 {
+    appearance
+        .color
+        .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
+        .or(port_accent)
+        .unwrap_or_else(|| node_color(node_type))
+}
 
 pub(super) fn level_db(value: f32) -> f32 {
     (20.0 * value.max(0.000001).log10()).clamp(-120.0, 0.0)

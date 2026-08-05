@@ -58,6 +58,52 @@ pub enum BackendError {
     Native(String),
 }
 
+impl BackendError {
+    pub(crate) fn native(message: impl std::fmt::Display) -> Self {
+        Self::Native(message.to_string())
+    }
+
+    pub(crate) fn unsupported(message: impl std::fmt::Display) -> Self {
+        Self::Unsupported(message.to_string())
+    }
+
+    pub(crate) fn unknown_effect_instance(instance_id: &str) -> Self {
+        Self::native(format!("unknown effect instance {instance_id}"))
+    }
+
+    pub(crate) fn effect_already_exists(instance_id: &str) -> Self {
+        Self::native(format!("effect instance {instance_id} already exists"))
+    }
+
+    pub(crate) fn effect_create_failed(error: impl std::fmt::Display) -> Self {
+        Self::native(format!("could not create effect: {error}"))
+    }
+
+    pub(crate) fn effect_source_unavailable() -> Self {
+        Self::native("effect source port is unavailable")
+    }
+
+    pub(crate) fn effect_destination_unavailable() -> Self {
+        Self::native("effect destination port is unavailable")
+    }
+
+    pub(crate) fn effect_not_linked() -> Self {
+        Self::native("effect source and destination are not linked")
+    }
+
+    pub(crate) fn effect_source_disappeared() -> Self {
+        Self::native("effect source disappeared while removing effect")
+    }
+
+    pub(crate) fn effect_destination_disappeared() -> Self {
+        Self::native("effect destination disappeared while removing effect")
+    }
+
+    pub(crate) fn effect_routing_incomplete() -> Self {
+        Self::native("effect routing is incomplete and cannot be restored")
+    }
+}
+
 pub type BackendResult<T> = Result<T, BackendError>;
 
 /// Parameters used to create a free-standing effect node. The node has one
@@ -89,6 +135,19 @@ pub struct EffectInsertRequest {
     pub parameters: BTreeMap<String, f32>,
     /// Position for the newly inserted effect node.
     pub position: [f32; 2],
+}
+
+impl From<EffectInsertRequest> for EffectNodeRequest {
+    fn from(request: EffectInsertRequest) -> Self {
+        Self {
+            instance_id: request.instance_id,
+            effect_id: request.effect_id,
+            module_path: request.module_path,
+            enabled: request.enabled,
+            parameters: request.parameters,
+            position: request.position,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,21 +186,15 @@ pub trait EffectDriver {
     /// Create an unconnected effect node which can be linked through normal
     /// graph operations.
     fn create_effect_node(&mut self, _request: EffectNodeRequest) -> BackendResult<EffectInstance> {
-        Err(BackendError::Unsupported(
-            "effect processing is not available for this backend".into(),
-        ))
+        Err(unsupported_effect())
     }
 
     fn insert_effect(&mut self, _request: EffectInsertRequest) -> BackendResult<EffectInstance> {
-        Err(BackendError::Unsupported(
-            "effect processing is not available for this backend".into(),
-        ))
+        Err(unsupported_effect())
     }
 
     fn set_effect_enabled(&mut self, _instance_id: &str, _enabled: bool) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "effect processing is not available for this backend".into(),
-        ))
+        Err(unsupported_effect())
     }
 
     fn set_effect_parameter(
@@ -150,16 +203,20 @@ pub trait EffectDriver {
         _parameter: &str,
         _value: f32,
     ) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "effect processing is not available for this backend".into(),
-        ))
+        Err(unsupported_effect())
     }
 
     fn remove_effect(&mut self, _instance_id: &str) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "effect processing is not available for this backend".into(),
-        ))
+        Err(unsupported_effect())
     }
+}
+
+fn unsupported_effect() -> BackendError {
+    BackendError::unsupported("effect processing is not available for this backend")
+}
+
+fn unsupported_node_op(operation: &str) -> BackendError {
+    BackendError::unsupported(format!("node {operation} is not supported by this backend"))
 }
 
 /// A normalized, node-level audio reading supplied by a backend.
@@ -281,23 +338,17 @@ pub trait GraphDriver: EffectDriver {
         position: [f32; 2],
     ) -> BackendResult<()> {
         let _ = (node, position);
-        Err(BackendError::Unsupported(
-            "node layout is not supported by this backend".into(),
-        ))
+        Err(unsupported_node_op("layout"))
     }
 
     fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
         let _ = (node, muted);
-        Err(BackendError::Unsupported(
-            "node mute is not supported by this backend".into(),
-        ))
+        Err(unsupported_node_op("mute"))
     }
 
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
         let _ = (node, volume);
-        Err(BackendError::Unsupported(
-            "node volume is not supported by this backend".into(),
-        ))
+        Err(unsupported_node_op("volume"))
     }
 
     fn graph(&self) -> &Graph;
@@ -308,8 +359,89 @@ pub trait GraphDriver: EffectDriver {
         false
     }
 
-    fn is_node_type(&self, node_type: NodeType) -> bool;
-    fn is_port_type(&self, port_type: PortType) -> bool;
+    fn is_node_type(&self, node_type: NodeType) -> bool {
+        matches!(node_type, NodeType::PipeWire | NodeType::Effect)
+    }
+
+    fn is_port_type(&self, port_type: PortType) -> bool {
+        matches!(
+            port_type,
+            PortType::Audio | PortType::Video | PortType::MidiJack
+        )
+    }
+
+    /// Resolve the two endpoints of a link that an effect is about to replace,
+    /// failing if either port vanished or no direct link exists between them.
+    /// Both drivers share this preamble for `insert_effect`.
+    fn effect_link_endpoints(
+        &self,
+        source: &PortKey,
+        destination: &PortKey,
+    ) -> BackendResult<(PortId, PortId, Link)> {
+        let output = self
+            .graph()
+            .resolve_port_key(source)
+            .ok_or_else(BackendError::effect_source_unavailable)?;
+        let input = self
+            .graph()
+            .resolve_port_key(destination)
+            .ok_or_else(BackendError::effect_destination_unavailable)?;
+        let output_port = self
+            .graph()
+            .port(output)
+            .ok_or(GraphError::MissingPort(output))?;
+        let input_port = self
+            .graph()
+            .port(input)
+            .ok_or(GraphError::MissingPort(input))?;
+        if !output_port.direction.is_source() {
+            return Err(GraphError::NotSource(output).into());
+        }
+        if !input_port.direction.is_sink() {
+            return Err(GraphError::NotSink(input).into());
+        }
+        let link = self
+            .graph()
+            .links
+            .values()
+            .find(|link| link.output_port == output && link.input_port == input)
+            .cloned()
+            .ok_or_else(BackendError::effect_not_linked)?;
+        Ok((output, input, link))
+    }
+
+    /// Resolve and validate the saved endpoints of an inserted effect. Both
+    /// drivers call this while removing an effect so its original routing can
+    /// still be restored after the effect node has been destroyed.
+    fn effect_restore_endpoints(
+        &self,
+        source: &PortKey,
+        destination: &PortKey,
+    ) -> BackendResult<(PortId, PortId)> {
+        let output = self
+            .graph()
+            .resolve_port_key(source)
+            .ok_or_else(BackendError::effect_source_disappeared)?;
+        let input = self
+            .graph()
+            .resolve_port_key(destination)
+            .ok_or_else(BackendError::effect_destination_disappeared)?;
+        let output_port = self
+            .graph()
+            .port(output)
+            .ok_or(GraphError::MissingPort(output))?;
+        let input_port = self
+            .graph()
+            .port(input)
+            .ok_or(GraphError::MissingPort(input))?;
+        if !output_port.direction.is_source() {
+            return Err(GraphError::NotSource(output).into());
+        }
+        if !input_port.direction.is_sink() {
+            return Err(GraphError::NotSink(input).into());
+        }
+        Ok((output, input))
+    }
 
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
         Ok(Vec::new())

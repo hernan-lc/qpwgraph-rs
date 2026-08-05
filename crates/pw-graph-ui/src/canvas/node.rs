@@ -20,7 +20,7 @@ mod controls;
 mod helpers;
 mod layout;
 mod ports;
-pub(super) use helpers::node_color;
+pub(super) use helpers::accent_color;
 use helpers::{dominant_port, node_tooltip, node_type_label};
 
 const NODE_WIDTH: f32 = 244.0;
@@ -302,14 +302,11 @@ impl GraphCanvas {
         let selected = self.selected_nodes.contains(&node.id);
         let focused = body_response.has_focus() || header_response.has_focus();
         let text_scale = self.node_text_scale.clamp(0.80, 2.0);
-        let accent = appearance
-            .color
-            .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
-            .unwrap_or_else(|| {
-                dominant_port(&ports)
-                    .map(|port| port_color(port.port_type, port_role(port)))
-                    .unwrap_or_else(|| node_color(node.node_type))
-            });
+        let accent = accent_color(
+            &appearance,
+            dominant_port(&ports).map(|port| port_color(port.port_type, port_role(port))),
+            node.node_type,
+        );
         let fill = if selected {
             Color32::from_rgb(48, 60, 76)
         } else {

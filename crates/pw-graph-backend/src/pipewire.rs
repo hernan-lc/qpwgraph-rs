@@ -47,6 +47,22 @@ const LINK_OUTPUT_PORT: &str = "link.output.port";
 const LINK_INPUT_PORT: &str = "link.input.port";
 const NODE_INTERFACE_VERSION: u32 = 3;
 
+/// Property keys for the client-owned helper nodes (`pw_filter`s and meter
+/// streams). Shared by the effect, relay, and metering runtimes so a property
+/// name only needs to be spelled once.
+const PROP_NODE_VIRTUAL: &str = "node.virtual";
+const PROP_NODE_AUTOCONNECT: &str = "node.autoconnect";
+const PROP_NODE_GROUP: &str = "node.group";
+const PROP_MEDIA_CATEGORY: &str = "media.category";
+const PROP_MEDIA_ROLE: &str = "media.role";
+const PROP_FORMAT_DSP_VALUE: &str = "32 bit float mono audio";
+
+/// Media classes and roles shared by the virtual nodes the backend creates.
+const MEDIA_CLASS_AUDIO_FILTER: &str = "Audio/Filter";
+const MEDIA_ROLE_DSP: &str = "DSP";
+const MEDIA_TYPE_AUDIO: &str = "Audio";
+const MEDIA_CATEGORY_FILTER: &str = "Filter";
+
 /// Node name given to our own metering streams. They are helper objects, so
 /// they are filtered back out of the graph the UI renders.
 const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
@@ -280,6 +296,39 @@ impl PipewireDriver {
         Ok(())
     }
 
+    /// Run an operation with the thread loop locked, releasing the guard
+    /// before returning so nested lock acquisition cannot deadlock.
+    fn with_loop<T>(&mut self, op: impl FnOnce(&mut Self) -> BackendResult<T>) -> BackendResult<T> {
+        let loop_for_op = self.thread_loop.clone();
+        let _guard = loop_for_op.lock();
+        op(self)
+    }
+
+    /// Synchronize with the daemon and rebuild the graph snapshot. The caller
+    /// must hold the thread-loop lock.
+    fn sync(&mut self) -> BackendResult<()> {
+        self.roundtrip_locked()?;
+        self.rebuild_graph_locked()
+    }
+
+    /// Run a bounded number of round-trips until `ready` reports the expected
+    /// globals are visible. A single synchronization normally observes objects
+    /// published by another client, but a bounded second pass covers the
+    /// cross-client publication race without ever waiting in a loop. The
+    /// caller must hold the thread-loop lock.
+    fn wait_for_publication(
+        &mut self,
+        mut ready: impl FnMut(&mut Self) -> bool,
+    ) -> BackendResult<()> {
+        for _ in 0..2 {
+            self.sync()?;
+            if ready(self) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Reattach backend-owned effect instances to the global IDs PipeWire is
     /// currently using. A `pw_filter` has a stable Rust-side instance ID, but
     /// its node and port globals are assigned asynchronously and may change
@@ -473,6 +522,15 @@ impl PipewireDriver {
             && left.port_type == right.port_type
     }
 
+    fn is_blocked_pair(&self, output: &PortKey, input: &PortKey) -> bool {
+        self.blocked_connections
+            .iter()
+            .any(|(blocked_output, blocked_input)| {
+                Self::port_keys_equal(blocked_output, output)
+                    && Self::port_keys_equal(blocked_input, input)
+            })
+    }
+
     fn connection_is_blocked(&self, link: &Link) -> bool {
         let Some(output) = self.graph.port_key(link.output_port) else {
             return false;
@@ -480,12 +538,7 @@ impl PipewireDriver {
         let Some(input) = self.graph.port_key(link.input_port) else {
             return false;
         };
-        self.blocked_connections
-            .iter()
-            .any(|(blocked_output, blocked_input)| {
-                Self::port_keys_equal(blocked_output, &output)
-                    && Self::port_keys_equal(blocked_input, &input)
-            })
+        self.is_blocked_pair(&output, &input)
     }
 
     fn allow_blocked_connection(&mut self, output: &PortKey, input: &PortKey) {
@@ -503,14 +556,7 @@ impl PipewireDriver {
         ) else {
             return;
         };
-        if !self
-            .blocked_connections
-            .iter()
-            .any(|(blocked_output, blocked_input)| {
-                Self::port_keys_equal(blocked_output, &output)
-                    && Self::port_keys_equal(blocked_input, &input)
-            })
-        {
+        if !self.is_blocked_pair(&output, &input) {
             self.blocked_connections.push((output, input));
         }
     }
@@ -608,9 +654,9 @@ impl PipewireDriver {
         let stream_name = format!("{METER_NODE_PREFIX} {}", node_id.0);
         let description = format!("Level meter: {}", record.name);
         let mut properties = pw::properties::properties! {
-            "node.name" => stream_name.as_str(),
-            "node.description" => description.as_str(),
-            "media.type" => "Audio",
+            NODE_NAME => stream_name.as_str(),
+            NODE_DESCRIPTION => description.as_str(),
+            MEDIA_TYPE => MEDIA_TYPE_AUDIO,
             "media.category" => "Capture",
             "media.role" => "DSP",
             "media.class" => "Stream/Input/Audio",
@@ -698,10 +744,7 @@ impl PipewireDriver {
         request: EffectNodeRequest,
     ) -> BackendResult<EffectInstance> {
         if self.effects.contains_key(&request.instance_id) {
-            return Err(BackendError::Native(format!(
-                "effect instance {} already exists",
-                request.instance_id
-            )));
+            return Err(BackendError::effect_already_exists(&request.instance_id));
         }
         let instance_id = request.instance_id.clone();
         let effect = NativeEffect::create(&self.effect_host, &self.thread_loop, request)?;
@@ -712,22 +755,24 @@ impl PipewireDriver {
             // own. One round-trip from this driver's core normally observes
             // its globals, but a bounded second synchronization covers the
             // cross-client publication race without ever waiting in a loop.
-            for _ in 0..2 {
-                self.roundtrip_locked()?;
-                self.rebuild_graph_locked()?;
-                let effect = self.effects.get(&instance_id).ok_or_else(|| {
-                    BackendError::Native("new PipeWire effect disappeared during creation".into())
-                })?;
-                if effect.resolved()
-                    && self.graph.node(effect.instance.node_id).is_some()
-                    && self.graph.port(effect.instance.input_port).is_some()
-                    && self.graph.port(effect.instance.output_port).is_some()
-                {
-                    return Ok(effect.snapshot());
-                }
+            self.wait_for_publication(|driver| {
+                let Some(effect) = driver.effects.get(&instance_id) else {
+                    return false;
+                };
+                effect.resolved()
+                    && driver.graph.node(effect.instance.node_id).is_some()
+                    && driver.graph.port(effect.instance.input_port).is_some()
+                    && driver.graph.port(effect.instance.output_port).is_some()
+            })?;
+            let effect = self
+                .effects
+                .get(&instance_id)
+                .ok_or_else(|| BackendError::native("new PipeWire effect disappeared during creation"))?;
+            if effect.resolved() {
+                return Ok(effect.snapshot());
             }
-            Err(BackendError::Native(
-                "PipeWire did not publish the effect node and both DSP ports".into(),
+            Err(BackendError::native(
+                "PipeWire did not publish the effect node and both DSP ports",
             ))
         })();
 
@@ -750,14 +795,7 @@ impl PipewireDriver {
         source: &PortKey,
         destination: &PortKey,
     ) -> BackendResult<(PortId, PortId, Link)> {
-        let output = self
-            .graph
-            .resolve_port_key(source)
-            .ok_or_else(|| BackendError::Native("effect source port is unavailable".into()))?;
-        let input = self
-            .graph
-            .resolve_port_key(destination)
-            .ok_or_else(|| BackendError::Native("effect destination port is unavailable".into()))?;
+        let (output, input, link) = self.effect_link_endpoints(source, destination)?;
         let output_port = self
             .graph
             .port(output)
@@ -766,26 +804,11 @@ impl PipewireDriver {
             .graph
             .port(input)
             .ok_or(GraphError::MissingPort(input))?;
-        if !output_port.direction.is_source() {
-            return Err(GraphError::NotSource(output).into());
-        }
-        if !input_port.direction.is_sink() {
-            return Err(GraphError::NotSink(input).into());
-        }
         if output_port.port_type != PortType::Audio || input_port.port_type != PortType::Audio {
-            return Err(BackendError::Native(
-                "PipeWire effects can only be inserted into audio links".into(),
+            return Err(BackendError::native(
+                "PipeWire effects can only be inserted into audio links",
             ));
         }
-        let link = self
-            .graph
-            .links
-            .values()
-            .find(|link| link.output_port == output && link.input_port == input)
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::Native("effect source and destination are not linked".into())
-            })?;
         Ok((output, input, link))
     }
 
@@ -793,9 +816,10 @@ impl PipewireDriver {
     /// destroyed filter, so this is the rollback primitive for a failed insert
     /// as well as the standalone-node removal path.
     fn destroy_effect_node_locked(&mut self, instance_id: &str) -> BackendResult<EffectInstance> {
-        let effect = self.effects.remove(instance_id).ok_or_else(|| {
-            BackendError::Native(format!("unknown effect instance {instance_id}"))
-        })?;
+        let effect = self
+            .effects
+            .remove(instance_id)
+            .ok_or_else(|| BackendError::unknown_effect_instance(instance_id))?;
         let snapshot = effect.snapshot();
         self.positions.remove(&snapshot.node_id);
         drop(effect);
@@ -809,22 +833,20 @@ impl PipewireDriver {
     /// that link is the successful, idempotent result.
     fn restore_direct_connection_locked(
         &mut self,
-        source: &PortKey,
-        destination: &PortKey,
+        output: PortId,
+        input: PortId,
     ) -> BackendResult<()> {
-        let output = self.graph.resolve_port_key(source).ok_or_else(|| {
-            BackendError::Native("effect source disappeared while restoring routing".into())
-        })?;
-        let input = self.graph.resolve_port_key(destination).ok_or_else(|| {
-            BackendError::Native("effect destination disappeared while restoring routing".into())
-        })?;
         if self
             .graph
             .links
             .values()
             .any(|link| link.output_port == output && link.input_port == input)
         {
-            self.allow_blocked_connection(source, destination);
+            if let (Some(output_key), Some(input_key)) =
+                (self.graph.port_key(output), self.graph.port_key(input))
+            {
+                self.allow_blocked_connection(&output_key, &input_key);
+            }
             return Ok(());
         }
         self.connect_locked(output, input)?;
@@ -842,14 +864,7 @@ impl PipewireDriver {
         // immediately before disconnecting it below.
         self.effect_link_endpoints_locked(&source, &destination)?;
         let instance_id = request.instance_id.clone();
-        let instance = self.create_effect_node_locked(EffectNodeRequest {
-            instance_id: request.instance_id,
-            effect_id: request.effect_id,
-            module_path: request.module_path,
-            enabled: request.enabled,
-            parameters: request.parameters,
-            position: request.position,
-        })?;
+        let instance = self.create_effect_node_locked(request.into())?;
 
         let result = (|| {
             let (output, input, direct_link) =
@@ -858,7 +873,7 @@ impl PipewireDriver {
             self.connect_locked(output, instance.input_port)?;
             self.connect_locked(instance.output_port, input)?;
             let effect = self.effects.get_mut(&instance_id).ok_or_else(|| {
-                BackendError::Native("effect disappeared while committing insertion".into())
+                BackendError::native("effect disappeared while committing insertion")
             })?;
             effect.instance.source = Some(source.clone());
             effect.instance.destination = Some(destination.clone());
@@ -869,7 +884,10 @@ impl PipewireDriver {
             // The direct link is restored after filter destruction. This also
             // cleans up either half of a partially connected insertion.
             let cleanup = self.destroy_effect_node_locked(&instance_id);
-            let restore = self.restore_direct_connection_locked(&source, &destination);
+            let restore = (|| {
+                let (output, input) = self.effect_restore_endpoints(&source, &destination)?;
+                self.restore_direct_connection_locked(output, input)
+            })();
             if let Err(restore_error) = restore {
                 return Err(BackendError::Native(format!(
                     "{error}; additionally failed to restore the original link: {restore_error}"
@@ -889,48 +907,22 @@ impl PipewireDriver {
         let instance = self
             .effects
             .get(instance_id)
-            .ok_or_else(|| BackendError::Native(format!("unknown effect instance {instance_id}")))?
+            .ok_or_else(|| BackendError::unknown_effect_instance(instance_id))?
             .snapshot();
         let endpoints = match (&instance.source, &instance.destination) {
             (Some(source), Some(destination)) => {
                 // Refuse to destroy an inserted effect if the persisted
                 // endpoints have already vanished; otherwise its original
                 // routing could not honestly be restored.
-                let output = self.graph.resolve_port_key(source).ok_or_else(|| {
-                    BackendError::Native("effect source disappeared while removing effect".into())
-                })?;
-                let input = self.graph.resolve_port_key(destination).ok_or_else(|| {
-                    BackendError::Native(
-                        "effect destination disappeared while removing effect".into(),
-                    )
-                })?;
-                let output_port = self
-                    .graph
-                    .port(output)
-                    .ok_or(GraphError::MissingPort(output))?;
-                let input_port = self
-                    .graph
-                    .port(input)
-                    .ok_or(GraphError::MissingPort(input))?;
-                if !output_port.direction.is_source() {
-                    return Err(GraphError::NotSource(output).into());
-                }
-                if !input_port.direction.is_sink() {
-                    return Err(GraphError::NotSink(input).into());
-                }
-                Some((source.clone(), destination.clone()))
+                Some(self.effect_restore_endpoints(source, destination)?)
             }
             (None, None) => None,
-            _ => {
-                return Err(BackendError::Native(
-                    "effect routing is incomplete and cannot be restored".into(),
-                ));
-            }
+            _ => return Err(BackendError::effect_routing_incomplete()),
         };
 
         self.destroy_effect_node_locked(instance_id)?;
-        if let Some((source, destination)) = endpoints {
-            self.restore_direct_connection_locked(&source, &destination)?;
+        if let Some((output, input)) = endpoints {
+            self.restore_direct_connection_locked(output, input)?;
         }
         Ok(())
     }
@@ -956,28 +948,25 @@ impl Drop for PipewireDriver {
 
 impl GraphDriver for PipewireDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
-        let loop_for_refresh = self.thread_loop.clone();
-        let _guard = loop_for_refresh.lock();
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        self.registry_dirty.set(false);
-        Ok(self.graph.nodes.values().cloned().collect())
+        self.with_loop(|driver| {
+            driver.sync()?;
+            driver.registry_dirty.set(false);
+            Ok(driver.graph.nodes.values().cloned().collect())
+        })
     }
 
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
-        let loop_for_connect = self.thread_loop.clone();
-        let _guard = loop_for_connect.lock();
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        self.connect_locked(src, dst)
+        self.with_loop(|driver| {
+            driver.sync()?;
+            driver.connect_locked(src, dst)
+        })
     }
 
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
-        let loop_for_disconnect = self.thread_loop.clone();
-        let _guard = loop_for_disconnect.lock();
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        self.disconnect_locked(link)
+        self.with_loop(|driver| {
+            driver.sync()?;
+            driver.disconnect_locked(link)
+        })
     }
 
     fn allow_connection(&mut self, output: &PortKey, input: &PortKey) {
@@ -985,14 +974,7 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn suppress_connection(&mut self, output: &PortKey, input: &PortKey) {
-        if !self
-            .blocked_connections
-            .iter()
-            .any(|(blocked_output, blocked_input)| {
-                Self::port_keys_equal(blocked_output, output)
-                    && Self::port_keys_equal(blocked_input, input)
-            })
-        {
+        if !self.is_blocked_pair(output, input) {
             self.blocked_connections
                 .push((output.clone(), input.clone()));
         }
@@ -1022,20 +1004,20 @@ impl GraphDriver for PipewireDriver {
         if !self.graph.nodes.contains_key(&node) {
             return Err(GraphError::MissingNode(node).into());
         }
-        let loop_for_mute = self.thread_loop.clone();
-        let _guard = loop_for_mute.lock();
-        self.roundtrip_locked()?;
-        self.set_node_mute_locked(node, muted)
+        self.with_loop(|driver| {
+            driver.roundtrip_locked()?;
+            driver.set_node_mute_locked(node, muted)
+        })
     }
 
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
         if !self.graph.nodes.contains_key(&node) {
             return Err(GraphError::MissingNode(node).into());
         }
-        let loop_for_volume = self.thread_loop.clone();
-        let _guard = loop_for_volume.lock();
-        self.roundtrip_locked()?;
-        self.set_node_volume_locked(node, volume)
+        self.with_loop(|driver| {
+            driver.roundtrip_locked()?;
+            driver.set_node_volume_locked(node, volume)
+        })
     }
 
     fn graph(&self) -> &Graph {
@@ -1044,10 +1026,6 @@ impl GraphDriver for PipewireDriver {
 
     fn graph_dirty(&self) -> bool {
         self.registry_dirty.get()
-    }
-
-    fn is_node_type(&self, node_type: NodeType) -> bool {
-        matches!(node_type, NodeType::PipeWire | NodeType::Effect)
     }
 
     fn is_port_type(&self, port_type: PortType) -> bool {
@@ -1097,10 +1075,10 @@ impl GraphDriver for PipewireDriver {
         if policy != MeterPolicy::OnDemand {
             self.meter_requests.clear();
         }
-        let loop_for_policy = self.thread_loop.clone();
-        let _guard = loop_for_policy.lock();
-        self.ensure_meters_locked();
-        Ok(())
+        self.with_loop(|driver| {
+            driver.ensure_meters_locked();
+            Ok(())
+        })
     }
 
     fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
@@ -1118,18 +1096,18 @@ impl GraphDriver for PipewireDriver {
         if wanted.iter().eq(self.meters.keys()) {
             return Ok(());
         }
-        let loop_for_request = self.thread_loop.clone();
-        let _guard = loop_for_request.lock();
-        self.ensure_meters_locked();
-        Ok(())
+        self.with_loop(|driver| {
+            driver.ensure_meters_locked();
+            Ok(())
+        })
     }
 
     fn reset_audio_config(&mut self) -> BackendResult<()> {
         self.meter_requests.clear();
-        let loop_for_reset = self.thread_loop.clone();
-        let _guard = loop_for_reset.lock();
-        self.meters.clear();
-        Ok(())
+        self.with_loop(|driver| {
+            driver.meters.clear();
+            Ok(())
+        })
     }
 }
 
@@ -1147,25 +1125,24 @@ impl EffectDriver for PipewireDriver {
     }
 
     fn create_effect_node(&mut self, request: EffectNodeRequest) -> BackendResult<EffectInstance> {
-        let loop_for_create = self.thread_loop.clone();
-        let _guard = loop_for_create.lock();
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        self.create_effect_node_locked(request)
+        self.with_loop(|driver| {
+            driver.sync()?;
+            driver.create_effect_node_locked(request)
+        })
     }
 
     fn insert_effect(&mut self, request: EffectInsertRequest) -> BackendResult<EffectInstance> {
-        let loop_for_insert = self.thread_loop.clone();
-        let _guard = loop_for_insert.lock();
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        self.insert_effect_locked(request)
+        self.with_loop(|driver| {
+            driver.sync()?;
+            driver.insert_effect_locked(request)
+        })
     }
 
     fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
-        let effect = self.effects.get_mut(instance_id).ok_or_else(|| {
-            BackendError::Native(format!("unknown effect instance {instance_id}"))
-        })?;
+        let effect = self
+            .effects
+            .get_mut(instance_id)
+            .ok_or_else(|| BackendError::unknown_effect_instance(instance_id))?;
         effect.set_enabled(enabled);
         Ok(())
     }
@@ -1176,18 +1153,18 @@ impl EffectDriver for PipewireDriver {
         parameter: &str,
         value: f32,
     ) -> BackendResult<()> {
-        let effect = self.effects.get_mut(instance_id).ok_or_else(|| {
-            BackendError::Native(format!("unknown effect instance {instance_id}"))
-        })?;
+        let effect = self
+            .effects
+            .get_mut(instance_id)
+            .ok_or_else(|| BackendError::unknown_effect_instance(instance_id))?;
         effect.set_parameter(parameter, value)
     }
 
     fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
-        let loop_for_remove = self.thread_loop.clone();
-        let _guard = loop_for_remove.lock();
-        self.roundtrip_locked()?;
-        self.rebuild_graph_locked()?;
-        self.remove_effect_locked(instance_id)
+        self.with_loop(|driver| {
+            driver.sync()?;
+            driver.remove_effect_locked(instance_id)
+        })
     }
 }
 
@@ -1209,28 +1186,28 @@ impl RelayDriver for PipewireDriver {
     }
 
     fn relay_start_host(&mut self, request: RelayHostRequest) -> BackendResult<u16> {
-        let loop_for_relay = self.thread_loop.clone();
-        let _guard = loop_for_relay.lock();
-        let set = self.ensure_relay_devices_locked(&request.device_name)?;
-        let config = pw_graph_relay::EngineConfig {
-            device_name: request.device_name,
-            pin: request.pin,
-            port: request.port,
-            codec: request.codec,
-            frame_ms: request.frame_ms,
-            transport: request.transport,
-            ..Default::default()
-        };
-        set.handle().update_config(config);
-        set.handle()
-            .host_start()
-            .map_err(|error| BackendError::Native(format!("relay host start failed: {error}")))
+        self.with_loop(|driver| {
+            let set = driver.ensure_relay_devices_locked(&request.device_name)?;
+            let config = pw_graph_relay::EngineConfig {
+                device_name: request.device_name,
+                pin: request.pin,
+                port: request.port,
+                codec: request.codec,
+                frame_ms: request.frame_ms,
+                transport: request.transport,
+                ..Default::default()
+            };
+            set.handle().update_config(config);
+            set.handle()
+                .host_start()
+                .map_err(|error| BackendError::native(format!("relay host start failed: {error}")))
+        })
     }
 
     fn relay_stop_host(&mut self) -> BackendResult<()> {
         if let Some(set) = self.relay.as_mut() {
             set.handle().host_stop().map_err(|error| {
-                BackendError::Native(format!("relay host stop failed: {error}"))
+                BackendError::native(format!("relay host stop failed: {error}"))
             })?;
         }
         Ok(())
@@ -1242,27 +1219,27 @@ impl RelayDriver for PipewireDriver {
         pin: &str,
         roles: RelayRoles,
     ) -> BackendResult<()> {
-        let loop_for_relay = self.thread_loop.clone();
-        let _guard = loop_for_relay.lock();
-        let device_name = self
-            .relay
-            .as_ref()
-            .map(|set| set.handle().config().device_name)
-            .unwrap_or_else(|| "qpwgraph-rs".into());
-        let set = self.ensure_relay_devices_locked(&device_name)?;
-        set.handle().connect(target, pin, roles);
-        Ok(())
+        self.with_loop(|driver| {
+            let device_name = driver
+                .relay
+                .as_ref()
+                .map(|set| set.handle().config().device_name)
+                .unwrap_or_else(|| "qpwgraph-rs".into());
+            let set = driver.ensure_relay_devices_locked(&device_name)?;
+            set.handle().connect(target, pin, roles);
+            Ok(())
+        })
     }
 
     fn relay_disconnect(&mut self, session: RelaySessionId) -> BackendResult<()> {
         let Some(set) = self.relay.as_mut() else {
-            return Err(BackendError::Native(
-                "no relay session exists to disconnect".into(),
+            return Err(BackendError::native(
+                "no relay session exists to disconnect",
             ));
         };
         set.handle()
             .disconnect(session)
-            .map_err(|error| BackendError::Native(format!("relay disconnect failed: {error}")))
+            .map_err(|error| BackendError::native(format!("relay disconnect failed: {error}")))
     }
 
     fn relay_events(&mut self) -> Vec<RelayEvent> {
@@ -1273,12 +1250,12 @@ impl RelayDriver for PipewireDriver {
     }
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {
-        let loop_for_relay = self.thread_loop.clone();
-        let _guard = loop_for_relay.lock();
-        let set = self.ensure_relay_devices_locked("qpwgraph-rs")?;
-        set.handle()
-            .discovery_start()
-            .map_err(|error| BackendError::Native(format!("relay discovery failed: {error}")))
+        self.with_loop(|driver| {
+            let set = driver.ensure_relay_devices_locked("qpwgraph-rs")?;
+            set.handle()
+                .discovery_start()
+                .map_err(|error| BackendError::native(format!("relay discovery failed: {error}")))
+        })
     }
 
     fn relay_discovery_stop(&mut self) {
@@ -1315,13 +1292,7 @@ impl PipewireDriver {
             // Mirror the effect-creation synchronization: one round-trip
             // normally observes the globals, and a bounded second pass
             // covers the publication race without ever waiting in a loop.
-            for _ in 0..2 {
-                self.roundtrip_locked()?;
-                self.rebuild_graph_locked()?;
-                if self.relay_devices_visible_locked() {
-                    break;
-                }
-            }
+            self.wait_for_publication(|driver| driver.relay_devices_visible_locked())?;
         }
         Ok(self
             .relay

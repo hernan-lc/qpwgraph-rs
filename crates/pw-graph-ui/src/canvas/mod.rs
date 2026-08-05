@@ -6,7 +6,7 @@
 
 use crate::{CanvasAction, GraphCanvas, LinkId, NodeId, UiDocument};
 use egui::{pos2, vec2, Color32, FontId, Rect, Sense, Stroke, Ui};
-use pw_graph_core::Graph;
+use pw_graph_core::{Graph, Link};
 use pw_graph_i18n::I18n;
 use std::collections::{BTreeSet, HashMap};
 
@@ -442,22 +442,32 @@ impl GraphCanvas {
         let links = graph
             .links
             .values()
-            .filter(|link| {
-                let Some(source) = graph.port(link.output_port) else {
-                    return false;
-                };
-                let Some(destination) = graph.port(link.input_port) else {
-                    return false;
-                };
-                visible_nodes.contains(&source.node_id)
-                    && visible_nodes.contains(&destination.node_id)
-                    && self.media_filter.matches_port_type(source.port_type)
-                    && self.media_filter.matches_port_type(destination.port_type)
-                    && self.search_matches_port(graph, source.id)
-                    && self.search_matches_port(graph, destination.id)
-            })
+            .filter(|link| self.link_is_visible(graph, link, &visible_nodes))
             .count();
         (visible_nodes.len(), ports, links)
+    }
+
+    /// Whether a link is visible under the current media filter, search query,
+    /// and visible-node set. The main canvas, minimap, and counters all agree
+    /// about which links appear because they share this one predicate.
+    pub(super) fn link_is_visible(
+        &self,
+        graph: &Graph,
+        link: &Link,
+        visible_node_ids: &BTreeSet<NodeId>,
+    ) -> bool {
+        let (Some(source), Some(destination)) = (
+            graph.port(link.output_port),
+            graph.port(link.input_port),
+        ) else {
+            return false;
+        };
+        visible_node_ids.contains(&source.node_id)
+            && visible_node_ids.contains(&destination.node_id)
+            && self.media_filter.matches_port_type(source.port_type)
+            && self.media_filter.matches_port_type(destination.port_type)
+            && self.search_matches_port(graph, source.id)
+            && self.search_matches_port(graph, destination.id)
     }
 
     fn prune_hidden_state(&mut self, graph: &Graph, visible_node_ids: &BTreeSet<NodeId>) {
@@ -493,20 +503,9 @@ impl GraphCanvas {
             self.pending_node_connect = None;
         }
         if self.selected_link.is_some_and(|link_id| {
-            graph.link(link_id).is_none_or(|link| {
-                let Some(source) = graph.port(link.output_port) else {
-                    return true;
-                };
-                let Some(destination) = graph.port(link.input_port) else {
-                    return true;
-                };
-                !visible_node_ids.contains(&source.node_id)
-                    || !visible_node_ids.contains(&destination.node_id)
-                    || !self.media_filter.matches_port_type(source.port_type)
-                    || !self.media_filter.matches_port_type(destination.port_type)
-                    || !self.search_matches_port(graph, source.id)
-                    || !self.search_matches_port(graph, destination.id)
-            })
+            graph
+                .link(link_id)
+                .is_none_or(|link| !self.link_is_visible(graph, link, visible_node_ids))
         }) {
             self.selected_link = None;
         }

@@ -8,7 +8,6 @@ use super::super::names::compact_label;
 use super::super::ports::{
     connect_many, display_groups, pair_ports, port_color, port_group_tooltip, port_role,
 };
-use super::PORT_ROW_HEIGHT;
 
 impl GraphCanvas {
     #[allow(clippy::too_many_arguments)]
@@ -38,21 +37,11 @@ impl GraphCanvas {
 
         let controls_offset = self.node_controls_height(node, has_audio);
         for (index, group) in groups.into_iter().enumerate() {
-            let y = node_rect.top()
-                + (super::NODE_HEADER_HEIGHT
-                    + controls_offset
-                    + 13.0
-                    + index as f32 * PORT_ROW_HEIGHT)
-                    * self.zoom;
-            let x = if group.direction == Direction::Source {
-                node_rect.right() - 12.0 * self.zoom
-            } else {
-                node_rect.left() + 12.0 * self.zoom
-            };
-            let anchor = pos2(x, y);
+            let anchor = self.port_row_anchor(node_rect, group.direction, index, controls_offset);
             for port in &group.ports {
                 anchors.insert(port.id, anchor);
             }
+            let y = anchor.y;
             let row_rect = Rect::from_min_max(
                 pos2(node_rect.left() + 5.0 * self.zoom, y - 10.0 * self.zoom),
                 pos2(node_rect.right() - 5.0 * self.zoom, y + 10.0 * self.zoom),

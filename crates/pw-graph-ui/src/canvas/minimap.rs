@@ -6,7 +6,7 @@ use pw_graph_core::{Graph, NodeType};
 use pw_graph_i18n::I18n;
 use std::collections::BTreeSet;
 
-use super::node::node_color;
+use super::node::accent_color;
 use super::ports::{link_color, port_color, port_role};
 
 const PANEL_SIZE: egui::Vec2 = vec2(238.0, 164.0);
@@ -37,19 +37,14 @@ fn node_accent(
     node_type: NodeType,
 ) -> Color32 {
     let appearance = canvas.node_appearance(node_id);
-    appearance
-        .color
-        .map(|color| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]))
-        .or_else(|| {
-            graph.node(node_id).and_then(|node| {
-                node.ports
-                    .iter()
-                    .filter_map(|port_id| graph.port(*port_id))
-                    .map(|port| port_color(port.port_type, port_role(port)))
-                    .next()
-            })
-        })
-        .unwrap_or(node_color(node_type))
+    let port_accent = graph.node(node_id).and_then(|node| {
+        node.ports
+            .iter()
+            .filter_map(|port_id| graph.port(*port_id))
+            .map(|port| port_color(port.port_type, port_role(port)))
+            .next()
+    });
+    accent_color(&appearance, port_accent, node_type)
 }
 
 impl GraphCanvas {
@@ -158,13 +153,7 @@ impl GraphCanvas {
             else {
                 continue;
             };
-            if !visible_node_ids.contains(&source.id)
-                || !visible_node_ids.contains(&destination.id)
-                || !self.media_filter.matches_port_type(output.port_type)
-                || !self.media_filter.matches_port_type(input.port_type)
-                || !self.search_matches_port(graph, output.id)
-                || !self.search_matches_port(graph, input.id)
-            {
+            if !self.link_is_visible(graph, link, visible_node_ids) {
                 continue;
             }
             let source_center = map_point(

@@ -195,21 +195,21 @@ impl RelayNodeRuntime {
         let callback_ptr = callback.as_ref() as *const RelayCallbackState as *mut c_void;
         let loop_ = unsafe { pw::sys::pw_thread_loop_get_loop(thread_loop.as_raw_ptr()) };
         if loop_.is_null() {
-            return Err(BackendError::Native(
-                "PipeWire relay filter has no thread loop".into(),
+            return Err(BackendError::native(
+                "PipeWire relay filter has no thread loop",
             ));
         }
 
         let properties = pw::properties::properties! {
-            "node.name" => node_name,
-            "node.description" => description,
-            "media.type" => "Audio",
-            "media.class" => media_class,
-            "node.virtual" => "true",
+            NODE_NAME => node_name,
+            NODE_DESCRIPTION => description,
+            MEDIA_TYPE => MEDIA_TYPE_AUDIO,
+            MEDIA_CLASS => media_class,
+            PROP_NODE_VIRTUAL => "true",
             // Relay endpoints are patchable graph nodes; never let a session
             // manager silently route them to a default device.
-            "node.autoconnect" => "false",
-            "node.group" => "qpwgraph-rs",
+            PROP_NODE_AUTOCONNECT => "false",
+            PROP_NODE_GROUP => "qpwgraph-rs",
             "device.icon-name" => icon,
             "qpwgraph-rs.relay.kind" => match kind {
                 RelayNodeKind::Microphone => "source",
@@ -228,8 +228,8 @@ impl RelayNodeRuntime {
             )
         };
         let Some(filter) = NonNull::new(filter) else {
-            return Err(BackendError::Native(
-                "PipeWire relay filter creation returned null".into(),
+            return Err(BackendError::native(
+                "PipeWire relay filter creation returned null",
             ));
         };
 
@@ -240,9 +240,9 @@ impl RelayNodeRuntime {
         let mut ports = [ptr::null_mut(); RELAY_CHANNELS];
         for (index, channel) in ["FL", "FR"].iter().enumerate() {
             let port_properties = pw::properties::properties! {
-                "format.dsp" => "32 bit float mono audio",
-                "port.name" => format!("{channel}"),
-                "audio.channel" => *channel,
+                FORMAT_DSP => PROP_FORMAT_DSP_VALUE,
+                PORT_NAME => *channel,
+                AUDIO_CHANNEL => *channel,
             };
             ports[index] = unsafe {
                 pw::sys::pw_filter_add_port(
@@ -257,7 +257,7 @@ impl RelayNodeRuntime {
             };
             if ports[index].is_null() {
                 unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-                return Err(BackendError::Native(format!(
+                return Err(BackendError::native(format!(
                     "PipeWire relay {channel} port creation returned null"
                 )));
             }
@@ -276,7 +276,7 @@ impl RelayNodeRuntime {
         };
         if result < 0 {
             unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-            return Err(BackendError::Native(format!(
+            return Err(BackendError::native(format!(
                 "PipeWire relay filter connection failed ({result})"
             )));
         }
@@ -321,7 +321,7 @@ impl RelayRuntimeSet {
             ..Default::default()
         };
         let engine = RelayEngine::start(config)
-            .map_err(|error| BackendError::Native(format!("relay engine start: {error}")))?;
+            .map_err(|error| BackendError::native(format!("relay engine start: {error}")))?;
         let handle = engine.handle();
         let source =
             RelayNodeRuntime::create(thread_loop, handle.clone(), RelayNodeKind::Microphone)?;
