@@ -47,6 +47,14 @@ The app mirrors the desktop relay panel with three tabs:
 USB is not a link option: the app (like the desktop) auto-detects an active
 USB tether, shows it under the tab bar, and `Auto` prefers it.
 
+## Pair by QR code
+
+The desktop Emitter tab renders the host's addresses and port and offers a
+**Show QR** button while the host runs. The QR carries a
+`qpw-relay://host:port?pin=123456` payload. In the Android Receiver tab, tap
+**Scan QR** (camera permission required) to fill in the address and PIN
+automatically, then press **Connect**. Plain `host:port` QR codes work too.
+
 ## Test over USB tethering
 
 ADB USB debugging alone is only for installing and inspecting the app. For
@@ -78,8 +86,8 @@ connectivity does not prove network reachability.
 1. Start the desktop qpwgraph-rs application with the default `relay` feature.
 2. Open the relay panel from the navigation rail, set a six-digit PIN, and
    start the host.
-3. Enter the desktop `host:port` and PIN in the Android app, or find the host
-   in the **Discover** tab.
+3. Enter the desktop `host:port` and PIN in the Android app, scan the host's
+   QR code, or find the host in the **Discover** tab.
 4. Choose Emit, Receive, or Both and press **Connect**.
 
 Manual address entry remains supported as a fallback. The relay protocol uses

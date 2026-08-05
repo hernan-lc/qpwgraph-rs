@@ -11,6 +11,7 @@
 mod client;
 mod discovery;
 mod host;
+mod qr;
 mod sessions;
 
 use super::components::{document_button, document_selectable_label};
@@ -42,6 +43,7 @@ impl QpwgraphApp {
                 self.show_relay_contents(&mut document, ui);
             });
         self.ui_document = document;
+        self.show_relay_qr_modal(ctx);
     }
 
     fn show_relay_contents(&mut self, document: &mut UiDocument, ui: &mut Ui) {

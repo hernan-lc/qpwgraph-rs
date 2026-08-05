@@ -13,7 +13,7 @@ path = "src/main.rs"
 default = ["pipewire", "alsa", "tray", "relay"]
 pipewire = ["pw-graph-backend/pipewire"]
 alsa = ["pw-graph-alsamidi/alsa"]
-relay = ["pw-graph-backend/relay", "pipewire"]
+relay = ["pw-graph-backend/relay", "pipewire", "dep:qrcode"]
 tray = ["dep:ksni"]
 
 [dependencies]
@@ -22,6 +22,7 @@ egui.workspace = true
 egui_extras.workspace = true
 rfd.workspace = true
 ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"], optional = true }
+qrcode = { workspace = true, optional = true }
 pw-graph-backend = { path = "../pw-graph-backend" }
 pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false }
 pw-graph-command = { path = "../pw-graph-command" }

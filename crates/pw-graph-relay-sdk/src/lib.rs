@@ -53,8 +53,9 @@
 //! repository.
 
 pub use pw_graph_relay::{
-    CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink, PeerInfo, RelayError,
-    RelayEvent, RelayResult, Roles, SessionId, SessionStatus, TransportPreference,
+    netlink::local_links, CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink,
+    PeerInfo, RelayError, RelayEvent, RelayResult, Roles, SessionId, SessionStatus,
+    TransportPreference,
 };
 
 use pw_graph_relay::{RelayEngine, RelayHandle};

@@ -56,6 +56,37 @@ data class UsbLinkInfo(
     val addr: String,
 )
 
+/** One usable local IPv4 link, ranked best-first by the native layer. */
+data class LocalLinkInfo(
+    val name: String,
+    val addr: String,
+    val kind: String,
+)
+
+/**
+ * Parse a scanned QR payload into `(target, pin)`. Accepts the app's own
+ * `qpw-relay://host:port?pin=123456` URI as well as a plain `host:port`
+ * string, so any generic QR carrying the address still works.
+ */
+fun parseRelayQr(raw: String): Pair<String, String?>? {
+    val text = raw.trim()
+    if (text.isEmpty()) return null
+    if (text.startsWith("qpw-relay://")) {
+        val rest = text.removePrefix("qpw-relay://")
+        val parts = rest.split('?', limit = 2)
+        val target = parts[0].trimEnd('/')
+        if (target.isEmpty()) return null
+        val pin = parts.getOrNull(1)
+            ?.split('&')
+            ?.firstOrNull { it.startsWith("pin=") }
+            ?.removePrefix("pin=")
+            ?.takeIf { it.isNotBlank() }
+        return target to pin
+    }
+    if (Regex("""^[\w.\-]+:\d+$""").matches(text)) return text to null
+    return null
+}
+
 /** A relay host seen on the local network during discovery. */
 data class DiscoveredPeer(
     val name: String,
@@ -93,6 +124,8 @@ data class RelayUiState(
     val discoveryMessage: String = "",
     // Auto-detected USB tether link, when one is up.
     val usbLink: UsbLinkInfo? = null,
+    // All usable local links, best-first; shown with the host port.
+    val localLinks: List<LocalLinkInfo> = emptyList(),
     // Selected tab.
     val mode: RelayMode = RelayMode.Receiver,
 )

@@ -1,4 +1,5 @@
 use super::QpwgraphApp;
+use eframe::egui::TextureHandle;
 use pw_graph_backend::{
     BackendError, BackendResult, RelayCodecKind, RelayEvent, RelayHostRequest, RelayLinkKind,
     RelayLocalLink, RelayPeerInfo, RelayRoles, RelaySessionId, RelayTransportPreference,
@@ -23,9 +24,15 @@ pub(crate) struct RelayUiState {
     pub(crate) discovery_active: bool,
     pub(crate) peers: Vec<RelayPeerInfo>,
     pub(crate) message: String,
+    /// Local IPv4 links, ranked best-first; refreshed on an interval.
+    pub(crate) links: Vec<RelayLocalLink>,
     /// Active USB tether link, when one is detected. USB is never a select
     /// option: `Auto` prefers it and the panel simply reports the link.
     pub(crate) usb_link: Option<RelayLocalLink>,
+    /// QR modal visibility and its cached payload/texture.
+    pub(crate) show_qr: bool,
+    pub(crate) qr_text: String,
+    pub(crate) qr_texture: Option<TextureHandle>,
     last_link_check: Option<Instant>,
 }
 
@@ -74,11 +81,12 @@ impl RelayUiState {
             .is_none_or(|at| at.elapsed() >= LINK_CHECK_INTERVAL);
         if refresh_due {
             self.last_link_check = Some(Instant::now());
-            self.usb_link = app
-                .driver
-                .relay_local_links()
-                .into_iter()
-                .find(|link| link.kind == RelayLinkKind::Usb);
+            self.links = app.driver.relay_local_links();
+            self.usb_link = self
+                .links
+                .iter()
+                .find(|link| link.kind == RelayLinkKind::Usb)
+                .cloned();
         }
         let events = app.driver.relay_events();
         for event in events {
@@ -118,6 +126,20 @@ impl RelayUiState {
             frame_ms: app.config.relay_frame_ms,
             transport: Self::transport(&app.config.relay_transport),
         }
+    }
+
+    /// Payload encoded in the "scan to connect" QR: the best-ranked local
+    /// address with the live control port and the pairing PIN. Links come
+    /// back USB-first, so a tethered phone scans the tether address.
+    pub(crate) fn qr_payload(app: &QpwgraphApp) -> Option<String> {
+        let port = app.driver.relay_status().host_port?;
+        let link = app.relay.links.first()?;
+        let pin = app.config.relay_host_pin.trim();
+        let mut payload = format!("qpw-relay://{}:{}", link.addr, port);
+        if !pin.is_empty() {
+            payload.push_str(&format!("?pin={pin}"));
+        }
+        Some(payload)
     }
 
     pub(crate) fn start_host(&mut self, app: &mut QpwgraphApp) {

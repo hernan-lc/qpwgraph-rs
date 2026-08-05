@@ -63,14 +63,28 @@ fn parse_transport(value: &str) -> TransportPreference {
 /// the desktop panel.
 fn usb_link_json() -> serde_json::Value {
     match pw_graph_relay_sdk::LocalLink::find_usb() {
-        Some(link) => json!({
-            "type": "usb_link",
-            "name": link.name,
-            "addr": link.addr.to_string(),
-            "kind": link.kind.as_str(),
-        }),
+        Some(link) => link_json(&link),
         None => json!({"type": "none"}),
     }
+}
+
+/// JSON snapshot of every usable local link, ranked best-first. Lets the UI
+/// render the addresses a peer should dial (with the host port appended).
+fn local_links_json() -> serde_json::Value {
+    let links: Vec<serde_json::Value> = pw_graph_relay_sdk::local_links()
+        .iter()
+        .map(link_json)
+        .collect();
+    json!({ "type": "links", "links": links })
+}
+
+fn link_json(link: &pw_graph_relay_sdk::LocalLink) -> serde_json::Value {
+    json!({
+        "type": "usb_link",
+        "name": link.name,
+        "addr": link.addr.to_string(),
+        "kind": link.kind.as_str(),
+    })
 }
 
 fn event_json(event: RelayEvent) -> serde_json::Value {
@@ -719,6 +733,14 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_usbLink(
     json_string(&mut env, usb_link_json()).unwrap_or(std::ptr::null_mut())
 }
 
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_localLinks(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jni::sys::jstring {
+    json_string(&mut env, local_links_json()).unwrap_or(std::ptr::null_mut())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,6 +763,27 @@ mod tests {
         if kind == Some("usb_link") {
             assert!(value.get("name").is_some());
             assert!(value.get("addr").is_some());
+        }
+    }
+
+    #[test]
+    fn local_links_json_lists_every_link_with_kind() {
+        let value = local_links_json();
+        assert_eq!(
+            value.get("type").and_then(|field| field.as_str()),
+            Some("links")
+        );
+        let links = value
+            .get("links")
+            .and_then(|field| field.as_array())
+            .unwrap();
+        for link in links {
+            assert!(matches!(
+                link.get("kind").and_then(|field| field.as_str()),
+                Some("usb") | Some("wifi") | Some("bluetooth") | Some("lan")
+            ));
+            assert!(link.get("name").is_some());
+            assert!(link.get("addr").is_some());
         }
     }
 }

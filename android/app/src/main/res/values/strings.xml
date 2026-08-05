@@ -18,4 +18,6 @@
     <string name="relay_discovery_started">Discovery started</string>
     <string name="relay_discovery_stopped">Discovery stopped</string>
     <string name="relay_usb_detected">USB tethering detected: %1$s · %2$s — preferred automatically</string>
+    <string name="relay_qr_applied">Filled %1$s from the QR code</string>
+    <string name="relay_qr_invalid">That QR code is not a relay address</string>
 </resources>

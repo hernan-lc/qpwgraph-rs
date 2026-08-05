@@ -65,9 +65,30 @@ impl QpwgraphApp {
                     if let Some(port) = self.driver.relay_status().host_port {
                         ui.label(self.tf("relay.listening", &[("port", port.to_string())]));
                     }
+                    if document_button(
+                        document,
+                        ui,
+                        "relay.panel.host.qr",
+                        self.i18n.text("relay.show_qr"),
+                        true,
+                    ) {
+                        self.relay.show_qr = true;
+                    }
                 }
             });
             self.show_relay_usb_status(ui);
+            if self.driver.relay_status().host_active {
+                if let Some(port) = self.driver.relay_status().host_port {
+                    let links = self.relay.links.clone();
+                    for link in &links {
+                        ui.label(
+                            RichText::new(format!("{} · {}:{}", link.name, link.addr, port))
+                                .small()
+                                .weak(),
+                        );
+                    }
+                }
+            }
             ui.label(
                 RichText::new(self.i18n.text("relay.emitter_hint"))
                     .small()

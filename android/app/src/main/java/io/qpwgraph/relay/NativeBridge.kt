@@ -63,4 +63,7 @@ internal object NativeBridge {
     // Link detection -----------------------------------------------------
     /** JSON snapshot of the active USB tether link, or `{"type":"none"}`. */
     external fun usbLink(): String
+
+    /** JSON snapshot of all usable local links, ranked best-first. */
+    external fun localLinks(): String
 }

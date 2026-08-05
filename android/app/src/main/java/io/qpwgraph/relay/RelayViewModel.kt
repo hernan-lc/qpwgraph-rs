@@ -436,39 +436,59 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ------------------------------------------------------------------
-    // USB tether auto-detection
+    // Local link detection (USB tether + host addresses)
     // ------------------------------------------------------------------
 
     /**
-     * Poll the native layer for an active USB tether. USB is never a
-     * transport choice: `auto` prefers it, the UI only reports the link.
+     * Poll the native layer for local links. USB is never a transport
+     * choice: `auto` prefers it, the UI only reports the link. The full
+     * list also feeds the Emitter tab's "reachable at" addresses.
      */
     private fun startUsbPolling() {
         usbPolling?.cancel()
         usbPolling = viewModelScope.launch(Dispatchers.IO) {
             while (true) {
-                refreshUsbLink()
+                refreshLinks()
                 delay(USB_LINK_POLL_INTERVAL_MS)
             }
         }
     }
 
-    private fun refreshUsbLink() {
+    private fun refreshLinks() {
         val response = try {
-            JSONObject(NativeBridge.usbLink())
+            JSONObject(NativeBridge.localLinks())
         } catch (_: Exception) {
             return
         }
-        val link = if (response.optString("type") == "usb_link") {
-            UsbLinkInfo(
-                name = response.optString("name"),
-                addr = response.optString("addr"),
+        if (response.optString("type") != "links") return
+        val linksJson = response.optJSONArray("links") ?: return
+        val links = (0 until linksJson.length()).map { index ->
+            val link = linksJson.getJSONObject(index)
+            LocalLinkInfo(
+                name = link.optString("name"),
+                addr = link.optString("addr"),
+                kind = link.optString("kind"),
             )
-        } else {
-            null
         }
-        if (link != mutableState.value.usbLink) {
-            setState { it.copy(usbLink = link) }
+        val usb = links.firstOrNull { it.kind == "usb" }?.let { UsbLinkInfo(it.name, it.addr) }
+        val current = mutableState.value
+        if (links != current.localLinks || usb != current.usbLink) {
+            setState { it.copy(localLinks = links, usbLink = usb) }
+        }
+    }
+
+    /** Fill target (and PIN, when the QR carries one) from a scanned code. */
+    fun applyScannedQr(raw: String) {
+        val parsed = parseRelayQr(raw)
+        if (parsed == null) {
+            setState { it.copy(message = text(R.string.relay_qr_invalid)) }
+            return
+        }
+        val (target, pin) = parsed
+        val settings = mutableState.value.settings
+        update(settings.copy(target = target, pin = pin ?: settings.pin))
+        setState {
+            it.copy(message = text(R.string.relay_qr_applied, target))
         }
     }
 

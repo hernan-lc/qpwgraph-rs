@@ -8,7 +8,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,7 +22,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -25,23 +33,37 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Link options offered in the UI. USB is deliberately absent: the relay
  * auto-detects an active USB tether and prefers it under `auto`. */
@@ -65,11 +87,17 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
     var permissionRequested by remember { mutableStateOf(false) }
+    var showScanner by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissions ->
         val granted = permissions[Manifest.permission.RECORD_AUDIO] == true
         if (granted) viewModel.connect()
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) showScanner = true
     }
 
     fun connectWithPermission() {
@@ -87,6 +115,15 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
         }
     }
 
+    fun openScanner() {
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) showScanner = true
+        else cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
     MaterialTheme {
         Column(
             modifier = Modifier
@@ -100,11 +137,20 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
             RelayTabs(mode = state.mode, onSelected = viewModel::setMode)
             UsbStatus(link = state.usbLink)
             when (state.mode) {
-                RelayMode.Receiver -> ReceiverTab(state, viewModel, ::connectWithPermission)
+                RelayMode.Receiver -> ReceiverTab(state, viewModel, ::connectWithPermission, ::openScanner)
                 RelayMode.Emitter -> EmitterTab(state, viewModel)
                 RelayMode.Discover -> DiscoverTab(state, viewModel)
             }
         }
+    }
+    if (showScanner) {
+        QrScannerDialog(
+            onDetected = { value ->
+                showScanner = false
+                viewModel.applyScannedQr(value)
+            },
+            onDismiss = { showScanner = false },
+        )
     }
 }
 
@@ -136,20 +182,113 @@ private fun UsbStatus(link: UsbLinkInfo?) {
     }
 }
 
+/** Camera preview that decodes QR codes and reports the first payload. */
+@Composable
+private fun QrScannerDialog(onDetected: (String) -> Unit, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val executor = remember { Executors.newSingleThreadExecutor() }
+    val scanner = remember {
+        BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build(),
+        )
+    }
+    val detected = remember { AtomicBoolean(false) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    DisposableEffect(Unit) {
+        onDispose {
+            cameraProvider?.unbindAll()
+            executor.shutdown()
+            scanner.close()
+        }
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(320.dp)
+                .clip(RoundedCornerShape(16.dp)),
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).also { previewView ->
+                        val future = ProcessCameraProvider.getInstance(ctx)
+                        future.addListener({
+                            val provider = future.get()
+                            cameraProvider = provider
+                            val preview = Preview.Builder().build().also { built ->
+                                built.setSurfaceProvider(previewView.surfaceProvider)
+                            }
+                            val analysis = ImageAnalysis.Builder()
+                                .setBackpressureStrategy(
+                                    ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST,
+                                )
+                                .build()
+                            analysis.setAnalyzer(executor) { proxy ->
+                                val image = proxy.image
+                                if (image == null || detected.get()) {
+                                    proxy.close()
+                                    return@setAnalyzer
+                                }
+                                val input = InputImage.fromMediaImage(
+                                    image,
+                                    proxy.imageInfo.rotationDegrees,
+                                )
+                                scanner.process(input)
+                                    .addOnSuccessListener { codes ->
+                                        val value = codes.firstNotNullOfOrNull { it.rawValue }
+                                        if (value != null && detected.compareAndSet(false, true)) {
+                                            onDetected(value)
+                                        }
+                                    }
+                                    .addOnCompleteListener { proxy.close() }
+                            }
+                            provider.unbindAll()
+                            provider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                preview,
+                                analysis,
+                            )
+                        }, ContextCompat.getMainExecutor(ctx))
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
 @Composable
 private fun ReceiverTab(
     state: RelayUiState,
     viewModel: RelayViewModel,
     connectWithPermission: () -> Unit,
+    openScanner: () -> Unit,
 ) {
-    OutlinedTextField(
-        value = state.settings.target,
-        onValueChange = { viewModel.update(state.settings.copy(target = it)) },
-        label = { Text("Host address") },
-        placeholder = { Text("192.168.1.20:48123") },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = state.settings.target,
+            onValueChange = { viewModel.update(state.settings.copy(target = it)) },
+            label = { Text("Host address") },
+            placeholder = { Text("192.168.1.20:48123") },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+        )
+        OutlinedButton(onClick = openScanner, modifier = Modifier.padding(top = 8.dp)) {
+            Text("Scan QR")
+        }
+    }
     OutlinedTextField(
         value = state.settings.pin,
         onValueChange = { viewModel.update(state.settings.copy(pin = it)) },
@@ -272,6 +411,21 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
             if (state.hostPort != null) Text("Listening on port ${state.hostPort}")
             if (state.hostMessage.isNotBlank()) Text(state.hostMessage)
             Text("Level: ${(state.hostRms * 100).toInt()}%")
+        }
+    }
+    val hostPort = state.hostPort
+    if (state.hostState == RelayHostState.Running &&
+        hostPort != null &&
+        state.localLinks.isNotEmpty()
+    ) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Reachable at", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(6.dp))
+                state.localLinks.forEach { link ->
+                    Text("${link.addr}:$hostPort (${link.name})")
+                }
+            }
         }
     }
     if (state.sessions.isNotEmpty()) {
