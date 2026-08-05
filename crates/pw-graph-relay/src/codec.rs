@@ -9,6 +9,13 @@ use crate::protocol::CodecKind;
 use crate::RelayError;
 use std::fmt;
 
+/// Per-channel Opus bitrate. Generous for speech at 48 kHz while keeping a
+/// 10 ms frame comfortably inside one datagram.
+const OPUS_BITRATE_PER_CHANNEL: i32 = 64_000;
+/// Encoder complexity (0–10). Mid-range trades a little quality for markedly
+/// shorter encode times on the send path.
+const OPUS_COMPLEXITY: i32 = 5;
+
 /// Encode one frame of interleaved f32 PCM into `out`.
 pub trait AudioEncode: Send {
     fn encode(&mut self, pcm: &[f32], out: &mut Vec<u8>) -> Result<usize, RelayError>;
@@ -131,8 +138,31 @@ struct OpusEncoderState {
 impl OpusEncoderState {
     fn new(format: AudioFormat) -> Result<Self, RelayError> {
         let channels = opus_channels(format.channels)?;
-        let encoder = opus::Encoder::new(format.sample_rate, channels, opus::Application::Voip)
-            .map_err(|error| RelayError::Codec(format!("Opus encoder init: {error}")))?;
+        // `LowDelay` is Opus's RESTRICTED_LOWDELAY mode: CELT only, with no
+        // SILK layer and therefore none of its 5 ms encoder lookahead. That
+        // costs inband FEC — a SILK feature — but the receiver already
+        // conceals losses through the jitter buffer, and the lookahead is
+        // pure added delay on every single frame.
+        let mut encoder =
+            opus::Encoder::new(format.sample_rate, channels, opus::Application::LowDelay)
+                .map_err(|error| RelayError::Codec(format!("Opus encoder init: {error}")))?;
+        let setting = |result: Result<(), opus::Error>, what: &str| {
+            result.map_err(|error| RelayError::Codec(format!("Opus {what}: {error}")))
+        };
+        setting(
+            encoder.set_bitrate(opus::Bitrate::Bits(
+                OPUS_BITRATE_PER_CHANNEL * i32::from(format.channels),
+            )),
+            "bitrate",
+        )?;
+        // Constrained VBR keeps quality adaptive without letting a loud
+        // transient inflate one packet, which would add serialization delay
+        // exactly when the audio matters most.
+        setting(encoder.set_vbr(true), "vbr")?;
+        setting(encoder.set_vbr_constraint(true), "constrained vbr")?;
+        // Mid complexity: the encoder runs between two realtime deadlines,
+        // so shaving encode time is worth more than the last decibel.
+        setting(encoder.set_complexity(OPUS_COMPLEXITY), "complexity")?;
         Ok(Self { encoder })
     }
 }

@@ -62,6 +62,55 @@ fn ramp(samples: usize) -> Vec<f32> {
     (0..samples).map(|i| i as f32 / samples as f32).collect()
 }
 
+/// One codec frame at the default configuration (10 ms, mono, 48 kHz).
+const FRAME: usize = 480;
+/// Frames the producer may run ahead of what the consumer has taken
+/// delivery of. The relay keeps only the freshest couple of frames, so a
+/// test that races further ahead than this would see its own surplus
+/// discarded — correctly — as stale backlog.
+const PIPELINE_SLACK: usize = 2;
+
+/// Empty a playback queue completely, appending everything to `received`.
+///
+/// The relay caps its queues at a small multiple of the frame size on
+/// purpose, so a consumer that takes only one buffer per poll can fall
+/// behind and lose audio that the transport delivered correctly.
+fn drain_playback(handle: &RelayHandle, received: &mut Vec<f32>) {
+    let mut buffer = [0.0f32; FRAME];
+    loop {
+        let count = handle.pull_playback(&mut buffer);
+        if count == 0 {
+            return;
+        }
+        received.extend_from_slice(&buffer[..count]);
+    }
+}
+
+/// Feed a signal the way a capture callback does: one frame at a time,
+/// draining the far end as we go.
+///
+/// Pushing the whole signal in a single call would be dropped as stale
+/// backlog — the queues keep only the freshest couple of frames so that a
+/// stalled consumer costs a glitch instead of permanent added latency. The
+/// producer therefore paces itself against actual delivery rather than a
+/// fixed sleep, which also keeps the test honest on a loaded machine.
+fn stream_frames(push: impl Fn(&[f32]), receiver: &RelayHandle, signal: &[f32]) -> Vec<f32> {
+    let mut received = Vec::new();
+    for (index, chunk) in signal.chunks(FRAME).enumerate() {
+        push(chunk);
+        let settled = index.saturating_sub(PIPELINE_SLACK) * FRAME;
+        wait_until(|| {
+            drain_playback(receiver, &mut received);
+            received.len() >= settled
+        });
+    }
+    wait_until(|| {
+        drain_playback(receiver, &mut received);
+        received.len() >= signal.len()
+    });
+    received
+}
+
 fn establish(
     host: &RelayHandle,
     client: &RelayHandle,
@@ -102,18 +151,14 @@ fn client_emit_delivers_audio_to_host() {
         Roles::emit_only(),
     );
 
-    const FRAME: usize = 960;
     let signal = ramp(FRAME * 10);
-    client_handle.push_capture(&signal);
-
-    let mut received = Vec::new();
-    let mut buffer = [0.0f32; FRAME];
+    let received = stream_frames(
+        |frame| client_handle.push_capture(frame),
+        &host_handle,
+        &signal,
+    );
     assert!(
-        wait_until(|| {
-            let count = host_handle.pull_playback(&mut buffer);
-            received.extend_from_slice(&buffer[..count]);
-            received.len() >= signal.len()
-        }),
+        received.len() >= signal.len(),
         "host should receive all emitted samples, got {}",
         received.len()
     );
@@ -143,18 +188,14 @@ fn host_sends_audio_to_receiving_client() {
         Roles::receive_only(),
     );
 
-    const FRAME: usize = 960;
     let signal = ramp(FRAME * 8);
-    host_handle.push_capture(&signal);
-
-    let mut received = Vec::new();
-    let mut buffer = [0.0f32; FRAME];
+    let received = stream_frames(
+        |frame| host_handle.push_capture(frame),
+        &client_handle,
+        &signal,
+    );
     assert!(
-        wait_until(|| {
-            let count = client_handle.pull_playback(&mut buffer);
-            received.extend_from_slice(&buffer[..count]);
-            received.len() >= signal.len()
-        }),
+        received.len() >= signal.len(),
         "client should receive all host samples, got {}",
         received.len()
     );
@@ -181,22 +222,74 @@ fn host_capture_fans_out_to_multiple_receivers() {
         Roles::receive_only(),
     );
 
-    const FRAME: usize = 960;
     let signal = ramp(FRAME * 4);
-    host_handle.push_capture(&signal);
     let mut received_a = Vec::new();
     let mut received_b = Vec::new();
-    let mut buffer_a = [0.0f32; FRAME];
-    let mut buffer_b = [0.0f32; FRAME];
+    for (index, chunk) in signal.chunks(FRAME).enumerate() {
+        host_handle.push_capture(chunk);
+        let settled = index.saturating_sub(PIPELINE_SLACK) * FRAME;
+        wait_until(|| {
+            drain_playback(&client_a_handle, &mut received_a);
+            drain_playback(&client_b_handle, &mut received_b);
+            received_a.len() >= settled && received_b.len() >= settled
+        });
+    }
     assert!(wait_until(|| {
-        let count_a = client_a_handle.pull_playback(&mut buffer_a);
-        let count_b = client_b_handle.pull_playback(&mut buffer_b);
-        received_a.extend_from_slice(&buffer_a[..count_a]);
-        received_b.extend_from_slice(&buffer_b[..count_b]);
+        drain_playback(&client_a_handle, &mut received_a);
+        drain_playback(&client_b_handle, &mut received_b);
         received_a.len() >= signal.len() && received_b.len() >= signal.len()
     }));
     assert_eq!(&received_a[..signal.len()], &signal[..]);
     assert_eq!(&received_b[..signal.len()], &signal[..]);
+}
+
+#[test]
+fn frames_traverse_the_relay_promptly() {
+    let (_host, host_handle, port) = host_engine("123456");
+    let (_client, client_handle) = client_engine();
+    establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::emit_only(),
+    );
+
+    // Prime the path: the jitter buffer holds the first frames back until it
+    // has an anchor, which is startup cost rather than steady-state delay.
+    let warmup = ramp(FRAME * 8);
+    stream_frames(
+        |frame| client_handle.push_capture(frame),
+        &host_handle,
+        &warmup,
+    );
+
+    // Now time one frame from capture to playback. Over loopback this is
+    // dominated by the relay's own buffering, which is exactly what the
+    // queue depths and jitter tolerance are there to bound.
+    let mut worst = Duration::ZERO;
+    for _ in 0..10 {
+        let mut received = Vec::new();
+        let sent = Instant::now();
+        client_handle.push_capture(&ramp(FRAME));
+        assert!(
+            wait_until(|| {
+                drain_playback(&host_handle, &mut received);
+                received.len() >= FRAME
+            }),
+            "a frame must arrive within the test timeout"
+        );
+        worst = worst.max(sent.elapsed());
+    }
+
+    // Generous next to the ~10 ms design target: this runs alongside the
+    // rest of the suite on shared cores, and the point is to catch a
+    // regression back to the hundreds of milliseconds an unbounded queue
+    // used to accumulate, not to measure the network.
+    assert!(
+        worst < Duration::from_millis(150),
+        "worst-case capture-to-playback delay was {worst:?}"
+    );
 }
 
 #[test]

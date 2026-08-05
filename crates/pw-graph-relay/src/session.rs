@@ -17,6 +17,7 @@ use crate::pairing::{generate_salt, pair_digest, verify_digest};
 use crate::protocol::{
     read_frame, write_frame, CodecKind, ControlMessage, DeviceKind, Roles, PROTOCOL_VERSION,
 };
+use crate::realtime::{request_realtime_thread, tune_audio_socket};
 use crate::{EngineInner, PeerInfo, RelayError, RelayEvent, RelayResult, SessionId, SessionRecord};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,9 +33,17 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(6);
 const RESUME_GRACE: Duration = Duration::from_secs(15);
 /// Client-side reconnect attempts before a session is declared lost.
 const RESUME_ATTEMPTS: u32 = 3;
-/// Initial buffering before playback starts: 3 frames ≈ 60 ms at 20 ms.
-const JITTER_DEPTH_FRAMES: usize = 3;
+/// Initial buffering before playback starts, in frames. Two is the smallest
+/// depth that still lets the sender's keyframe anchor the stream when its
+/// first two datagrams arrive out of order; the buffer's reorder tolerance
+/// adapts from there, and the receive queue's target depth bounds what the
+/// priming delay can turn into. At the default 10 ms frame this is 20 ms.
+const JITTER_DEPTH_FRAMES: usize = 2;
 const MAX_DATAGRAM: usize = 8192;
+/// How long the sender parks waiting for a complete frame. The condvar wakes
+/// it as soon as one is ready, so this only bounds how long teardown takes to
+/// be noticed.
+const FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Bookkeeping for a running host listener.
 pub(crate) struct HostRecord {
@@ -175,6 +184,7 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
         Ok(socket) => socket,
         Err(_) => return,
     };
+    tune_audio_socket(&socket);
     let Ok(audio_port) = socket.local_addr().map(|addr| addr.port()) else {
         return;
     };
@@ -515,6 +525,7 @@ fn client_thread(
             return;
         }
     };
+    tune_audio_socket(&socket);
     let host_audio_addr = SocketAddr::new(target.ip(), audio_port);
     // Teach the host our UDP address before real audio flows.
     let _ = socket.send_to(&announce_packet(config.codec), host_audio_addr);
@@ -732,7 +743,13 @@ fn run_rx(
     socket: Arc<UdpSocket>,
     host_side: bool,
 ) {
+    request_realtime_thread();
     let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
+    // Bound what a stalled playback consumer can turn into standing delay:
+    // decoded audio waiting here is latency, not safety.
+    inner
+        .incoming
+        .set_target_depth(record.format.frame_samples() * crate::PLAYBACK_DEPTH_FRAMES);
     let mut decoder = match make_decoder(record.codec, record.format) {
         Ok(decoder) => decoder,
         Err(error) => {
@@ -828,11 +845,19 @@ fn run_rx(
 
 /// Send loop: outgoing queue → encoder → datagrams.
 ///
-/// Pacing comes from the capture side filling the queue in real time; when
-/// the queue is empty the thread idles briefly. The peer address is re-read
-/// per frame so a roaming client (new source address) is followed without a
-/// restart.
+/// Pacing comes from the capture side filling the queue in real time. The
+/// thread parks on the queue's condvar rather than polling, so a completed
+/// frame is encoded and sent the moment the capture callback delivers it
+/// instead of up to a poll interval later; the wait timeout exists only so
+/// teardown is noticed promptly. The peer address is re-read per frame so a
+/// roaming client (new source address) is followed without a restart.
 fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSocket>) {
+    request_realtime_thread();
+    // Same reasoning as the receive side: captured audio that cannot be sent
+    // promptly is better dropped than delivered late.
+    record
+        .outgoing
+        .set_target_depth(record.format.frame_samples() * crate::CAPTURE_DEPTH_FRAMES);
     let mut encoder = match make_encoder(record.codec, record.format) {
         Ok(encoder) => encoder,
         Err(error) => {
@@ -859,8 +884,10 @@ fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSo
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
-        let Some(samples) = record.outgoing.pop_exact(frame_samples) else {
-            std::thread::sleep(Duration::from_millis(2));
+        let Some(samples) = record
+            .outgoing
+            .pop_exact_timeout(frame_samples, FRAME_WAIT_TIMEOUT)
+        else {
             continue;
         };
         match encoder.encode(&samples, &mut payload) {

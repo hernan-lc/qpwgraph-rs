@@ -110,6 +110,16 @@ pub enum JitterPop {
     Lost,
 }
 
+/// Smallest reorder tolerance: one frame must be queued past a gap before
+/// the gap counts as a loss.
+const MIN_LOOKAHEAD: usize = 1;
+/// Largest reorder tolerance. Each step costs one frame of concealment delay
+/// on a genuinely lost packet, so the ceiling stays low.
+const MAX_LOOKAHEAD: usize = 4;
+/// In-order frames that must pass before the tolerance relaxes by one step.
+/// At a 10 ms frame this is about two and a half seconds of clean audio.
+const LOOKAHEAD_DECAY_POPS: u32 = 250;
+
 /// A small reordering/loss buffer keyed by sequence number.
 ///
 /// Playback starts once `depth_frames` packets are queued, then advances one
@@ -120,12 +130,23 @@ pub enum JitterPop {
 /// the first packet that arrived while the buffer was empty, refined by
 /// [`JitterBuffer::set_anchor`] when the sender marks a keyframe (its first
 /// frame). This keeps priming correct across the u32 wraparound.
+///
+/// # Adaptive reorder tolerance
+///
+/// A gap is only called lost once `lookahead` later frames are queued behind
+/// it. That tolerance is not fixed: it grows when the network actually
+/// delivers packets late, and decays back to [`MIN_LOOKAHEAD`] after a long
+/// clean run. A clean link therefore pays no reordering delay at all, while a
+/// jittery one buys tolerance only for as long as it needs it — the reason to
+/// adapt rather than pick one conservative constant for every network.
 pub struct JitterBuffer {
     queued: BTreeMap<u32, Vec<u8>>,
     next_sequence: Option<u32>,
     primed: bool,
     anchor: Option<u32>,
     depth_frames: usize,
+    lookahead: usize,
+    clean_pops: u32,
     pub frames_received: u64,
     pub frames_dropped_late: u64,
     pub frames_lost: u64,
@@ -139,10 +160,17 @@ impl JitterBuffer {
             primed: false,
             anchor: None,
             depth_frames: depth_frames.max(1),
+            lookahead: MIN_LOOKAHEAD,
+            clean_pops: 0,
             frames_received: 0,
             frames_dropped_late: 0,
             frames_lost: 0,
         }
+    }
+
+    /// Current reorder tolerance in frames.
+    pub fn lookahead(&self) -> usize {
+        self.lookahead
     }
 
     pub fn queue_len(&self) -> usize {
@@ -168,6 +196,10 @@ impl JitterBuffer {
             let distance = sequence.wrapping_sub(next) as i32;
             if distance < 0 {
                 self.frames_dropped_late += 1;
+                // A frame that arrived after its slot passed is direct
+                // evidence the current tolerance is too tight for this link.
+                self.lookahead = (self.lookahead + 1).min(MAX_LOOKAHEAD);
+                self.clean_pops = 0;
                 return false;
             }
         } else if self.queued.is_empty() && self.anchor.is_none() {
@@ -209,22 +241,38 @@ impl JitterBuffer {
         let next = self.next_sequence.expect("primed buffers track a sequence");
         if let Some(payload) = self.queued.remove(&next) {
             self.next_sequence = Some(next.wrapping_add(1));
+            self.note_clean_pop();
             return JitterPop::Frame(payload);
         }
 
-        // The expected frame is missing. Only declare it lost when a later
-        // frame is already queued; otherwise it may simply still be in
+        // The expected frame is missing. Only declare it lost once enough
+        // later frames are queued; until then it may simply still be in
         // flight, and the caller should try again on the next datagram.
         let queued_ahead = self
             .queued
             .keys()
-            .any(|sequence| (sequence.wrapping_sub(next) as i32) > 0);
-        if queued_ahead {
+            .filter(|sequence| (sequence.wrapping_sub(next) as i32) > 0)
+            .count();
+        if queued_ahead >= self.lookahead {
             self.next_sequence = Some(next.wrapping_add(1));
             self.frames_lost += 1;
+            self.clean_pops = 0;
             JitterPop::Lost
         } else {
             JitterPop::Buffering
+        }
+    }
+
+    /// Relax the reorder tolerance one step after a long clean run, so a
+    /// brief burst of jitter does not leave the stream permanently delayed.
+    fn note_clean_pop(&mut self) {
+        if self.lookahead <= MIN_LOOKAHEAD {
+            return;
+        }
+        self.clean_pops += 1;
+        if self.clean_pops >= LOOKAHEAD_DECAY_POPS {
+            self.lookahead -= 1;
+            self.clean_pops = 0;
         }
     }
 }
@@ -315,6 +363,67 @@ mod tests {
         // A late duplicate of frame 1 is dropped, not replayed.
         assert!(!buffer.push(1, vec![1]));
         assert_eq!(buffer.frames_dropped_late, 1);
+    }
+
+    #[test]
+    fn lookahead_starts_minimal_and_grows_on_late_arrivals() {
+        let mut buffer = JitterBuffer::new(1);
+        assert_eq!(buffer.lookahead(), MIN_LOOKAHEAD);
+        assert!(buffer.push(0, vec![0]));
+        assert!(buffer.push(2, vec![2]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
+        // One frame queued past the gap is enough at the minimum tolerance.
+        assert_eq!(buffer.pop(), JitterPop::Lost);
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
+        // Frame 1 finally shows up too late; the link has proven it reorders.
+        assert!(!buffer.push(1, vec![1]));
+        assert_eq!(buffer.lookahead(), MIN_LOOKAHEAD + 1);
+    }
+
+    #[test]
+    fn a_grown_lookahead_waits_for_more_evidence_before_declaring_loss() {
+        let mut buffer = JitterBuffer::new(1);
+        assert!(buffer.push(0, vec![0]));
+        assert!(buffer.push(2, vec![2]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
+        assert_eq!(buffer.pop(), JitterPop::Lost);
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
+        assert!(!buffer.push(1, vec![1]));
+        assert_eq!(buffer.lookahead(), 2);
+
+        // With tolerance 2, a single frame past the gap no longer triggers
+        // concealment: frame 4 alone leaves frame 3 a chance to arrive.
+        assert!(buffer.push(4, vec![4]));
+        assert_eq!(buffer.pop(), JitterPop::Buffering);
+        assert!(buffer.push(3, vec![3]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![3]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![4]));
+        assert_eq!(
+            buffer.frames_lost, 1,
+            "frame 3 was recovered, not concealed"
+        );
+    }
+
+    #[test]
+    fn lookahead_decays_after_a_clean_run() {
+        let mut buffer = JitterBuffer::new(1);
+        assert!(buffer.push(0, vec![0]));
+        assert!(buffer.push(2, vec![2]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
+        assert_eq!(buffer.pop(), JitterPop::Lost);
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
+        assert!(!buffer.push(1, vec![1]));
+        assert_eq!(buffer.lookahead(), 2);
+
+        for sequence in 3..(3 + LOOKAHEAD_DECAY_POPS) {
+            assert!(buffer.push(sequence, vec![0]));
+            assert!(matches!(buffer.pop(), JitterPop::Frame(_)));
+        }
+        assert_eq!(
+            buffer.lookahead(),
+            MIN_LOOKAHEAD,
+            "a clean link must not stay penalised forever"
+        );
     }
 
     #[test]

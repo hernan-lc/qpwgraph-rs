@@ -2,22 +2,60 @@ use super::QpwgraphApp;
 use eframe::egui::TextureHandle;
 use pw_graph_backend::{
     relay_build_qr_payload, relay_parse_qr_payload, BackendError, BackendResult, RelayCodecKind,
-    RelayEvent, RelayHostRequest, RelayLinkKind, RelayLocalLink, RelayPeerInfo, RelayRoles,
-    RelaySessionId, RelayTransportPreference,
+    RelayDeviceKind, RelayEvent, RelayHostRequest, RelayLinkKind, RelayLocalLink, RelayPeerInfo,
+    RelayRoles, RelaySessionId, RelaySessionStatus, RelayTransportPreference,
 };
+use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// Tabs inside the relay panel, one per relay activity.
+/// Tabs inside the relay panel.
+///
+/// Discovered devices and live sessions are one list, not two: a phone the
+/// user just connected to is the same row it was a moment earlier, only in a
+/// different state. Hosting is the one genuinely separate activity, so it
+/// keeps its own tab.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) enum RelayPanelTab {
     #[default]
-    Emitter,
-    Receiver,
-    Discover,
-    Sessions,
+    Connections,
+    Host,
 }
+
+/// What a device row in the Connections list is currently doing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RelayDeviceState {
+    /// Discovered and idle: offer a connect action.
+    Available,
+    /// A connect attempt is in flight; no session exists yet.
+    Connecting,
+    /// A live session, identified so the row can disconnect it.
+    Connected(RelaySessionId),
+}
+
+/// One row of the unified device list, built by joining discovered peers
+/// with live sessions so a device never appears twice.
+#[derive(Clone, Debug)]
+pub(crate) struct RelayDeviceRow {
+    pub(crate) name: String,
+    pub(crate) kind: RelayDeviceKind,
+    pub(crate) addr: SocketAddr,
+    pub(crate) state: RelayDeviceState,
+    /// Session details, present only for connected rows.
+    pub(crate) session: Option<RelaySessionStatus>,
+}
+
+impl RelayDeviceRow {
+    pub(crate) fn is_connected(&self) -> bool {
+        matches!(self.state, RelayDeviceState::Connected(_))
+    }
+}
+
+/// How long a connect attempt shows as "Connecting…" before the row falls
+/// back to `Available`. The engine reports failures through `RelayEvent`,
+/// but a silently dropped attempt must not pin the row forever.
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
 pub(crate) struct RelayUiState {
@@ -25,13 +63,22 @@ pub(crate) struct RelayUiState {
     pub(crate) discovery_active: bool,
     pub(crate) peers: Vec<RelayPeerInfo>,
     pub(crate) message: String,
-    /// Manual address typed on the Discover tab; accepts `host:port` or a
-    /// pasted `qpw-relay://` QR payload. Kept out of `AppConfig` because it
-    /// is a one-shot convenience, not a setting.
+    /// Manual address typed under "Add a device manually"; accepts
+    /// `host:port` or a pasted `qpw-relay://` QR payload. Kept out of
+    /// `AppConfig` because it is a one-shot convenience, not a setting.
     pub(crate) quick_target: String,
-    /// Set when the most recent discovery start failed, so the Discover tab
-    /// does not retry automatically on every frame.
+    /// Set when the most recent discovery start failed, so the panel does
+    /// not retry automatically on every frame.
     pub(crate) discovery_failed: bool,
+    /// Address of an in-flight connect attempt and when it started.
+    pub(crate) connecting: Option<(SocketAddr, Instant)>,
+    /// Row the user expanded for connection details, keyed by session id.
+    pub(crate) expanded: Option<u64>,
+    /// Disclosure state for the manual-address and advanced-settings blocks.
+    pub(crate) show_manual: bool,
+    pub(crate) show_advanced: bool,
+    /// Latest RMS reported per session, for the connected rows' level bars.
+    pub(crate) levels: HashMap<u64, f32>,
     /// Local IPv4 links, ranked best-first; refreshed on an interval.
     pub(crate) links: Vec<RelayLocalLink>,
     /// Active USB tether link, when one is detected. USB is never a select
@@ -111,17 +158,83 @@ impl RelayUiState {
                     self.message = app.tf("relay.peer_lost", &[("name", peer.name)]);
                 }
                 RelayEvent::SessionEstablished { peer, .. } => {
+                    if self.connecting.is_some_and(|(addr, _)| addr == peer.addr) {
+                        self.connecting = None;
+                    }
                     self.message = app.tf("relay.session_connected", &[("name", peer.name)]);
                 }
-                RelayEvent::SessionLost { reason, .. } => {
+                RelayEvent::SessionLost { reason, id } => {
+                    self.levels.remove(&id.0);
+                    if self.expanded == Some(id.0) {
+                        self.expanded = None;
+                    }
                     self.message = app.tf("relay.session_lost", &[("reason", reason)]);
                 }
                 RelayEvent::Error { message } => {
+                    // A failed attempt must release the row, otherwise it
+                    // stays stuck on "Connecting…" with no way back.
+                    self.connecting = None;
                     self.message = app.tf("relay.error", &[("error", message)]);
                 }
-                RelayEvent::AudioLevel { .. } => {}
+                RelayEvent::AudioLevel { id, rms } => {
+                    self.levels.insert(id.0, rms);
+                }
             }
         }
+        if self
+            .connecting
+            .is_some_and(|(_, since)| since.elapsed() >= CONNECT_ATTEMPT_TIMEOUT)
+        {
+            self.connecting = None;
+        }
+    }
+
+    /// The unified device list: live sessions first, then discovered hosts
+    /// that are not already connected, then an in-flight attempt to an
+    /// address discovery has not reported (a manually typed or scanned one).
+    pub(crate) fn device_rows(&self, app: &QpwgraphApp) -> Vec<RelayDeviceRow> {
+        let sessions = app.driver.relay_status().sessions;
+        let mut rows: Vec<RelayDeviceRow> = sessions
+            .iter()
+            .map(|session| RelayDeviceRow {
+                name: session.peer.name.clone(),
+                kind: session.peer.kind,
+                addr: session.peer.addr,
+                state: RelayDeviceState::Connected(session.id),
+                session: Some(session.clone()),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.addr.cmp(&b.addr)));
+        let connected: Vec<SocketAddr> = rows.iter().map(|row| row.addr).collect();
+        let connecting = self.connecting.map(|(addr, _)| addr);
+        for peer in &self.peers {
+            if connected.contains(&peer.addr) {
+                continue;
+            }
+            rows.push(RelayDeviceRow {
+                name: peer.name.clone(),
+                kind: peer.kind,
+                addr: peer.addr,
+                state: if connecting == Some(peer.addr) {
+                    RelayDeviceState::Connecting
+                } else {
+                    RelayDeviceState::Available
+                },
+                session: None,
+            });
+        }
+        if let Some(addr) = connecting {
+            if !rows.iter().any(|row| row.addr == addr) {
+                rows.push(RelayDeviceRow {
+                    name: addr.to_string(),
+                    kind: RelayDeviceKind::Other,
+                    addr,
+                    state: RelayDeviceState::Connecting,
+                    session: None,
+                });
+            }
+        }
+        rows
     }
 
     pub(crate) fn host_request(&self, app: &QpwgraphApp) -> RelayHostRequest {
@@ -219,9 +332,22 @@ impl RelayUiState {
             &app.config.relay_client_pin,
             Self::role(&app.config.relay_role),
         ) {
-            Ok(()) => self.message = app.t("relay.connecting"),
-            Err(error) => self.message = app.tf("relay.error", &[("error", error.to_string())]),
+            Ok(()) => {
+                self.connecting = Some((target, Instant::now()));
+                self.message = app.t("relay.connecting");
+            }
+            Err(error) => {
+                self.connecting = None;
+                self.message = app.tf("relay.error", &[("error", error.to_string())]);
+            }
         }
+    }
+
+    /// Abandon an in-flight connect attempt. The engine has no cancel; the
+    /// row simply stops claiming to be connecting, and a session that does
+    /// arrive later still shows up as connected.
+    pub(crate) fn cancel_connect(&mut self) {
+        self.connecting = None;
     }
 
     pub(crate) fn disconnect(&mut self, app: &mut QpwgraphApp, session: RelaySessionId) {
@@ -231,12 +357,15 @@ impl RelayUiState {
         }
     }
 
-    pub(crate) fn toggle_discovery(&mut self, app: &mut QpwgraphApp) {
-        if self.discovery_active {
-            self.stop_discovery(app);
-        } else {
-            self.start_discovery(app);
-        }
+    /// Restart browsing from scratch, the way a Wi-Fi or Bluetooth panel's
+    /// refresh does: drop the stale peer list, re-prime the mDNS browse and
+    /// the USB probe, and rescan local links.
+    pub(crate) fn refresh(&mut self, app: &mut QpwgraphApp) {
+        self.stop_discovery(app);
+        self.peers.clear();
+        self.discovery_failed = false;
+        self.refresh_links(app);
+        self.start_discovery(app);
     }
 
     /// Begin browsing for relay hosts. Idempotent; failures are remembered

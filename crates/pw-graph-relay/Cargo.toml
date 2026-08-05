@@ -14,6 +14,7 @@ opus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 socket2.workspace = true
+libc.workspace = true
 thiserror.workspace = true
 mdns-sd.workspace = true
 netdev.workspace = true

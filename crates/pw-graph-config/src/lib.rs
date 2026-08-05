@@ -117,8 +117,13 @@ fn default_relay_codec() -> String {
     "opus".into()
 }
 
+/// Default audio packet duration. Ten milliseconds halves the codec-side
+/// latency floor of the previous 20 ms default at the cost of doubling the
+/// packet rate to 100/s, which local Wi-Fi and USB tether links carry
+/// comfortably. The relay panel's advanced settings still expose 5–60 ms for
+/// links that prefer fewer, larger packets.
 fn default_relay_frame_ms() -> u16 {
-    20
+    10
 }
 
 fn default_relay_transport() -> String {

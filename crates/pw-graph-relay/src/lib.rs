@@ -22,12 +22,13 @@ pub mod qr;
 pub mod usb_probe;
 
 mod queue;
+mod realtime;
 mod session;
 
 pub use codec::AudioFormat;
 pub use netlink::{LinkKind, LocalLink, TransportPreference};
 pub use protocol::{CodecKind, DeviceKind, Roles};
-pub use queue::{PcmQueue, DEFAULT_QUEUE_CAPACITY};
+pub use queue::{PcmQueue, CAPTURE_DEPTH_FRAMES, DEFAULT_QUEUE_CAPACITY, PLAYBACK_DEPTH_FRAMES};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -134,7 +135,7 @@ impl Default for EngineConfig {
             pin: String::new(),
             port: 0,
             codec: CodecKind::Opus,
-            frame_ms: 20,
+            frame_ms: 10,
             sample_rate: 48_000,
             channels: 1,
             client_roles: Roles::emit_only(),
@@ -525,11 +526,11 @@ mod tests {
     #[test]
     fn default_config_is_usable() {
         let config = EngineConfig::default();
-        assert_eq!(config.frame_ms, 20);
+        assert_eq!(config.frame_ms, 10);
         assert_eq!(config.sample_rate, 48_000);
         assert!(config.client_roles.emit);
         let format = AudioFormat::new(config.sample_rate, config.channels, config.frame_ms);
-        assert_eq!(format.frame_samples(), 960);
+        assert_eq!(format.frame_samples(), 480);
     }
 
     #[test]

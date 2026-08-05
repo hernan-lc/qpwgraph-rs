@@ -49,7 +49,7 @@ USB tether, shows it under the tab bar, and `Auto` prefers it.
 
 ## Pair by QR code
 
-The desktop Emitter tab renders the host's addresses and port and offers a
+The desktop Host tab renders the host's addresses and port and offers a
 **Show QR** button while the host runs. The QR carries a
 `qpw-relay://host:port?pin=123456` payload. In the Android Receiver tab, tap
 **Scan QR** (camera permission required) to fill in the address and PIN

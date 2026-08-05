@@ -132,9 +132,21 @@ belong on the control thread.
 
 The desktop app includes the relay panel when the default `relay` feature is
 enabled. Open **Relay** from the navigation rail to dock the panel on the
-right of the canvas; it has four tabs — **Emitter**, **Receiver**,
-**Discover**, and **Sessions** — covering host settings, connecting to a
-host, browsing the network, and live sessions. Relay settings are saved
+right of the canvas. It has two tabs:
+
+- **Connections** — one device list, in the shape of a system Bluetooth or
+  Wi-Fi pane. Discovered hosts and live sessions are the same rows in
+  different states: an available device offers **Connect**, a connecting one
+  shows a spinner and can be cancelled, and a connected one shows a live
+  level bar with disconnect and details actions. Connected devices are
+  grouped first. A refresh button in the header restarts the scan, and
+  disclosures below hold manual address entry and the advanced settings
+  (role, codec, frame duration, preferred link).
+- **Host** — device name, pairing PIN, control port, and the start/stop
+  action, plus the endpoint list and QR code while hosting.
+
+Discovery runs for as long as the panel is open, so the device list is
+already populated when you switch back to it. Relay settings are saved
 automatically in the app configuration.
 
 Starting a host or connecting to a peer creates two PipeWire virtual nodes:
@@ -144,23 +156,50 @@ receiving peers.
 
 ### Discovery and pairing
 
-The **Discover** tab starts browsing as soon as it opens. Hosts announce
-themselves over mDNS (`_qpw-relay._udp`), and USB tether subnets are probed
-directly because mDNS often does not cross a tether. Discovered hosts are
-listed with their name, device kind, and endpoint, and connect with one
-click. A quick-connect field on the same tab accepts a plain `host:port` or a
-pasted `qpw-relay://` QR payload for networks where mDNS is blocked.
+Browsing starts as soon as the panel opens. Hosts announce themselves over
+mDNS (`_qpw-relay._udp`), and USB tether subnets are probed directly because
+mDNS often does not cross a tether. Discovered hosts are listed with their
+name, device kind, and endpoint, and connect with one click. The **Add a
+device manually** disclosure accepts a plain `host:port` or a pasted
+`qpw-relay://` QR payload for networks where mDNS is blocked.
 
-While the host runs, the **Emitter** tab shows every reachable
+While the host runs, the **Host** tab shows every reachable
 `address:port` endpoint (the QR's primary endpoint highlighted), the pairing
 PIN, and a **Show QR** button. The QR carries a
 `qpw-relay://host:port?pin=123456` payload: the Android app scans it to fill
-in the address and PIN automatically, and the desktop Receiver tab accepts
-the same payload pasted into its host address field. Active links are listed
+in the address and PIN automatically, and the desktop Connections tab
+accepts the same payload pasted into its manual address field. Active links are listed
 first. If interface state flags are incomplete, the UI falls back to a
 non-loopback address on the default or physical interface so the endpoint and
 QR remain available; transport binding still uses the strict active-link
 selection and the operating system's default route.
+
+### Latency
+
+The transport is tuned for minimal delay rather than maximum completeness;
+when the two conflict, fresh audio wins.
+
+- **Frame duration defaults to 10 ms** (5–60 ms remain available under
+  advanced settings). This halves the codec-side floor at the cost of a
+  100 packets/s rate, which local Wi-Fi and USB tether links carry easily.
+- **Opus runs in `RESTRICTED_LOWDELAY`**, which drops the SILK layer and its
+  5 ms encoder lookahead, with constrained VBR so a loud transient cannot
+  inflate a packet. Losses are handled by the receiver's concealment rather
+  than by inband FEC, which that mode does not offer.
+- **The PCM queues have a working depth, not just a capacity.** A drop-oldest
+  queue bounded only by capacity stays full forever after a single consumer
+  stall, so every later sample inherits the whole backlog. Both directions now
+  trim to roughly four frames, sized by the PipeWire quantum rather than the
+  codec frame.
+- **The sender parks on a condvar** instead of polling, so a completed frame
+  goes on the wire as soon as the capture callback delivers it.
+- **The jitter buffer adapts.** It declares a gap lost after one later frame
+  on a clean link, widening its tolerance only when packets actually arrive
+  late and decaying back after a long clean run.
+- **UDP sockets are marked DSCP EF** (voice access category on Wi-Fi) with a
+  deliberately small send buffer, and the audio worker threads request
+  `SCHED_FIFO` at a priority well below PipeWire's own. All of this is
+  best-effort: without `RLIMIT_RTPRIO` the threads simply run as normal ones.
 
 The relay requires the native PipeWire backend. Builds without relay support
 remain usable for graph editing, but the relay panel reports that relay is

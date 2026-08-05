@@ -3,16 +3,21 @@
 //!
 //! The panel is a first-class docked surface (opened from the navigation
 //! rail) rather than a Preferences tab, because relaying is an activity you
-//! watch — sessions and status change while you work the canvas. The body is
-//! split into tabs (emitter, receiver, discovery, sessions); one renderer per
-//! tab lives in its own submodule, and all of them drive the shared action
-//! layer in [`crate::app::relay`] and persist through `AppConfig`.
+//! watch — sessions and status change while you work the canvas.
+//!
+//! The body has two tabs. **Connections** is a single device list in the
+//! shape of a system Bluetooth or Wi-Fi pane: discovered hosts and live
+//! sessions are the same rows in different states, with manual entry and the
+//! connection settings tucked into disclosures beneath. **Host** covers the
+//! separate activity of broadcasting this device. Each tab's renderer lives
+//! in its own submodule and drives the shared action layer in
+//! [`crate::app::relay`], persisting through `AppConfig`.
 
-mod client;
-mod discovery;
+mod advanced;
+mod connections;
+mod device_row;
 mod host;
 mod qr;
-mod sessions;
 
 use super::components::{document_button, document_selectable_label};
 use super::shared::{apply_panel_text_scale, fresh_scroll_area, PANEL_FILL};
@@ -70,13 +75,11 @@ impl QpwgraphApp {
             ui.label(RichText::new(self.i18n.text("relay.unavailable")).weak());
             return;
         }
-        // Browsing is cheap and expected on this tab, so opening it starts
-        // discovery automatically; a failed start is not retried until the
-        // user toggles it by hand.
-        if self.relay.tab == RelayPanelTab::Discover
-            && !self.relay.discovery_active
-            && !self.relay.discovery_failed
-        {
+        // Browsing is cheap and is what the panel is for, so having it open
+        // keeps discovery running regardless of tab — the device list must
+        // already be populated when the user switches back to it. A failed
+        // start is not retried until the user presses refresh.
+        if !self.relay.discovery_active && !self.relay.discovery_failed {
             let mut relay = std::mem::take(&mut self.relay);
             relay.start_discovery(self);
             self.relay = relay;
@@ -88,10 +91,8 @@ impl QpwgraphApp {
             ui.available_height(),
         )
         .show(ui, |ui| match self.relay.tab {
-            RelayPanelTab::Emitter => self.show_relay_host_section(document, ui),
-            RelayPanelTab::Receiver => self.show_relay_client_section(document, ui),
-            RelayPanelTab::Discover => self.show_relay_discovery_section(document, ui),
-            RelayPanelTab::Sessions => self.show_relay_sessions_section(document, ui),
+            RelayPanelTab::Connections => self.show_relay_connections_section(document, ui),
+            RelayPanelTab::Host => self.show_relay_host_section(document, ui),
         });
         let message = self.relay.message.clone();
         if !message.is_empty() {
@@ -100,35 +101,26 @@ impl QpwgraphApp {
         }
     }
 
-    /// One tab per relay activity, mirroring the Preferences tab bar.
+    /// Two tabs: the device list, and hosting. The connected-session count
+    /// rides on the Connections label so it stays visible from the Host tab.
     fn show_relay_tab_bar(&mut self, document: &mut UiDocument, ui: &mut Ui) {
         let session_count = self.driver.relay_status().sessions.len();
         let tabs = [
             (
-                RelayPanelTab::Emitter,
-                "relay.tab_emitter",
-                "relay.panel.tab.emitter",
+                RelayPanelTab::Connections,
+                "relay.tab_connections",
+                "relay.panel.tab.connections",
             ),
             (
-                RelayPanelTab::Receiver,
-                "relay.tab_receiver",
-                "relay.panel.tab.receiver",
-            ),
-            (
-                RelayPanelTab::Discover,
-                "relay.tab_discover",
-                "relay.panel.tab.discover",
-            ),
-            (
-                RelayPanelTab::Sessions,
-                "relay.tab_sessions",
-                "relay.panel.tab.sessions",
+                RelayPanelTab::Host,
+                "relay.tab_host",
+                "relay.panel.tab.host",
             ),
         ];
         ui.horizontal(|ui| {
             for (tab, label_key, tab_id) in tabs {
                 let mut label = self.i18n.text(label_key);
-                if tab == RelayPanelTab::Sessions && session_count > 0 {
+                if tab == RelayPanelTab::Connections && session_count > 0 {
                     label = format!("{label} ({session_count})");
                 }
                 if document_selectable_label(

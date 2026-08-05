@@ -27,7 +27,7 @@ fn main() {
         client.host_name()
     );
 
-    const FRAME: usize = 960; // 20 ms at 48 kHz mono
+    const FRAME: usize = 480; // 10 ms at 48 kHz mono, the default frame
     let mut phase = 0.0f32;
     let mut buffer = [0.0f32; FRAME];
     loop {
@@ -39,6 +39,6 @@ fn main() {
             phase += 1.0;
         }
         client.send_capture(&buffer);
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
