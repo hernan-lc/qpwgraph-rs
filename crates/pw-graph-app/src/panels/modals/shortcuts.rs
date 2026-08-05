@@ -1,8 +1,7 @@
 use super::super::components::{document_button, document_text_input_sized};
-use super::super::shared::{fresh_scroll_area, show_close_button};
+use super::super::shared::{fresh_scroll_area, show_close_button, text_colors};
 use crate::app::QpwgraphApp;
 use eframe::egui::{self, Color32, RichText, Ui};
-use pw_graph_ui::ThemeToken;
 
 fn shortcut_row(ui: &mut Ui, keys: &str, description: String, primary: Color32, secondary: Color32) {
     ui.label(RichText::new(keys).strong().monospace().color(primary));
@@ -114,18 +113,16 @@ impl QpwgraphApp {
             return;
         }
         if self.run_dialog(ctx, "shortcuts", self.i18n.text("shortcuts.title"), 560.0, |app, ui, document| {
-            let primary = document.theme_color(ThemeToken::TextPrimary);
-            let secondary = document.theme_color(ThemeToken::TextSecondary);
-            let weak = document.theme_color(ThemeToken::TextWeak);
+            let text = text_colors(document.theme());
             ui.label(
-                RichText::new(app.i18n.text("shortcuts.hint")).color(weak),
+                RichText::new(app.i18n.text("shortcuts.hint")).color(text.weak),
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(app.i18n.text("shortcuts.search"))
                         .strong()
-                        .color(primary),
+                        .color(text.primary),
                 );
                 let clear_width = if app.shortcut_search.is_empty() {
                     0.0
@@ -183,12 +180,12 @@ impl QpwgraphApp {
                     &[("count", matching_entries.len().to_string())],
                 ))
                 .small()
-                .color(weak),
+                .color(text.weak),
             );
             fresh_scroll_area(("shortcuts-scroll", app.shortcut_scroll_epoch), 420.0).show(ui, |ui| {
                 if matching_entries.is_empty() {
                     ui.label(
-                        RichText::new(app.i18n.text("shortcuts.no_results")).color(weak),
+                        RichText::new(app.i18n.text("shortcuts.no_results")).color(text.weak),
                     );
                 } else {
                     egui::Grid::new("shortcuts-grid")
@@ -196,7 +193,7 @@ impl QpwgraphApp {
                         .spacing(egui::vec2(18.0, 7.0))
                         .show(ui, |ui| {
                             for (keys, description) in matching_entries {
-                                shortcut_row(ui, keys, description, primary, secondary);
+                                shortcut_row(ui, keys, description, text.primary, text.secondary);
                             }
                         });
                 }

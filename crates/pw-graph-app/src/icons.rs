@@ -155,6 +155,46 @@ pub(crate) fn sidebar_icon_button_enabled(
         9.0,
     )
 }
+/// Draws one icon button: a hoverable square with the icon centered, reporting
+/// whether it was clicked. All three public buttons (plain, enabled-aware,
+/// selectable toggle, nav) share this body — they differ only in the id salt,
+/// corner radius, and how the visual state is derived from `selected`/`enabled`.
+#[allow(clippy::too_many_arguments)]
+fn draw_icon_button(
+    ui: &mut Ui,
+    id: &str,
+    id_salt: &str,
+    size: Vec2,
+    icon_inset: f32,
+    corner_radius: f32,
+    selected: Option<bool>,
+    enabled: bool,
+    icon: Icon,
+    label: String,
+    explanation: String,
+) -> bool {
+    ui.push_id((id_salt, id), |ui| {
+        let clickable = selected.is_some() || enabled;
+        let sense = if clickable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(size, sense);
+        let response = response.on_hover_text(format!("{label}\n{explanation}"));
+        let visuals = match selected {
+            Some(selected) => ui.style().interact_selectable(&response, selected),
+            None if enabled => *ui.style().interact(&response),
+            None => *ui.style().noninteractive(),
+        };
+        ui.painter()
+            .rect(rect, corner_radius, visuals.bg_fill, visuals.bg_stroke);
+        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
+        response.clicked()
+    })
+    .inner
+}
+
 #[allow(clippy::too_many_arguments)]
 fn icon_button_enabled_sized(
     ui: &mut Ui,
@@ -166,25 +206,19 @@ fn icon_button_enabled_sized(
     size: Vec2,
     icon_inset: f32,
 ) -> bool {
-    ui.push_id(("icon-button", id), |ui| {
-        let sense = if enabled {
-            Sense::click()
-        } else {
-            Sense::hover()
-        };
-        let (rect, response) = ui.allocate_exact_size(size, sense);
-        let response = response.on_hover_text(format!("{label}\n{explanation}"));
-        let visuals = if enabled {
-            ui.style().interact(&response)
-        } else {
-            ui.style().noninteractive()
-        };
-        ui.painter()
-            .rect(rect, 4.0, visuals.bg_fill, visuals.bg_stroke);
-        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
-        response.clicked()
-    })
-    .inner
+    draw_icon_button(
+        ui,
+        id,
+        "icon-button",
+        size,
+        icon_inset,
+        4.0,
+        None,
+        enabled,
+        icon,
+        label,
+        explanation,
+    )
 }
 
 pub(crate) fn sidebar_icon_toggle_button(
@@ -217,16 +251,19 @@ fn icon_toggle_button_sized(
     size: Vec2,
     icon_inset: f32,
 ) -> bool {
-    ui.push_id(("icon-toggle-button", id), |ui| {
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-        let response = response.on_hover_text(format!("{label}\n{explanation}"));
-        let visuals = ui.style().interact_selectable(&response, selected);
-        ui.painter()
-            .rect(rect, 4.0, visuals.bg_fill, visuals.bg_stroke);
-        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
-        response.clicked()
-    })
-    .inner
+    draw_icon_button(
+        ui,
+        id,
+        "icon-toggle-button",
+        size,
+        icon_inset,
+        4.0,
+        Some(selected),
+        true,
+        icon,
+        label,
+        explanation,
+    )
 }
 
 pub(crate) fn sidebar_nav_icon_button(
@@ -259,16 +296,19 @@ fn nav_icon_button_sized(
     size: Vec2,
     icon_inset: f32,
 ) -> bool {
-    ui.push_id(("navigation-icon", id), |ui| {
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-        let response = response.on_hover_text(format!("{label}\n{explanation}"));
-        let visuals = ui.style().interact_selectable(&response, selected);
-        ui.painter()
-            .rect(rect, 5.0, visuals.bg_fill, visuals.bg_stroke);
-        paint_icon(ui, rect.shrink(icon_inset), icon, visuals.fg_stroke.color);
-        response.clicked()
-    })
-    .inner
+    draw_icon_button(
+        ui,
+        id,
+        "navigation-icon",
+        size,
+        icon_inset,
+        5.0,
+        Some(selected),
+        true,
+        icon,
+        label,
+        explanation,
+    )
 }
 
 pub(crate) fn icon_label(ui: &mut Ui, icon: Icon, tooltip: String) {

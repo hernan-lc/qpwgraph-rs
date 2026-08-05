@@ -80,12 +80,6 @@ impl CompositeDriver {
             .ok_or_else(|| unsupported("PipeWire backend is disabled"))
     }
 
-    fn pipewire_ref(&self) -> BackendResult<&PipewireDriver> {
-        self.pipewire
-            .as_ref()
-            .ok_or_else(|| unsupported("PipeWire backend is disabled"))
-    }
-
     fn alsa_mut(&mut self) -> BackendResult<&mut AlsaMidiDriver> {
         self.alsa
             .as_mut()

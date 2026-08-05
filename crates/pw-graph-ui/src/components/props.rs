@@ -395,6 +395,49 @@ macro_rules! impl_common_builders {
     };
 }
 
+/// Generates the `selected`/`options`/`option` builders shared by every
+/// select-like props type. The "first enabled option wins when nothing is
+/// selected yet" rule must be one definition so a control cannot pick a
+/// disabled option as its default.
+macro_rules! impl_selectable_options {
+    ($type:ty) => {
+        impl $type {
+            /// Sets the initial selected value.
+            pub fn selected(mut self, selected: impl Into<String>) -> Self {
+                self.selected = selected.into();
+                self
+            }
+
+            /// Replaces the options.
+            pub fn options<I>(mut self, options: I) -> Self
+            where
+                I: IntoIterator<Item = OptionItem>,
+            {
+                self.options = options.into_iter().collect();
+                if self.selected.is_empty() {
+                    self.selected = self
+                        .options
+                        .iter()
+                        .find(|option| !option.disabled)
+                        .map(|option| option.value.clone())
+                        .unwrap_or_default();
+                }
+                self
+            }
+
+            /// Adds one option.
+            pub fn option(mut self, value: impl Into<String>, label: impl Into<String>) -> Self {
+                let option = OptionItem::new(value, label);
+                if self.selected.is_empty() {
+                    self.selected = option.value.clone();
+                }
+                self.options.push(option);
+                self
+            }
+        }
+    };
+}
+
 /// Text-only component properties.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LabelProps {
@@ -785,40 +828,9 @@ impl SelectProps {
             options: Vec::new(),
         }
     }
-
-    /// Sets the initial selected value.
-    pub fn selected(mut self, selected: impl Into<String>) -> Self {
-        self.selected = selected.into();
-        self
-    }
-
-    /// Replaces the options.
-    pub fn options<I>(mut self, options: I) -> Self
-    where
-        I: IntoIterator<Item = OptionItem>,
-    {
-        self.options = options.into_iter().collect();
-        if self.selected.is_empty() {
-            self.selected = self
-                .options
-                .iter()
-                .find(|option| !option.disabled)
-                .map(|option| option.value.clone())
-                .unwrap_or_default();
-        }
-        self
-    }
-
-    /// Adds one option.
-    pub fn option(mut self, value: impl Into<String>, label: impl Into<String>) -> Self {
-        let option = OptionItem::new(value, label);
-        if self.selected.is_empty() {
-            self.selected = option.value.clone();
-        }
-        self.options.push(option);
-        self
-    }
 }
+
+impl_selectable_options!(SelectProps);
 
 impl Default for SelectProps {
     fn default() -> Self {
@@ -852,45 +864,14 @@ impl RadioGroupProps {
         }
     }
 
-    /// Sets the initial selected value.
-    pub fn selected(mut self, selected: impl Into<String>) -> Self {
-        self.selected = selected.into();
-        self
-    }
-
-    /// Replaces the options.
-    pub fn options<I>(mut self, options: I) -> Self
-    where
-        I: IntoIterator<Item = OptionItem>,
-    {
-        self.options = options.into_iter().collect();
-        if self.selected.is_empty() {
-            self.selected = self
-                .options
-                .iter()
-                .find(|option| !option.disabled)
-                .map(|option| option.value.clone())
-                .unwrap_or_default();
-        }
-        self
-    }
-
-    /// Adds one option.
-    pub fn option(mut self, value: impl Into<String>, label: impl Into<String>) -> Self {
-        let option = OptionItem::new(value, label);
-        if self.selected.is_empty() {
-            self.selected = option.value.clone();
-        }
-        self.options.push(option);
-        self
-    }
-
     /// Lays the radio buttons out horizontally.
     pub fn horizontal(mut self, horizontal: bool) -> Self {
         self.horizontal = horizontal;
         self
     }
 }
+
+impl_selectable_options!(RadioGroupProps);
 
 impl Default for RadioGroupProps {
     fn default() -> Self {

@@ -86,7 +86,9 @@ impl eframe::App for QpwgraphApp {
         self.sync_effect_controls();
 
         if self.config.statusbar {
-            let fill = self.ui_document.theme_color(pw_graph_ui::ThemeToken::Background);
+            let fill = self
+                .ui_document
+                .theme_color(pw_graph_ui::ThemeToken::Background);
             egui::TopBottomPanel::bottom("statusbar")
                 .frame(
                     egui::Frame::none()

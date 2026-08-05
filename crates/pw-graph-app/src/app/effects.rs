@@ -1,5 +1,8 @@
 use super::QpwgraphApp;
-use pw_graph_backend::{BackendResult, EffectDriver, EffectInsertRequest, EffectInstance, EffectNodeRequest, GraphDriver};
+use pw_graph_backend::{
+    BackendResult, EffectDriver, EffectInsertRequest, EffectInstance, EffectNodeRequest,
+    GraphDriver,
+};
 use pw_graph_config::PersistedEffect;
 use pw_graph_core::NodeId;
 use pw_graph_effects::EffectDescriptor;
@@ -249,29 +252,7 @@ impl QpwgraphApp {
             self.status = self.t("effects.not_found");
             return;
         };
-        let saved_links: Vec<_> = self
-            .driver
-            .graph()
-            .links
-            .values()
-            .filter(|link| {
-                self.driver
-                    .graph()
-                    .port(link.output_port)
-                    .is_some_and(|port| port.node_id == node_id)
-                    || self
-                        .driver
-                        .graph()
-                        .port(link.input_port)
-                        .is_some_and(|port| port.node_id == node_id)
-            })
-            .filter_map(|link| {
-                self.driver
-                    .graph()
-                    .port_key(link.output_port)
-                    .zip(self.driver.graph().port_key(link.input_port))
-            })
-            .collect();
+        let saved_links = self.stable_link_pairs(&self.links_touching_node(node_id));
         match self.driver.remove_effect(&instance_id) {
             Ok(()) => {
                 self.config

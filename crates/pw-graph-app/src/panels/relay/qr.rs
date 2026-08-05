@@ -1,11 +1,11 @@
 //! QR modal: renders the running host's connection payload (address, port,
 //! and PIN) as a QR code so phones can scan it instead of typing.
 
-use super::super::shared::show_close_button;
+use super::super::shared::{show_close_button, text_colors};
 use crate::app::{QpwgraphApp, RelayUiState};
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureOptions, Ui};
 use pw_graph_backend::{relay_parse_qr_payload, relay_qr};
-use pw_graph_ui::{ThemeToken, UiDocument};
+use pw_graph_ui::UiDocument;
 
 const QR_DIALOG_WIDTH: f32 = 380.0;
 const QR_DISPLAY_SIZE: f32 = 260.0;
@@ -51,9 +51,7 @@ impl QpwgraphApp {
         ui: &mut Ui,
     ) {
         ui.vertical_centered(|ui| {
-            let primary = document.theme_color(ThemeToken::TextPrimary);
-            let secondary = document.theme_color(ThemeToken::TextSecondary);
-            let weak = document.theme_color(ThemeToken::TextWeak);
+            let text = text_colors(document.theme());
             let texture_ready = payload.is_some() && self.relay.qr_texture.is_some();
             if texture_ready {
                 if let Some(texture) = &self.relay.qr_texture {
@@ -75,12 +73,12 @@ impl QpwgraphApp {
                             RichText::new(parsed.target)
                                 .monospace()
                                 .strong()
-                                .color(primary),
+                                .color(text.primary),
                         );
                         if let Some(pin) = parsed.pin {
                             ui.label(
                                 RichText::new(self.tf("relay.qr_pin", &[("pin", pin)]))
-                                    .color(secondary),
+                                    .color(text.secondary),
                             );
                         }
                     }
@@ -89,18 +87,18 @@ impl QpwgraphApp {
                 // The host is already listening; only the link is missing, so
                 // do not tell the user to start the host again.
                 ui.label(
-                    RichText::new(self.i18n.text("relay.qr_no_link")).color(weak),
+                    RichText::new(self.i18n.text("relay.qr_no_link")).color(text.weak),
                 );
             } else {
                 ui.label(
-                    RichText::new(self.i18n.text("relay.qr_unavailable")).color(weak),
+                    RichText::new(self.i18n.text("relay.qr_unavailable")).color(text.weak),
                 );
             }
             ui.add_space(4.0);
             ui.label(
                 RichText::new(self.i18n.text("relay.qr_hint"))
                     .small()
-                    .color(weak),
+                    .color(text.weak),
             );
         });
         ui.add_space(6.0);

@@ -165,37 +165,12 @@ impl QpwgraphApp {
     }
 
     fn disconnect_node(&mut self, node: NodeId) {
-        let links: Vec<_> = self
-            .driver
-            .graph()
-            .links
-            .values()
-            .filter(|link| {
-                self.driver
-                    .graph()
-                    .port(link.output_port)
-                    .is_some_and(|port| port.node_id == node)
-                    || self
-                        .driver
-                        .graph()
-                        .port(link.input_port)
-                        .is_some_and(|port| port.node_id == node)
-            })
-            .cloned()
-            .collect();
+        let links = self.links_touching_node(node);
         let ids: Vec<_> = links.iter().map(|link| link.id).collect();
         if ids.is_empty() {
             return;
         }
-        let stable_pairs: Vec<_> = links
-            .iter()
-            .filter_map(|link| {
-                self.driver
-                    .graph()
-                    .port_key(link.output_port)
-                    .zip(self.driver.graph().port_key(link.input_port))
-            })
-            .collect();
+        let stable_pairs = self.stable_link_pairs(&links);
         let count = ids.len();
         match self.commands.execute(
             Box::new(DisconnectManyCommand::from_links(
@@ -250,10 +225,9 @@ impl QpwgraphApp {
             return;
         };
         let stable_pair = self
-            .driver
-            .graph()
-            .port_key(existing.output_port)
-            .zip(self.driver.graph().port_key(existing.input_port));
+            .stable_link_pairs(std::slice::from_ref(&existing))
+            .into_iter()
+            .next();
         match self.commands.execute(
             Box::new(DisconnectCommand::from_link(
                 self.driver.graph(),
@@ -286,15 +260,7 @@ impl QpwgraphApp {
         if links.is_empty() {
             return;
         }
-        let stable_pairs: Vec<_> = links
-            .iter()
-            .filter_map(|link| {
-                self.driver
-                    .graph()
-                    .port_key(link.output_port)
-                    .zip(self.driver.graph().port_key(link.input_port))
-            })
-            .collect();
+        let stable_pairs = self.stable_link_pairs(&links);
         let count = links.len();
         match self.commands.execute(
             Box::new(DisconnectManyCommand::from_links(

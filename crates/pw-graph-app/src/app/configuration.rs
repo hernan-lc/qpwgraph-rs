@@ -89,13 +89,13 @@ impl QpwgraphApp {
 
     pub(crate) fn save_config_now(&mut self) {
         self.sync_config();
-        match self.config.save_to(&self.config_file) {
-            Ok(()) => {
-                self.config_saved_snapshot = self.config.clone();
-                self.config_dirty_since = None;
-                self.status = self.t("status.config_saved");
-            }
-            Err(error) => self.status_error("status.config_save_failed", &error),
+        if self.persist_report(
+            self.config.save_to(&self.config_file),
+            "status.config_save_failed",
+        ) {
+            self.config_saved_snapshot = self.config.clone();
+            self.config_dirty_since = None;
+            self.status = self.t("status.config_saved");
         }
     }
 
@@ -109,15 +109,14 @@ impl QpwgraphApp {
         if dirty_since.elapsed() < Duration::from_millis(500) {
             return;
         }
-        match self.config.save_to(&self.config_file) {
-            Ok(()) => {
-                self.config_saved_snapshot = self.config.clone();
-                self.config_dirty_since = None;
-            }
-            Err(error) => {
-                self.config_dirty_since = Some(Instant::now());
-                self.status_error("status.config_save_failed", &error);
-            }
+        if self.persist_report(
+            self.config.save_to(&self.config_file),
+            "status.config_save_failed",
+        ) {
+            self.config_saved_snapshot = self.config.clone();
+            self.config_dirty_since = None;
+        } else {
+            self.config_dirty_since = Some(Instant::now());
         }
     }
 

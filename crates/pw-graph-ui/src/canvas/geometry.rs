@@ -1,7 +1,7 @@
 //! Bezier link curves and hit-testing math, independent of egui's widget
 //! system so it stays easy to unit test on its own.
 
-use egui::{pos2, vec2, Pos2, Rect};
+use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 
 pub(crate) fn bezier_points(start: Pos2, end: Pos2, lane_offset: f32) -> Vec<Pos2> {
     let handle = (end.x - start.x).abs().clamp(72.0, 220.0) * 0.45;
@@ -18,6 +18,24 @@ pub(crate) fn bezier_points(start: Pos2, end: Pos2, lane_offset: f32) -> Vec<Pos
             pos2(point.x, point.y)
         })
         .collect()
+}
+
+/// Paints a bezier polyline as a dark outline under a coloured core. Every
+/// pending-connection preview and link uses the same two-stroke silhouette, so
+/// the outline/core widths live here instead of at each call site.
+pub(crate) fn paint_bezier(
+    painter: &Painter,
+    points: Vec<Pos2>,
+    outline_width: f32,
+    outline_color: Color32,
+    core_width: f32,
+    core_color: Color32,
+) {
+    painter.add(Shape::line(
+        points.clone(),
+        Stroke::new(outline_width, outline_color),
+    ));
+    painter.add(Shape::line(points, Stroke::new(core_width, core_color)));
 }
 
 pub(crate) fn points_bounds(points: &[Pos2]) -> Rect {

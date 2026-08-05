@@ -8,7 +8,7 @@
 //! it represents in one gesture.
 
 use super::names::display_port_name;
-use crate::ConnectMode;
+use crate::{CanvasAction, ConnectMode};
 use egui::Color32;
 use pw_graph_core::{Direction, Graph, Node, Port, PortId, PortType};
 use pw_graph_i18n::I18n;
@@ -267,6 +267,26 @@ pub(crate) fn link_exists(graph: &Graph, output: PortId, input: PortId) -> bool 
         .links
         .values()
         .any(|link| link.output_port == output && link.input_port == input)
+}
+
+/// Emits a [`CanvasAction::ConnectMany`] for a set of candidate pairs, dropping
+/// any link that already exists, and reports whether anything was scheduled.
+/// Every port/group connect path funnels through here so the "don't duplicate
+/// an existing link" filter lives in one place.
+pub(crate) fn connect_many(
+    actions: &mut Vec<CanvasAction>,
+    graph: &Graph,
+    pairs: Vec<(PortId, PortId)>,
+) -> bool {
+    let pairs: Vec<_> = pairs
+        .into_iter()
+        .filter(|(output, input)| !link_exists(graph, *output, *input))
+        .collect();
+    if pairs.is_empty() {
+        return false;
+    }
+    actions.push(CanvasAction::ConnectMany { pairs });
+    true
 }
 
 /// The visual role of a port within its media family.

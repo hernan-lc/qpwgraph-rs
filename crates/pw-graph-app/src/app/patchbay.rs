@@ -11,12 +11,10 @@ impl QpwgraphApp {
     /// edits are user actions, so losing them merely because the profile was
     /// not manually saved is particularly surprising for effect nodes.
     pub(crate) fn autosave_patchbay(&mut self) {
-        if let Err(error) = self.patchbay.save_to(&self.patchbay_file) {
-            self.status = self.tf(
-                "status.patchbay_save_failed",
-                &[("error", error.to_string())],
-            );
-        }
+        self.persist_report(
+            self.patchbay.save_to(&self.patchbay_file),
+            "status.patchbay_save_failed",
+        );
     }
 
     /// Bring saved rules in line with the live graph after undo/redo and at
@@ -93,19 +91,14 @@ impl QpwgraphApp {
             return;
         };
         self.select_patchbay_path(path);
-        match self.patchbay.save_to(&self.patchbay_file) {
-            Ok(()) => {
-                self.status = self.tf(
-                    "status.saved_patchbay",
-                    &[("path", self.patchbay_file.display().to_string())],
-                )
-            }
-            Err(error) => {
-                self.status = self.tf(
-                    "status.patchbay_save_failed",
-                    &[("error", error.to_string())],
-                )
-            }
+        if self.persist_report(
+            self.patchbay.save_to(&self.patchbay_file),
+            "status.patchbay_save_failed",
+        ) {
+            self.status = self.tf(
+                "status.saved_patchbay",
+                &[("path", self.patchbay_file.display().to_string())],
+            );
         }
     }
 

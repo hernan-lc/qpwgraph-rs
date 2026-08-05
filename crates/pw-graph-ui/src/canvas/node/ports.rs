@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use super::super::names::compact_label;
 use super::super::ports::{
-    display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role,
+    connect_many, display_groups, pair_ports, port_color, port_group_tooltip, port_role,
 };
 use super::PORT_ROW_HEIGHT;
 
@@ -147,13 +147,8 @@ impl GraphCanvas {
                 if let Some(output_ids) = self.pending_outputs.take() {
                     let output_ports: Vec<&Port> =
                         output_ids.iter().filter_map(|id| graph.port(*id)).collect();
-                    let pairs: Vec<_> = pair_ports(&output_ports, &group.ports)
-                        .into_iter()
-                        .filter(|(output, input)| !link_exists(graph, *output, *input))
-                        .collect();
-                    if !pairs.is_empty() {
-                        actions.push(crate::CanvasAction::ConnectMany { pairs });
-                    }
+                    let pairs = pair_ports(&output_ports, &group.ports);
+                    connect_many(actions, graph, pairs);
                 }
             }
         }

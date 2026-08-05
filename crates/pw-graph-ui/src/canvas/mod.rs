@@ -5,7 +5,7 @@
 //! concern can be read (and tested) on its own instead of one long file.
 
 use crate::{CanvasAction, GraphCanvas, LinkId, NodeId, UiDocument};
-use egui::{pos2, vec2, Color32, FontId, Rect, Sense, Shape, Stroke, Ui};
+use egui::{pos2, vec2, Color32, FontId, Rect, Sense, Stroke, Ui};
 use pw_graph_core::Graph;
 use pw_graph_i18n::I18n;
 use std::collections::{BTreeSet, HashMap};
@@ -18,7 +18,7 @@ mod names;
 mod node;
 mod ports;
 
-use geometry::bezier_points;
+use geometry::{bezier_points, paint_bezier};
 use names::display_port_name;
 use node::NodeDrawContext;
 
@@ -258,14 +258,14 @@ impl GraphCanvas {
         };
         let end = ui.input(|input| input.pointer.hover_pos()).unwrap_or(start);
         let points = bezier_points(start, end, 0.0);
-        painter.add(Shape::line(
-            points.clone(),
-            Stroke::new(4.0_f32, Color32::BLACK),
-        ));
-        painter.add(Shape::line(
+        paint_bezier(
+            painter,
             points,
-            Stroke::new(2.0_f32, Color32::LIGHT_GREEN),
-        ));
+            4.0,
+            Color32::BLACK,
+            2.0,
+            Color32::LIGHT_GREEN,
+        );
         let label = if output_ids.len() > 1 {
             i18n.format(
                 "canvas.pending_connection_group",

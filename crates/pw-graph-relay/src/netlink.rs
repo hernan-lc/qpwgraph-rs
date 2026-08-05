@@ -192,6 +192,35 @@ pub fn display_links() -> Vec<LocalLink> {
     collect_display_links(&interfaces, false)
 }
 
+/// Append every usable IPv4 address of `interface` to `links`. Link-local
+/// and unspecified addresses are skipped because they are not routable to
+/// a peer. Both the strict and display paths share this filter.
+fn push_v4_links(links: &mut Vec<LocalLink>, interface: &netdev::Interface, kind: LinkKind) {
+    for v4 in &interface.ipv4 {
+        let addr = v4.addr();
+        if addr.is_link_local() || addr.is_unspecified() {
+            continue;
+        }
+        links.push(LocalLink {
+            name: interface.name.clone(),
+            addr,
+            netmask: v4.netmask(),
+            kind,
+        });
+    }
+}
+
+/// Sort links best-first: policy rank, then address for deterministic order.
+/// Every public link list is ranked this way so "first entry wins" heuristics
+/// (USB tethering, bind address selection) behave consistently.
+fn sort_links(links: &mut [LocalLink]) {
+    links.sort_by(|a, b| {
+        (a.kind, a.addr)
+            .partial_cmp(&(b.kind, b.addr))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 fn collect_display_links(interfaces: &[netdev::Interface], preferred_only: bool) -> Vec<LocalLink> {
     let mut links = Vec::new();
     for interface in interfaces {
@@ -201,24 +230,9 @@ fn collect_display_links(interfaces: &[netdev::Interface], preferred_only: bool)
             continue;
         }
         let kind = classify_interface(&interface.name).unwrap_or(LinkKind::Lan);
-        for v4 in &interface.ipv4 {
-            let addr = v4.addr();
-            if addr.is_link_local() || addr.is_unspecified() {
-                continue;
-            }
-            links.push(LocalLink {
-                name: interface.name.clone(),
-                addr,
-                netmask: v4.netmask(),
-                kind,
-            });
-        }
+        push_v4_links(&mut links, interface, kind);
     }
-    links.sort_by(|a, b| {
-        (a.kind, a.addr)
-            .partial_cmp(&(b.kind, b.addr))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_links(&mut links);
     links
 }
 
@@ -242,24 +256,9 @@ fn enumerate_links() -> Vec<LocalLink> {
             // name): never fall back to a generic LAN label.
             continue;
         };
-        for v4 in &interface.ipv4 {
-            let addr = v4.addr();
-            if addr.is_link_local() || addr.is_unspecified() {
-                continue;
-            }
-            links.push(LocalLink {
-                name: interface.name.clone(),
-                addr,
-                netmask: v4.netmask(),
-                kind,
-            });
-        }
+        push_v4_links(&mut links, &interface, kind);
     }
-    links.sort_by(|a, b| {
-        (a.kind, a.addr)
-            .partial_cmp(&(b.kind, b.addr))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_links(&mut links);
     links
 }
 
@@ -272,11 +271,7 @@ pub fn select_links(links: &[LocalLink], preference: TransportPreference) -> Vec
         .filter(|link| preference.matches(link.kind))
         .cloned()
         .collect();
-    selected.sort_by(|a, b| {
-        (a.kind, a.addr)
-            .partial_cmp(&(b.kind, b.addr))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_links(&mut selected);
     selected
 }
 

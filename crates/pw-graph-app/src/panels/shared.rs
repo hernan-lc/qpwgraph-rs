@@ -18,6 +18,25 @@ pub(super) fn section_fill(theme: &Theme) -> Color32 {
 pub(super) fn section_stroke_color(theme: &Theme) -> Color32 {
     theme.color(ThemeToken::Border)
 }
+
+/// The three text emphasis levels every dense panel reads from the theme.
+/// Bundling them keeps call sites from repeating the three-token lookup (and
+/// from picking one token inconsistently from panel to panel).
+#[derive(Clone, Copy)]
+pub(super) struct TextColors {
+    pub primary: Color32,
+    pub secondary: Color32,
+    pub weak: Color32,
+}
+
+pub(super) fn text_colors(theme: &Theme) -> TextColors {
+    TextColors {
+        primary: theme.color(ThemeToken::TextPrimary),
+        secondary: theme.color(ThemeToken::TextSecondary),
+        weak: theme.color(ThemeToken::TextWeak),
+    }
+}
+
 pub(super) const NAV_RAIL_WIDTH: f32 = 76.0;
 
 pub(super) fn apply_panel_text_scale(ui: &mut Ui, scale: f32) {

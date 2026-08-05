@@ -2,6 +2,7 @@ use crate::panels::PreferencesTab;
 use pw_graph_backend::MeterPolicy;
 use pw_graph_command::CommandStack;
 use pw_graph_config::AppConfig;
+use pw_graph_core::{Link, NodeId, PortKey};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use pw_graph_ui::{GraphCanvas, UiDocument};
@@ -89,18 +90,69 @@ impl QpwgraphApp {
         self.status = self.tf(key, &[("error", error.to_string())]);
     }
 
+    /// Persists a config or patchbay file, reporting failures through the
+    /// status bar, and returns whether the save succeeded. Both document
+    /// types share this shell so the failure status key can't drift.
+    pub(crate) fn persist_report(
+        &mut self,
+        result: Result<(), impl std::fmt::Display>,
+        failure_key: &str,
+    ) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.status_error(failure_key, &error);
+                false
+            }
+        }
+    }
+
     /// Runs a relay-panel method that needs both the app and `&mut` relay
     /// state at once. `RelayUiState` owns several long-lived handles that
     /// borrow the app while it mutates them, so callers must take the state
     /// out, call, and put it back — this helper owns that take/restore pair.
     #[cfg(feature = "relay")]
-    pub(crate) fn with_relay<R>(
-        &mut self,
-        f: impl FnOnce(&mut Self, &mut RelayUiState) -> R,
-    ) -> R {
+    pub(crate) fn with_relay<R>(&mut self, f: impl FnOnce(&mut Self, &mut RelayUiState) -> R) -> R {
         let mut relay = std::mem::take(&mut self.relay);
         let result = f(self, &mut relay);
         self.relay = relay;
         result
+    }
+
+    /// Every link touching a node, whether on its output or input side.
+    /// Disconnect and effect-removal both tear down a node's whole link set,
+    /// so they share this single definition of "touches this node".
+    pub(crate) fn links_touching_node(&self, node: NodeId) -> Vec<Link> {
+        self.driver
+            .graph()
+            .links
+            .values()
+            .filter(|link| {
+                self.driver
+                    .graph()
+                    .port(link.output_port)
+                    .is_some_and(|port| port.node_id == node)
+                    || self
+                        .driver
+                        .graph()
+                        .port(link.input_port)
+                        .is_some_and(|port| port.node_id == node)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Stable (node, port) name pairs for a set of links, which is what the
+    /// patchbay tracks connections by.
+    pub(crate) fn stable_link_pairs(&self, links: &[Link]) -> Vec<(PortKey, PortKey)> {
+        links
+            .iter()
+            .filter_map(|link| {
+                self.driver
+                    .graph()
+                    .port_key(link.output_port)
+                    .zip(self.driver.graph().port_key(link.input_port))
+            })
+            .collect()
     }
 }

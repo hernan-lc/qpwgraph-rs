@@ -4,16 +4,16 @@
 use crate::{
     ButtonProps, CanvasAction, ConnectMode, GraphCanvas, MeterReading, PortId, UiDocument, Value,
 };
-use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
+use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use pw_graph_core::{Direction, Graph, Node, Port, PortType};
 use pw_graph_i18n::I18n;
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use super::geometry::bezier_points;
+use super::geometry::{bezier_points, paint_bezier};
 use super::names::{compact_label, display_node_name};
 use super::ports::{
-    display_groups, link_exists, pair_ports, port_color, port_group_tooltip, port_role,
+    connect_many, display_groups, pair_ports, port_color, port_group_tooltip, port_role,
 };
 
 mod controls;
@@ -157,39 +157,17 @@ impl GraphCanvas {
                 body_sense,
             )
             .on_hover_text(body_tooltip);
-        let disconnect_node_requested = Cell::new(false);
-        let remove_effect_requested = Cell::new(false);
-        let arrange_nodes_requested = Cell::new(false);
+        let requests = NodeMenuRequests::default();
         body_response.context_menu(|ui| {
-            if node_button(
+            node_context_menu(
                 document,
                 ui,
-                &format!("node.{}.context.disconnect", node.id),
+                node,
+                i18n,
+                "context",
                 disconnect_node_label.clone(),
-            ) {
-                disconnect_node_requested.set(true);
-                ui.close_menu();
-            }
-            if node.node_type == pw_graph_core::NodeType::Effect
-                && node_button(
-                    document,
-                    ui,
-                    &format!("node.{}.context.remove-effect", node.id),
-                    i18n.text("canvas.remove_effect"),
-                )
-            {
-                remove_effect_requested.set(true);
-                ui.close_menu();
-            }
-            if node_button(
-                document,
-                ui,
-                &format!("node.{}.context.arrange", node.id),
-                i18n.text("canvas.arrange_selection"),
-            ) {
-                arrange_nodes_requested.set(true);
-                ui.close_menu();
-            }
+                &requests,
+            );
         });
         let header_response = ui
             .interact(
@@ -199,35 +177,15 @@ impl GraphCanvas {
             )
             .on_hover_text(format!("{tooltip}\n\n{}", i18n.text("canvas.drag_header")));
         header_response.context_menu(|ui| {
-            if node_button(
+            node_context_menu(
                 document,
                 ui,
-                &format!("node.{}.header.disconnect", node.id),
+                node,
+                i18n,
+                "header",
                 disconnect_node_label.clone(),
-            ) {
-                disconnect_node_requested.set(true);
-                ui.close_menu();
-            }
-            if node.node_type == pw_graph_core::NodeType::Effect
-                && node_button(
-                    document,
-                    ui,
-                    &format!("node.{}.header.remove-effect", node.id),
-                    i18n.text("canvas.remove_effect"),
-                )
-            {
-                remove_effect_requested.set(true);
-                ui.close_menu();
-            }
-            if node_button(
-                document,
-                ui,
-                &format!("node.{}.header.arrange", node.id),
-                i18n.text("canvas.arrange_selection"),
-            ) {
-                arrange_nodes_requested.set(true);
-                ui.close_menu();
-            }
+                &requests,
+            );
         });
         if body_response.clicked() || header_response.clicked() {
             let shift = ui.input(|input| input.modifiers.shift);
@@ -250,15 +208,8 @@ impl GraphCanvas {
                         .filter(|port| port.direction == Direction::Sink)
                         .collect();
                     let pairs = pair_ports(&output_ports, &inputs);
-                    if !pairs.is_empty() {
+                    if connect_many(actions, graph, pairs) {
                         self.pending_outputs = None;
-                        let pairs: Vec<_> = pairs
-                            .into_iter()
-                            .filter(|(output, input)| !link_exists(graph, *output, *input))
-                            .collect();
-                        if !pairs.is_empty() {
-                            actions.push(CanvasAction::ConnectMany { pairs });
-                        }
                     }
                 }
             }
@@ -277,14 +228,8 @@ impl GraphCanvas {
             }) {
                 if let Some(target) = self.node_at(rect, graph, pointer, node.id) {
                     if let Some(target_node) = graph.node(target) {
-                        let pairs: Vec<_> = self
-                            .matching_port_pairs(graph, node, target_node)
-                            .into_iter()
-                            .filter(|(output, input)| !link_exists(graph, *output, *input))
-                            .collect();
-                        if !pairs.is_empty() {
-                            actions.push(CanvasAction::ConnectMany { pairs });
-                        }
+                        let pairs = self.matching_port_pairs(graph, node, target_node);
+                        connect_many(actions, graph, pairs);
                     }
                 }
             }
@@ -339,13 +284,13 @@ impl GraphCanvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
 
-        if disconnect_node_requested.get() {
+        if requests.disconnect.get() {
             actions.push(CanvasAction::DisconnectNode { node: node.id });
         }
-        if remove_effect_requested.get() {
+        if requests.remove_effect.get() {
             actions.push(CanvasAction::RemoveEffect { node: node.id });
         }
-        if arrange_nodes_requested.get() {
+        if requests.arrange.get() {
             let nodes = if self.selected_nodes.contains(&node.id) && self.selected_nodes.len() > 1 {
                 self.selected_nodes.iter().copied().collect()
             } else {
@@ -479,14 +424,14 @@ impl GraphCanvas {
                 if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
                     let start = node_rect.right_center();
                     let points = bezier_points(start, pointer, 0.0);
-                    painter.add(Shape::line(
-                        points.clone(),
-                        Stroke::new(4.0_f32, Color32::BLACK),
-                    ));
-                    painter.add(Shape::line(
+                    paint_bezier(
+                        &painter,
                         points,
-                        Stroke::new(2.0_f32, Color32::LIGHT_GREEN),
-                    ));
+                        4.0,
+                        Color32::BLACK,
+                        2.0,
+                        Color32::LIGHT_GREEN,
+                    );
                     painter.text(
                         start + vec2(8.0, -22.0),
                         egui::Align2::LEFT_TOP,
@@ -526,6 +471,58 @@ pub(super) fn node_button(
     label: impl Into<String>,
 ) -> bool {
     document.button(ui, ButtonProps::new(id, label)).clicked()
+}
+
+/// Flags a node's context menu can raise so drawing happens after the menu
+/// closes. Bundled so body and header menus share one helper call.
+#[derive(Default)]
+pub(super) struct NodeMenuRequests {
+    pub(super) disconnect: Cell<bool>,
+    pub(super) remove_effect: Cell<bool>,
+    pub(super) arrange: Cell<bool>,
+}
+
+/// The right-click menu shown for a node card. Both the card body and the
+/// header open the same menu with different egui id salts; `id_salt` keeps
+/// each surface's widget state separate.
+pub(super) fn node_context_menu(
+    document: &mut UiDocument,
+    ui: &mut Ui,
+    node: &Node,
+    i18n: &I18n,
+    id_salt: &str,
+    disconnect_node_label: String,
+    requests: &NodeMenuRequests,
+) {
+    if node_button(
+        document,
+        ui,
+        &format!("node.{}.{id_salt}.disconnect", node.id),
+        disconnect_node_label,
+    ) {
+        requests.disconnect.set(true);
+        ui.close_menu();
+    }
+    if node.node_type == pw_graph_core::NodeType::Effect
+        && node_button(
+            document,
+            ui,
+            &format!("node.{}.{id_salt}.remove-effect", node.id),
+            i18n.text("canvas.remove_effect"),
+        )
+    {
+        requests.remove_effect.set(true);
+        ui.close_menu();
+    }
+    if node_button(
+        document,
+        ui,
+        &format!("node.{}.{id_salt}.arrange", node.id),
+        i18n.text("canvas.arrange_selection"),
+    ) {
+        requests.arrange.set(true);
+        ui.close_menu();
+    }
 }
 
 pub(super) fn sync_document_value(document: &mut UiDocument, id: &str, value: Value) {

@@ -9,7 +9,7 @@
 //! a tab strip (where everything is always available) would misrepresent.
 
 use super::super::components::{document_button, document_setting_number, document_text_input};
-use super::super::shared::panel_section;
+use super::super::shared::{panel_section, text_colors};
 use super::{accent_color, connected_accent_color};
 use crate::app::QpwgraphApp;
 use crate::icons::Icon;
@@ -188,9 +188,7 @@ impl QpwgraphApp {
         let Some(port) = self.driver.relay_status().host_port else {
             return;
         };
-        let weak = document.theme_color(ThemeToken::TextWeak);
-        let primary = document.theme_color(ThemeToken::TextPrimary);
-        let secondary = document.theme_color(ThemeToken::TextSecondary);
+        let text = text_colors(document.theme());
         let links = if self.relay.links.is_empty() {
             self.driver.relay_local_links()
         } else {
@@ -200,18 +198,18 @@ impl QpwgraphApp {
             ui.label(
                 RichText::new(self.i18n.text("relay.no_links"))
                     .small()
-                    .color(weak),
+                    .color(text.weak),
             );
         }
         for (index, link) in links.iter().enumerate() {
             let endpoint = format!("{}:{}", link.addr, port);
             if index == 0 {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(endpoint).monospace().strong().color(primary));
+                    ui.label(RichText::new(endpoint).monospace().strong().color(text.primary));
                     ui.label(
                         RichText::new(self.i18n.text("relay.endpoint_primary"))
                             .small()
-                            .color(weak),
+                            .color(text.weak),
                     );
                 });
             } else {
@@ -219,16 +217,17 @@ impl QpwgraphApp {
                     ui.label(
                         RichText::new(format!("{} · ", link.name))
                             .small()
-                            .color(weak),
+                            .color(text.weak),
                     );
-                    ui.label(RichText::new(endpoint).monospace().color(secondary));
+                    ui.label(RichText::new(endpoint).monospace().color(text.secondary));
                 });
             }
         }
         let pin = self.config.relay_host_pin.trim();
         if !pin.is_empty() {
             ui.label(
-                RichText::new(self.tf("relay.qr_pin", &[("pin", pin.to_owned())])).color(secondary),
+                RichText::new(self.tf("relay.qr_pin", &[("pin", pin.to_owned())]))
+                    .color(text.secondary),
             );
         }
     }
