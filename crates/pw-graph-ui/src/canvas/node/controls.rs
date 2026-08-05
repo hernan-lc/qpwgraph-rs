@@ -1,13 +1,13 @@
 use crate::{
-    setting_row, CanvasAction, GraphCanvas, MeterReading, NodeAppearance, SliderProps, SwitchProps,
-    TextInputProps, UiDocument, Value,
+    setting_row, CanvasAction, GraphCanvas, Icon, MeterReading, NodeAppearance, SliderProps,
+    SwitchProps, TextInputProps, UiDocument, Value,
 };
 use egui::{pos2, vec2, Color32, Key, ProgressBar, Rect, Response, RichText, Stroke, Ui};
 use pw_graph_core::Node;
 use pw_graph_i18n::I18n;
 use std::cell::Cell;
 
-use super::super::icons::{self, NodeIcon};
+use super::super::icons;
 use super::helpers::{level_db, meter_fraction};
 use super::{node_button, sync_document_value, AudioInfo};
 
@@ -135,7 +135,6 @@ impl GraphCanvas {
             ),
             vec2(20.0, 22.0) * self.zoom,
         );
-        let pin_requested = Cell::new(false);
         let info_response = ui
             .scope_builder(
                 egui::UiBuilder::new()
@@ -145,7 +144,7 @@ impl GraphCanvas {
                     ui.add_sized(
                         info_rect.size(),
                         egui::Button::image(icons::image(
-                            NodeIcon::Info,
+                            Icon::Info,
                             vec2(14.0, 14.0) * self.zoom,
                             Color32::from_rgb(192, 204, 219),
                         ))
@@ -156,76 +155,8 @@ impl GraphCanvas {
             .inner;
         document.record_click(format!("node.{}.info", node.id), info_response.clicked());
         if let Some(audio_info) = audio_info {
-            let meter = audio_info.meter;
-            let peak_hold = meter
-                .filter(|reading| reading.available)
-                .map(|reading| self.meter_peak_hold(node.id, reading.peak));
-            let monitor_pinned = self.pinned_meter == Some(audio_info.port_id);
-            info_response.on_hover_ui(|ui| {
-                ui.label(RichText::new(&audio_info.port_help).strong());
-                ui.separator();
-                ui.label(RichText::new(i18n.text("canvas.audio_meter_title")).strong());
-                match meter {
-                    Some(reading) if reading.available => {
-                        let state = if reading.age_ms > 750 {
-                            i18n.text("canvas.audio_meter_stale")
-                        } else {
-                            i18n.text("canvas.audio_meter_live")
-                        };
-                        ui.label(RichText::new(state).weak());
-                        ui.add(
-                            ProgressBar::new(meter_fraction(reading.rms))
-                                .desired_width(190.0)
-                                .text(format!(
-                                    "{}  {:.1} dB",
-                                    i18n.text("canvas.audio_meter_rms"),
-                                    level_db(reading.rms)
-                                )),
-                        );
-                        if let Some(peak_hold) = peak_hold {
-                            ui.add(
-                                ProgressBar::new(meter_fraction(peak_hold))
-                                    .desired_width(190.0)
-                                    .text(format!(
-                                        "{}  {:.1} dB",
-                                        i18n.text("canvas.audio_meter_peak_hold"),
-                                        level_db(peak_hold)
-                                    )),
-                            );
-                        }
-                        ui.label(
-                            RichText::new(i18n.format(
-                                "canvas.audio_meter_age",
-                                &[("age", reading.age_ms.to_string())],
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    }
-                    Some(_) => {
-                        ui.label(RichText::new(i18n.text("canvas.audio_meter_unavailable")).weak());
-                    }
-                    None if self.metering_disabled => {
-                        ui.label(RichText::new(i18n.text("canvas.audio_meter_disabled")).weak());
-                    }
-                    None => {
-                        ui.label(RichText::new(i18n.text("canvas.audio_meter_starting")).weak());
-                    }
-                }
-                if node_button(
-                    document,
-                    ui,
-                    &format!("node.{}.meter.pin", node.id),
-                    if monitor_pinned {
-                        i18n.text("canvas.audio_meter_pinned")
-                    } else {
-                        i18n.text("canvas.audio_meter_pin")
-                    },
-                ) {
-                    pin_requested.set(true);
-                }
-            });
-            if pin_requested.get() {
+            if self.draw_node_meter_popup(info_response, node, i18n, document, audio_info) {
+                let monitor_pinned = self.pinned_meter == Some(audio_info.port_id);
                 self.pinned_meter = if monitor_pinned {
                     None
                 } else {
@@ -250,7 +181,7 @@ impl GraphCanvas {
             |ui| {
                 ui.menu_image_button(
                     icons::image(
-                        NodeIcon::More,
+                        Icon::More,
                         vec2(12.0, 12.0) * self.zoom,
                         ui.visuals().text_color(),
                     ),
@@ -360,6 +291,91 @@ impl GraphCanvas {
         }
     }
 
+    /// The hover popup behind the info button on an audio node: the port
+    /// help, a live/stale meter readout, and the monitor-pin toggle. Reports
+    /// whether the user asked to pin/unpin the monitor so the caller commits
+    /// the change after the popup closes.
+    fn draw_node_meter_popup(
+        &mut self,
+        info_response: Response,
+        node: &Node,
+        i18n: &I18n,
+        document: &mut UiDocument,
+        audio_info: &AudioInfo,
+    ) -> bool {
+        let meter = audio_info.meter;
+        let peak_hold = meter
+            .filter(|reading| reading.available)
+            .map(|reading| self.meter_peak_hold(node.id, reading.peak));
+        let monitor_pinned = self.pinned_meter == Some(audio_info.port_id);
+        let pin_requested = Cell::new(false);
+        info_response.on_hover_ui(|ui| {
+            ui.label(RichText::new(&audio_info.port_help).strong());
+            ui.separator();
+            ui.label(RichText::new(i18n.text("canvas.audio_meter_title")).strong());
+            match meter {
+                Some(reading) if reading.available => {
+                    let state = if reading.age_ms > 750 {
+                        i18n.text("canvas.audio_meter_stale")
+                    } else {
+                        i18n.text("canvas.audio_meter_live")
+                    };
+                    ui.label(RichText::new(state).weak());
+                    ui.add(
+                        ProgressBar::new(meter_fraction(reading.rms))
+                            .desired_width(190.0)
+                            .text(format!(
+                                "{}  {:.1} dB",
+                                i18n.text("canvas.audio_meter_rms"),
+                                level_db(reading.rms)
+                            )),
+                    );
+                    if let Some(peak_hold) = peak_hold {
+                        ui.add(
+                            ProgressBar::new(meter_fraction(peak_hold))
+                                .desired_width(190.0)
+                                .text(format!(
+                                    "{}  {:.1} dB",
+                                    i18n.text("canvas.audio_meter_peak_hold"),
+                                    level_db(peak_hold)
+                                )),
+                        );
+                    }
+                    ui.label(
+                        RichText::new(i18n.format(
+                            "canvas.audio_meter_age",
+                            &[("age", reading.age_ms.to_string())],
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+                Some(_) => {
+                    ui.label(RichText::new(i18n.text("canvas.audio_meter_unavailable")).weak());
+                }
+                None if self.metering_disabled => {
+                    ui.label(RichText::new(i18n.text("canvas.audio_meter_disabled")).weak());
+                }
+                None => {
+                    ui.label(RichText::new(i18n.text("canvas.audio_meter_starting")).weak());
+                }
+            }
+            if node_button(
+                document,
+                ui,
+                &format!("node.{}.meter.pin", node.id),
+                if monitor_pinned {
+                    i18n.text("canvas.audio_meter_pinned")
+                } else {
+                    i18n.text("canvas.audio_meter_pin")
+                },
+            ) {
+                pin_requested.set(true);
+            }
+        });
+        pin_requested.get()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_node_audio_controls(
         &mut self,
@@ -426,9 +442,9 @@ impl GraphCanvas {
                             as f32;
                         state.volume = volume_from_track_position(volume_position);
                         let icon = if state.muted {
-                            NodeIcon::VolumeMuted
+                            Icon::VolumeMuted
                         } else {
-                            NodeIcon::Volume
+                            Icon::Volume
                         };
                         let tooltip = i18n.text(if state.muted {
                             "canvas.unmute_node"

@@ -1,12 +1,11 @@
 use super::super::super::{
-    ElementKind, EventType, NumberInputProps, SliderProps, TextInputProps, ThemeToken, UiDocument,
-    Value,
+    ElementKind, EventType, Icon, NumberInputProps, SliderProps, TextInputProps, ThemeToken,
+    UiDocument, Value,
 };
 use super::shared::{add_sized, labelled, normalize_optional_range, normalize_range, with_common};
 use super::{finish_control, prepare_control};
 use egui::{
-    include_image, vec2, Align, Button, Color32, Frame, Image, ImageSource, Layout, Response, Ui,
-    Vec2,
+    vec2, Align, Button, Color32, Frame, Image, ImageSource, Layout, Response, Ui, Vec2,
 };
 
 const NUMBER_INPUT_STEPPER_WIDTH: f32 = 24.0;
@@ -14,9 +13,9 @@ const NUMBER_INPUT_ICON_SIZE: f32 = 13.0;
 
 fn number_step_icon(increment: bool) -> ImageSource<'static> {
     if increment {
-        include_image!("../../../../assets/icons/arrow_up.svg")
+        Icon::ArrowUp.source()
     } else {
-        include_image!("../../../../assets/icons/arrow_down.svg")
+        Icon::ArrowDown.source()
     }
 }
 

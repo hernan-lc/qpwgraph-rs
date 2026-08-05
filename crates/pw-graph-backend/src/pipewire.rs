@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod effects;
+mod filter_runtime;
 mod links;
 mod metering;
 mod properties;

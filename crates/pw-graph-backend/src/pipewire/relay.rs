@@ -17,9 +17,10 @@
 //! bypassed quantum instead of an xrun.
 
 use super::*;
+use super::filter_runtime::FilterRuntime;
 use pw_graph_relay::{RelayEngine, RelayHandle};
 use std::ffi::c_void;
-use std::ptr::{self, NonNull};
+use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Mutex;
 
@@ -140,7 +141,7 @@ unsafe extern "C" fn relay_filter_process(
     data: *mut c_void,
     position: *mut pw::spa::sys::spa_io_position,
 ) {
-    // `data` is a Box<RelayCallbackState> retained by RelayNodeRuntime until
+    // `data` is a Box<RelayCallbackState> retained by FilterRuntime until
     // `pw_filter_destroy` has detached all callbacks. Never unwind over C.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         let Some(state) = data.cast::<RelayCallbackState>().as_ref() else {
@@ -150,27 +151,14 @@ unsafe extern "C" fn relay_filter_process(
     }));
 }
 
-static RELAY_FILTER_EVENTS: pw::sys::pw_filter_events = pw::sys::pw_filter_events {
-    version: pw::sys::PW_VERSION_FILTER_EVENTS,
-    destroy: None,
-    state_changed: None,
-    io_changed: None,
-    param_changed: None,
-    add_buffer: None,
-    remove_buffer: None,
-    process: Some(relay_filter_process),
-    drained: None,
-    command: None,
-};
-
-/// RAII owner for one virtual relay node.
-///
-/// Like `EffectRuntime`, this may only be dropped while the driver's
-/// ThreadLoop lock is held: PipeWire must detach the realtime callback before
-/// the callback state is released.
+/// The virtual device a filter represents. Unlike the effect runtime, a relay
+/// node owns only one directed port pair, so the callback type carries the
+/// device kind rather than a second port set.
 pub(super) struct RelayNodeRuntime {
-    filter: NonNull<pw::sys::pw_filter>,
-    _callback: Box<RelayCallbackState>,
+    /// Held for its `Drop`: the inner runtime destroys the filter while the
+    /// driver's ThreadLoop lock is held, detaching the realtime callback
+    /// before the callback `Box` is released.
+    _runtime: FilterRuntime<RelayCallbackState>,
 }
 
 impl RelayNodeRuntime {
@@ -192,14 +180,6 @@ impl RelayNodeRuntime {
         };
 
         let callback = Box::new(RelayCallbackState::new(kind, handle));
-        let callback_ptr = callback.as_ref() as *const RelayCallbackState as *mut c_void;
-        let loop_ = unsafe { pw::sys::pw_thread_loop_get_loop(thread_loop.as_raw_ptr()) };
-        if loop_.is_null() {
-            return Err(BackendError::native(
-                "PipeWire relay filter has no thread loop",
-            ));
-        }
-
         let properties = pw::properties::properties! {
             NODE_NAME => node_name,
             NODE_DESCRIPTION => description,
@@ -216,22 +196,13 @@ impl RelayNodeRuntime {
                 RelayNodeKind::Speaker => "sink",
             },
         };
-        let filter = unsafe {
-            pw::sys::pw_filter_new_simple(
-                loop_,
-                std::ffi::CString::new(node_name)
-                    .expect("relay node names are static C strings")
-                    .as_ptr(),
-                properties.into_raw(),
-                &RELAY_FILTER_EVENTS,
-                callback_ptr,
-            )
-        };
-        let Some(filter) = NonNull::new(filter) else {
-            return Err(BackendError::native(
-                "PipeWire relay filter creation returned null",
-            ));
-        };
+        let runtime = FilterRuntime::create(
+            thread_loop,
+            node_name,
+            properties,
+            Some(relay_filter_process),
+            callback,
+        )?;
 
         let direction = match kind {
             RelayNodeKind::Microphone => pw::spa::sys::SPA_DIRECTION_OUTPUT,
@@ -239,61 +210,14 @@ impl RelayNodeRuntime {
         };
         let mut ports = [ptr::null_mut(); RELAY_CHANNELS];
         for (index, channel) in ["FL", "FR"].iter().enumerate() {
-            let port_properties = pw::properties::properties! {
-                FORMAT_DSP => PROP_FORMAT_DSP_VALUE,
-                PORT_NAME => *channel,
-                AUDIO_CHANNEL => *channel,
-            };
-            ports[index] = unsafe {
-                pw::sys::pw_filter_add_port(
-                    filter.as_ptr(),
-                    direction,
-                    pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    0,
-                    port_properties.into_raw(),
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if ports[index].is_null() {
-                unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-                return Err(BackendError::native(format!(
-                    "PipeWire relay {channel} port creation returned null"
-                )));
-            }
+            ports[index] = runtime.add_port(direction, channel, channel)?;
         }
-        for (callback_port, port) in callback.ports.iter().zip(ports.iter()) {
+        for (callback_port, port) in runtime.callback().ports.iter().zip(ports.iter()) {
             callback_port.store(*port, Ordering::Release);
         }
+        runtime.connect()?;
 
-        let result = unsafe {
-            pw::sys::pw_filter_connect(
-                filter.as_ptr(),
-                pw::sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS,
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if result < 0 {
-            unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-            return Err(BackendError::native(format!(
-                "PipeWire relay filter connection failed ({result})"
-            )));
-        }
-
-        Ok(Self {
-            filter,
-            _callback: callback,
-        })
-    }
-}
-
-impl Drop for RelayNodeRuntime {
-    fn drop(&mut self) {
-        // The driver drops relay runtimes under the ThreadLoop lock, matching
-        // the effect filter lifecycle. PipeWire detaches the realtime
-        // callback before this returns, so the callback Box can be released.
-        unsafe { pw::sys::pw_filter_destroy(self.filter.as_ptr()) };
+        Ok(Self { _runtime: runtime })
     }
 }
 

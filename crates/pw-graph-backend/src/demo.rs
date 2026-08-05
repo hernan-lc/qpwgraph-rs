@@ -127,7 +127,7 @@ impl DemoDriver {
         let mut processor = self
             .effect_host
             .create(&request.effect_id)
-            .map_err(|error| BackendError::effect_create_failed(error))?;
+            .map_err(BackendError::effect_create_failed)?;
         processor
             .prepare(AudioSpec {
                 sample_rate: 48_000,

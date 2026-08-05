@@ -14,11 +14,12 @@
 //! control channel before it can be added safely.
 
 use super::*;
+use super::filter_runtime::FilterRuntime;
 use pw_graph_effects::{
     apply_parameters, AudioSpec, EffectHost, EffectInstanceConfig, EffectProcessor,
 };
 use std::ffi::c_void;
-use std::ptr::{self, NonNull};
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::Mutex;
 
@@ -235,7 +236,7 @@ unsafe extern "C" fn filter_process(
     data: *mut c_void,
     position: *mut pw::spa::sys::spa_io_position,
 ) {
-    // `data` is a Box<CallbackState> retained by EffectRuntime until after
+    // `data` is a Box<CallbackState> retained by FilterRuntime until after
     // `pw_filter_destroy` has detached all callbacks. Never unwind over C.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         let Some(state) = data.cast::<CallbackState>().as_ref() else {
@@ -245,190 +246,10 @@ unsafe extern "C" fn filter_process(
     }));
 }
 
-static FILTER_EVENTS: pw::sys::pw_filter_events = pw::sys::pw_filter_events {
-    version: pw::sys::PW_VERSION_FILTER_EVENTS,
-    destroy: None,
-    state_changed: None,
-    io_changed: None,
-    param_changed: None,
-    add_buffer: None,
-    remove_buffer: None,
-    process: Some(filter_process),
-    drained: None,
-    command: None,
-};
-
-/// RAII owner for a C `pw_filter` and its Rust callback state.
-struct EffectRuntime {
-    filter: NonNull<pw::sys::pw_filter>,
-    callback: Box<CallbackState>,
-}
-
-impl EffectRuntime {
-    fn create(
-        thread_loop: &pw::thread_loop::ThreadLoop,
-        node_name: &str,
-        instance_id: &str,
-        effect_id: &str,
-        processor: Box<dyn EffectProcessor>,
-        enabled: bool,
-    ) -> BackendResult<Self> {
-        let callback = Box::new(CallbackState::new(processor, enabled));
-        let callback_ptr = callback.as_ref() as *const CallbackState as *mut c_void;
-        let loop_ = unsafe { pw::sys::pw_thread_loop_get_loop(thread_loop.as_raw_ptr()) };
-        if loop_.is_null() {
-            return Err(BackendError::native(
-                "PipeWire effect filter has no thread loop",
-            ));
-        }
-
-        // `pw_filter_new_simple` creates the helper core/listener internally,
-        // while still running on the driver's existing thread loop. It takes
-        // ownership of the properties object on both success and failure.
-        let filter_properties = pw::properties::properties! {
-            NODE_NAME => node_name,
-            NODE_DESCRIPTION => node_name,
-            MEDIA_TYPE => MEDIA_TYPE_AUDIO,
-            PROP_MEDIA_CATEGORY => MEDIA_CATEGORY_FILTER,
-            PROP_MEDIA_ROLE => MEDIA_ROLE_DSP,
-            MEDIA_CLASS => MEDIA_CLASS_AUDIO_FILTER,
-            PROP_NODE_VIRTUAL => "true",
-            // Filters are deliberately patchable graph nodes. Never let a
-            // session manager route a newly-created effect to a default device.
-            PROP_NODE_AUTOCONNECT => "false",
-            PROP_NODE_GROUP => "qpwgraph-rs",
-            "qpwgraph-rs.effect.instance" => instance_id,
-            "qpwgraph-rs.effect.id" => effect_id,
-        };
-        let filter = unsafe {
-            pw::sys::pw_filter_new_simple(
-                loop_,
-                std::ffi::CString::new(node_name)
-                    .expect("effect node names are validated before reaching FFI")
-                    .as_ptr(),
-                filter_properties.into_raw(),
-                &FILTER_EVENTS,
-                callback_ptr,
-            )
-        };
-        let Some(filter) = NonNull::new(filter) else {
-            return Err(BackendError::native(
-                "PipeWire effect filter creation returned null",
-            ));
-        };
-
-        let mut input_ports = [ptr::null_mut(); DSP_CHANNELS];
-        let mut output_ports = [ptr::null_mut(); DSP_CHANNELS];
-        for (index, channel) in ["FL", "FR"].iter().enumerate() {
-            let input_properties = pw::properties::properties! {
-                FORMAT_DSP => PROP_FORMAT_DSP_VALUE,
-                PORT_NAME => format!("input_{channel}"),
-                AUDIO_CHANNEL => *channel,
-            };
-            input_ports[index] = unsafe {
-                pw::sys::pw_filter_add_port(
-                    filter.as_ptr(),
-                    pw::spa::sys::SPA_DIRECTION_INPUT,
-                    pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    0,
-                    input_properties.into_raw(),
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if input_ports[index].is_null() {
-                unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-                return Err(BackendError::native(
-                    "PipeWire effect input-port creation returned null",
-                ));
-            }
-
-            let output_properties = pw::properties::properties! {
-                FORMAT_DSP => PROP_FORMAT_DSP_VALUE,
-                PORT_NAME => format!("output_{channel}"),
-                AUDIO_CHANNEL => *channel,
-            };
-            output_ports[index] = unsafe {
-                pw::sys::pw_filter_add_port(
-                    filter.as_ptr(),
-                    pw::spa::sys::SPA_DIRECTION_OUTPUT,
-                    pw::sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-                    0,
-                    output_properties.into_raw(),
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if output_ports[index].is_null() {
-                unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-                return Err(BackendError::native(
-                    "PipeWire effect output-port creation returned null",
-                ));
-            }
-        }
-
-        for channel in 0..DSP_CHANNELS {
-            callback.input_ports[channel].store(input_ports[channel], Ordering::Release);
-            callback.output_ports[channel].store(output_ports[channel], Ordering::Release);
-        }
-        let result = unsafe {
-            pw::sys::pw_filter_connect(
-                filter.as_ptr(),
-                pw::sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS,
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if result < 0 {
-            unsafe { pw::sys::pw_filter_destroy(filter.as_ptr()) };
-            return Err(BackendError::native(format!(
-                "PipeWire effect filter connection failed ({result})"
-            )));
-        }
-
-        Ok(Self { filter, callback })
-    }
-
-    /// This may only be called while the parent's ThreadLoop lock is held.
-    fn node_id(&self) -> Option<NodeId> {
-        let id = unsafe { pw::sys::pw_filter_get_node_id(self.filter.as_ptr()) };
-        (id != u32::MAX).then_some(NodeId(id as u64))
-    }
-
-    fn set_enabled(&self, enabled: bool) {
-        self.callback.enabled.store(enabled, Ordering::Release);
-    }
-
-    fn set_parameter(&self, parameter: &str, value: f32) -> BackendResult<()> {
-        let mut state = self
-            .callback
-            .processor
-            .lock()
-            .map_err(|_| BackendError::native("effect processor lock was poisoned"))?;
-        state
-            .processor
-            .set_parameter(parameter, value)
-            .map_err(BackendError::native)
-    }
-
-    fn processor_failed(&self) -> bool {
-        self.callback.processor_failed.load(Ordering::Relaxed)
-    }
-}
-
-impl Drop for EffectRuntime {
-    fn drop(&mut self) {
-        // The only owner is PipewireDriver, which drops/rolls these instances
-        // under the ThreadLoop lock and before its Context/Core are released.
-        // PipeWire detaches the realtime callback before this Box is dropped.
-        unsafe { pw::sys::pw_filter_destroy(self.filter.as_ptr()) };
-    }
-}
-
 /// Backend-owned metadata paired with a live PipeWire filter.
 pub(super) struct NativeEffect {
     pub(super) instance: EffectInstance,
-    runtime: EffectRuntime,
+    runtime: FilterRuntime<CallbackState>,
     node_name: String,
     position: [f32; 2],
 }
@@ -467,14 +288,57 @@ impl NativeEffect {
         // its node name, so two Noise Gate nodes must not collapse into the
         // same persistence/undo endpoint after a registry refresh.
         let node_name = format!("{effect_name} ({})", request.instance_id);
-        let runtime = EffectRuntime::create(
+
+        let callback = Box::new(CallbackState::new(processor, request.enabled));
+        let filter_properties = pw::properties::properties! {
+            NODE_NAME => node_name.as_str(),
+            NODE_DESCRIPTION => node_name.as_str(),
+            MEDIA_TYPE => MEDIA_TYPE_AUDIO,
+            PROP_MEDIA_CATEGORY => MEDIA_CATEGORY_FILTER,
+            PROP_MEDIA_ROLE => MEDIA_ROLE_DSP,
+            MEDIA_CLASS => MEDIA_CLASS_AUDIO_FILTER,
+            PROP_NODE_VIRTUAL => "true",
+            // Filters are deliberately patchable graph nodes. Never let a
+            // session manager route a newly-created effect to a default device.
+            PROP_NODE_AUTOCONNECT => "false",
+            PROP_NODE_GROUP => "qpwgraph-rs",
+            "qpwgraph-rs.effect.instance" => request.instance_id.as_str(),
+            "qpwgraph-rs.effect.id" => request.effect_id.as_str(),
+        };
+        let runtime = FilterRuntime::create(
             thread_loop,
             &node_name,
-            &request.instance_id,
-            &request.effect_id,
-            processor,
-            request.enabled,
+            filter_properties,
+            Some(filter_process),
+            callback,
         )?;
+
+        let mut input_ports = [ptr::null_mut(); DSP_CHANNELS];
+        let mut output_ports = [ptr::null_mut(); DSP_CHANNELS];
+        for (index, channel) in ["FL", "FR"].iter().enumerate() {
+            input_ports[index] = runtime.add_port(
+                pw::spa::sys::SPA_DIRECTION_INPUT,
+                &format!("input_{channel}"),
+                channel,
+            )?;
+            output_ports[index] = runtime.add_port(
+                pw::spa::sys::SPA_DIRECTION_OUTPUT,
+                &format!("output_{channel}"),
+                channel,
+            )?;
+        }
+        for channel in 0..DSP_CHANNELS {
+            runtime
+                .callback()
+                .input_ports[channel]
+                .store(input_ports[channel], Ordering::Release);
+            runtime
+                .callback()
+                .output_ports[channel]
+                .store(output_ports[channel], Ordering::Release);
+        }
+        runtime.connect()?;
+
         let instance = EffectInstance {
             config: EffectInstanceConfig {
                 instance_id: request.instance_id,
@@ -533,7 +397,12 @@ impl NativeEffect {
 
     pub(super) fn snapshot(&self) -> EffectInstance {
         let mut instance = self.instance.clone();
-        if self.runtime.processor_failed() {
+        if self
+            .runtime
+            .callback()
+            .processor_failed
+            .load(Ordering::Relaxed)
+        {
             instance.error =
                 Some("effect processor rejected the most recent realtime buffer".into());
         }
@@ -541,12 +410,24 @@ impl NativeEffect {
     }
 
     pub(super) fn set_enabled(&mut self, enabled: bool) {
-        self.runtime.set_enabled(enabled);
+        self.runtime
+            .callback()
+            .enabled
+            .store(enabled, Ordering::Release);
         self.instance.config.enabled = enabled;
     }
 
     pub(super) fn set_parameter(&mut self, parameter: &str, value: f32) -> BackendResult<()> {
-        self.runtime.set_parameter(parameter, value)?;
+        let mut state = self
+            .runtime
+            .callback()
+            .processor
+            .lock()
+            .map_err(|_| BackendError::native("effect processor lock was poisoned"))?;
+        state
+            .processor
+            .set_parameter(parameter, value)
+            .map_err(BackendError::native)?;
         self.instance
             .config
             .parameters

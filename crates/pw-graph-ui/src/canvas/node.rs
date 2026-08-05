@@ -416,39 +416,7 @@ impl GraphCanvas {
             self.draw_node_effect_controls(ui, node, node_rect, header, actions, i18n, document);
         }
 
-        if let Some(source_id) = self.pending_node_connect {
-            if source_id == node.id {
-                if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
-                    let start = node_rect.right_center();
-                    let points = bezier_points(start, pointer, 0.0);
-                    paint_bezier(
-                        &painter,
-                        points,
-                        4.0,
-                        Color32::BLACK,
-                        2.0,
-                        Color32::LIGHT_GREEN,
-                    );
-                    painter.text(
-                        start + vec2(8.0, -22.0),
-                        egui::Align2::LEFT_TOP,
-                        i18n.format(
-                            "canvas.pending_node_connection",
-                            &[
-                                ("action", i18n.text("canvas.connect_hint")),
-                                ("node", display_node_name(&node.name, i18n)),
-                            ],
-                        ),
-                        FontId::proportional(12.0 * self.zoom * text_scale),
-                        Color32::LIGHT_GREEN,
-                    );
-                }
-            } else if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
-                if node_rect.contains(pointer) {
-                    painter.rect_stroke(node_rect, 8.0, Stroke::new(2.5_f32, Color32::LIGHT_GREEN));
-                }
-            }
-        }
+        self.draw_pending_node_connect(ui, &painter, node, node_rect, i18n, text_scale);
 
         if self.thumbnail_mode || appearance.collapsed {
             return;
@@ -458,6 +426,53 @@ impl GraphCanvas {
             ui, &painter, node, graph, node_rect, ports, has_audio, accent, text_scale, i18n,
             anchors, actions,
         );
+    }
+
+    /// The Easy-mode node-to-node connect preview: a bezier from the source
+    /// node to the pointer, plus a highlight ring on the hovered drop target.
+    fn draw_pending_node_connect(
+        &self,
+        ui: &Ui,
+        painter: &egui::Painter,
+        node: &Node,
+        node_rect: Rect,
+        i18n: &I18n,
+        text_scale: f32,
+    ) {
+        let Some(source_id) = self.pending_node_connect else {
+            return;
+        };
+        if source_id == node.id {
+            if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+                let start = node_rect.right_center();
+                let points = bezier_points(start, pointer, 0.0);
+                paint_bezier(
+                    painter,
+                    points,
+                    4.0,
+                    Color32::BLACK,
+                    2.0,
+                    Color32::LIGHT_GREEN,
+                );
+                painter.text(
+                    start + vec2(8.0, -22.0),
+                    egui::Align2::LEFT_TOP,
+                    i18n.format(
+                        "canvas.pending_node_connection",
+                        &[
+                            ("action", i18n.text("canvas.connect_hint")),
+                            ("node", display_node_name(&node.name, i18n)),
+                        ],
+                    ),
+                    FontId::proportional(12.0 * self.zoom * text_scale),
+                    Color32::LIGHT_GREEN,
+                );
+            }
+        } else if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+            if node_rect.contains(pointer) {
+                painter.rect_stroke(node_rect, 8.0, Stroke::new(2.5_f32, Color32::LIGHT_GREEN));
+            }
+        }
     }
 }
 
