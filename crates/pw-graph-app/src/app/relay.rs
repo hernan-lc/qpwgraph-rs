@@ -1,8 +1,9 @@
 use super::QpwgraphApp;
 use eframe::egui::TextureHandle;
 use pw_graph_backend::{
-    BackendError, BackendResult, RelayCodecKind, RelayEvent, RelayHostRequest, RelayLinkKind,
-    RelayLocalLink, RelayPeerInfo, RelayRoles, RelaySessionId, RelayTransportPreference,
+    relay_build_qr_payload, relay_parse_qr_payload, BackendError, BackendResult, RelayCodecKind,
+    RelayEvent, RelayHostRequest, RelayLinkKind, RelayLocalLink, RelayPeerInfo, RelayRoles,
+    RelaySessionId, RelayTransportPreference,
 };
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -24,6 +25,13 @@ pub(crate) struct RelayUiState {
     pub(crate) discovery_active: bool,
     pub(crate) peers: Vec<RelayPeerInfo>,
     pub(crate) message: String,
+    /// Manual address typed on the Discover tab; accepts `host:port` or a
+    /// pasted `qpw-relay://` QR payload. Kept out of `AppConfig` because it
+    /// is a one-shot convenience, not a setting.
+    pub(crate) quick_target: String,
+    /// Set when the most recent discovery start failed, so the Discover tab
+    /// does not retry automatically on every frame.
+    pub(crate) discovery_failed: bool,
     /// Local IPv4 links, ranked best-first; refreshed on an interval.
     pub(crate) links: Vec<RelayLocalLink>,
     /// Active USB tether link, when one is detected. USB is never a select
@@ -71,6 +79,10 @@ impl RelayUiState {
 
     pub(crate) fn poll(&mut self, app: &mut QpwgraphApp) {
         self.peers = app.driver.relay_peers();
+        // Stable, readable order: the engine reports peers from a map keyed
+        // by socket address, which jumps around as addresses change.
+        self.peers
+            .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.addr.cmp(&b.addr)));
         // Legacy configs may still name USB explicitly; it is now detected
         // automatically under `Auto` and no longer offered as a choice.
         if app.config.relay_transport == "usb" {
@@ -134,12 +146,7 @@ impl RelayUiState {
     pub(crate) fn qr_payload(app: &QpwgraphApp) -> Option<String> {
         let port = app.driver.relay_status().host_port?;
         let link = app.relay.links.first()?;
-        let pin = app.config.relay_host_pin.trim();
-        let mut payload = format!("qpw-relay://{}:{}", link.addr, port);
-        if !pin.is_empty() {
-            payload.push_str(&format!("?pin={pin}"));
-        }
-        Some(payload)
+        Some(relay_build_qr_payload(link.addr, port, &app.config.relay_host_pin))
     }
 
     pub(crate) fn start_host(&mut self, app: &mut QpwgraphApp) {
@@ -161,7 +168,32 @@ impl RelayUiState {
     }
 
     pub(crate) fn connect(&mut self, app: &mut QpwgraphApp) {
-        let target = match Self::resolve_target(&app.config.relay_client_target) {
+        // Accept a pasted QR payload (`qpw-relay://host:port?pin=...`) in
+        // the address field: normalize it back to a plain `host:port` and
+        // fill in the PIN it carries, so the saved config stays clean.
+        if let Some(payload) = relay_parse_qr_payload(&app.config.relay_client_target) {
+            app.config.relay_client_target = payload.target;
+            if let Some(pin) = payload.pin {
+                app.config.relay_client_pin = pin;
+            }
+        }
+        let target_text = app.config.relay_client_target.clone();
+        self.connect_target(app, &target_text);
+    }
+
+    /// Connect to an explicit target string (Discover-tab quick connect).
+    /// The string may be a plain `host:port` or a full QR payload.
+    pub(crate) fn connect_target(&mut self, app: &mut QpwgraphApp, raw_target: &str) {
+        let target_text = match relay_parse_qr_payload(raw_target) {
+            Some(payload) => {
+                if let Some(pin) = payload.pin {
+                    app.config.relay_client_pin = pin;
+                }
+                payload.target
+            }
+            None => raw_target.trim().to_owned(),
+        };
+        let target = match Self::resolve_target(&target_text) {
             Ok(target) => target,
             Err(error) => {
                 self.message = app.tf("relay.error", &[("error", error.to_string())]);
@@ -187,19 +219,38 @@ impl RelayUiState {
 
     pub(crate) fn toggle_discovery(&mut self, app: &mut QpwgraphApp) {
         if self.discovery_active {
-            app.driver.relay_discovery_stop();
-            self.discovery_active = false;
-            self.message = app.t("relay.discovery_stopped");
+            self.stop_discovery(app);
         } else {
-            match app.driver.relay_discovery_start() {
-                Ok(()) => {
-                    self.discovery_active = true;
-                    self.message = app.t("relay.discovery_started");
-                }
-                Err(error) => {
-                    self.message = app.tf("relay.error", &[("error", error.to_string())]);
-                }
+            self.start_discovery(app);
+        }
+    }
+
+    /// Begin browsing for relay hosts. Idempotent; failures are remembered
+    /// in `discovery_failed` so the Discover tab does not retry every frame.
+    pub(crate) fn start_discovery(&mut self, app: &mut QpwgraphApp) {
+        if self.discovery_active {
+            return;
+        }
+        match app.driver.relay_discovery_start() {
+            Ok(()) => {
+                self.discovery_active = true;
+                self.discovery_failed = false;
+                self.message = app.t("relay.discovery_started");
+            }
+            Err(error) => {
+                self.discovery_failed = true;
+                self.message = app.tf("relay.error", &[("error", error.to_string())]);
             }
         }
+    }
+
+    pub(crate) fn stop_discovery(&mut self, app: &mut QpwgraphApp) {
+        if !self.discovery_active {
+            return;
+        }
+        app.driver.relay_discovery_stop();
+        self.discovery_active = false;
+        self.discovery_failed = false;
+        self.message = app.t("relay.discovery_stopped");
     }
 }

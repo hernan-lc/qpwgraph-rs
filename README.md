@@ -130,22 +130,37 @@ belong on the control thread.
 
 ## Audio relay
 
-The desktop app includes the relay UI when the default `relay` feature is
-enabled. Open **Preferences → Relay** to configure the local device name,
-host PIN and TCP port, client target/PIN, role, codec, frame duration, and
-preferred local link. Host, client, discovery, and active-session controls are
-available in that tab; relay settings are saved automatically in the app
-configuration.
+The desktop app includes the relay panel when the default `relay` feature is
+enabled. Open **Relay** from the navigation rail to dock the panel on the
+right of the canvas; it has four tabs — **Emitter**, **Receiver**,
+**Discover**, and **Sessions** — covering host settings, connecting to a
+host, browsing the network, and live sessions. Relay settings are saved
+automatically in the app configuration.
 
 Starting a host or connecting to a peer creates two PipeWire virtual nodes:
 `qpwgraph-rs.relay.source` exposes received peer audio as **Relay Microphone**,
 and `qpwgraph-rs.relay.sink` sends audio routed into **Relay Speaker** to
-receiving peers. Discovery uses mDNS (`_qpw-relay._udp`); manual `host:port`
-entry remains available when multicast discovery is unavailable.
+receiving peers.
+
+### Discovery and pairing
+
+The **Discover** tab starts browsing as soon as it opens. Hosts announce
+themselves over mDNS (`_qpw-relay._udp`), and USB tether subnets are probed
+directly because mDNS often does not cross a tether. Discovered hosts are
+listed with their name, device kind, and endpoint, and connect with one
+click. A quick-connect field on the same tab accepts a plain `host:port` or a
+pasted `qpw-relay://` QR payload for networks where mDNS is blocked.
+
+While the host runs, the **Emitter** tab shows every reachable
+`address:port` endpoint (the QR's primary endpoint highlighted), the pairing
+PIN, and a **Show QR** button. The QR carries a
+`qpw-relay://host:port?pin=123456` payload: the Android app scans it to fill
+in the address and PIN automatically, and the desktop Receiver tab accepts
+the same payload pasted into its host address field.
 
 The relay requires the native PipeWire backend. Builds without relay support
-remain usable for graph editing, but the Relay preferences tab reports that
-relay is unavailable. The Android client and native bridge are documented in
+remain usable for graph editing, but the relay panel reports that relay is
+unavailable. The Android client and native bridge are documented in
 [`android/README.md`](android/README.md):
 
 ```bash

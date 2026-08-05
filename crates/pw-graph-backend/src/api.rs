@@ -353,9 +353,13 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
-    CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, LinkKind as RelayLinkKind,
-    LocalLink as RelayLocalLink, PeerInfo as RelayPeerInfo, RelayEvent, Roles as RelayRoles,
-    SessionId as RelaySessionId, SessionStatus as RelaySessionStatus,
+    pairing::{
+        build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
+        QrPayload as RelayQrPayload,
+    },
+    CodecKind as RelayCodecKind, EngineStatus as RelayEngineStatus, DeviceKind as RelayDeviceKind,
+    LinkKind as RelayLinkKind, LocalLink as RelayLocalLink, PeerInfo as RelayPeerInfo, RelayEvent,
+    Roles as RelayRoles, SessionId as RelaySessionId, SessionStatus as RelaySessionStatus,
     TransportPreference as RelayTransportPreference,
 };
 

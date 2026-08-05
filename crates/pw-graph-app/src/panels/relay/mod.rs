@@ -70,6 +70,17 @@ impl QpwgraphApp {
             ui.label(RichText::new(self.i18n.text("relay.unavailable")).weak());
             return;
         }
+        // Browsing is cheap and expected on this tab, so opening it starts
+        // discovery automatically; a failed start is not retried until the
+        // user toggles it by hand.
+        if self.relay.tab == RelayPanelTab::Discover
+            && !self.relay.discovery_active
+            && !self.relay.discovery_failed
+        {
+            let mut relay = std::mem::take(&mut self.relay);
+            relay.start_discovery(self);
+            self.relay = relay;
+        }
         self.show_relay_tab_bar(document, ui);
         ui.separator();
         fresh_scroll_area(

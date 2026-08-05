@@ -4,12 +4,14 @@
 use super::super::shared::{show_centered_dialog, show_close_button};
 use crate::app::{QpwgraphApp, RelayUiState};
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureOptions, Ui};
+use pw_graph_backend::relay_parse_qr_payload;
 use pw_graph_ui::UiDocument;
 
 const QR_DIALOG_WIDTH: f32 = 380.0;
-const QR_MODULE_SCALE: usize = 6;
 const QR_QUIET_MODULES: usize = 4;
 const QR_DISPLAY_SIZE: f32 = 260.0;
+/// Smallest module edge in texture pixels; camera scanners need fat modules.
+const QR_MIN_MODULE_SCALE: usize = 2;
 
 impl QpwgraphApp {
     /// Modal with the host QR, opened from the Emitter tab.
@@ -63,20 +65,25 @@ impl QpwgraphApp {
             let texture_ready = payload.is_some() && self.relay.qr_texture.is_some();
             if texture_ready {
                 if let Some(texture) = &self.relay.qr_texture {
+                    // Show the texture at its native pixel size: it was
+                    // rasterized at an integer module scale, so any resize
+                    // here would re-introduce uneven modules.
+                    let size = texture.size_vec2();
                     ui.add(egui::Image::new(egui::load::SizedTexture::new(
                         texture.id(),
-                        egui::vec2(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE),
+                        size,
                     )));
                 }
                 ui.add_space(8.0);
                 if let Some(payload) = payload {
-                    // Human-readable fallback: `host:port` without scheme/PIN.
-                    let target = payload
-                        .trim_start_matches("qpw-relay://")
-                        .split('?')
-                        .next()
-                        .unwrap_or_default();
-                    ui.label(RichText::new(target).strong());
+                    // Human-readable fallback for phones that cannot scan:
+                    // the endpoint and PIN as text.
+                    if let Some(parsed) = relay_parse_qr_payload(payload) {
+                        ui.label(RichText::new(parsed.target).monospace().strong());
+                        if let Some(pin) = parsed.pin {
+                            ui.label(self.tf("relay.qr_pin", &[("pin", pin)]));
+                        }
+                    }
                 }
             } else {
                 ui.label(RichText::new(self.i18n.text("relay.qr_unavailable")).weak());
@@ -100,21 +107,29 @@ impl QpwgraphApp {
     }
 }
 
+/// Pixels per module so the rasterized code lands as close to the display
+/// size as an integer scale allows. Non-integer scaling of QR textures is
+/// what makes modules render uneven and breaks phone scanners.
+fn qr_module_scale(total_modules: usize) -> usize {
+    (QR_DISPLAY_SIZE as usize / total_modules).max(QR_MIN_MODULE_SCALE)
+}
+
 /// Rasterize a payload into a black-on-white image with a quiet zone.
 fn render_qr_image(text: &str) -> Option<ColorImage> {
     let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
     let modules = code.width();
-    let side = (modules + QR_QUIET_MODULES * 2) * QR_MODULE_SCALE;
+    let scale = qr_module_scale(modules + QR_QUIET_MODULES * 2);
+    let side = (modules + QR_QUIET_MODULES * 2) * scale;
     let mut pixels = vec![Color32::WHITE; side * side];
     for y in 0..modules {
         for x in 0..modules {
             if code[(x, y)] != qrcode::Color::Dark {
                 continue;
             }
-            for dy in 0..QR_MODULE_SCALE {
-                for dx in 0..QR_MODULE_SCALE {
-                    let px = (x + QR_QUIET_MODULES) * QR_MODULE_SCALE + dx;
-                    let py = (y + QR_QUIET_MODULES) * QR_MODULE_SCALE + dy;
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let px = (x + QR_QUIET_MODULES) * scale + dx;
+                    let py = (y + QR_QUIET_MODULES) * scale + dy;
                     pixels[py * side + px] = Color32::BLACK;
                 }
             }
@@ -128,22 +143,39 @@ fn render_qr_image(text: &str) -> Option<ColorImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_qr_image;
+    use super::{qr_module_scale, render_qr_image, QR_DISPLAY_SIZE, QR_QUIET_MODULES};
 
     #[test]
     fn renders_a_payload_with_quiet_zone() {
-        let image = render_qr_image("qpw-relay://192.168.1.20:48123?pin=123456").unwrap();
+        let payload = "qpw-relay://192.168.1.20:48123?pin=123456";
+        let image = render_qr_image(payload).unwrap();
+        let code = qrcode::QrCode::new(payload.as_bytes()).unwrap();
+        let total_modules = code.width() + QR_QUIET_MODULES * 2;
+        let scale = qr_module_scale(total_modules);
         let [width, height] = image.size;
         assert_eq!(width, height);
-        assert!(width >= 25 * 6, "a version-2 code plus quiet zone");
+        assert_eq!(width, total_modules * scale, "integer module scale");
+        assert!(
+            width <= QR_DISPLAY_SIZE as usize,
+            "the texture must not be upscaled at display time"
+        );
         // Quiet zone corners stay white; the finder pattern puts dark
         // modules near the top-left inside the quiet zone.
         assert_eq!(image.pixels[0], eframe::egui::Color32::WHITE);
-        let first_module = 4 * 6;
+        let first_module = QR_QUIET_MODULES * scale;
         assert_eq!(
             image.pixels[first_module * width + first_module],
             eframe::egui::Color32::BLACK
         );
+    }
+
+    #[test]
+    fn module_scale_keeps_a_floor_for_camera_scanners() {
+        // Even an unrealistically dense code keeps at least 2px modules.
+        assert_eq!(qr_module_scale(10_000), 2);
+        // A typical version-3 payload code fills most of the display size.
+        let scale = qr_module_scale(29 + QR_QUIET_MODULES * 2);
+        assert!(scale >= 6, "expected fat modules, got {scale}px");
     }
 
     #[test]

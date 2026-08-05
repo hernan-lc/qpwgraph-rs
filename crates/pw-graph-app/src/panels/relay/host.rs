@@ -40,8 +40,8 @@ impl QpwgraphApp {
                 self.i18n.text("relay.port_help"),
                 100.0,
             ) as u16;
+            let running = self.driver.relay_status().host_active;
             ui.horizontal(|ui| {
-                let running = self.driver.relay_status().host_active;
                 if document_button(
                     document,
                     ui,
@@ -61,33 +61,21 @@ impl QpwgraphApp {
                     }
                     self.relay = relay;
                 }
-                if running {
-                    if let Some(port) = self.driver.relay_status().host_port {
-                        ui.label(self.tf("relay.listening", &[("port", port.to_string())]));
-                    }
-                    if document_button(
+                if running
+                    && document_button(
                         document,
                         ui,
                         "relay.panel.host.qr",
                         self.i18n.text("relay.show_qr"),
                         true,
-                    ) {
-                        self.relay.show_qr = true;
-                    }
+                    )
+                {
+                    self.relay.show_qr = true;
                 }
             });
             self.show_relay_usb_status(ui);
-            if self.driver.relay_status().host_active {
-                if let Some(port) = self.driver.relay_status().host_port {
-                    let links = self.relay.links.clone();
-                    for link in &links {
-                        ui.label(
-                            RichText::new(format!("{} · {}:{}", link.name, link.addr, port))
-                                .small()
-                                .weak(),
-                        );
-                    }
-                }
+            if running {
+                self.show_relay_host_endpoints(ui);
             }
             ui.label(
                 RichText::new(self.i18n.text("relay.emitter_hint"))
@@ -95,5 +83,38 @@ impl QpwgraphApp {
                     .weak(),
             );
         });
+    }
+
+    /// Connection details peers need: the control port, every reachable
+    /// `address:port` (the QR's primary endpoint first and highlighted), and
+    /// the pairing PIN. Monospace keeps the endpoints readable as one unit.
+    fn show_relay_host_endpoints(&self, ui: &mut Ui) {
+        let Some(port) = self.driver.relay_status().host_port else {
+            return;
+        };
+        ui.label(self.tf("relay.listening", &[("port", port.to_string())]));
+        let links = self.relay.links.clone();
+        for (index, link) in links.iter().enumerate() {
+            let endpoint = format!("{}:{}", link.addr, port);
+            if index == 0 {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(endpoint).monospace().strong());
+                    ui.label(
+                        RichText::new(self.i18n.text("relay.endpoint_primary"))
+                            .small()
+                            .weak(),
+                    );
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} · ", link.name)).small().weak());
+                    ui.label(RichText::new(endpoint).monospace().weak());
+                });
+            }
+        }
+        let pin = self.config.relay_host_pin.trim();
+        if !pin.is_empty() {
+            ui.label(self.tf("relay.qr_pin", &[("pin", pin.to_owned())]));
+        }
     }
 }
