@@ -2900,6 +2900,7 @@ dependencies = [
  "pw-graph-core",
  "pw-graph-effects",
  "pw-graph-relay",
+ "pw-graph-utils",
  "thiserror 1.0.69",
 ]
 
@@ -2970,6 +2971,7 @@ dependencies = [
  "mdns-sd",
  "netdev",
  "opus",
+ "pw-graph-utils",
  "qrcode",
  "rand 0.8.7",
  "serde",
@@ -3003,7 +3005,12 @@ dependencies = [
  "egui",
  "pw-graph-core",
  "pw-graph-i18n",
+ "pw-graph-utils",
 ]
+
+[[package]]
+name = "pw-graph-utils"
+version = "0.1.0"
 
 [[package]]
 name = "pxfm"

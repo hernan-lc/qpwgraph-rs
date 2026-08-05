@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+/// User-facing appearance overrides for a node. The backend keeps the native
+/// node identity and name; this state controls how the node is presented in
+/// the canvas and can be persisted by the application.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct NodeAppearance {
+    pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 4]>,
+}
+
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(

@@ -16,3 +16,4 @@ pw-graph-effects = { path = "../pw-graph-effects" }
 thiserror.workspace = true
 pipewire = { workspace = true, optional = true }
 pw-graph-relay = { path = "../pw-graph-relay", optional = true }
+pw-graph-utils = { path = "../pw-graph-utils" }

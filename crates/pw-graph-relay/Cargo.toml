@@ -19,3 +19,4 @@ thiserror.workspace = true
 mdns-sd.workspace = true
 netdev.workspace = true
 qrcode.workspace = true
+pw-graph-utils = { path = "../pw-graph-utils" }

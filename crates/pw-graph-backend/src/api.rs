@@ -15,35 +15,26 @@ use thiserror::Error;
 /// that for every audio node continuously can visibly rewrite the user's audio
 /// configuration, so metering defaults to [`MeterPolicy::OnDemand`], which is
 /// limited to nodes represented by a currently visible application window.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MeterPolicy {
-    /// Never open helper streams. Meters report unavailable.
-    Disabled,
-    /// Measure filtered audio nodes while the application window is visible.
-    #[default]
-    OnDemand,
-    /// Measure every audio node continuously.
-    Always,
+///
+/// `parse` accepts multiple aliases per variant. Unknown values fall back to
+/// the safe default so a hand-edited or older config file still starts.
+pw_graph_utils::enum_str! {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum MeterPolicy {
+        Disabled = "off",
+        OnDemand = "on-demand",
+        Always = "always",
+    }
 }
 
 impl MeterPolicy {
-    pub const ALL: [Self; 3] = [Self::Disabled, Self::OnDemand, Self::Always];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "off",
-            Self::OnDemand => "on-demand",
-            Self::Always => "always",
-        }
-    }
-
-    /// Unknown values fall back to the safe default rather than failing a load,
-    /// so a hand-edited or older config file still starts the application.
+    /// Parse with extended aliases. Unknown values fall back to the default.
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" | "disabled" | "none" => Self::Disabled,
             "always" | "all" => Self::Always,
-            _ => Self::OnDemand,
+            "on-demand" => Self::OnDemand,
+            _ => Self::default(),
         }
     }
 }
@@ -66,42 +57,42 @@ impl BackendError {
     pub(crate) fn unsupported(message: impl std::fmt::Display) -> Self {
         Self::Unsupported(message.to_string())
     }
+}
 
-    pub(crate) fn unknown_effect_instance(instance_id: &str) -> Self {
-        Self::native(format!("unknown effect instance {instance_id}"))
-    }
+macro_rules! backend_error_constructors {
+    ($($name:ident => $message:expr),+ $(,)?) => {
+        impl BackendError {
+            $(
+                pub(crate) fn $name() -> Self {
+                    Self::native($message)
+                }
+            )+
+        }
+    };
+    ($($name:ident($($arg:ident: $ty:ty),*) => $message:expr),+ $(,)?) => {
+        impl BackendError {
+            $(
+                pub(crate) fn $name($($arg: $ty),*) -> Self {
+                    Self::native($message)
+                }
+            )+
+        }
+    };
+}
 
-    pub(crate) fn effect_already_exists(instance_id: &str) -> Self {
-        Self::native(format!("effect instance {instance_id} already exists"))
-    }
+backend_error_constructors! {
+    effect_source_unavailable => "effect source port is unavailable",
+    effect_destination_unavailable => "effect destination port is unavailable",
+    effect_not_linked => "effect source and destination are not linked",
+    effect_source_disappeared => "effect source disappeared while removing effect",
+    effect_destination_disappeared => "effect destination disappeared while removing effect",
+    effect_routing_incomplete => "effect routing is incomplete and cannot be restored",
+}
 
-    pub(crate) fn effect_create_failed(error: impl std::fmt::Display) -> Self {
-        Self::native(format!("could not create effect: {error}"))
-    }
-
-    pub(crate) fn effect_source_unavailable() -> Self {
-        Self::native("effect source port is unavailable")
-    }
-
-    pub(crate) fn effect_destination_unavailable() -> Self {
-        Self::native("effect destination port is unavailable")
-    }
-
-    pub(crate) fn effect_not_linked() -> Self {
-        Self::native("effect source and destination are not linked")
-    }
-
-    pub(crate) fn effect_source_disappeared() -> Self {
-        Self::native("effect source disappeared while removing effect")
-    }
-
-    pub(crate) fn effect_destination_disappeared() -> Self {
-        Self::native("effect destination disappeared while removing effect")
-    }
-
-    pub(crate) fn effect_routing_incomplete() -> Self {
-        Self::native("effect routing is incomplete and cannot be restored")
-    }
+backend_error_constructors! {
+    unknown_effect_instance(instance_id: &str) => format!("unknown effect instance {instance_id}"),
+    effect_already_exists(instance_id: &str) => format!("effect instance {instance_id} already exists"),
+    effect_create_failed(error: impl std::fmt::Display) => format!("could not create effect: {error}"),
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
@@ -378,28 +369,12 @@ pub trait GraphDriver: EffectDriver {
         source: &PortKey,
         destination: &PortKey,
     ) -> BackendResult<(PortId, PortId, Link)> {
-        let output = self
-            .graph()
-            .resolve_port_key(source)
-            .ok_or_else(BackendError::effect_source_unavailable)?;
-        let input = self
-            .graph()
-            .resolve_port_key(destination)
-            .ok_or_else(BackendError::effect_destination_unavailable)?;
-        let output_port = self
-            .graph()
-            .port(output)
-            .ok_or(GraphError::MissingPort(output))?;
-        let input_port = self
-            .graph()
-            .port(input)
-            .ok_or(GraphError::MissingPort(input))?;
-        if !output_port.direction.is_source() {
-            return Err(GraphError::NotSource(output).into());
-        }
-        if !input_port.direction.is_sink() {
-            return Err(GraphError::NotSink(input).into());
-        }
+        let (output, input) = self.effect_resolve_and_validate_endpoints(
+            source,
+            destination,
+            BackendError::effect_source_unavailable,
+            BackendError::effect_destination_unavailable,
+        )?;
         let link = self
             .graph()
             .links
@@ -418,14 +393,28 @@ pub trait GraphDriver: EffectDriver {
         source: &PortKey,
         destination: &PortKey,
     ) -> BackendResult<(PortId, PortId)> {
-        let output = self
-            .graph()
-            .resolve_port_key(source)
-            .ok_or_else(BackendError::effect_source_disappeared)?;
+        self.effect_resolve_and_validate_endpoints(
+            source,
+            destination,
+            BackendError::effect_source_disappeared,
+            BackendError::effect_destination_disappeared,
+        )
+    }
+
+    /// Shared endpoint resolution: resolve both ports by key, validate their
+    /// directions, and return their numeric IDs.
+    fn effect_resolve_and_validate_endpoints(
+        &self,
+        source: &PortKey,
+        destination: &PortKey,
+        source_error: impl FnOnce() -> BackendError,
+        destination_error: impl FnOnce() -> BackendError,
+    ) -> BackendResult<(PortId, PortId)> {
+        let output = self.graph().resolve_port_key(source).ok_or_else(source_error)?;
         let input = self
             .graph()
             .resolve_port_key(destination)
-            .ok_or_else(BackendError::effect_destination_disappeared)?;
+            .ok_or_else(destination_error)?;
         let output_port = self
             .graph()
             .port(output)

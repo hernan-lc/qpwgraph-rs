@@ -368,26 +368,37 @@ fn resume_peer_session(inner: &Arc<EngineInner>, id: SessionId, mut stream: TcpS
     host_control_loop(inner, record, stream);
 }
 
+/// Handle a clean control-watch exit that ends the session. Returns `true`
+/// if the session was torn down (so the caller can return).
+fn handle_teardown_exit(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    exit: ControlExit,
+    on_drop: impl FnOnce(String),
+) -> bool {
+    match exit {
+        ControlExit::Stopped => {
+            teardown(inner, record.id, "session stopped".into());
+            true
+        }
+        ControlExit::PeerBye(reason) => {
+            teardown(inner, record.id, format!("peer left: {reason}"));
+            true
+        }
+        ControlExit::Dropped(reason) => on_drop(reason),
+    }
+}
+
 /// Watch the control channel, waiting out link drops for [`RESUME_GRACE`]
 /// so a reconnecting client can take over without losing the session. The
 /// resuming thread runs its own watch, so every outcome ends this one.
 fn host_control_loop(inner: Arc<EngineInner>, record: Arc<SessionRecord>, stream: TcpStream) {
-    match watch_control(Arc::clone(&inner), Arc::clone(&record), stream) {
-        ControlExit::Stopped => {
-            teardown(&inner, record.id, "session stopped".into());
-        }
-        ControlExit::PeerBye(reason) => {
-            teardown(&inner, record.id, format!("peer left: {reason}"));
-        }
-        ControlExit::Dropped(reason) => {
-            if await_resume_grace(&inner, &record) {
-                // A resume thread took over (or the session is already gone);
-                // this watch must not touch the session further.
-                return;
-            }
+    let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream);
+    handle_teardown_exit(&inner, &record, result, |reason| {
+        if !await_resume_grace(&inner, &record) {
             teardown(&inner, record.id, reason);
         }
-    }
+    });
 }
 
 /// Wait for a client resume to replace this control watch. Returns `true`
@@ -594,43 +605,39 @@ fn client_control_loop(
     let socket_codec = record.codec;
     let mut stream = stream;
     loop {
-        match watch_control(Arc::clone(&inner), Arc::clone(&record), stream) {
-            ControlExit::Stopped => {
-                teardown(&inner, record.id, "session stopped".into());
+        let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream);
+        let resume = handle_teardown_exit(&inner, &record, result, |reason| {
+            if record.bye_requested.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
+                teardown(&inner, record.id, reason);
                 return;
             }
-            ControlExit::PeerBye(reason) => {
-                teardown(&inner, record.id, format!("peer left: {reason}"));
-                return;
-            }
-            ControlExit::Dropped(reason) => {
-                if record.bye_requested.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
-                    teardown(&inner, record.id, reason);
-                    return;
-                }
-                inner.emit(RelayEvent::Error {
-                    message: format!("control link to host lost ({reason}); attempting to resume"),
-                });
-                match resume_client_control(&inner, &record, target, &pin) {
-                    Some(new_stream) => {
-                        // Re-announce our UDP address from the real audio
-                        // socket: the route may have changed link (e.g.
-                        // Wi-Fi to USB tethering), and the host must learn
-                        // the new source address.
-                        if let Ok(slot) = record.peer_audio_addr.lock() {
-                            if let Some(addr) = *slot {
-                                let _ = socket.send_to(&announce_packet(socket_codec), addr);
-                            }
+            inner.emit(RelayEvent::Error {
+                message: format!("control link to host lost ({reason}); attempting to resume"),
+            });
+            match resume_client_control(&inner, &record, target, &pin) {
+                Some(new_stream) => {
+                    // Re-announce our UDP address from the real audio
+                    // socket: the route may have changed link (e.g.
+                    // Wi-Fi to USB tethering), and the host must learn
+                    // the new source address.
+                    if let Ok(slot) = record.peer_audio_addr.lock() {
+                        if let Some(addr) = *slot {
+                            let _ = socket.send_to(&announce_packet(socket_codec), addr);
                         }
-                        stream = new_stream;
-                        continue;
                     }
-                    None => {
-                        teardown(&inner, record.id, reason);
-                        return;
-                    }
+                    stream = new_stream;
+                    true
+                }
+                None => {
+                    teardown(&inner, record.id, reason);
+                    false
                 }
             }
+        });
+        if resume {
+            continue;
+        } else {
+            return;
         }
     }
 }

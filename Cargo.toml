@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/pw-graph-utils",
     "crates/pw-graph-core",
     "crates/pw-graph-effects",
     "crates/pw-graph-backend",

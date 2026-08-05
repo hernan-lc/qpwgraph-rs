@@ -5,6 +5,7 @@
 //! host sends in its challenge. The PIN itself never crosses the wire.
 
 use hmac::{Hmac, Mac};
+use pw_graph_utils::hex::{hex_decode, hex_encode};
 use rand::Rng;
 use sha2::Sha256;
 
@@ -112,27 +113,6 @@ pub fn verify_digest(pin: &str, salt: &str, digest: &str) -> bool {
     };
     mac.update(salt.as_bytes());
     mac.verify_slice(&provided).is_ok()
-}
-
-pub fn hex_encode(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push_str(&format!("{byte:02x}"));
-    }
-    text
-}
-
-pub fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
-    if !text.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|index| {
-            u8::from_str_radix(&text[index..index + 2], 16)
-                .map_err(|error| format!("invalid hex byte: {error}"))
-        })
-        .collect()
 }
 
 #[cfg(test)]

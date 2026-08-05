@@ -1,5 +1,6 @@
 //! TOML configuration compatible with the state surface described by qpwgraph.
 
+pub use pw_graph_core::NodeAppearance;
 use pw_graph_core::PortKey;
 use pw_graph_effects::EffectInstanceConfig;
 use serde::{Deserialize, Serialize};
@@ -18,12 +19,8 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct NodeViewConfig {
-    pub collapsed: bool,
-    pub custom_name: Option<String>,
-    pub color: Option<[u8; 4]>,
-}
+#[deprecated(since = "0.1.0", note = "use pw_graph_core::NodeAppearance instead")]
+pub type NodeViewConfig = NodeAppearance;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default = "AppConfig::default")]

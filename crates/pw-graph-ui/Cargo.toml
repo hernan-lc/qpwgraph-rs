@@ -9,3 +9,4 @@ authors.workspace = true
 egui.workspace = true
 pw-graph-core = { path = "../pw-graph-core" }
 pw-graph-i18n = { path = "../pw-graph-i18n" }
+pw-graph-utils = { path = "../pw-graph-utils" }

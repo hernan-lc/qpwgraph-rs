@@ -2,7 +2,7 @@
 //! never owns the driver or command stack.
 
 use egui::{vec2, Pos2, Vec2};
-use pw_graph_core::{Graph, LinkId, NodeId, PortId, PortType};
+use pw_graph_core::{Graph, LinkId, NodeAppearance, NodeId, PortId, PortType};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod canvas;
@@ -18,16 +18,6 @@ pub use components::{
     SelectProps, SliderProps, StepItem, StepsProps, Style, SwitchProps, TabItem, TabsProps,
     TextInputProps, Theme, ThemeMode, ThemePalette, ThemeToken, UiDocument, UiEvent, Value,
 };
-
-/// User-facing appearance overrides for a node. The backend keeps the native
-/// node identity and name; this state controls how the node is presented in
-/// the canvas and can be persisted by the application.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct NodeAppearance {
-    pub collapsed: bool,
-    pub custom_name: Option<String>,
-    pub color: Option<[u8; 4]>,
-}
 
 /// Local UI mirror of the node's audio controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,64 +91,29 @@ pub enum CanvasAction {
 }
 
 /// How dragging from a node's ports/body creates connections.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ConnectMode {
-    /// Drag from a specific port to another specific port: one link at a time.
-    #[default]
-    Advanced,
-    /// Drag from one node onto another: every compatible port pair is linked
-    /// at once, matched by channel position when available (e.g. stereo L/R).
-    Easy,
+pw_graph_utils::enum_str! {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum ConnectMode {
+        Advanced = "advanced",
+        Easy = "easy",
+    }
 }
 
 impl ConnectMode {
     pub const ALL: [Self; 2] = [Self::Easy, Self::Advanced];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Easy => "easy",
-            Self::Advanced => "advanced",
-        }
-    }
-
-    pub fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "easy" => Self::Easy,
-            _ => Self::Advanced,
-        }
-    }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MediaFilter {
-    #[default]
-    All,
-    Audio,
-    Video,
-    Midi,
+pw_graph_utils::enum_str! {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum MediaFilter {
+        All = "all",
+        Audio = "audio",
+        Video = "video",
+        Midi = "midi",
+    }
 }
 
 impl MediaFilter {
-    pub const ALL: [Self; 4] = [Self::All, Self::Audio, Self::Video, Self::Midi];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Audio => "audio",
-            Self::Video => "video",
-            Self::Midi => "midi",
-        }
-    }
-
-    pub fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "audio" => Self::Audio,
-            "video" => Self::Video,
-            "midi" => Self::Midi,
-            _ => Self::All,
-        }
-    }
-
     pub fn matches_port_type(self, port_type: PortType) -> bool {
         match self {
             Self::All => true,

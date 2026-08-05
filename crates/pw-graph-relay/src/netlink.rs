@@ -15,25 +15,17 @@ use std::time::{Duration, Instant};
 
 /// A kind of local network link, declared in preference order: USB
 /// tethering first (lowest latency, most stable), wired LAN last.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum LinkKind {
-    Usb,
-    Wifi,
-    BluetoothPan,
-    Lan,
+pw_graph_utils::enum_str! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum LinkKind {
+        Usb = "usb",
+        Wifi = "wifi",
+        BluetoothPan = "bluetooth",
+        Lan = "lan",
+    }
 }
 
 impl LinkKind {
-    /// Stable identifier used in config values and TXT records.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Usb => "usb",
-            Self::Wifi => "wifi",
-            Self::BluetoothPan => "bluetooth",
-            Self::Lan => "lan",
-        }
-    }
-
     /// Human-readable label for UI display.
     pub fn label(self) -> &'static str {
         match self {

@@ -21,21 +21,13 @@ pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_CONTROL_FRAME: u32 = 64 * 1024;
 
 /// Which kind of device a peer runs on. Informational for display only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DeviceKind {
-    Android,
-    Linux,
-    Other,
-}
-
-impl DeviceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Android => "android",
-            Self::Linux => "linux",
-            Self::Other => "other",
-        }
+pw_graph_utils::enum_str! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum DeviceKind {
+        Android = "android",
+        Linux = "linux",
+        Other = "other",
     }
 }
 
@@ -77,13 +69,13 @@ impl Roles {
 }
 
 /// Audio codec carried on the UDP audio channel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CodecKind {
-    /// Interleaved little-endian f32 PCM. Debugging and deterministic tests.
-    Pcm,
-    /// Opus frames, the default for real sessions.
-    Opus,
+pw_graph_utils::enum_str! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum CodecKind {
+        Pcm = "pcm",
+        Opus = "opus",
+    }
 }
 
 impl CodecKind {

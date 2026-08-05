@@ -234,53 +234,31 @@ impl EngineInner {
     }
 
     pub(crate) fn stop_advertiser(&self) {
-        if let Ok(mut slot) = self.advertiser.lock() {
-            if let Some(advertiser) = slot.take() {
-                advertiser.stop();
-            }
-        }
+        stop_slot(&self.advertiser);
     }
 
     pub(crate) fn start_browser(self: &Arc<Self>) -> RelayResult<()> {
-        if let Ok(slot) = self.browser.lock() {
-            if slot.as_ref().is_some_and(|browser| !browser.stopped()) {
-                return Ok(());
-            }
-        }
-        let browser = Browser::start(self)?;
-        if let Ok(mut slot) = self.browser.lock() {
-            *slot = Some(browser);
-        }
-        Ok(())
+        start_stoppable(
+            &self.browser,
+            |s| s.as_ref().is_some_and(|browser| !browser.stopped()),
+            || Browser::start(self),
+        )
     }
 
     pub(crate) fn stop_browser(&self) {
-        if let Ok(mut slot) = self.browser.lock() {
-            if let Some(browser) = slot.take() {
-                browser.stop();
-            }
-        }
+        stop_slot(&self.browser);
     }
 
     pub(crate) fn start_usb_scanner(self: &Arc<Self>) -> RelayResult<()> {
-        if let Ok(slot) = self.usb_scanner.lock() {
-            if slot.as_ref().is_some_and(|scanner| !scanner.stopped()) {
-                return Ok(());
-            }
-        }
-        let scanner = crate::usb_probe::UsbScanner::start(self)?;
-        if let Ok(mut slot) = self.usb_scanner.lock() {
-            *slot = Some(scanner);
-        }
-        Ok(())
+        start_stoppable(
+            &self.usb_scanner,
+            |s| s.as_ref().is_some_and(|scanner| !scanner.stopped()),
+            || crate::usb_probe::UsbScanner::start(self),
+        )
     }
 
     pub(crate) fn stop_usb_scanner(&self) {
-        if let Ok(mut slot) = self.usb_scanner.lock() {
-            if let Some(scanner) = slot.take() {
-                scanner.stop();
-            }
-        }
+        stop_slot(&self.usb_scanner);
     }
 
     pub(crate) fn refresh_service(&self, service_id: &str, current: Vec<PeerInfo>) {
@@ -346,6 +324,57 @@ impl EngineInner {
             .map(|peers| peers.values().cloned().collect())
             .unwrap_or_default()
     }
+}
+
+/// A background service that can be started and stopped with an `Arc<AtomicBool>` flag.
+trait Stoppable: Send + Sync {
+    fn stop(&self);
+    fn stopped(&self) -> bool;
+}
+
+impl Stoppable for Browser {
+    fn stop(&self) {
+        Browser::stop(self)
+    }
+    fn stopped(&self) -> bool {
+        Browser::stopped(self)
+    }
+}
+
+impl Stoppable for usb_probe::UsbScanner {
+    fn stop(&self) {
+        usb_probe::UsbScanner::stop(self)
+    }
+    fn stopped(&self) -> bool {
+        usb_probe::UsbScanner::stopped(self)
+    }
+}
+
+/// Replace the content of a `Mutex<Option<T>>`, stopping the previous value.
+fn stop_slot<T: Stoppable>(slot: &Mutex<Option<T>>) {
+    if let Ok(mut slot) = slot.lock() {
+        if let Some(service) = slot.take() {
+            service.stop();
+        }
+    }
+}
+
+/// Start a background service inside a slot, unless one is already running.
+fn start_stoppable<T: Stoppable, E, F: FnOnce() -> Result<T, E>>(
+    slot: &Mutex<Option<T>>,
+    is_active: impl FnOnce(&Option<T>) -> bool,
+    make: F,
+) -> Result<(), E> {
+    if let Ok(slot) = slot.lock() {
+        if is_active(&slot) {
+            return Ok(());
+        }
+    }
+    let service = make()?;
+    if let Ok(mut slot) = slot.lock() {
+        *slot = Some(service);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
