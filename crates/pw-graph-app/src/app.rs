@@ -58,6 +58,10 @@ pub(crate) struct QpwgraphApp {
     /// back at the top instead of reusing a scroll offset left over from
     /// before.
     pub(crate) preferences_scroll_epoch: u32,
+    /// Which patchbay rule is open for editing, by position in the list.
+    /// Positions shift when a rule is removed, so this is cleared rather
+    /// than remapped whenever the list is edited.
+    pub(crate) patchbay_rule_expanded: Option<usize>,
     pub(crate) profile_name: String,
     pub(crate) last_meter_refresh: Instant,
     pub(crate) last_graph_refresh: Instant,
