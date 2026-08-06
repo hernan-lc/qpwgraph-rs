@@ -77,6 +77,22 @@ cargo run -p pw-graph-app -- --lang es
 `--demo` starts the deterministic demo graph. Without it, a missing live
 backend produces an empty graph and an explanatory status message.
 
+## Nix
+
+The flake provides a native Linux package and a development shell with the
+PipeWire, ALSA, GTK, Wayland, X11, and Opus dependencies used by the desktop
+application:
+
+```bash
+nix develop
+nix build
+nix run
+nix flake check
+```
+
+The default package builds `pw-graph-app` with its default native features and
+runs the workspace tests with all features enabled.
+
 ## Releases
 
 Releases are published by GitHub Actions from tags matching `vX.Y.Z`. The tag
