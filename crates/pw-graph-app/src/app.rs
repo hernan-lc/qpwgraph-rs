@@ -58,6 +58,9 @@ pub(crate) struct QpwgraphApp {
     /// back at the top instead of reusing a scroll offset left over from
     /// before.
     pub(crate) preferences_scroll_epoch: u32,
+    /// Frames elapsed since the Preferences modal opened, used to keep its
+    /// scroll area pinned to the top while it settles.
+    pub(crate) preferences_open_frames: u8,
     /// Which patchbay rule is open for editing, by position in the list.
     /// Positions shift when a rule is removed, so this is cleared rather
     /// than remapped whenever the list is edited.

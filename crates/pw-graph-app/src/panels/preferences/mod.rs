@@ -25,6 +25,10 @@ const PREFERENCES_SCROLL_MAX_HEIGHT: f32 = 600.0;
 pub(super) const PREFERENCES_SELECT_WIDTH: f32 = 260.0;
 /// Filesystem paths need considerably more room than an option label.
 pub(super) const PREFERENCES_PATH_SELECT_WIDTH: f32 = 520.0;
+/// How many frames the scroll area is held at the top after the modal opens.
+/// Two would do; three costs nothing and covers the frame egui spends
+/// measuring content it has not laid out before.
+const PREFERENCES_SCROLL_PIN_FRAMES: u8 = 3;
 
 /// Tabs inside the Preferences modal, which holds settings you configure once
 /// rather than watch while working the canvas.
@@ -54,8 +58,16 @@ fn preferences_tab_from_value(value: &str) -> PreferencesTab {
 impl QpwgraphApp {
     pub(crate) fn show_preferences_modal(&mut self, ctx: &egui::Context) {
         if !self.show_preferences {
+            self.preferences_open_frames = 0;
             return;
         }
+        // Salting the scroll id per tab and per open is not enough on its own
+        // — the modal still came up showing the middle of the page, with the
+        // first section scrolled off above the viewport. Hold the offset at
+        // the top for the opening frames so the page always starts where it
+        // reads from; after that the scroll area is the user's again.
+        let pin_scroll_to_top = self.preferences_open_frames < PREFERENCES_SCROLL_PIN_FRAMES;
+        self.preferences_open_frames = self.preferences_open_frames.saturating_add(1);
         let viewport = ctx.screen_rect();
         let dialog_width = (viewport.width() - 48.0)
             .clamp(320.0, PREFERENCES_DIALOG_WIDTH)
@@ -79,14 +91,15 @@ impl QpwgraphApp {
                     app.preferences_tab,
                     app.preferences_scroll_epoch,
                 );
-                fresh_scroll_area(scroll_id, scroll_max_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match app.preferences_tab {
-                        PreferencesTab::Interface => {
-                            app.show_preferences_interface_tab(document, ui)
-                        }
-                        PreferencesTab::Patchbay => app.show_preferences_patchbay_tab(document, ui),
-                    });
+                let mut scroll =
+                    fresh_scroll_area(scroll_id, scroll_max_height).auto_shrink([false, false]);
+                if pin_scroll_to_top {
+                    scroll = scroll.vertical_scroll_offset(0.0);
+                }
+                scroll.show(ui, |ui| match app.preferences_tab {
+                    PreferencesTab::Interface => app.show_preferences_interface_tab(document, ui),
+                    PreferencesTab::Patchbay => app.show_preferences_patchbay_tab(document, ui),
+                });
                 ui.add_space(8.0);
                 if show_close_button(
                     document,

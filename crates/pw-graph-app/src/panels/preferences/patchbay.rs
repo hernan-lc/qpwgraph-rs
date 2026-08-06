@@ -22,6 +22,8 @@ const SAVE_PROFILE_BUTTON_WIDTH: f32 = 130.0;
 impl QpwgraphApp {
     pub(super) fn show_preferences_patchbay_tab(&mut self, document: &mut UiDocument, ui: &mut Ui) {
         let theme = document.theme().clone();
+        self.show_patchbay_options_section(document, ui, &theme);
+        self.show_patchbay_file_section(document, ui, &theme);
         self.show_patchbay_rules_section(document, ui, &theme);
     }
 

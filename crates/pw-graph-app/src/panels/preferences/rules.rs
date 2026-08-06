@@ -18,9 +18,7 @@ use crate::app::QpwgraphApp;
 use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
 use pw_graph_patchbay::PatchConnection;
-use pw_graph_ui::{
-    CardProps, Icon as UiIcon, IconButtonProps, Theme, ThemeToken, UiDocument,
-};
+use pw_graph_ui::{CardProps, Icon as UiIcon, IconButtonProps, Theme, ThemeToken, UiDocument};
 
 /// Room for the chevron, pin, and remove buttons on a rule's trailing edge:
 /// three 26 pt icon buttons and the gaps between them, plus a little slack so
@@ -253,8 +251,16 @@ impl QpwgraphApp {
     ) -> RuleFields {
         ui.add_space(2.0);
         for (suffix, label_key, value) in [
-            ("output_node", "patchbay.output_node", &mut fields.output_node),
-            ("output_name", "patchbay.output_port", &mut fields.output_name),
+            (
+                "output_node",
+                "patchbay.output_node",
+                &mut fields.output_node,
+            ),
+            (
+                "output_name",
+                "patchbay.output_port",
+                &mut fields.output_name,
+            ),
             ("input_node", "patchbay.input_node", &mut fields.input_node),
             ("input_name", "patchbay.input_port", &mut fields.input_name),
         ] {
@@ -319,10 +325,8 @@ fn endpoint_line(
         ui.label(RichText::new(label).small().color(colors.weak));
         match endpoint {
             Some(endpoint) => {
-                ui.add(
-                    egui::Label::new(RichText::new(endpoint).color(colors.primary)).truncate(),
-                )
-                .on_hover_text(endpoint);
+                ui.add(egui::Label::new(RichText::new(endpoint).color(colors.primary)).truncate())
+                    .on_hover_text(endpoint);
             }
             None => {
                 ui.label(RichText::new("—").color(colors.weak));

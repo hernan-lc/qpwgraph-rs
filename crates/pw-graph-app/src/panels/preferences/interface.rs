@@ -6,9 +6,7 @@
 //! on it refers to anything else on it — which is exactly why it is worth
 //! keeping apart from the patchbay editor, where everything does.
 
-use super::super::components::{
-    document_button, document_setting_number, document_setting_select,
-};
+use super::super::components::{document_button, document_setting_number, document_setting_select};
 use super::super::shared::{meter_policy_key, panel_section};
 use super::PREFERENCES_SELECT_WIDTH;
 use crate::app::QpwgraphApp;
@@ -19,7 +17,11 @@ use pw_graph_i18n::Locale;
 use pw_graph_ui::{OptionItem, UiDocument};
 
 impl QpwgraphApp {
-    pub(super) fn show_preferences_interface_tab(&mut self, document: &mut UiDocument, ui: &mut Ui) {
+    pub(super) fn show_preferences_interface_tab(
+        &mut self,
+        document: &mut UiDocument,
+        ui: &mut Ui,
+    ) {
         let theme = document.theme().clone();
         self.show_configuration_section(document, ui, &theme);
         self.show_chrome_section(document, ui, &theme);
@@ -82,7 +84,9 @@ impl QpwgraphApp {
                 icon_label(ui, Icon::Save, self.i18n.text("help.save_configuration"));
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(self.i18n.text("inspector.save_configuration")).strong());
+                    ui.label(
+                        RichText::new(self.i18n.text("inspector.save_configuration")).strong(),
+                    );
                     ui.label(
                         RichText::new(self.tf(
                             "inspector.config_path",
