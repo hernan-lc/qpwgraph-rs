@@ -1,4 +1,5 @@
 target/
+.direnv/
 .commandcode/
 android/.gradle/
 android/.kotlin/

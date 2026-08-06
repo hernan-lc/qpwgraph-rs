@@ -47,9 +47,9 @@ install -Dm644 packaging/qpwgraph-rs.desktop ~/.local/share/applications/qpwgrap
 install -Dm644 packaging/io.github.qpwgraph_rs.metainfo.xml ~/.local/share/metainfo/io.github.qpwgraph_rs.metainfo.xml
 ```
 
-Native builds need Rust, PipeWire development headers and libraries, ALSA
-Sequencer development headers and libraries, and the native file-dialog
-dependencies used by `rfd`. Build without either native backend
+Native builds need Rust, CMake, Clang/libclang, PipeWire development headers
+and libraries, ALSA Sequencer development headers and libraries, Opus, and the
+native file-dialog dependencies used by `rfd`. Build without either native backend
 when those libraries are unavailable:
 
 ```bash

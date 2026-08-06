@@ -93,6 +93,13 @@ nix flake check
 The default package builds `pw-graph-app` with its default native features and
 runs the workspace tests with all features enabled.
 
+With [direnv](https://direnv.net/) installed, allow the repository once to
+load the same development shell automatically:
+
+```bash
+direnv allow
+```
+
 ## Releases
 
 Releases are published by GitHub Actions from tags matching `vX.Y.Z`. The tag
@@ -274,6 +281,14 @@ cargo fmt --all -- --check
 cargo test --workspace
 cargo check --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+To run the GitHub Actions checks locally with `act` and Docker:
+
+```bash
+act push -j checks \
+  --artifact-server-addr 127.0.0.1 \
+  -P ubuntu-latest=catthehacker/ubuntu:act-latest
 ```
 
 See [TODO.md](TODO.md) for implementation notes and
