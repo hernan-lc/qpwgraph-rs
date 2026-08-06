@@ -23,44 +23,36 @@ pub mod hex;
 /// assert_eq!(Direction::parse("SOURCE"), Direction::Source);
 /// ```
 ///
-/// For enums that need `Default`, implement it separately:
+/// Attributes may also be attached to individual variants, which is how an
+/// enum declares its default:
 ///
 /// ```ignore
 /// enum_str! {
 ///     #[derive(Default)]
-///     pub enum Direction {
-///         Source = "source",
-///         Sink = "sink",
-///     }
-/// }
-/// impl Default for Direction {
-///     fn default() -> Self { Self::Source }
-/// }
-/// ```
-///
-/// The `ALL` constant can also be used as a const:
-///
-/// ```ignore
-/// enum_str! {
 ///     pub enum Direction {
 ///         #[default]
 ///         Source = "source",
 ///         Sink = "sink",
 ///     }
 /// }
+///
+/// assert_eq!(Direction::default(), Direction::Source);
 /// ```
+///
+/// Prefer that over a hand-written `impl Default`, which is what
+/// `clippy::derivable_impls` asks for.
 #[macro_export]
 macro_rules! enum_str {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident {
-            $($variant:ident = $value:literal),+ $(,)?
+            $($(#[$variant_meta:meta])* $variant:ident = $value:literal),+ $(,)?
         }
     ) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         $vis enum $name {
-            $($variant),+
+            $($(#[$variant_meta])* $variant),+
         }
 
         impl $name {

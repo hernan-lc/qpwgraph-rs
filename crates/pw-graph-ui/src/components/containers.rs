@@ -601,7 +601,11 @@ fn step_marker(
 ) -> bool {
     let active = index == current;
     let inactive_color = ui.visuals().weak_text_color();
-    let color = if item.done || active { accent } else { inactive_color };
+    let color = if item.done || active {
+        accent
+    } else {
+        inactive_color
+    };
     let number_on_active = ui.visuals().extreme_bg_color;
     let response = ui
         .horizontal(|ui| {

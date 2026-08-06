@@ -18,9 +18,15 @@ impl QpwgraphApp {
         }
         let payload = RelayUiState::qr_payload(self);
         self.ensure_relay_qr_texture(ctx, payload.as_deref());
-        if self.run_dialog(ctx, "relay-qr", self.i18n.text("relay.qr_title"), QR_DIALOG_WIDTH, |app, ui, document| {
-            app.show_relay_qr_contents(payload.as_deref(), document, ui);
-        }) {
+        if self.run_dialog(
+            ctx,
+            "relay-qr",
+            self.i18n.text("relay.qr_title"),
+            QR_DIALOG_WIDTH,
+            |app, ui, document| {
+                app.show_relay_qr_contents(payload.as_deref(), document, ui);
+            },
+        ) {
             self.relay.show_qr = false;
         }
     }
@@ -86,13 +92,9 @@ impl QpwgraphApp {
             } else if self.driver.relay_status().host_active {
                 // The host is already listening; only the link is missing, so
                 // do not tell the user to start the host again.
-                ui.label(
-                    RichText::new(self.i18n.text("relay.qr_no_link")).color(text.weak),
-                );
+                ui.label(RichText::new(self.i18n.text("relay.qr_no_link")).color(text.weak));
             } else {
-                ui.label(
-                    RichText::new(self.i18n.text("relay.qr_unavailable")).color(text.weak),
-                );
+                ui.label(RichText::new(self.i18n.text("relay.qr_unavailable")).color(text.weak));
             }
             ui.add_space(4.0);
             ui.label(

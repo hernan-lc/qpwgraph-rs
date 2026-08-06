@@ -765,10 +765,9 @@ impl PipewireDriver {
                     && driver.graph.port(effect.instance.input_port).is_some()
                     && driver.graph.port(effect.instance.output_port).is_some()
             })?;
-            let effect = self
-                .effects
-                .get(&instance_id)
-                .ok_or_else(|| BackendError::native("new PipeWire effect disappeared during creation"))?;
+            let effect = self.effects.get(&instance_id).ok_or_else(|| {
+                BackendError::native("new PipeWire effect disappeared during creation")
+            })?;
             if effect.resolved() {
                 return Ok(effect.snapshot());
             }

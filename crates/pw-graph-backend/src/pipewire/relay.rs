@@ -16,8 +16,8 @@
 //! into the engine's PCM queues so a busy network worker can cost at most one
 //! bypassed quantum instead of an xrun.
 
-use super::*;
 use super::filter_runtime::FilterRuntime;
+use super::*;
 use pw_graph_relay::{RelayEngine, RelayHandle};
 use std::ffi::c_void;
 use std::ptr;

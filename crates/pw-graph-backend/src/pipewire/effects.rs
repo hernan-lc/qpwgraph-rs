@@ -13,8 +13,8 @@
 //! thread. Out-of-process/WASM module hosting still needs a richer realtime
 //! control channel before it can be added safely.
 
-use super::*;
 use super::filter_runtime::FilterRuntime;
+use super::*;
 use pw_graph_effects::{
     apply_parameters, AudioSpec, EffectHost, EffectInstanceConfig, EffectProcessor,
 };
@@ -328,13 +328,8 @@ impl NativeEffect {
             )?;
         }
         for channel in 0..DSP_CHANNELS {
-            runtime
-                .callback()
-                .input_ports[channel]
-                .store(input_ports[channel], Ordering::Release);
-            runtime
-                .callback()
-                .output_ports[channel]
+            runtime.callback().input_ports[channel].store(input_ports[channel], Ordering::Release);
+            runtime.callback().output_ports[channel]
                 .store(output_ports[channel], Ordering::Release);
         }
         runtime.connect()?;

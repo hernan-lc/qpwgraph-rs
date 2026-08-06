@@ -4,9 +4,7 @@ use super::super::super::{
 };
 use super::shared::{add_sized, labelled, normalize_optional_range, normalize_range, with_common};
 use super::{finish_control, prepare_control};
-use egui::{
-    vec2, Align, Button, Color32, Frame, Image, ImageSource, Layout, Response, Ui, Vec2,
-};
+use egui::{vec2, Align, Button, Color32, Frame, Image, ImageSource, Layout, Response, Ui, Vec2};
 
 const NUMBER_INPUT_STEPPER_WIDTH: f32 = 24.0;
 const NUMBER_INPUT_ICON_SIZE: f32 = 13.0;

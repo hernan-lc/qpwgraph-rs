@@ -122,7 +122,10 @@ impl GraphCanvas {
         pos2(
             self.port_side_x(node_rect, direction),
             node_rect.top()
-                + (NODE_HEADER_HEIGHT + controls_height + 13.0 + row_index as f32 * PORT_ROW_HEIGHT)
+                + (NODE_HEADER_HEIGHT
+                    + controls_height
+                    + 13.0
+                    + row_index as f32 * PORT_ROW_HEIGHT)
                     * self.zoom,
         )
     }

@@ -420,7 +420,10 @@ pub trait GraphDriver: EffectDriver {
         destination_error: BackendError,
     ) -> BackendResult<(PortId, PortId)> {
         let output = self.graph().resolve_port_key(source).ok_or(source_error)?;
-        let input = self.graph().resolve_port_key(destination).ok_or(destination_error)?;
+        let input = self
+            .graph()
+            .resolve_port_key(destination)
+            .ok_or(destination_error)?;
         let output_port = self
             .graph()
             .port(output)

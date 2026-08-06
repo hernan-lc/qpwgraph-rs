@@ -205,7 +205,12 @@ impl QpwgraphApp {
             let endpoint = format!("{}:{}", link.addr, port);
             if index == 0 {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(endpoint).monospace().strong().color(text.primary));
+                    ui.label(
+                        RichText::new(endpoint)
+                            .monospace()
+                            .strong()
+                            .color(text.primary),
+                    );
                     ui.label(
                         RichText::new(self.i18n.text("relay.endpoint_primary"))
                             .small()

@@ -36,9 +36,7 @@ impl<T> FilterRuntime<T> {
         thread_loop: &pw::thread_loop::ThreadLoop,
         node_name: &str,
         properties: pw::properties::Properties,
-        process: Option<
-            unsafe extern "C" fn(*mut c_void, *mut pw::spa::sys::spa_io_position),
-        >,
+        process: Option<unsafe extern "C" fn(*mut c_void, *mut pw::spa::sys::spa_io_position)>,
         callback: Box<T>,
     ) -> BackendResult<Self> {
         let callback_ptr = callback.as_ref() as *const T as *mut c_void;

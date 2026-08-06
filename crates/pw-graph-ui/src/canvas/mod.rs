@@ -456,10 +456,9 @@ impl GraphCanvas {
         link: &Link,
         visible_node_ids: &BTreeSet<NodeId>,
     ) -> bool {
-        let (Some(source), Some(destination)) = (
-            graph.port(link.output_port),
-            graph.port(link.input_port),
-        ) else {
+        let (Some(source), Some(destination)) =
+            (graph.port(link.output_port), graph.port(link.input_port))
+        else {
             return false;
         };
         visible_node_ids.contains(&source.node_id)

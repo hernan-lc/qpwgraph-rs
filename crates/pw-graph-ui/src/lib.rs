@@ -14,12 +14,12 @@ pub mod components;
 
 pub use components::{
     icon_image, record_custom_click, setting_row, setting_row_sized, BadgeProps, ButtonProps,
-    CardProps,
-    CheckboxProps, CommonProps, DialogPlacement, DialogProps, DialogResponse, DisclosureProps,
-    Document, Element, ElementId, ElementKind, EventType, Form, FormValues, Icon, IconButtonProps,
-    IconSource, LabelProps, ListenerId, MeterProps, NumberInputProps, OptionItem, RadioGroupProps,
-    SelectProps, SliderProps, StepItem, StepsProps, Style, SwitchProps, TabItem, TabsProps,
-    TextInputProps, Theme, ThemeMode, ThemePalette, ThemeToken, UiDocument, UiEvent, Value,
+    CardProps, CheckboxProps, CommonProps, DialogPlacement, DialogProps, DialogResponse,
+    DisclosureProps, Document, Element, ElementId, ElementKind, EventType, Form, FormValues, Icon,
+    IconButtonProps, IconSource, LabelProps, ListenerId, MeterProps, NumberInputProps, OptionItem,
+    RadioGroupProps, SelectProps, SliderProps, StepItem, StepsProps, Style, SwitchProps, TabItem,
+    TabsProps, TextInputProps, Theme, ThemeMode, ThemePalette, ThemeToken, UiDocument, UiEvent,
+    Value,
 };
 
 /// Local UI mirror of the node's audio controls.
@@ -95,30 +95,22 @@ pub enum CanvasAction {
 
 // How dragging from a node's ports/body creates connections.
 pw_graph_utils::enum_str! {
+    #[derive(Default)]
     pub enum ConnectMode {
+        #[default]
         Advanced = "advanced",
         Easy = "easy",
     }
 }
 
-impl Default for ConnectMode {
-    fn default() -> Self {
-        Self::Advanced
-    }
-}
-
 pw_graph_utils::enum_str! {
+    #[derive(Default)]
     pub enum MediaFilter {
+        #[default]
         All = "all",
         Audio = "audio",
         Video = "video",
         Midi = "midi",
-    }
-}
-
-impl Default for MediaFilter {
-    fn default() -> Self {
-        Self::All
     }
 }
 

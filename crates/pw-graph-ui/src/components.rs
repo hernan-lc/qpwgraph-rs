@@ -64,9 +64,9 @@ mod icons;
 mod ids;
 mod indicators;
 mod props;
-mod theme;
 #[cfg(test)]
 mod tests;
+mod theme;
 
 use std::collections::{BTreeMap, VecDeque};
 

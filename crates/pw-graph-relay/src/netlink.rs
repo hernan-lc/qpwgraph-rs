@@ -75,18 +75,14 @@ pub fn classify_interface(name: &str) -> Option<LinkKind> {
 // Which transport the user asked for. `Auto` (the default) picks the best
 // available link by policy.
 pw_graph_utils::enum_str! {
+    #[derive(Default)]
     pub enum TransportPreference {
+        #[default]
         Auto = "auto",
         Usb = "usb",
         Wifi = "wifi",
         Bluetooth = "bluetooth",
         Lan = "lan",
-    }
-}
-
-impl Default for TransportPreference {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 

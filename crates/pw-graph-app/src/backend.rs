@@ -1,5 +1,7 @@
 use pw_graph_alsamidi::AlsaMidiDriver;
-use pw_graph_backend::{AudioMeter, BackendError, BackendResult, GraphDriver, MeterPolicy, PipewireDriver};
+use pw_graph_backend::{
+    AudioMeter, BackendError, BackendResult, GraphDriver, MeterPolicy, PipewireDriver,
+};
 
 #[cfg(feature = "relay")]
 use pw_graph_backend::RelayDriver;
@@ -139,11 +141,7 @@ impl GraphDriver for CompositeDriver {
         Ok(existing)
     }
 
-    fn set_node_position(
-        &mut self,
-        node: NodeId,
-        position: [f32; 2],
-    ) -> BackendResult<()> {
+    fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
         if node.0 & ALSA_FLAG != 0 {
             self.alsa_mut()?.set_node_position(node, position)?;
         } else {
@@ -162,11 +160,7 @@ impl GraphDriver for CompositeDriver {
         self.pipewire_mut()?.set_node_mute(node, muted)
     }
 
-    fn set_node_volume(
-        &mut self,
-        node: NodeId,
-        volume: f32,
-    ) -> BackendResult<()> {
+    fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
         if node.0 & ALSA_FLAG != 0 {
             return Err(unsupported("ALSA MIDI nodes do not expose audio volume"));
         }
@@ -264,12 +258,9 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
         self.mutate_pipewire(|driver| driver.insert_effect(request))
     }
 
-    fn set_effect_enabled(
-        &mut self,
-        instance_id: &str,
-        enabled: bool,
-    ) -> BackendResult<()> {
-        self.pipewire_mut()?.set_effect_enabled(instance_id, enabled)
+    fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
+        self.pipewire_mut()?
+            .set_effect_enabled(instance_id, enabled)
     }
 
     fn set_effect_parameter(
@@ -328,10 +319,7 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         self.mutate_pipewire(|driver| driver.relay_connect(target, pin, roles))
     }
 
-    fn relay_disconnect(
-        &mut self,
-        session: pw_graph_backend::RelaySessionId,
-    ) -> BackendResult<()> {
+    fn relay_disconnect(&mut self, session: pw_graph_backend::RelaySessionId) -> BackendResult<()> {
         self.pipewire_mut()?.relay_disconnect(session)
     }
 
