@@ -32,8 +32,11 @@
 
             nativeBuildInputs = with pkgs; [
               cmake
+              llvmPackages.libclang
               pkg-config
             ];
+
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
             buildInputs = with pkgs; [
               alsa-lib
@@ -81,11 +84,14 @@
               cargo
               clippy
               cmake
+              llvmPackages.libclang
               rustc
               rustfmt
             ];
 
             nativeBuildInputs = with pkgs; [ pkg-config ];
+
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
             buildInputs = with pkgs; [
               alsa-lib
