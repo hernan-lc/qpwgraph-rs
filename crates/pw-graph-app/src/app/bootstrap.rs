@@ -155,7 +155,7 @@ impl QpwgraphApp {
             show_preferences: true,
             preferences_tab: PreferencesTab::Patchbay,
             preferences_scroll_epoch: 0,
-            patchbay_rule_expanded: Some(0),
+            patchbay_rule_expanded: None,
             profile_name,
             last_meter_refresh: Instant::now() - Duration::from_secs(1),
             last_graph_refresh: Instant::now(),

@@ -19,11 +19,13 @@ use crate::icons::Icon;
 use eframe::egui::{self, RichText, Ui};
 use pw_graph_patchbay::PatchConnection;
 use pw_graph_ui::{
-    BadgeProps, CardProps, Icon as UiIcon, IconButtonProps, Theme, ThemeToken, UiDocument,
+    CardProps, Icon as UiIcon, IconButtonProps, Theme, ThemeToken, UiDocument,
 };
 
-/// Room for the chevron, pin, and remove buttons on a rule's trailing edge.
-const RULE_ACTIONS_WIDTH: f32 = 118.0;
+/// Room for the chevron, pin, and remove buttons on a rule's trailing edge:
+/// three 26 pt icon buttons and the gaps between them, plus a little slack so
+/// an elided endpoint never touches the first button.
+const RULE_ACTIONS_WIDTH: f32 = 104.0;
 
 /// What the user asked a rule row to do, resolved after the list has been
 /// drawn so the loop never mutates the vector it is iterating.
@@ -81,7 +83,14 @@ impl QpwgraphApp {
         ui: &mut Ui,
         theme: &Theme,
     ) {
-        panel_section(ui, self.i18n.text("patchbay.connections"), theme, |ui| {
+        // The count belongs in the section title rather than on a badge of
+        // its own: a lone badge on an otherwise empty line reads as a control
+        // you can press, and cost a full row to say one digit.
+        let title = match self.patchbay.connections.len() {
+            0 => self.i18n.text("patchbay.connections"),
+            count => format!("{} · {count}", self.i18n.text("patchbay.connections")),
+        };
+        panel_section(ui, title, theme, |ui| {
             self.show_patchbay_rules_header(document, ui);
             if self.patchbay.connections.is_empty() {
                 ui.label(RichText::new(self.i18n.text("patchbay.no_connections")).weak());
@@ -99,31 +108,23 @@ impl QpwgraphApp {
         });
     }
 
-    /// Rule count and the add action. Adding was simply missing before: rules
-    /// could only arrive by snapshotting the live graph, so a rule for a node
-    /// that is not running yet was impossible to write down.
+    /// The add action. Adding was simply missing before: rules could only
+    /// arrive by snapshotting the live graph, so a rule for a node that is
+    /// not running yet was impossible to write down.
     fn show_patchbay_rules_header(&mut self, document: &mut UiDocument, ui: &mut Ui) {
-        let count = self.patchbay.connections.len();
-        let accent = document.theme_color(ThemeToken::Accent);
-        ui.horizontal(|ui| {
-            document.badge(
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if document_button(
+                document,
                 ui,
-                BadgeProps::new("preferences.patchbay.rule_count", count.to_string()).color(accent),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if document_button(
-                    document,
-                    ui,
-                    "preferences.patchbay.add_rule",
-                    self.i18n.text("patchbay.add_rule"),
-                    true,
-                ) {
-                    self.patchbay.connections.push(PatchConnection::default());
-                    // A blank rule is useless collapsed — it has nothing to
-                    // summarise — so open the one that was just added.
-                    self.patchbay_rule_expanded = Some(self.patchbay.connections.len() - 1);
-                }
-            });
+                "preferences.patchbay.add_rule",
+                self.i18n.text("patchbay.add_rule"),
+                true,
+            ) {
+                self.patchbay.connections.push(PatchConnection::default());
+                // A blank rule is useless collapsed — it has nothing to
+                // summarise — so open the one that was just added.
+                self.patchbay_rule_expanded = Some(self.patchbay.connections.len() - 1);
+            }
         });
     }
 
@@ -166,7 +167,7 @@ impl QpwgraphApp {
 
     /// The collapsed face of a rule: what it connects, and what can be done
     /// to it. The endpoint text is given a bounded column so long node names
-    /// wrap instead of pushing the actions off the card.
+    /// elide inside it instead of running over the actions.
     fn show_rule_summary(
         &self,
         document: &mut UiDocument,
@@ -301,6 +302,13 @@ impl QpwgraphApp {
 }
 
 /// `Output  node / port`, with the endpoint itself carrying the emphasis.
+///
+/// PipeWire node names are routinely 60 characters or more
+/// (`alsa_input.usb-EMEET_EMEET_SmartCam_C960_Ultra_A260…analog-stereo`), and
+/// a label left to its natural width simply drew over the pin and remove
+/// buttons to its right. The endpoint is elided to the column it was given
+/// and carries the untruncated value as its tooltip — expanding the rule is
+/// the other way to read the whole thing.
 fn endpoint_line(
     ui: &mut Ui,
     label: &str,
@@ -311,7 +319,10 @@ fn endpoint_line(
         ui.label(RichText::new(label).small().color(colors.weak));
         match endpoint {
             Some(endpoint) => {
-                ui.label(RichText::new(endpoint).color(colors.primary));
+                ui.add(
+                    egui::Label::new(RichText::new(endpoint).color(colors.primary)).truncate(),
+                )
+                .on_hover_text(endpoint);
             }
             None => {
                 ui.label(RichText::new("—").color(colors.weak));
