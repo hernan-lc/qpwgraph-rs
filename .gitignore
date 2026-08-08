@@ -18,3 +18,4 @@ test-local.yml
 
 # Generated cargo sources
 generated-sources.json
+packshots/*.png

@@ -36,7 +36,7 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.1.0" date="2025-08-01">
+    <release version="0.1.0" date="2025-08-08">
       <url type="details">https://github.com/nglmercer/qpwgraph-rs/releases/tag/v0.1.0</url>
       <description>
         <p>Initial release of qpwgraph-rs.</p>
