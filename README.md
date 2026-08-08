@@ -2,6 +2,8 @@
 
 Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support.
 
+![Demo](demo.webm)
+
 ## Workspace
 
 The code is split into small crates:
