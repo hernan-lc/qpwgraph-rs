@@ -2,7 +2,7 @@
 
 Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support.
 
-![Demo](demo.webm)
+![Demo](demo.mp4)
 
 ## Workspace
 
@@ -292,6 +292,4 @@ act push -j checks \
   --artifact-server-addr 127.0.0.1 \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest
 ```
-
-See [TODO.md](TODO.md) for implementation notes and
 [packaging/README.md](packaging/README.md) for desktop integration notes.
