@@ -7,3 +7,14 @@ android/build/
 android/app/build/
 android/app/src/main/jniLibs/
 **.bmp
+
+# Flatpak build artifacts
+builddir/
+.flatpak-builder/
+repo/
+
+# Temporary test manifests
+test-local.yml
+
+# Generated cargo sources
+generated-sources.json
