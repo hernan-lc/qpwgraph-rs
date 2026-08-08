@@ -2,7 +2,7 @@
 
 Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support.
 
-<https://github.com/nglmercer/qpwgraph-rs/raw/main/demo.mp4>
+https://github.com/user-attachments/assets/d7a9b1d4-d6d3-4ef2-b0d1-4cfc2de64650
 
 ## Workspace
 
