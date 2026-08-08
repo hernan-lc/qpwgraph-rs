@@ -12,7 +12,7 @@
   <url type="vcs-browser">https://github.com/nglmercer/qpwgraph-rs</url>
   <url type="bugtracker">https://github.com/nglmercer/qpwgraph-rs/issues</url>
   <description>
-    <p>A Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support.</p>
+    <p>qpwgraph-rs is a Rust/egui patchbay for PipeWire, with optional ALSA Sequencer MIDI support for routing audio and MIDI connections.</p>
     <p>Inspect, connect, disconnect, and persist PipeWire and ALSA Sequencer MIDI graphs.</p>
     <ul>
       <li>Visual graph-based connection management</li>
@@ -25,16 +25,6 @@
       <li>Optional ALSA MIDI backend</li>
     </ul>
   </description>
-  <screenshots>
-    <screenshot type="default">
-      <caption>Main graph view showing PipeWire connections</caption>
-      <image>https://raw.githubusercontent.com/nglmercer/qpwgraph-rs/main/packshots/main-graph.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>Preferences dialog</caption>
-      <image>https://raw.githubusercontent.com/nglmercer/qpwgraph-rs/main/packshots/preferences.png</image>
-    </screenshot>
-  </screenshots>
   <releases>
     <release version="0.1.0" date="2025-08-08">
       <url type="details">https://github.com/nglmercer/qpwgraph-rs/releases/tag/v0.1.0</url>
@@ -56,11 +46,6 @@
     <color type="primary" scheme_preference="dark">#4da3ff</color>
   </branding>
   <launchable type="desktop-id">io.github.nglmercer.qpwgraph-rs.desktop</launchable>
-  <requires>
-    <control>keyboard</control>
-    <control>pointing</control>
-    <display_length compare="ge">768</display_length>
-  </requires>
   <provides>
     <binary>qpwgraph-rs</binary>
   </provides>

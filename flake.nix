@@ -57,15 +57,17 @@
               install -Dm755 \
                 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/qpwgraph-rs \
                 $out/bin/qpwgraph-rs
-              install -Dm644 packaging/qpwgraph-rs.desktop \
-                $out/share/applications/qpwgraph-rs.desktop
-              install -Dm644 packaging/io.github.qpwgraph_rs.metainfo.xml \
-                $out/share/metainfo/io.github.qpwgraph_rs.metainfo.xml
+              install -Dm644 packaging/io.github.nglmercer.qpwgraph-rs.desktop \
+                $out/share/applications/io.github.nglmercer.qpwgraph-rs.desktop
+              install -Dm644 packaging/io.github.nglmercer.qpwgraph-rs.metainfo.xml \
+                $out/share/metainfo/io.github.nglmercer.qpwgraph-rs.metainfo.xml
+              install -Dm644 packaging/io.github.nglmercer.qpwgraph-rs.svg \
+                $out/share/icons/hicolor/scalable/apps/io.github.nglmercer.qpwgraph-rs.svg
               runHook postInstall
             '';
 
             meta = {
-              homepage = "https://github.com/rncbc/qpwgraph";
+              homepage = "https://github.com/nglmercer/qpwgraph-rs";
               description = "Visual PipeWire and ALSA MIDI connection manager";
               license = lib.licenses.gpl3Plus;
               mainProgram = "qpwgraph-rs";

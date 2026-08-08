@@ -6,6 +6,6 @@ Comment=Visual PipeWire and ALSA MIDI connection manager
 Exec=qpwgraph-rs %U
 Icon=io.github.nglmercer.qpwgraph-rs
 Terminal=false
-Categories=AudioVideo;Audio;Utility;
+Categories=AudioVideo;
 Keywords=PipeWire;JACK;ALSA;MIDI;patchbay;
 StartupNotify=true

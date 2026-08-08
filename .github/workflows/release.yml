@@ -19,8 +19,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  native:
+    name: Native Linux and AppImage
+    runs-on: ubuntu-22.04
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
@@ -60,7 +61,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked -p pw-graph-app
 
-      - name: Package release assets
+      - name: Package native release
         shell: bash
         run: |
           set -euo pipefail
@@ -82,10 +83,20 @@ jobs:
             "$package_root/PACKAGING.md"
           install -Dm644 docs/adaptive-noise-reduction.md \
             "$package_root/share/doc/qpwgraph-rs/adaptive-noise-reduction.md"
-          install -Dm644 packaging/qpwgraph-rs.desktop \
-            "$package_root/share/applications/qpwgraph-rs.desktop"
-          install -Dm644 packaging/io.github.qpwgraph_rs.metainfo.xml \
-            "$package_root/share/metainfo/io.github.qpwgraph_rs.metainfo.xml"
+          install -Dm644 LICENSE \
+            "$package_root/share/licenses/qpwgraph-rs/LICENSE"
+          install -Dm644 packaging/io.github.nglmercer.qpwgraph-rs.desktop \
+            "$package_root/share/applications/io.github.nglmercer.qpwgraph-rs.desktop"
+          install -Dm644 packaging/io.github.nglmercer.qpwgraph-rs.metainfo.xml \
+            "$package_root/share/metainfo/io.github.nglmercer.qpwgraph-rs.metainfo.xml"
+          install -Dm644 packaging/io.github.nglmercer.qpwgraph-rs.svg \
+            "$package_root/share/icons/hicolor/scalable/apps/io.github.nglmercer.qpwgraph-rs.svg"
+          install -Dm644 vendor/audiopus_sys/LICENSE.md \
+            "$package_root/share/licenses/qpwgraph-rs/audiopus_sys-LICENSE.md"
+          install -Dm644 vendor/audiopus_sys/opus/COPYING \
+            "$package_root/share/licenses/qpwgraph-rs/opus-COPYING"
+          install -Dm644 vendor/libspa/LICENSE \
+            "$package_root/share/licenses/qpwgraph-rs/libspa-LICENSE"
           install -Dm644 vendor/nnnoiseless/COPYING \
             "$package_root/share/licenses/qpwgraph-rs/nnnoiseless-COPYING"
 
@@ -97,8 +108,92 @@ jobs:
             -C "$staging_dir" "$package_name"
           (cd "$asset_dir" && sha256sum "$archive" > "${archive}.sha256")
 
-          echo "Release assets:"
-          ls -lh "$asset_dir"
+      - name: Download linuxdeploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          linuxdeploy_version=1-alpha-20251107-1
+          linuxdeploy_path="${RUNNER_TEMP}/linuxdeploy-x86_64.AppImage"
+          curl --fail --location --silent --show-error \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${linuxdeploy_version}/linuxdeploy-x86_64.AppImage" \
+            --output "$linuxdeploy_path"
+          chmod +x "$linuxdeploy_path"
+          echo "LINUXDEPLOY_PATH=$linuxdeploy_path" >> "$GITHUB_ENV"
+
+      - name: Build AppImage
+        run: bash packaging/appimage/build-appimage.sh "${RELEASE_TAG#v}" "$LINUXDEPLOY_PATH" dist
+
+      - name: Upload native release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-release-assets
+          path: dist/
+          if-no-files-found: error
+
+  flatpak:
+    name: Standalone Flatpak bundle
+    runs-on: ubuntu-22.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Build Flatpak repository
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/io.github.nglmercer.qpwgraph-rs.yml
+          branch: stable
+          build-bundle: false
+          repository-name: flathub
+          cache-key: flatpak-builder-${{ github.sha }}
+          repo-dir: repo
+          upload-artifact: false
+
+      - name: Create standalone Flatpak bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${RELEASE_TAG#v}"
+          mkdir -p dist
+          flatpak build-bundle repo \
+            "dist/qpwgraph-rs-${tag_version}-x86_64.flatpak" \
+            io.github.nglmercer.qpwgraph-rs stable \
+            --runtime-repo=https://releases.freedesktop-sdk.io/freedesktop-sdk.flatpakrepo
+
+      - name: Upload Flatpak release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-release-assets
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [native, flatpak]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-release-assets'
+          path: dist
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          ls -lh dist
 
       - name: Publish GitHub release
         shell: bash

@@ -111,7 +111,9 @@ builds the native Linux release binary, and publishes these assets:
 
 - `qpwgraph-rs-<version>-x86_64-unknown-linux-gnu.tar.gz`, containing the
   binary, desktop integration files, documentation, and third-party license;
-- the matching `.sha256` checksum file.
+- `qpwgraph-rs-<version>-x86_64.flatpak`, a standalone Flatpak bundle;
+- `qpwgraph-rs-<version>-x86_64.AppImage`, a portable Linux application;
+- `SHA256SUMS`, covering all release assets.
 
 To publish a release after updating the workspace version:
 
