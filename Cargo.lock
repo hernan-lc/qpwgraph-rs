@@ -4627,7 +4627,6 @@ dependencies = [
  "serde",
  "slint",
  "slint-build",
- "slint-node-editor",
  "toml 0.8.23",
 ]
 
@@ -5449,14 +5448,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "spin_on",
-]
-
-[[package]]
-name = "slint-node-editor"
-version = "0.1.0"
-dependencies = [
- "slint",
- "slint-build",
 ]
 
 [[package]]

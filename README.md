@@ -26,7 +26,9 @@ The code is split into small crates:
 - `pw-graph-app`: desktop shell, backend composition, panels, tray, and CLI.
 - `pw-graph-slint`: an additive Slint visual preview that projects the same
   graph read-only. It preserves the Egui application while the UI migration is
-  developed incrementally, using the pinned `slint-node-editor` submodule.
+  developed incrementally. Its node canvas is self-contained: `src/canvas.rs`
+  owns every world coordinate and `ui/node-canvas.slint` only renders and
+  reports pointer gestures.
 
 ## Interface
 

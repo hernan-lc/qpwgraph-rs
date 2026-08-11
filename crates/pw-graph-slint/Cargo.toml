@@ -18,7 +18,6 @@ relay = ["pw-graph-backend/relay", "pipewire"]
 
 [dependencies]
 slint.workspace = true
-slint-node-editor = { path = "../../vendor/slint-node-editor" }
 pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false, optional = true }
 pw-graph-backend = { path = "../pw-graph-backend", default-features = false }
 pw-graph-config = { path = "../pw-graph-config" }

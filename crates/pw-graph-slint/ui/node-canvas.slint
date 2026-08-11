@@ -1,0 +1,638 @@
+// Node canvas for qpwgraph-rs.
+//
+// Every coordinate shown here is computed in Rust (see `src/canvas.rs`): the
+// canvas renders what the model says and reports raw pointer gestures back.
+// No element measures itself and reports its own geometry, so the drag preview,
+// the pin hit-test and the drawn edges can never disagree.
+
+import { NodeAudioControl } from "parity-components.slint";
+
+export struct PortRow {
+    id: int,
+    label: string,
+    direction: int,
+    color: color,
+    // Top of the port row, relative to the node origin.
+    row-y: float,
+    // Centre of the pin dot, relative to the node origin.
+    pin-x: float,
+    pin-y: float,
+}
+
+export struct NodeRow {
+    id: int,
+    node-title: string,
+    node-subtitle: string,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    selected: bool,
+    collapsed: bool,
+    thumbnail: bool,
+    font-scale: float,
+    accent: color,
+    has-audio-controls: bool,
+    meter-rms: float,
+    meter-peak: float,
+    meter-peak-position: float,
+    meter-available: bool,
+    meter-label: string,
+    audio-volume-position: float,
+    audio-muted: bool,
+    ports: [PortRow],
+}
+
+export struct LinkRow {
+    id: int,
+    color: color,
+    selected: bool,
+}
+
+export struct MinimapNode {
+    id: int,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    color: color,
+}
+
+// What the pointer landed on. `kind` mirrors the HIT_* constants in canvas.rs.
+export struct HitResult {
+    kind: int,
+    id: int,
+    x: float,
+    y: float,
+    // Whether the hit node is already part of the selection.
+    selected: bool,
+}
+
+component GraphNode inherits Rectangle {
+    in property <NodeRow> data;
+    in property <length> offset-x: 0px;
+    in property <length> offset-y: 0px;
+    callback audio-volume-changed(int, float);
+    callback audio-mute-toggled(int);
+    callback collapse-toggled(int);
+
+    x: data.x * 1px + root.offset-x;
+    y: data.y * 1px + root.offset-y;
+    width: data.width * 1px;
+    height: data.height * 1px;
+    background: transparent;
+    clip: false;
+    accessible-role: list-item;
+    accessible-label: data.node-title;
+    accessible-description: data.selected ? "selected" : "";
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: data.selected ? #293d58 : #242a31;
+        border-color: data.selected ? #62a8ff : #536273;
+        border-width: data.selected ? 2px : 1px;
+        border-radius: 7px;
+    }
+
+    // Header — the drag handle in both connect modes.
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: 40px;
+        background: #354456;
+        border-radius: 6px;
+        Rectangle {
+            width: 4px;
+            height: parent.height;
+            background: data.accent;
+            border-radius: 4px;
+        }
+        Text {
+            x: 12px;
+            y: 3px;
+            width: parent.width - 52px;
+            height: 20px;
+            text: data.node-title;
+            color: #f5f8fa;
+            font-size: 12px * data.font-scale;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            x: 12px;
+            y: 21px;
+            width: parent.width - 52px;
+            height: 21px;
+            text: data.node-subtitle;
+            color: #d4dde5;
+            font-size: 8px * data.font-scale;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if !data.thumbnail: Rectangle {
+            x: parent.width - 27px;
+            y: 12px;
+            width: 15px;
+            height: 15px;
+            border-color: #dbe6ed80;
+            border-width: 1px;
+            border-radius: 7px;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: data.collapsed ? "+" : "−";
+                color: #eef4f8;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.collapse-toggled(data.id); }
+            }
+        }
+    }
+
+    if !data.collapsed && !data.thumbnail: Rectangle {
+        x: 1px;
+        y: 41px;
+        width: parent.width - 2px;
+        height: parent.height - 42px;
+        background: transparent;
+        clip: false;
+
+        if data.has-audio-controls: NodeAudioControl {
+            x: 10px;
+            y: 7px;
+            width: parent.width - 20px;
+            volume-position: data.audio-volume-position;
+            muted: data.audio-muted;
+            meter-peak: data.meter-peak;
+            meter-peak-position: data.meter-peak-position;
+            meter-label: data.meter-label;
+            meter-available: data.meter-available;
+            accent: data.accent;
+            volume-changed(value) => { root.audio-volume-changed(data.id, value); }
+            mute-toggled => { root.audio-mute-toggled(data.id); }
+        }
+    }
+
+    // Port labels and pins are placed straight from the Rust-computed offsets,
+    // so the dot the user aims at is exactly the point the hit-test uses.
+    if !data.collapsed && !data.thumbnail: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        clip: false;
+        for port in data.ports: Rectangle {
+            x: 13px;
+            y: port.row-y * 1px;
+            width: parent.width - 26px;
+            height: 22px;
+            background: transparent;
+            Text {
+                x: port.direction == 0 ? 8px : 0px;
+                width: parent.width - 8px;
+                height: parent.height;
+                text: port.label;
+                color: #d8e0e7;
+                font-size: 10px * data.font-scale;
+                horizontal-alignment: port.direction == 0 ? left : right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        for port in data.ports: Rectangle {
+            x: (port.pin-x - 5.5) * 1px;
+            y: (port.pin-y - 5.5) * 1px;
+            width: 11px;
+            height: 11px;
+            border-radius: 5.5px;
+            background: port.color;
+            border-color: #10151b;
+            border-width: 1px;
+        }
+    }
+}
+
+component CanvasMinimap inherits Rectangle {
+    in property <[MinimapNode]> nodes;
+    in property <length> viewport-pan-x;
+    in property <length> viewport-pan-y;
+    in property <float> viewport-zoom: 1.0;
+    in property <length> viewport-width;
+    in property <length> viewport-height;
+    in property <length> graph-min-x: 0px;
+    in property <length> graph-min-y: 0px;
+    in property <length> graph-max-x: 1600px;
+    in property <length> graph-max-y: 1200px;
+    callback navigate(length, length);
+
+    property <length> inset: 8px;
+    property <length> visible-min-x: -root.viewport-pan-x / root.viewport-zoom;
+    property <length> visible-min-y: -root.viewport-pan-y / root.viewport-zoom;
+    property <length> visible-width: root.viewport-width / root.viewport-zoom;
+    property <length> visible-height: root.viewport-height / root.viewport-zoom;
+    property <length> content-min-x: min(root.graph-min-x, root.visible-min-x);
+    property <length> content-min-y: min(root.graph-min-y, root.visible-min-y);
+    property <length> content-width: max(max(root.graph-max-x, root.visible-min-x + root.visible-width) - root.content-min-x, 1px);
+    property <length> content-height: max(max(root.graph-max-y, root.visible-min-y + root.visible-height) - root.content-min-y, 1px);
+    property <float> scale: min(
+        (root.width - 2 * root.inset) / root.content-width,
+        (root.height - 2 * root.inset) / root.content-height);
+
+    width: 190px;
+    height: 140px;
+    background: #12171deb;
+    border-color: #3c4956;
+    border-width: 1px;
+    border-radius: 5px;
+    clip: true;
+
+    for node in root.nodes: Rectangle {
+        x: root.inset + (node.x * 1px - root.content-min-x) * root.scale;
+        y: root.inset + (node.y * 1px - root.content-min-y) * root.scale;
+        width: max(node.width * 1px * root.scale, 2px);
+        height: max(node.height * 1px * root.scale, 2px);
+        background: node.color;
+        border-radius: 1px;
+    }
+
+    Rectangle {
+        x: root.inset + (root.visible-min-x - root.content-min-x) * root.scale;
+        y: root.inset + (root.visible-min-y - root.content-min-y) * root.scale;
+        width: root.visible-width * root.scale;
+        height: root.visible-height * root.scale;
+        background: #62a8ff1a;
+        border-color: #8fc3ff;
+        border-width: 1px;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        moved => { root.jump(self.mouse-x, self.mouse-y); }
+        clicked => { root.jump(self.mouse-x, self.mouse-y); }
+    }
+
+    function jump(local-x: length, local-y: length) {
+        root.navigate(
+            root.content-min-x + (local-x - root.inset) / root.scale,
+            root.content-min-y + (local-y - root.inset) / root.scale);
+    }
+}
+
+export component NodeCanvas inherits Rectangle {
+    // === Data ===
+    in property <[NodeRow]> nodes: [];
+    in property <[LinkRow]> links: [];
+    in property <[MinimapNode]> minimap-nodes: [];
+    in property <bool> minimap-enabled: false;
+    // World-space bounding box of the graph, reported by the bridge.
+    in property <float> graph-min-x: 0;
+    in property <float> graph-min-y: 0;
+    in property <float> graph-max-x: 1600;
+    in property <float> graph-max-y: 1200;
+    /// Easy mode connects whole cards by dragging their body.
+    in property <bool> easy-connect: false;
+    /// Bumped by the bridge whenever cached geometry changes.
+    in property <int> geometry-version: 0;
+    in property <string> grid-commands: "";
+
+    // === Viewport ===
+    in-out property <length> pan-x: 24px;
+    in-out property <length> pan-y: 24px;
+    in-out property <float> zoom: 1.0;
+    in property <float> min-zoom: 0.35;
+    in property <float> max-zoom: 2.5;
+    in property <color> grid-color: #27313a;
+    in property <length> world-size: 100000px;
+
+    /// True while a gesture owns the pointer; the bridge freezes model
+    /// replacement so a refresh cannot cancel the gesture.
+    out property <bool> interacting: root.gesture != 0;
+    out property <int> hovered-link: -1;
+
+    // === Computation, all resolved in Rust ===
+    pure callback hit-test(/* world-x */ float, /* world-y */ float) -> HitResult;
+    pure callback link-path(/* link-id */ int, /* version */ int, /* drag-dx */ float, /* drag-dy */ float) -> string;
+    pure callback pin-preview-path(/* pin-id */ int, /* world-x */ float, /* world-y */ float) -> string;
+    pure callback node-preview-path(/* node-id */ int, /* world-x */ float, /* world-y */ float) -> string;
+    callback request-grid();
+
+    // === Gestures ===
+    callback node-selected(/* id */ int, /* extend */ bool);
+    callback link-selected(/* id */ int, /* extend */ bool);
+    callback selection-cleared();
+    callback box-selected(float, float, float, float, /* extend */ bool);
+    callback drag-committed(/* id */ int, /* dx */ float, /* dy */ float);
+    callback link-requested(/* start-pin */ int, /* end-pin */ int);
+    callback link-dropped(/* start-pin */ int, /* world-x */ float, /* world-y */ float);
+    callback link-cancelled();
+    callback node-connect-dropped(/* node-id */ int, /* world-x */ float, /* world-y */ float);
+    callback node-double-clicked(int);
+    callback audio-volume-changed(int, float);
+    callback audio-mute-toggled(int);
+    callback collapse-toggled(int);
+
+    // === Gesture state ===
+    // 0 idle · 1 pan · 2 marquee · 3 node move · 4 link from pin · 5 easy card
+    property <int> gesture: 0;
+    property <bool> passed-threshold: false;
+    property <length> press-x: 0px;
+    property <length> press-y: 0px;
+    property <length> current-x: 0px;
+    property <length> current-y: 0px;
+    property <length> pan-origin-x: 0px;
+    property <length> pan-origin-y: 0px;
+    property <bool> extend-selection: false;
+    property <int> active-id: 0;
+    property <float> drag-dx: 0;
+    property <float> drag-dy: 0;
+
+    property <length> drag-threshold: 4px;
+
+    background: #191d24;
+    clip: true;
+
+    public function cancel-gesture() {
+        if (root.gesture == 4 || root.gesture == 5) {
+            root.link-cancelled();
+        }
+        root.gesture = 0;
+        root.drag-dx = 0;
+        root.drag-dy = 0;
+    }
+
+    pure function to-world-x(screen: length) -> float {
+        return (screen - root.pan-x) / root.zoom / 1px;
+    }
+    pure function to-world-y(screen: length) -> float {
+        return (screen - root.pan-y) / root.zoom / 1px;
+    }
+
+    function zoom-at(factor: float, at-x: length, at-y: length) {
+        let target = clamp(root.zoom * factor, root.min-zoom, root.max-zoom);
+        let world-x = root.to-world-x(at-x);
+        let world-y = root.to-world-y(at-y);
+        root.zoom = target;
+        root.pan-x = at-x - world-x * target * 1px;
+        root.pan-y = at-y - world-y * target * 1px;
+    }
+
+    changed pan-x => { root.request-grid(); }
+    changed pan-y => { root.request-grid(); }
+    changed zoom => { root.request-grid(); }
+    changed width => { root.request-grid(); }
+    changed height => { root.request-grid(); }
+    init => { root.request-grid(); }
+
+    // Layer 1 — grid and the single gesture surface.
+    Path {
+        width: 100%;
+        height: 100%;
+        commands: root.grid-commands;
+        stroke: root.grid-color;
+        stroke-width: 1px;
+        fill: transparent;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: max(self.width / 1px, 1);
+        viewbox-height: max(self.height / 1px, 1);
+    }
+
+    surface := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: root.gesture == 1 ? MouseCursor.grabbing
+            : root.gesture == 3 ? MouseCursor.move
+            : root.gesture == 4 || root.gesture == 5 ? MouseCursor.crosshair
+            : MouseCursor.default;
+
+        scroll-event(event) => {
+            if ((event.modifiers.control || event.modifiers.meta) && abs(event.delta-x) < 1px) {
+                root.zoom-at(1.0 + (event.delta-y / 1px) * 0.002, self.mouse-x, self.mouse-y);
+            } else if (event.modifiers.shift) {
+                root.pan-x += abs(event.delta-x) > abs(event.delta-y) ? event.delta-x : event.delta-y;
+            } else {
+                root.pan-x += event.delta-x;
+                root.pan-y += event.delta-y;
+            }
+            accept
+        }
+
+        double-clicked => {
+            let hit = root.hit-test(root.to-world-x(self.mouse-x), root.to-world-y(self.mouse-y));
+            if (hit.kind == 2 || hit.kind == 4) {
+                root.node-double-clicked(hit.id);
+            }
+        }
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.press-x = self.mouse-x;
+                root.press-y = self.mouse-y;
+                root.current-x = self.mouse-x;
+                root.current-y = self.mouse-y;
+                root.passed-threshold = false;
+                root.extend-selection = event.modifiers.shift;
+                if (event.button == PointerEventButton.middle) {
+                    root.gesture = 1;
+                    root.pan-origin-x = root.pan-x;
+                    root.pan-origin-y = root.pan-y;
+                } else if (event.button == PointerEventButton.left) {
+                    root.begin-left-press(event.modifiers.shift, event.modifiers.control || event.modifiers.meta);
+                }
+            } else if (event.kind == PointerEventKind.up) {
+                if (event.button == PointerEventButton.left || event.button == PointerEventButton.middle) {
+                    root.finish-gesture();
+                }
+            } else if (event.kind == PointerEventKind.move && root.gesture == 0) {
+                root.hovered-link = root.hit-link-at(self.mouse-x, self.mouse-y);
+            }
+        }
+
+        moved => {
+            root.current-x = self.mouse-x;
+            root.current-y = self.mouse-y;
+            if (abs(self.mouse-x - root.press-x) > root.drag-threshold
+                || abs(self.mouse-y - root.press-y) > root.drag-threshold) {
+                root.passed-threshold = true;
+            }
+            if (root.gesture == 1) {
+                root.pan-x = root.pan-origin-x + (self.mouse-x - root.press-x);
+                root.pan-y = root.pan-origin-y + (self.mouse-y - root.press-y);
+            } else if (root.gesture == 3) {
+                root.drag-dx = (self.mouse-x - root.press-x) / root.zoom / 1px;
+                root.drag-dy = (self.mouse-y - root.press-y) / root.zoom / 1px;
+            }
+        }
+    }
+
+    pure function hit-link-at(screen-x: length, screen-y: length) -> int {
+        let hit = root.hit-test(root.to-world-x(screen-x), root.to-world-y(screen-y));
+        return hit.kind == 3 ? hit.id : -1;
+    }
+
+    function begin-left-press(shift: bool, ctrl: bool) {
+        let hit = root.hit-test(root.to-world-x(root.press-x), root.to-world-y(root.press-y));
+        if (ctrl) {
+            // Ctrl always means "marquee", even over a card.
+            root.gesture = 2;
+            if (!shift) { root.selection-cleared(); }
+            return;
+        }
+        if (hit.kind == 1) {
+            root.gesture = 4;
+            root.active-id = hit.id;
+        } else if (hit.kind == 4) {
+            root.gesture = 5;
+            root.active-id = hit.id;
+        } else if (hit.kind == 2) {
+            root.gesture = 3;
+            root.active-id = hit.id;
+            root.drag-dx = 0;
+            root.drag-dy = 0;
+            // Selection is projected synchronously by the bridge, so the live
+            // multi-node preview below already sees the new `selected` flags.
+            if (shift || !hit.selected) {
+                root.node-selected(hit.id, shift);
+            }
+        } else if (hit.kind == 3) {
+            root.gesture = 0;
+            root.link-selected(hit.id, shift);
+        } else {
+            root.gesture = 2;
+            if (!shift) { root.selection-cleared(); }
+        }
+    }
+
+    function finish-gesture() {
+        if (root.gesture == 2) {
+            if (root.passed-threshold) {
+                root.box-selected(
+                    root.to-world-x(min(root.press-x, root.current-x)),
+                    root.to-world-y(min(root.press-y, root.current-y)),
+                    abs(root.current-x - root.press-x) / root.zoom / 1px,
+                    abs(root.current-y - root.press-y) / root.zoom / 1px,
+                    root.extend-selection);
+            }
+        } else if (root.gesture == 3) {
+            if (root.passed-threshold) {
+                root.drag-committed(root.active-id, root.drag-dx, root.drag-dy);
+            }
+        } else if (root.gesture == 4) {
+            if (root.passed-threshold) {
+                let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y));
+                if (target.kind == 1 && target.id != root.active-id) {
+                    root.link-requested(root.active-id, target.id);
+                } else {
+                    root.link-dropped(
+                        root.active-id,
+                        root.to-world-x(root.current-x),
+                        root.to-world-y(root.current-y));
+                }
+            } else {
+                root.link-cancelled();
+            }
+        } else if (root.gesture == 5) {
+            if (root.passed-threshold) {
+                root.node-connect-dropped(
+                    root.active-id,
+                    root.to-world-x(root.current-x),
+                    root.to-world-y(root.current-y));
+            } else {
+                root.node-selected(root.active-id, root.extend-selection);
+            }
+        }
+        root.gesture = 0;
+        root.drag-dx = 0;
+        root.drag-dy = 0;
+    }
+
+    // Layer 2 — world content. screen = pan + world * zoom.
+    Rectangle {
+        x: root.pan-x;
+        y: root.pan-y;
+        width: root.world-size;
+        height: root.world-size;
+        transform-origin: { x: 0, y: 0 };
+        transform-scale: root.zoom;
+        background: transparent;
+        clip: false;
+
+        for link in root.links: Path {
+            width: 100%;
+            height: 100%;
+            commands: root.link-path(link.id, root.geometry-version, root.drag-dx, root.drag-dy);
+            stroke: link.selected ? link.color.brighter(60%)
+                : root.hovered-link == link.id ? link.color.brighter(30%)
+                : link.color;
+            stroke-width: link.selected ? 3px : 2px;
+            fill: transparent;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: max(self.width / 1px, 1);
+            viewbox-height: max(self.height / 1px, 1);
+        }
+
+        // Rubber band for a link being created.
+        if root.gesture == 4 || root.gesture == 5: Path {
+            width: 100%;
+            height: 100%;
+            commands: root.gesture == 4
+                ? root.pin-preview-path(root.active-id, root.to-world-x(root.current-x), root.to-world-y(root.current-y))
+                : root.node-preview-path(root.active-id, root.to-world-x(root.current-x), root.to-world-y(root.current-y));
+            stroke: #cfe4ff;
+            stroke-width: 2px;
+            fill: transparent;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: max(self.width / 1px, 1);
+            viewbox-height: max(self.height / 1px, 1);
+        }
+
+        for node in root.nodes: GraphNode {
+            data: node;
+            offset-x: root.gesture == 3 && node.selected ? root.drag-dx * 1px : 0px;
+            offset-y: root.gesture == 3 && node.selected ? root.drag-dy * 1px : 0px;
+            audio-volume-changed(id, value) => { root.audio-volume-changed(id, value); }
+            audio-mute-toggled(id) => { root.audio-mute-toggled(id); }
+            collapse-toggled(id) => { root.collapse-toggled(id); }
+        }
+    }
+
+    // Layer 3 — overlays.
+    if root.gesture == 2 && root.passed-threshold: Rectangle {
+        x: min(root.press-x, root.current-x);
+        y: min(root.press-y, root.current-y);
+        width: abs(root.current-x - root.press-x);
+        height: abs(root.current-y - root.press-y);
+        background: #62a8ff20;
+        border-color: #62a8ff;
+        border-width: 1px;
+    }
+
+    if root.minimap-enabled: CanvasMinimap {
+        x: root.width - self.width - 22px;
+        y: root.height - self.height - 22px;
+        nodes: root.minimap-nodes;
+        viewport-pan-x: root.pan-x;
+        viewport-pan-y: root.pan-y;
+        viewport-zoom: root.zoom;
+        viewport-width: root.width;
+        viewport-height: root.height;
+        graph-min-x: root.graph-min-x * 1px;
+        graph-min-y: root.graph-min-y * 1px;
+        graph-max-x: root.graph-max-x * 1px;
+        graph-max-y: root.graph-max-y * 1px;
+        navigate(world-x, world-y) => {
+            root.pan-x = -world-x * root.zoom + root.width / 2;
+            root.pan-y = -world-y * root.zoom + root.height / 2;
+        }
+    }
+}

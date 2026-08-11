@@ -1,5 +1,6 @@
 mod args;
 mod bridge;
+mod canvas;
 mod model;
 mod source;
 

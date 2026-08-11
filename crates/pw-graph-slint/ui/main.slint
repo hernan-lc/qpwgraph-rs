@@ -1,15 +1,12 @@
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
 import {
-    BaseNode,
-    DragState,
-    LinkData,
+    HitResult,
+    LinkRow,
     MinimapNode,
-    NodeEditor,
-    NodeEditorComputations,
-    NodeEditorInternalCallbacks,
-    Pin,
-    PinTypes,
-} from "@slint-node-editor/node-editor.slint";
+    NodeCanvas,
+    NodeRow,
+    PortRow,
+} from "node-canvas.slint";
 import {
     NodeAudioControl,
     PreferencesDialog,
@@ -18,38 +15,6 @@ import {
     ShortcutRow,
     UiI18n,
 } from "parity-components.slint";
-
-export struct PortRow {
-    id: int,
-    label: string,
-    direction: int,
-    color: color,
-    y: float,
-}
-
-export struct NodeRow {
-    id: int,
-    node-title: string,
-    node-subtitle: string,
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-    selected: bool,
-    collapsed: bool,
-    thumbnail: bool,
-    font-scale: float,
-    accent: color,
-    has-audio-controls: bool,
-    meter-rms: float,
-    meter-peak: float,
-    meter-peak-position: float,
-    meter-available: bool,
-    meter-label: string,
-    audio-volume-position: float,
-    audio-muted: bool,
-    ports: [PortRow],
-}
 
 export struct EffectRow {
     name: string,
@@ -72,7 +37,7 @@ export struct RelayRow {
     level: float,
 }
 
-export { NodeEditorComputations, NodeEditorInternalCallbacks, UiI18n }
+export { HitResult, LinkRow, MinimapNode, NodeRow, PortRow, UiI18n }
 
 component RailButton inherits Rectangle {
     in property <image> icon;
@@ -180,196 +145,6 @@ component ActionButton inherits Rectangle {
     }
 }
 
-component GraphNode inherits BaseNode {
-    in property <NodeRow> data;
-    in property <bool> easy-connect: false;
-    callback audio-volume-changed(int, float);
-    callback audio-mute-toggled(int);
-    callback collapse-toggled(int);
-    callback easy-connect-dropped(int, float, float);
-    callback easy-node-clicked(int, bool);
-
-    node-id: data.id;
-    selected: data.selected;
-    world-x: data.x * 1px;
-    world-y: data.y * 1px;
-    node-width: data.width * 1px;
-    node-height: data.height * 1px;
-    // Keep dragging on the header so the audio controls and pins in the body
-    // receive pointer events without competing with BaseNode's drag gesture.
-    drag-handle-height: 40px;
-    accessible-label: data.node-title;
-
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        background: data.selected ? #293d58 : #242a31;
-        border-color: data.selected ? #62a8ff : #536273;
-        border-width: data.selected ? 2px : 1px;
-        border-radius: 7px;
-    }
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 40px;
-        background: #354456;
-        border-radius: 6px;
-        Rectangle {
-            x: 0px;
-            y: 0px;
-            width: 4px;
-            height: parent.height;
-            background: data.accent;
-            border-radius: 4px;
-        }
-        Text {
-            x: 12px;
-            y: 3px;
-            width: parent.width - 52px;
-            height: 20px;
-            text: data.node-title;
-            color: #f5f8fa;
-            font-size: 12px * data.font-scale;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        Text {
-            x: 12px;
-            y: 21px;
-            width: parent.width - 52px;
-            height: 21px;
-            text: data.node-subtitle;
-            color: #d4dde5;
-            font-size: 8px * data.font-scale;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        if !data.thumbnail: Rectangle {
-            x: parent.width - 27px;
-            y: 12px;
-            width: 15px;
-            height: 15px;
-            border-color: #dbe6ed80;
-            border-width: 1px;
-            border-radius: 7px;
-            Text {
-                width: parent.width;
-                height: parent.height;
-                text: data.collapsed ? "+" : "−";
-                color: #eef4f8;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                mouse-cursor: MouseCursor.pointer;
-                clicked => { root.collapse-toggled(data.id); }
-            }
-        }
-    }
-
-    if !data.collapsed && !data.thumbnail: Rectangle {
-        // This stacking context must stay above the Easy-mode body surface so
-        // its pins and audio controls receive their own pointer gestures.
-        z: 2;
-        x: 1px;
-        y: 41px;
-        width: parent.width - 2px;
-        height: parent.height - 42px;
-        background: #242a31;
-        border-radius: 6px;
-
-        if data.has-audio-controls: NodeAudioControl {
-            x: 10px;
-            y: 7px;
-            width: parent.width - 20px;
-            volume-position: data.audio-volume-position;
-            muted: data.audio-muted;
-            meter-peak: data.meter-peak;
-            meter-peak-position: data.meter-peak-position;
-            meter-label: data.meter-label;
-            meter-available: data.meter-available;
-            accent: data.accent;
-            volume-changed(value) => { root.audio-volume-changed(data.id, value); }
-            mute-toggled => { root.audio-mute-toggled(data.id); }
-        }
-
-        for port in data.ports: Rectangle {
-            x: 12px;
-            y: (data.has-audio-controls ? 45px : 5px) + port.y * 1px;
-            width: parent.width - 24px;
-            height: 22px;
-            Text {
-                x: port.direction == 0 ? 13px : 0px;
-                width: parent.width - 13px;
-                height: parent.height;
-                text: port.label;
-                color: #d8e0e7;
-                font-size: 10px * data.font-scale;
-                horizontal-alignment: port.direction == 0 ? left : right;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            Pin {
-                // Easy mode has a body drag surface. Keep the actual pin above
-                // it so press-drag-release always belongs to Pin.
-                z: 10;
-                x: port.direction == 0 ? -9px : parent.width - 2px;
-                y: 5px;
-                pin-id: port.id;
-                node-id: root.node-id;
-                pin-type: port.direction == 0 ? PinTypes.input : PinTypes.output;
-                node-screen-x: root.screen-x;
-                node-screen-y: root.screen-y;
-                // Pin is nested inside the port-row rectangle. Report the
-                // row origin so the editor's world-space cache matches the
-                // visible dot for hit-testing and drag previews.
-                parent-offset-x: 13px;
-                parent-offset-y: 41px + (data.has-audio-controls ? 45px : 5px) + port.y * 1px;
-                base-color: port.color;
-                hover-color: port.color.brighter(25%);
-                base-size: 11px;
-            }
-        }
-    }
-
-    // Easy mode connects whole nodes by dragging the body. Keep this surface
-    // below the movable header and below audio controls, matching the main
-    // canvas interaction while allowing every effect and relay endpoint.
-    if root.easy-connect && !data.collapsed && !data.thumbnail: easy-touch := TouchArea {
-        z: 1;
-        x: 1px;
-        y: data.has-audio-controls ? 84px : 42px;
-        width: root.node-width - 2px;
-        height: max(root.node-height - self.y - 1px, 1px);
-        mouse-cursor: MouseCursor.crosshair;
-        property <length> press-x: 0px;
-        property <length> press-y: 0px;
-        property <bool> shift-held: false;
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                press-x = self.mouse-x;
-                press-y = self.mouse-y;
-                shift-held = event.modifiers.shift;
-            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
-                if (abs(self.mouse-x - press-x) > 5px || abs(self.mouse-y - press-y) > 5px) {
-                    root.easy-connect-dropped(
-                        data.id,
-                        data.x + (self.x + self.mouse-x) / 1px,
-                        data.y + (self.y + self.mouse-y) / 1px
-                    );
-                } else {
-                    root.easy-node-clicked(data.id, shift-held);
-                }
-            }
-        }
-    }
-}
-
 export component MainWindow inherits Window {
     title: UiI18n.localized("app.title");
     icon: @image-url("../../pw-graph-app/assets/icons/brand.svg");
@@ -380,7 +155,7 @@ export component MainWindow inherits Window {
     min-height: 520px;
 
     in property <[NodeRow]> nodes: [];
-    in property <[LinkData]> links: [];
+    in property <[LinkRow]> links: [];
     in property <[MinimapNode]> minimap-nodes: [];
     in property <[RuleRow]> rules: [];
     in property <[ShortcutRow]> shortcuts: [];
@@ -444,9 +219,18 @@ export component MainWindow inherits Window {
     in-out property <length> pan-y: 24px;
     in-out property <float> zoom: 1.0;
     in-out property <string> grid-commands: "";
+    // Bumped by the bridge whenever the cached canvas geometry changes, so the
+    // rendered edges are recomputed from the fresh node positions.
+    in property <int> geometry-version: 0;
+    in property <float> graph-min-x: 0;
+    in property <float> graph-min-y: 0;
+    in property <float> graph-max-x: 1600;
+    in property <float> graph-max-y: 1200;
     out property <float> width_: self.width / 1px;
     out property <float> height_: self.height / 1px;
-    out property <bool> graph-node-dragging: DragState.is-dragging;
+    out property <float> canvas-width_: canvas.width / 1px;
+    out property <float> canvas-height_: canvas.height / 1px;
+    out property <bool> graph-node-dragging: canvas.interacting;
     property <length> rail-width: 76px;
     // The preview uses the full window for the graph. Status is still kept in
     // the bridge for diagnostics and preferences compatibility, but it is not
@@ -457,27 +241,32 @@ export component MainWindow inherits Window {
     callback graph-node-selected(int, bool);
     callback graph-link-selected(int, bool);
     callback graph-selection-cleared();
-    callback graph-box-selected(length, length, length, length, bool);
+    callback graph-box-selected(float, float, float, float, bool);
+    callback graph-node-dragged(int, float, float);
     callback graph-link-requested(int, int);
+    callback graph-link-dropped(int, float, float);
     callback graph-link-cancelled();
-    callback graph-easy-connect(int, float, float, int);
+    callback graph-node-connect-dropped(int, float, float);
     callback graph-audio-volume-changed(int, float);
     callback graph-audio-mute-toggled(int);
     callback graph-node-collapse-toggled(int);
-    callback graph-compute-pin-at(length, length) -> int;
-    callback graph-compute-link-at(length, length) -> int;
+    // Geometry lives in Rust; these are the only questions the canvas asks.
+    pure callback graph-hit-test(float, float) -> HitResult;
+    pure callback graph-link-path(int, int, float, float) -> string;
+    pure callback graph-pin-preview-path(int, float, float) -> string;
+    pure callback graph-node-preview-path(int, float, float) -> string;
     callback graph-request-grid();
 
-    changed show-preferences => { if (!root.show-preferences) { editor.focus(); } }
-    changed show-history => { if (!root.show-history) { editor.focus(); } }
+    changed show-preferences => { if (!root.show-preferences) { workspace_focus.focus(); } }
+    changed show-history => { if (!root.show-history) { workspace_focus.focus(); } }
     changed show-shortcuts => {
         if (root.show-shortcuts) {
             workspace.focus-shortcut-search();
         } else {
-            editor.focus();
+            workspace_focus.focus();
         }
     }
-    changed show-effects => { if (!root.show-effects) { editor.focus(); } }
+    changed show-effects => { if (!root.show-effects) { workspace_focus.focus(); } }
 
     Rectangle {
         x: 0px;
@@ -562,16 +351,19 @@ export component MainWindow inherits Window {
                 running: true;
                 triggered => {
                     self.running = false;
-                    editor.focus();
+                    workspace_focus.focus();
                 }
             }
-            // Keep focus on the editor itself. Its key events bubble through
-            // this scope, so the preview shortcuts work on startup and again
-            // after a graph click.
-            init => { editor.focus(); }
+            // The canvas has no focus of its own: this scope owns the keymap,
+            // so the shortcuts work on startup and again after a graph click.
+            init => { workspace_focus.focus(); }
             key-pressed(event) => {
                 if (event.text == Key.F1) { root.action("shortcuts"); return accept; }
-                if (event.text == Key.Escape) { root.action("escape"); return accept; }
+                if (event.text == Key.Escape) {
+                    canvas.cancel-gesture();
+                    root.action("escape");
+                    return accept;
+                }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "f" || event.text == "F") && root.show-shortcuts) {
                     workspace.focus-shortcut-search();
                     return accept;
@@ -605,51 +397,45 @@ export component MainWindow inherits Window {
                 if (event.text == "-" || event.text == "_") { root.action("zoom-out"); return accept; }
                 return reject;
             }
-            editor := NodeEditor {
-                width: parent.width; height: parent.height;
+            canvas := NodeCanvas {
+                width: parent.width;
+                height: parent.height;
                 pan-x <=> root.pan-x;
                 pan-y <=> root.pan-y;
                 zoom <=> root.zoom;
-                links <=> root.links;
-                minimap-enabled <=> root.show-minimap;
-                minimap-nodes <=> root.minimap-nodes;
+                nodes: root.nodes;
+                links: root.links;
+                minimap-enabled: root.show-minimap;
+                minimap-nodes: root.minimap-nodes;
+                easy-connect: root.connect-mode == "easy";
+                geometry-version: root.geometry-version;
+                grid-commands: root.grid-commands;
+                graph-min-x: root.graph-min-x;
+                graph-min-y: root.graph-min-y;
+                graph-max-x: root.graph-max-x;
+                graph-max-y: root.graph-max-y;
                 min-zoom: 0.35;
                 max-zoom: 2.5;
-                background-color: #191d24;
-                grid-spacing: 24px;
-                grid-color: #27313a;
-                grid-commands <=> root.grid-commands;
-                has-link-selection: true;
 
-                compute-pin-at(x, y) => { root.graph-compute-pin-at(x, y); }
-                compute-link-at(x, y) => { root.graph-compute-link-at(x, y); }
-                request-grid-update => { root.graph-request-grid(); }
+                hit-test(x, y) => { root.graph-hit-test(x, y) }
+                link-path(id, version, dx, dy) => { root.graph-link-path(id, version, dx, dy) }
+                pin-preview-path(pin, x, y) => { root.graph-pin-preview-path(pin, x, y) }
+                node-preview-path(node, x, y) => { root.graph-node-preview-path(node, x, y) }
+                request-grid => { root.graph-request-grid(); }
+
                 node-selected(id, shift) => { root.graph-node-selected(id, shift); }
-                select-link(id, shift) => { root.graph-link-selected(id, shift); }
+                link-selected(id, shift) => { root.graph-link-selected(id, shift); }
                 selection-cleared => { root.graph-selection-cleared(); }
-                box-selection-committed(x, y, w, h, shift) => { root.graph-box-selected(x, y, w, h, shift); }
+                box-selected(x, y, w, h, shift) => { root.graph-box-selected(x, y, w, h, shift); }
+                drag-committed(id, dx, dy) => { root.graph-node-dragged(id, dx, dy); }
                 link-requested(start, end) => { root.graph-link-requested(start, end); }
-                link-dropped(start, x, y) => { root.graph-link-cancelled(); }
+                link-dropped(start, x, y) => { root.graph-link-dropped(start, x, y); }
                 link-cancelled => { root.graph-link-cancelled(); }
-
-                for node-data in root.nodes: GraphNode {
-                    data: node-data;
-                    easy-connect: root.connect-mode == "easy";
-                    viewport-width: editor.width;
-                    viewport-height: editor.height;
-                    audio-volume-changed(id, value) => { root.graph-audio-volume-changed(id, value); }
-                    audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
-                    collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
-                    easy-connect-dropped(id, x, y) => {
-                        root.graph-easy-connect(
-                            id,
-                            x,
-                            y,
-                            root.graph-compute-pin-at(x * 1px, y * 1px)
-                        );
-                    }
-                    easy-node-clicked(id, shift) => { root.graph-node-selected(id, shift); }
-                }
+                node-connect-dropped(id, x, y) => { root.graph-node-connect-dropped(id, x, y); }
+                node-double-clicked(id) => { root.graph-node-collapse-toggled(id); }
+                audio-volume-changed(id, value) => { root.graph-audio-volume-changed(id, value); }
+                audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
+                collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
             }
         }
 

@@ -1,4 +1,8 @@
 use crate::args::Args;
+use crate::canvas::{
+    self, CanvasGeometry, LinkGeometry, NodeGeometry, PinGeometry, HIT_NODE, HIT_NODE_BODY,
+    PIN_HIT_RADIUS,
+};
 use crate::model::{
     node_layout_key, node_type_color, port_type_color, ConnectMode, GraphSnapshot, LinkView,
     MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
@@ -21,8 +25,7 @@ use slint::{
 };
 #[cfg(feature = "relay")]
 use slint::{Rgba8Pixel, SharedPixelBuffer};
-use slint_node_editor::{GraphLogic, MovableNode, NodeEditorController, NodeEditorSetup};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "relay")]
 use std::net::ToSocketAddrs;
@@ -35,31 +38,8 @@ use std::time::{Duration, Instant};
 
 slint::include_modules!();
 
-impl MovableNode for NodeRow {
-    fn id(&self) -> i32 {
-        self.id
-    }
-
-    fn x(&self) -> f32 {
-        self.x
-    }
-
-    fn y(&self) -> f32 {
-        self.y
-    }
-
-    fn selected(&self) -> bool {
-        self.selected
-    }
-
-    fn set_x(&mut self, x: f32) {
-        self.x = x;
-    }
-
-    fn set_y(&mut self, y: f32) {
-        self.y = y;
-    }
-}
+/// World-space distance between two background grid lines.
+const GRID_SPACING: f32 = 24.0;
 
 enum UiEvent {
     Action(String),
@@ -69,7 +49,10 @@ enum UiEvent {
     SelectBox(f32, f32, f32, f32, bool),
     LinkRequested(i32, i32),
     LinkCancelled,
-    EasyConnect(i32, f32, f32, i32),
+    /// An Easy-mode drag of a whole card was dropped at a world position.
+    NodeConnectDropped(i32, f32, f32, i32),
+    /// A pin drag was dropped away from any pin.
+    LinkDropped(i32, f32, f32),
     ToggleCollapse(i32),
     DragCommitted(i32, f32, f32),
     SetAudioVolume(i32, f32),
@@ -113,6 +96,7 @@ struct PreviewApp {
     toast_message: String,
     toast_until: Option<Instant>,
     toast_error: bool,
+    pending_connection_pin: Option<i32>,
     debug: bool,
     last_refresh: Instant,
     meters: BTreeMap<pw_graph_core::NodeId, MeterReading>,
@@ -128,11 +112,12 @@ pub(crate) struct UiBridge {
     window: MainWindow,
     app: Rc<RefCell<PreviewApp>>,
     nodes: Rc<VecModel<NodeRow>>,
-    links: Rc<VecModel<LinkData>>,
+    links: Rc<VecModel<LinkRow>>,
     minimap_nodes: Rc<VecModel<MinimapNode>>,
     shortcuts: Rc<VecModel<ShortcutRow>>,
     events: Rc<RefCell<Vec<UiEvent>>>,
-    controller: Rc<NodeEditorController>,
+    geometry: Rc<RefCell<CanvasGeometry>>,
+    geometry_version: Rc<Cell<i32>>,
 }
 
 impl UiBridge {
@@ -172,6 +157,7 @@ impl UiBridge {
             toast_message: String::new(),
             toast_until: None,
             toast_error: false,
+            pending_connection_pin: None,
             debug: args.debug,
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
@@ -190,25 +176,18 @@ impl UiBridge {
                 SharedString::from(app_for_text.borrow().i18n.text(key.as_str()))
             });
             let app_for_format = app.clone();
-            window
-                .global::<UiI18n>()
-                .on_format_one(move |key, value| {
-                    let value = value.to_string();
-                    SharedString::from(
-                        app_for_format
-                            .borrow()
-                            .i18n
-                            .format(
-                                key.as_str(),
-                                &[
-                                    ("count", value.clone()),
-                                    ("path", value.clone()),
-                                    ("port", value.clone()),
-                                    ("pin", value),
-                                ],
-                            ),
-                    )
-                });
+            window.global::<UiI18n>().on_format_one(move |key, value| {
+                let value = value.to_string();
+                SharedString::from(app_for_format.borrow().i18n.format(
+                    key.as_str(),
+                    &[
+                        ("count", value.clone()),
+                        ("path", value.clone()),
+                        ("port", value.clone()),
+                        ("pin", value),
+                    ],
+                ))
+            });
             let preview = app.borrow();
             window
                 .global::<UiI18n>()
@@ -296,19 +275,6 @@ impl UiBridge {
         }
 
         let events = Rc::new(RefCell::new(Vec::new()));
-        let setup = NodeEditorSetup::new({
-            let nodes = nodes.clone();
-            let events = events.clone();
-            move |dragged, delta_x, delta_y| {
-                GraphLogic::commit_drag(&nodes, dragged, delta_x, delta_y);
-                events
-                    .borrow_mut()
-                    .push(UiEvent::DragCommitted(dragged, delta_x, delta_y));
-            }
-        });
-        let controller = setup.controller().clone();
-        slint_node_editor::wire_node_editor!(window, setup);
-
         let bridge = Self {
             window,
             app,
@@ -317,7 +283,8 @@ impl UiBridge {
             minimap_nodes,
             shortcuts,
             events,
-            controller,
+            geometry: Rc::new(RefCell::new(CanvasGeometry::default())),
+            geometry_version: Rc::new(Cell::new(0)),
         };
         bridge.install_callbacks();
         bridge.refresh_meters();
@@ -332,97 +299,13 @@ impl UiBridge {
                 .borrow_mut()
                 .push(UiEvent::Action(action.to_string()));
         });
-        let events = self.events.clone();
-        let nodes = self.nodes.clone();
-        let links = self.links.clone();
-        self.window.on_graph_node_selected(move |id, shift| {
-            project_node_selection(&nodes, &links, id, shift);
-            events.borrow_mut().push(UiEvent::SelectNode(id, shift));
-        });
-        let events = self.events.clone();
-        let nodes = self.nodes.clone();
-        let links = self.links.clone();
-        self.window.on_graph_link_selected(move |id, shift| {
-            project_link_selection(&nodes, &links, id, shift);
-            events.borrow_mut().push(UiEvent::SelectLink(id, shift));
-        });
-        let events = self.events.clone();
-        let nodes = self.nodes.clone();
-        let links = self.links.clone();
-        self.window.on_graph_selection_cleared(move || {
-            clear_model_selection(&nodes, &links);
-            events.borrow_mut().push(UiEvent::ClearSelection);
-        });
-        let events = self.events.clone();
-        let nodes = self.nodes.clone();
-        let links = self.links.clone();
-        let controller = self.controller.clone();
-        self.window
-            .on_graph_box_selected(move |x, y, width, height, shift| {
-                project_box_selection(&nodes, &links, &controller, x, y, width, height, shift);
-                events
-                    .borrow_mut()
-                    .push(UiEvent::SelectBox(x, y, width, height, shift));
-            });
-        let events = self.events.clone();
-        self.window.on_graph_link_requested(move |start, end| {
-            events.borrow_mut().push(UiEvent::LinkRequested(start, end));
-        });
-        let events = self.events.clone();
-        self.window.on_graph_link_cancelled(move || {
-            events.borrow_mut().push(UiEvent::LinkCancelled);
-        });
-        let events = self.events.clone();
-        self.window.on_graph_easy_connect(move |id, x, y, target_pin| {
-            events
-                .borrow_mut()
-                .push(UiEvent::EasyConnect(id, x, y, target_pin));
-        });
-        let events = self.events.clone();
-        self.window.on_graph_audio_volume_changed(move |id, value| {
-            events.borrow_mut().push(UiEvent::SetAudioVolume(id, value));
-        });
-        let events = self.events.clone();
-        self.window.on_graph_audio_mute_toggled(move |id| {
-            events.borrow_mut().push(UiEvent::ToggleAudioMute(id));
-        });
-        let controller = self.controller.clone();
-        self.window.on_graph_compute_pin_at(move |x, y| {
-            controller.cache().borrow().find_pin_at(x, y, 10.0)
-        });
-        let controller = self.controller.clone();
-        self.window.on_graph_compute_link_at(move |x, y| {
-            controller.find_link_at_world(x, y, 8.0, 50.0, 20)
-        });
-        let controller = self.controller.clone();
-        let weak_window = self.window.as_weak();
-        self.window.on_graph_request_grid(move || {
-            if let Some(window) = weak_window.upgrade() {
-                window.set_grid_commands(controller.generate_grid(
-                    window.get_width_(),
-                    window.get_height_(),
-                    window.get_pan_x(),
-                    window.get_pan_y(),
-                ));
-            }
-        });
-
-        let controller = self.controller.clone();
-        self.window
-            .global::<NodeEditorInternalCallbacks>()
-            .on_start_node_drag(move |node_id, _, _, _| {
-                controller.handle_node_drag_started(node_id)
-            });
-        let events = self.events.clone();
-        self.window
-            .global::<NodeEditorInternalCallbacks>()
-            .on_double_click_node(move |node_id| {
-                events.borrow_mut().push(UiEvent::ToggleCollapse(node_id));
-            });
-        let events = self.events.clone();
-        self.window.on_graph_node_collapse_toggled(move |node_id| {
-            events.borrow_mut().push(UiEvent::ToggleCollapse(node_id));
-        });
+        install_canvas_callbacks(
+            &self.window,
+            &self.nodes,
+            &self.links,
+            &self.geometry,
+            &self.events,
+        );
     }
 
     pub(crate) fn run(self) -> Result<(), slint::PlatformError> {
@@ -434,7 +317,8 @@ impl UiBridge {
         let minimap_nodes = self.minimap_nodes.clone();
         let shortcuts = self.shortcuts.clone();
         let events = self.events.clone();
-        let controller = self.controller.clone();
+        let geometry = self.geometry.clone();
+        let geometry_version = self.geometry_version.clone();
         timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let Some(window) = weak_window.upgrade() else {
                 return;
@@ -447,7 +331,8 @@ impl UiBridge {
                 &minimap_nodes,
                 &shortcuts,
                 &events,
-                &controller,
+                &geometry,
+                &geometry_version,
             );
         });
         let result = self.window.run();
@@ -469,7 +354,8 @@ impl UiBridge {
             &self.nodes,
             &self.links,
             &self.minimap_nodes,
-            &self.controller,
+            &self.geometry,
+            &self.geometry_version,
         );
     }
 
@@ -484,11 +370,12 @@ fn pump(
     window: &MainWindow,
     app: &Rc<RefCell<PreviewApp>>,
     nodes: &Rc<VecModel<NodeRow>>,
-    links: &Rc<VecModel<LinkData>>,
+    links: &Rc<VecModel<LinkRow>>,
     minimap_nodes: &Rc<VecModel<MinimapNode>>,
     shortcuts: &Rc<VecModel<ShortcutRow>>,
     events: &Rc<RefCell<Vec<UiEvent>>>,
-    controller: &Rc<NodeEditorController>,
+    geometry: &Rc<RefCell<CanvasGeometry>>,
+    geometry_version: &Rc<Cell<i32>>,
 ) {
     let pending = coalesce_audio_volume_events(std::mem::take(&mut *events.borrow_mut()));
     let mut preview = app.borrow_mut();
@@ -519,56 +406,258 @@ fn pump(
         nodes,
         links,
         minimap_nodes,
-        controller,
+        geometry,
+        geometry_version,
     );
+}
+
+/// Wire every canvas gesture and every geometry question to the bridge.
+/// Kept separate from the rest of the window wiring so the UI tests can drive
+/// exactly the same code path the application uses.
+fn install_canvas_callbacks(
+    window: &MainWindow,
+    nodes_source: &Rc<VecModel<NodeRow>>,
+    links_source: &Rc<VecModel<LinkRow>>,
+    geometry_source: &Rc<RefCell<CanvasGeometry>>,
+    events_source: &Rc<RefCell<Vec<UiEvent>>>,
+) {
+    let events = events_source.clone();
+    let nodes = nodes_source.clone();
+    let links = links_source.clone();
+    let geometry = geometry_source.clone();
+    window.on_graph_node_selected(move |id, shift| {
+        project_node_selection(&nodes, &links, id, shift);
+        sync_geometry_selection(&nodes, &geometry);
+        events.borrow_mut().push(UiEvent::SelectNode(id, shift));
+    });
+    let events = events_source.clone();
+    let nodes = nodes_source.clone();
+    let links = links_source.clone();
+    let geometry = geometry_source.clone();
+    window.on_graph_link_selected(move |id, shift| {
+        project_link_selection(&nodes, &links, id, shift);
+        sync_geometry_selection(&nodes, &geometry);
+        events.borrow_mut().push(UiEvent::SelectLink(id, shift));
+    });
+    let events = events_source.clone();
+    let nodes = nodes_source.clone();
+    let links = links_source.clone();
+    let geometry = geometry_source.clone();
+    window.on_graph_selection_cleared(move || {
+        clear_model_selection(&nodes, &links);
+        sync_geometry_selection(&nodes, &geometry);
+        events.borrow_mut().push(UiEvent::ClearSelection);
+    });
+    let events = events_source.clone();
+    let nodes = nodes_source.clone();
+    let links = links_source.clone();
+    let geometry = geometry_source.clone();
+    window.on_graph_box_selected(move |x, y, width, height, shift| {
+        project_box_selection(&nodes, &links, &geometry, x, y, width, height, shift);
+        sync_geometry_selection(&nodes, &geometry);
+        events
+            .borrow_mut()
+            .push(UiEvent::SelectBox(x, y, width, height, shift));
+    });
+    let events = events_source.clone();
+    let nodes = nodes_source.clone();
+    let geometry = geometry_source.clone();
+    window.on_graph_node_dragged(move |id, dx, dy| {
+        // Apply the move to the rendered rows immediately: the canvas drops
+        // its live offset as soon as this returns, so anything slower than
+        // synchronous would show the card snapping back for a frame.
+        commit_drag(&nodes, id, dx, dy);
+        geometry.borrow_mut().translate_selected(id, dx, dy);
+        events.borrow_mut().push(UiEvent::DragCommitted(id, dx, dy));
+    });
+    let events = events_source.clone();
+    window.on_graph_link_requested(move |start, end| {
+        events.borrow_mut().push(UiEvent::LinkRequested(start, end));
+    });
+    let events = events_source.clone();
+    window.on_graph_link_cancelled(move || {
+        events.borrow_mut().push(UiEvent::LinkCancelled);
+    });
+    let events = events_source.clone();
+    let weak_window = window.as_weak();
+    window.on_graph_link_dropped(move |pin, x, y| {
+        // Easy mode connects whole cards, so a pin drag that lands on a
+        // card rather than on its pin is still a connection request.
+        let easy = weak_window
+            .upgrade()
+            .is_some_and(|window| window.get_connect_mode() == "easy");
+        events.borrow_mut().push(if easy {
+            UiEvent::LinkDropped(pin, x, y)
+        } else {
+            UiEvent::LinkCancelled
+        });
+    });
+    let events = events_source.clone();
+    let geometry = geometry_source.clone();
+    window.on_graph_node_connect_dropped(move |id, x, y| {
+        let target_pin = geometry.borrow().find_pin_at(x, y, PIN_HIT_RADIUS);
+        events
+            .borrow_mut()
+            .push(UiEvent::NodeConnectDropped(id, x, y, target_pin));
+    });
+    let events = events_source.clone();
+    window.on_graph_audio_volume_changed(move |id, value| {
+        events.borrow_mut().push(UiEvent::SetAudioVolume(id, value));
+    });
+    let events = events_source.clone();
+    window.on_graph_audio_mute_toggled(move |id| {
+        events.borrow_mut().push(UiEvent::ToggleAudioMute(id));
+    });
+    let geometry = geometry_source.clone();
+    window.on_graph_hit_test(move |x, y| {
+        let geometry = geometry.borrow();
+        let hit = geometry.hit_test(x, y);
+        HitResult {
+            kind: hit.kind,
+            id: hit.id,
+            x: hit.x,
+            y: hit.y,
+            selected: matches!(hit.kind, HIT_NODE | HIT_NODE_BODY)
+                && geometry.node(hit.id).is_some_and(|node| node.selected),
+        }
+    });
+    let geometry = geometry_source.clone();
+    window.on_graph_link_path(move |id, _version, drag_x, drag_y| {
+        SharedString::from(geometry.borrow().link_path(id, (drag_x, drag_y)))
+    });
+    let geometry = geometry_source.clone();
+    window.on_graph_pin_preview_path(move |pin, x, y| {
+        SharedString::from(geometry.borrow().preview_path(pin, x, y))
+    });
+    let geometry = geometry_source.clone();
+    window.on_graph_node_preview_path(move |id, x, y| {
+        SharedString::from(geometry.borrow().node_preview_path(id, x, y))
+    });
+    let weak_window = window.as_weak();
+    window.on_graph_request_grid(move || {
+        if let Some(window) = weak_window.upgrade() {
+            window.set_grid_commands(SharedString::from(canvas::grid_commands(
+                window.get_canvas_width_(),
+                window.get_canvas_height_(),
+                window.get_zoom(),
+                window.get_pan_x(),
+                window.get_pan_y(),
+                GRID_SPACING,
+            )));
+        }
+    });
+
+    let events = events_source.clone();
+    window.on_graph_node_collapse_toggled(move |node_id| {
+        events.borrow_mut().push(UiEvent::ToggleCollapse(node_id));
+    });
+}
+
+fn set_selection_flags<T: Clone + 'static>(
+    model: &VecModel<T>,
+    selected_of: impl Fn(&mut T) -> &mut bool,
+    flags: &[bool],
+) {
+    for (index, flag) in flags.iter().enumerate() {
+        let Some(mut row) = model.row_data(index) else {
+            continue;
+        };
+        if *selected_of(&mut row) != *flag {
+            *selected_of(&mut row) = *flag;
+            model.set_row_data(index, row);
+        }
+    }
+}
+
+fn clear_selection_flags<T: Clone + 'static>(
+    model: &VecModel<T>,
+    selected_of: impl Fn(&mut T) -> &mut bool,
+) {
+    let flags = vec![false; model.row_count()];
+    set_selection_flags(model, selected_of, &flags);
+}
+
+fn rows_of<T: Clone + 'static>(model: &VecModel<T>) -> Vec<T> {
+    (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect()
 }
 
 fn project_node_selection(
     nodes: &Rc<VecModel<NodeRow>>,
-    links: &Rc<VecModel<LinkData>>,
+    links: &Rc<VecModel<LinkRow>>,
     node_id: i32,
     shift: bool,
 ) {
     if !shift {
-        slint_node_editor::selection::clear_selection(links, |link| &mut link.selected);
+        clear_selection_flags(links, |link| &mut link.selected);
     }
-    slint_node_editor::selection::apply_click(
-        nodes,
+    let flags = canvas::apply_click(
+        &rows_of(nodes),
         |node| node.id,
-        |node| &mut node.selected,
+        |node| node.selected,
         node_id,
         shift,
     );
+    set_selection_flags(nodes, |node| &mut node.selected, &flags);
 }
 
 fn project_link_selection(
     nodes: &Rc<VecModel<NodeRow>>,
-    links: &Rc<VecModel<LinkData>>,
+    links: &Rc<VecModel<LinkRow>>,
     link_id: i32,
     shift: bool,
 ) {
     if !shift {
-        slint_node_editor::selection::clear_selection(nodes, |node| &mut node.selected);
+        clear_selection_flags(nodes, |node| &mut node.selected);
     }
-    slint_node_editor::selection::apply_click(
-        links,
+    let flags = canvas::apply_click(
+        &rows_of(links),
         |link| link.id,
-        |link| &mut link.selected,
+        |link| link.selected,
         link_id,
         shift,
     );
+    set_selection_flags(links, |link| &mut link.selected, &flags);
 }
 
-fn clear_model_selection(nodes: &Rc<VecModel<NodeRow>>, links: &Rc<VecModel<LinkData>>) {
-    slint_node_editor::selection::clear_selection(nodes, |node| &mut node.selected);
-    slint_node_editor::selection::clear_selection(links, |link| &mut link.selected);
+fn clear_model_selection(nodes: &Rc<VecModel<NodeRow>>, links: &Rc<VecModel<LinkRow>>) {
+    clear_selection_flags(nodes, |node| &mut node.selected);
+    clear_selection_flags(links, |link| &mut link.selected);
+}
+
+/// Push the rendered selection into the geometry cache. The canvas asks the
+/// cache which cards a drag should move, so the two must never disagree.
+fn sync_geometry_selection(nodes: &Rc<VecModel<NodeRow>>, geometry: &Rc<RefCell<CanvasGeometry>>) {
+    let selected: BTreeSet<i32> = rows_of(nodes)
+        .into_iter()
+        .filter(|node| node.selected)
+        .map(|node| node.id)
+        .collect();
+    geometry
+        .borrow_mut()
+        .apply_selection(|id| selected.contains(&id));
+}
+
+/// Move the dragged card and everything selected with it.
+fn commit_drag(nodes: &Rc<VecModel<NodeRow>>, dragged: i32, dx: f32, dy: f32) {
+    for index in 0..nodes.row_count() {
+        let Some(mut node) = nodes.row_data(index) else {
+            continue;
+        };
+        if node.selected || node.id == dragged {
+            node.x += dx;
+            node.y += dy;
+            nodes.set_row_data(index, node);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn project_box_selection(
     nodes: &Rc<VecModel<NodeRow>>,
-    links: &Rc<VecModel<LinkData>>,
-    controller: &NodeEditorController,
+    links: &Rc<VecModel<LinkRow>>,
+    geometry: &Rc<RefCell<CanvasGeometry>>,
     x: f32,
     y: f32,
     width: f32,
@@ -576,34 +665,23 @@ fn project_box_selection(
     shift: bool,
 ) {
     let (node_hits, link_hits) = {
-        let cache = controller.cache();
-        let cache = cache.borrow();
-        let rows = (0..links.row_count())
-            .filter_map(|index| links.row_data(index))
-            .map(|link| (link.id, link.start_pin_id, link.end_pin_id));
+        let geometry = geometry.borrow();
         (
-            cache.nodes_in_selection_box(x, y, width, height),
-            cache.links_in_selection_box(x, y, width, height, rows),
+            geometry.nodes_in_box(x, y, width, height),
+            geometry.links_in_box(x, y, width, height),
         )
     };
 
-    if !shift {
-        clear_model_selection(nodes, links);
-    }
-    slint_node_editor::selection::apply_box(
-        nodes,
-        |node| node.id,
-        |node| &mut node.selected,
-        node_hits,
-        shift,
-    );
-    slint_node_editor::selection::apply_box(
-        links,
-        |link| link.id,
-        |link| &mut link.selected,
-        link_hits,
-        shift,
-    );
+    let node_flags: Vec<bool> = rows_of(nodes)
+        .iter()
+        .map(|node| node_hits.contains(&node.id) || (shift && node.selected))
+        .collect();
+    let link_flags: Vec<bool> = rows_of(links)
+        .iter()
+        .map(|link| link_hits.contains(&link.id) || (shift && link.selected))
+        .collect();
+    set_selection_flags(nodes, |node| &mut node.selected, &node_flags);
+    set_selection_flags(links, |link| &mut link.selected, &link_flags);
 }
 
 fn coalesce_audio_volume_events(pending: Vec<UiEvent>) -> Vec<UiEvent> {
@@ -723,12 +801,18 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
                 .view
                 .select_box(&preview.snapshot, x, y, width, height, shift)
         }
-        UiEvent::LinkRequested(start, end) => connect_pin_pair(preview, start, end),
+        UiEvent::LinkRequested(start, end) => handle_link_requested(preview, start, end),
         UiEvent::LinkCancelled => {
+            preview.pending_connection_pin = None;
             set_connection_feedback(preview, "Connection preview cancelled", false);
         }
-        UiEvent::EasyConnect(source, x, y, target_pin) => {
+        UiEvent::NodeConnectDropped(source, x, y, target_pin) => {
+            preview.pending_connection_pin = None;
             easy_connect_nodes(preview, source, x, y, target_pin)
+        }
+        UiEvent::LinkDropped(source_pin, x, y) => {
+            preview.pending_connection_pin = None;
+            easy_connect_from_pin(preview, source_pin, x, y)
         }
         UiEvent::ToggleCollapse(id) => {
             preview.view.toggle_local_collapse(id, &preview.snapshot);
@@ -779,7 +863,38 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
     }
 }
 
+fn handle_link_requested(preview: &mut PreviewApp, start_id: i32, end_id: i32) {
+    if start_id != end_id {
+        preview.pending_connection_pin = None;
+        connect_pin_pair(preview, start_id, end_id);
+        return;
+    }
+
+    match preview.pending_connection_pin.take() {
+        None => {
+            preview.pending_connection_pin = Some(start_id);
+            set_connection_feedback(
+                preview,
+                "Connection started: click a destination pin or drag",
+                false,
+            );
+        }
+        Some(pending) if pending == start_id => {
+            set_connection_feedback(preview, "Connection cancelled", false);
+        }
+        Some(pending) if preview.view.connect_mode == ConnectMode::Easy => {
+            easy_connect_pin_pair(preview, pending, start_id);
+        }
+        Some(pending) => connect_pin_pair(preview, pending, start_id),
+    }
+}
+
 fn connect_pin_pair(preview: &mut PreviewApp, start_id: i32, end_id: i32) {
+    if start_id == end_id {
+        set_connection_feedback(preview, "Connection cancelled", false);
+        return;
+    }
+
     let Some(start_port) = preview.view.ids.port_id(start_id) else {
         set_connection_feedback(
             preview,
@@ -895,8 +1010,7 @@ fn easy_connect_nodes(
                     .view
                     .node_at_with_margin(&preview.snapshot, x, y, source_node, 12.0)
             })
-    })
-    else {
+    }) else {
         set_connection_feedback(
             preview,
             "Easy connect cancelled: drop onto another node",
@@ -904,6 +1018,57 @@ fn easy_connect_nodes(
         );
         return;
     };
+    easy_connect_node_pair(preview, source_node, target_node);
+}
+
+fn easy_connect_from_pin(preview: &mut PreviewApp, source_pin_id: i32, x: f32, y: f32) {
+    let Some(source_node) = preview
+        .view
+        .ids
+        .port_id(source_pin_id)
+        .and_then(|port| preview.source.graph().port(port))
+        .map(|port| port.node_id)
+    else {
+        set_connection_feedback(
+            preview,
+            "Easy connect source pin is no longer available",
+            true,
+        );
+        return;
+    };
+    let Some(source_id) = preview.view.ids.node(source_node) else {
+        set_connection_feedback(preview, "Easy connect source is no longer available", true);
+        return;
+    };
+    easy_connect_nodes(preview, source_id, x, y, 0);
+}
+
+fn easy_connect_pin_pair(preview: &mut PreviewApp, source_pin_id: i32, target_pin_id: i32) {
+    let nodes = {
+        let graph = preview.source.graph();
+        preview
+            .view
+            .ids
+            .port_id(source_pin_id)
+            .and_then(|source| graph.port(source))
+            .map(|port| port.node_id)
+            .zip(
+                preview
+                    .view
+                    .ids
+                    .port_id(target_pin_id)
+                    .and_then(|target| graph.port(target))
+                    .map(|port| port.node_id),
+            )
+    };
+    let Some((source_node, target_node)) = nodes else {
+        set_connection_feedback(preview, "Easy connect pin is no longer available", true);
+        return;
+    };
+    if source_node == target_node {
+        set_connection_feedback(preview, "Connection cancelled: select another node", false);
+        return;
+    }
     easy_connect_node_pair(preview, source_node, target_node);
 }
 
@@ -1166,11 +1331,9 @@ fn delete_selected_connections(preview: &mut PreviewApp) {
     }
     preview.view.clear_selection();
     match refresh_connection_graph(preview) {
-        Ok(()) => set_connection_feedback(
-            preview,
-            format!("Removed {removed} connection(s)"),
-            false,
-        ),
+        Ok(()) => {
+            set_connection_feedback(preview, format!("Removed {removed} connection(s)"), false)
+        }
         Err(error) => set_connection_feedback(
             preview,
             format!("Connection removed, but graph refresh failed: {error}"),
@@ -1925,9 +2088,10 @@ fn sync_models(
     window: &MainWindow,
     preview: &mut PreviewApp,
     nodes: &Rc<VecModel<NodeRow>>,
-    links: &Rc<VecModel<LinkData>>,
+    links: &Rc<VecModel<LinkRow>>,
     minimap_nodes: &Rc<VecModel<MinimapNode>>,
-    controller: &Rc<NodeEditorController>,
+    geometry: &Rc<RefCell<CanvasGeometry>>,
+    geometry_version: &Rc<Cell<i32>>,
 ) {
     preview.view.relay_nodes_visible = relay_nodes_visible(preview);
     let snapshot = preview.view.snapshot_with_meters(
@@ -1951,7 +2115,7 @@ fn sync_models(
             )
         })
         .collect::<Vec<_>>();
-    sync_node_rows(window, nodes, node_rows);
+    let rows_applied = sync_node_rows(window, nodes, node_rows);
     links.set_vec(snapshot.links.iter().map(link_row).collect::<Vec<_>>());
     minimap_nodes.set_vec(
         snapshot
@@ -1971,9 +2135,18 @@ fn sync_models(
             })
             .collect::<Vec<_>>(),
     );
-    controller.clear_links();
-    for link in &snapshot.links {
-        controller.register_link(link.id, link.start_pin_id, link.end_pin_id);
+    // Only refresh the cache when the rendered rows were refreshed with it,
+    // so a gesture in flight can never hit-test against geometry the user
+    // cannot see.
+    if rows_applied || geometry.borrow().is_empty() {
+        rebuild_geometry(geometry, &snapshot, preview.view.connect_mode);
+        geometry_version.set(geometry_version.get().wrapping_add(1));
+        window.set_geometry_version(geometry_version.get());
+        let bounds = graph_bounds(&snapshot);
+        window.set_graph_min_x(bounds[0]);
+        window.set_graph_min_y(bounds[1]);
+        window.set_graph_max_x(bounds[2]);
+        window.set_graph_max_y(bounds[3]);
     }
     let (node_count, port_count, link_count) = preview.view.visible_counts(&snapshot);
     window.set_status(SharedString::from(preview.status.clone()));
@@ -2055,7 +2228,10 @@ fn sync_models(
 /// Replacing a Slint model invalidates its repeated component instances. Update
 /// stable rows in place so the 50ms refresh timer cannot cancel pointer capture
 /// between mouse-down and release. Defer structural changes during a drag.
-fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<NodeRow>) {
+/// Push fresh rows into the model, returning whether they were applied. A
+/// gesture in flight keeps the current rows so the pointer cannot lose the
+/// component it is dragging.
+fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<NodeRow>) -> bool {
     let stable_shape = nodes.row_count() == rows.len()
         && rows.iter().enumerate().all(|(index, row)| {
             nodes
@@ -2066,8 +2242,12 @@ fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<Node
         for (index, row) in rows.into_iter().enumerate() {
             nodes.set_row_data(index, row);
         }
+        true
     } else if !window.get_graph_node_dragging() {
         nodes.set_vec(rows);
+        true
+    } else {
+        false
     }
 }
 
@@ -2106,20 +2286,89 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl, i18n: &I18n) -> NodeRow
             node.ports
                 .iter()
                 .enumerate()
-                .map(|(index, port)| PortRow {
-                    id: port.pin_id,
-                    label: SharedString::from(port.label.clone()),
-                    direction: if port.direction == pw_graph_core::Direction::Sink {
-                        0
-                    } else {
-                        1
-                    },
-                    color: color(port_type_color(port.port_type)),
-                    y: index as f32 * 25.0,
+                .map(|(index, port)| {
+                    let is_output = port.direction != pw_graph_core::Direction::Sink;
+                    let (pin_x, pin_y) =
+                        canvas::pin_offset(node.width, index, node.has_audio_controls, is_output);
+                    PortRow {
+                        id: port.pin_id,
+                        label: SharedString::from(port.label.clone()),
+                        direction: if is_output { 1 } else { 0 },
+                        color: color(port_type_color(port.port_type)),
+                        row_y: canvas::port_row_top(index, node.has_audio_controls),
+                        pin_x,
+                        pin_y,
+                    }
                 })
                 .collect::<Vec<_>>(),
         ))),
     }
+}
+
+/// Rebuild the world-space cache the canvas hit-tests and draws against.
+fn rebuild_geometry(
+    geometry: &Rc<RefCell<CanvasGeometry>>,
+    snapshot: &GraphSnapshot,
+    connect_mode: ConnectMode,
+) {
+    let mut node_geometry = Vec::with_capacity(snapshot.nodes.len());
+    let mut pin_geometry = Vec::new();
+    for node in &snapshot.nodes {
+        let pins_visible = !node.collapsed && !node.thumbnail;
+        node_geometry.push(NodeGeometry {
+            id: node.id,
+            x: node.position[0],
+            y: node.position[1],
+            width: node.width,
+            height: node.height,
+            selected: node.selected,
+            pins_visible,
+        });
+        for (index, port) in node.ports.iter().enumerate() {
+            let is_output = port.direction != Direction::Sink;
+            let (offset_x, offset_y) =
+                canvas::pin_offset(node.width, index, node.has_audio_controls, is_output);
+            pin_geometry.push(PinGeometry {
+                pin_id: port.pin_id,
+                node_id: node.id,
+                is_output,
+                x: node.position[0] + offset_x,
+                y: node.position[1] + offset_y,
+                visible: pins_visible,
+                node_selected: node.selected,
+            });
+        }
+    }
+    let link_geometry = snapshot
+        .links
+        .iter()
+        .map(|link| LinkGeometry {
+            id: link.id,
+            start_pin: link.start_pin_id,
+            end_pin: link.end_pin_id,
+        })
+        .collect();
+    geometry.borrow_mut().replace(
+        node_geometry,
+        pin_geometry,
+        link_geometry,
+        connect_mode == ConnectMode::Easy,
+    );
+}
+
+/// Bounding box of every card, used to frame the minimap.
+fn graph_bounds(snapshot: &GraphSnapshot) -> [f32; 4] {
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for node in &snapshot.nodes {
+        bounds[0] = bounds[0].min(node.position[0]);
+        bounds[1] = bounds[1].min(node.position[1]);
+        bounds[2] = bounds[2].max(node.position[0] + node.width);
+        bounds[3] = bounds[3].max(node.position[1] + node.height);
+    }
+    if snapshot.nodes.is_empty() {
+        return [0.0, 0.0, 1600.0, 1200.0];
+    }
+    bounds
 }
 
 fn localized_node_type(i18n: &I18n, node_type: pw_graph_core::NodeType) -> String {
@@ -2246,15 +2495,11 @@ fn shortcut_rows(i18n: &I18n, query: &str) -> Vec<ShortcutRow> {
         .collect()
 }
 
-fn link_row(link: &LinkView) -> LinkData {
-    LinkData {
+fn link_row(link: &LinkView) -> LinkRow {
+    LinkRow {
         id: link.id,
-        start_pin_id: link.start_pin_id,
-        end_pin_id: link.end_pin_id,
         color: color(link.color),
         selected: link.selected,
-        line_width: 2.0,
-        status: -1,
     }
 }
 
@@ -2598,6 +2843,7 @@ mod tests {
             toast_message: String::new(),
             toast_until: None,
             toast_error: false,
+            pending_connection_pin: None,
             debug: false,
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
@@ -2636,6 +2882,15 @@ mod tests {
         let mut preview = demo_preview();
         let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
         let other_output = preview.view.ids.port(pw_graph_core::PortId(2)).unwrap();
+
+        handle_link_requested(&mut preview, output, output);
+        assert_eq!(preview.pending_connection_pin, Some(output));
+        assert!(!preview.toast_error);
+        assert!(preview.toast_message.contains("click a destination pin"));
+
+        handle_link_requested(&mut preview, output, output);
+        assert_eq!(preview.pending_connection_pin, None);
+        assert_eq!(preview.toast_message, "Connection cancelled");
 
         connect_pin_pair(&mut preview, output, 99_999);
         assert!(preview.toast_error);
@@ -2707,6 +2962,63 @@ mod tests {
     }
 
     #[test]
+    fn easy_port_drag_connects_when_released_on_the_target_body() {
+        let mut preview = demo_preview();
+        let source_pin = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let (target_x, target_y) = preview
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == pw_graph_core::NodeId(2))
+            .map(|node| {
+                (
+                    node.position[0] + node.width / 2.0,
+                    node.position[1] + node.height / 2.0,
+                )
+            })
+            .unwrap();
+
+        easy_connect_from_pin(&mut preview, source_pin, target_x, target_y);
+
+        assert_eq!(preview.source.graph().links.len(), 2);
+        assert!(preview.toast_message.contains("created 2 connection"));
+        assert!(!preview.toast_error);
+    }
+
+    #[test]
+    fn two_pin_clicks_connect_without_holding_the_pointer() {
+        let mut preview = demo_preview();
+        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+
+        handle_link_requested(&mut preview, output, output);
+        assert_eq!(preview.pending_connection_pin, Some(output));
+
+        handle_link_requested(&mut preview, input, input);
+
+        assert_eq!(preview.pending_connection_pin, None);
+        assert_eq!(preview.source.graph().links.len(), 1);
+        assert_eq!(preview.toast_message, "Connection created");
+        assert!(!preview.toast_error);
+    }
+
+    #[test]
+    fn two_pin_clicks_group_channels_in_easy_mode() {
+        let mut preview = demo_preview();
+        preview.view.connect_mode = ConnectMode::Easy;
+        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+
+        handle_link_requested(&mut preview, output, output);
+        handle_link_requested(&mut preview, input, input);
+
+        assert_eq!(preview.pending_connection_pin, None);
+        assert_eq!(preview.source.graph().links.len(), 2);
+        assert!(preview.toast_message.contains("created 2 connection"));
+        assert!(!preview.toast_error);
+    }
+
+    #[test]
     fn connection_feedback_is_transient() {
         let mut preview = demo_preview();
         set_connection_feedback(&mut preview, "test connection", false);
@@ -2714,161 +3026,6 @@ mod tests {
 
         preview.toast_until = Some(Instant::now() - Duration::from_secs(1));
         assert!(!toast_visible(&preview));
-    }
-
-    #[test]
-    fn rendered_pin_drag_reports_the_visible_output_to_input_pair() {
-        i_slint_backend_testing::init_no_event_loop();
-
-        let window = MainWindow::new().unwrap();
-        window
-            .window()
-            .set_size(slint::LogicalSize::new(1100.0, 760.0));
-        let source_ports = Rc::new(VecModel::from(vec![PortRow {
-            id: 101,
-            label: "output".into(),
-            direction: 1,
-            color: Color::from_rgb_u8(87, 199, 133),
-            y: 0.0,
-        }]));
-        let target_ports = Rc::new(VecModel::from(vec![PortRow {
-            id: 202,
-            label: "input".into(),
-            direction: 0,
-            color: Color::from_rgb_u8(87, 199, 133),
-            y: 0.0,
-        }]));
-        let nodes = Rc::new(VecModel::from(vec![
-            NodeRow {
-                id: 7,
-                node_title: "Source".into(),
-                node_subtitle: "PipeWire node".into(),
-                x: 100.0,
-                y: 100.0,
-                width: 280.0,
-                height: 100.0,
-                selected: false,
-                collapsed: false,
-                thumbnail: false,
-                font_scale: 1.0,
-                accent: Color::from_rgb_u8(87, 199, 133),
-                has_audio_controls: false,
-                meter_rms: 0.0,
-                meter_peak: 0.0,
-                meter_peak_position: 0.0,
-                meter_available: false,
-                meter_label: "N/A".into(),
-                audio_volume_position: 0.9,
-                audio_muted: false,
-                ports: ModelRc::from(source_ports),
-            },
-            NodeRow {
-                id: 8,
-                node_title: "Target".into(),
-                node_subtitle: "PipeWire node".into(),
-                x: 500.0,
-                y: 100.0,
-                width: 280.0,
-                height: 100.0,
-                selected: false,
-                collapsed: false,
-                thumbnail: false,
-                font_scale: 1.0,
-                accent: Color::from_rgb_u8(87, 199, 133),
-                has_audio_controls: false,
-                meter_rms: 0.0,
-                meter_peak: 0.0,
-                meter_peak_position: 0.0,
-                meter_available: false,
-                meter_label: "N/A".into(),
-                audio_volume_position: 0.9,
-                audio_muted: false,
-                ports: ModelRc::from(target_ports),
-            },
-        ]));
-        window.set_nodes(ModelRc::from(nodes));
-
-        let setup = NodeEditorSetup::new(|_, _, _| {});
-        let controller = setup.controller().clone();
-        slint_node_editor::wire_node_editor!(window, setup);
-        window.on_graph_compute_pin_at({
-            let controller = controller.clone();
-            move |x, y| controller.cache().borrow().find_pin_at(x, y, 10.0)
-        });
-        let link_result = Rc::new(RefCell::new(None));
-        window.on_graph_link_requested({
-            let link_result = link_result.clone();
-            move |start, end| *link_result.borrow_mut() = Some((start, end))
-        });
-        // Seed the same world-space geometry that the Pin reporting callbacks
-        // provide once the render loop has laid out the rows.
-        controller.handle_node_rect(7, 100.0, 100.0, 280.0, 100.0);
-        controller.handle_node_rect(8, 500.0, 100.0, 280.0, 100.0);
-        controller.handle_pin_position(101, 7, 2, 270.5, 56.5);
-        controller.handle_pin_position(202, 8, 1, 9.5, 56.5);
-
-        let dispatch = |event| {
-            window.window().dispatch_event(event);
-            slint::platform::update_timers_and_animations();
-        };
-        // Workspace starts at x=76 and the editor pan is (24, 24). These are
-        // the visible centers after including the body and port-row offsets.
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(470.5, 180.5),
-            button: PointerEventButton::Left,
-        });
-        dispatch(WindowEvent::PointerMoved {
-            position: LogicalPosition::new(609.5, 180.5),
-        });
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(609.5, 180.5),
-            button: PointerEventButton::Left,
-        });
-
-        assert_eq!(*link_result.borrow(), Some((101, 202)));
-
-        // Easy mode groups channels but must retain standard patch-cable
-        // interaction: the pin owns one continuous press-drag-release gesture.
-        let easy_result = Rc::new(RefCell::new(None));
-        window.on_graph_easy_connect({
-            let easy_result = easy_result.clone();
-            move |source, _, _, target_pin| {
-                *easy_result.borrow_mut() = Some((source, target_pin))
-            }
-        });
-        window.set_connect_mode("easy".into());
-        *link_result.borrow_mut() = None;
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(470.5, 180.5),
-            button: PointerEventButton::Left,
-        });
-        dispatch(WindowEvent::PointerMoved {
-            position: LogicalPosition::new(609.5, 180.5),
-        });
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(609.5, 180.5),
-            button: PointerEventButton::Left,
-        });
-        assert_eq!(*link_result.borrow(), Some((101, 202)));
-        assert_eq!(*easy_result.borrow(), None);
-
-        let cancelled = Rc::new(RefCell::new(false));
-        window.on_graph_link_cancelled({
-            let cancelled = cancelled.clone();
-            move || *cancelled.borrow_mut() = true
-        });
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(470.5, 180.5),
-            button: PointerEventButton::Left,
-        });
-        dispatch(WindowEvent::PointerMoved {
-            position: LogicalPosition::new(800.0, 300.0),
-        });
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(800.0, 300.0),
-            button: PointerEventButton::Left,
-        });
-        assert!(*cancelled.borrow());
     }
 
     #[test]
@@ -2938,189 +3095,374 @@ mod tests {
         assert_eq!(decoded, state);
     }
 
-    #[test]
-    fn node_header_drag_and_body_mute_button_receive_pointer_events() {
-        i_slint_backend_testing::init_no_event_loop();
+    /// Drives the real window with the real canvas wiring: rows, geometry and
+    /// callbacks are produced by the same code the application runs.
+    struct CanvasHarness {
+        window: MainWindow,
+        nodes: Rc<VecModel<NodeRow>>,
+        links: Rc<VecModel<LinkRow>>,
+        geometry: Rc<RefCell<CanvasGeometry>>,
+        events: Rc<RefCell<Vec<UiEvent>>>,
+        preview: PreviewApp,
+    }
 
-        let window = MainWindow::new().unwrap();
-        window
-            .window()
-            .set_size(slint::LogicalSize::new(1100.0, 760.0));
-        let nodes = Rc::new(VecModel::from(vec![
-            NodeRow {
-                id: 7,
-                node_title: "Test audio node".into(),
-                node_subtitle: "PipeWire node".into(),
-                x: 100.0,
-                y: 100.0,
-                width: 280.0,
-                height: 110.0,
-                selected: false,
-                collapsed: false,
-                thumbnail: false,
-                font_scale: 1.0,
-                accent: Color::from_rgb_u8(87, 199, 133),
-                has_audio_controls: true,
-                meter_rms: 0.0,
-                meter_peak: 0.0,
-                meter_peak_position: 0.0,
-                meter_available: false,
-                meter_label: "N/A".into(),
-                audio_volume_position: 0.9,
-                audio_muted: false,
-                ports: ModelRc::default(),
-            },
-            NodeRow {
-                id: 8,
-                node_title: "Test effect node".into(),
-                node_subtitle: "Effect node".into(),
-                x: 500.0,
-                y: 100.0,
-                width: 280.0,
-                height: 110.0,
-                selected: false,
-                collapsed: false,
-                thumbnail: false,
-                font_scale: 1.0,
-                accent: Color::from_rgb_u8(82, 117, 176),
-                has_audio_controls: false,
-                meter_rms: 0.0,
-                meter_peak: 0.0,
-                meter_peak_position: 0.0,
-                meter_available: false,
-                meter_label: "N/A".into(),
-                audio_volume_position: 0.9,
-                audio_muted: false,
-                ports: ModelRc::default(),
-            },
-        ]));
-        window.set_nodes(ModelRc::from(nodes.clone()));
+    /// The graph starts at the right edge of the icon rail.
+    const RAIL_WIDTH: f32 = 76.0;
 
-        let drag_result = Rc::new(RefCell::new(None));
-        window
-            .global::<NodeEditorInternalCallbacks>()
-            .on_end_node_drag({
-                let drag_result = drag_result.clone();
-                let nodes = nodes.clone();
-                move |node_id, dx, dy| {
-                    GraphLogic::commit_drag(&nodes, node_id, dx, dy);
-                    *drag_result.borrow_mut() = Some((node_id, dx, dy));
-                }
-            });
-        let muted_node = Rc::new(RefCell::new(None));
-        window.on_graph_audio_mute_toggled({
-            let muted_node = muted_node.clone();
-            move |node_id| *muted_node.borrow_mut() = Some(node_id)
-        });
+    impl CanvasHarness {
+        fn new(connect_mode: ConnectMode) -> Self {
+            i_slint_backend_testing::init_no_event_loop();
+            let mut preview = demo_preview();
+            preview.view.connect_mode = connect_mode;
+            // Anchor the viewport so world and screen differ only by the rail.
+            preview.view.pan = [0.0, 0.0];
+            preview.view.zoom = 1.0;
 
-        let dispatch = |event| {
-            window.window().dispatch_event(event);
+            let window = MainWindow::new().unwrap();
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(1400.0, 900.0));
+            let nodes = Rc::new(VecModel::default());
+            let links = Rc::new(VecModel::default());
+            window.set_nodes(ModelRc::from(nodes.clone()));
+            window.set_links(ModelRc::from(links.clone()));
+            let geometry = Rc::new(RefCell::new(CanvasGeometry::default()));
+            let events = Rc::new(RefCell::new(Vec::new()));
+            install_canvas_callbacks(&window, &nodes, &links, &geometry, &events);
+
+            let mut harness = Self {
+                window,
+                nodes,
+                links,
+                geometry,
+                events,
+                preview,
+            };
+            harness.sync();
+            harness
+        }
+
+        fn sync(&mut self) {
+            let minimap = Rc::new(VecModel::default());
+            let version = Rc::new(Cell::new(0));
+            sync_models(
+                &self.window,
+                &mut self.preview,
+                &self.nodes,
+                &self.links,
+                &minimap,
+                &self.geometry,
+                &version,
+            );
+        }
+
+        fn screen_of(&self, world: (f32, f32)) -> LogicalPosition {
+            LogicalPosition::new(RAIL_WIDTH + world.0, world.1)
+        }
+
+        fn dispatch(&self, event: WindowEvent) {
+            self.window.window().dispatch_event(event);
             slint::platform::update_timers_and_animations();
-        };
+        }
 
-        // Workspace starts at x=76; editor pan is (24, 24). The node header
-        // therefore starts at screen position (200, 124).
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(240.0, 140.0),
-            button: PointerEventButton::Left,
-        });
+        fn drag(&self, from: (f32, f32), to: (f32, f32)) {
+            self.dispatch(WindowEvent::PointerPressed {
+                position: self.screen_of(from),
+                button: PointerEventButton::Left,
+            });
+            self.dispatch(WindowEvent::PointerMoved {
+                position: self.screen_of(to),
+            });
+            self.dispatch(WindowEvent::PointerReleased {
+                position: self.screen_of(to),
+                button: PointerEventButton::Left,
+            });
+        }
 
-        // The refresh timer may run after mouse-down but before the pointer
-        // crosses the drag threshold. Updating the stable row must retain the
-        // component instance and its pointer capture.
-        let mut pressed_refresh = nodes.row_data(0).unwrap();
-        pressed_refresh.meter_peak = 0.25;
-        sync_node_rows(
-            &window,
-            &nodes,
-            vec![pressed_refresh, nodes.row_data(1).unwrap()],
-        );
-        assert_eq!(nodes.row_data(0).unwrap().meter_peak, 0.25);
+        fn click(&self, at: (f32, f32)) {
+            self.dispatch(WindowEvent::PointerPressed {
+                position: self.screen_of(at),
+                button: PointerEventButton::Left,
+            });
+            self.dispatch(WindowEvent::PointerReleased {
+                position: self.screen_of(at),
+                button: PointerEventButton::Left,
+            });
+        }
 
-        dispatch(WindowEvent::PointerMoved {
-            position: LogicalPosition::new(270.0, 160.0),
-        });
-        assert!(window.get_graph_node_dragging());
+        fn take_events(&self) -> Vec<UiEvent> {
+            std::mem::take(&mut *self.events.borrow_mut())
+        }
 
-        // It may run again during the drag; another in-place update must also
-        // preserve the gesture through release.
-        let mut stale_refresh = nodes.row_data(0).unwrap();
-        stale_refresh.meter_peak = 0.5;
-        sync_node_rows(
-            &window,
-            &nodes,
-            vec![stale_refresh, nodes.row_data(1).unwrap()],
-        );
-        assert_eq!(nodes.row_data(0).unwrap().meter_peak, 0.5);
+        /// World centre of a pin, exactly where the dot is drawn.
+        fn pin(&self, pin_id: i32) -> (f32, f32) {
+            let geometry = self.geometry.borrow();
+            let pin = geometry.pin(pin_id).expect("pin is cached");
+            (pin.x, pin.y)
+        }
 
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(270.0, 160.0),
-            button: PointerEventButton::Left,
-        });
+        /// A point on the card body that carries no widget of its own: below
+        /// the header and below the audio block when the card has one.
+        fn body_point(&self, card: &NodeRow) -> (f32, f32) {
+            let top = canvas::BODY_TOP
+                + if card.has_audio_controls {
+                    canvas::AUDIO_BLOCK_HEIGHT
+                } else {
+                    canvas::PORT_LIST_TOP
+                };
+            (card.x + card.width / 2.0, card.y + top + 8.0)
+        }
 
-        let (node_id, dx, dy) = drag_result.borrow().expect("header drag must finish");
-        assert_eq!(node_id, 7);
-        assert!((dx - 30.0).abs() < 0.1);
-        assert!((dy - 20.0).abs() < 0.1);
-        assert!(!window.get_graph_node_dragging());
-        assert!((nodes.row_data(0).unwrap().x - 130.0).abs() < 0.1);
-        assert!((nodes.row_data(0).unwrap().y - 120.0).abs() < 0.1);
+        fn node_row(&self, node_id: i32) -> NodeRow {
+            rows_of(&self.nodes)
+                .into_iter()
+                .find(|node| node.id == node_id)
+                .expect("node is rendered")
+        }
 
-        // The mute button is in the node body. It must not be captured by the
-        // inherited drag area after the node has visually moved by (30, 20).
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(485.0, 205.0),
-            button: PointerEventButton::Left,
-        });
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(485.0, 205.0),
-            button: PointerEventButton::Left,
-        });
-        assert_eq!(*muted_node.borrow(), Some(7));
+        /// First output pin and first input pin of two different cards.
+        fn connectable_pair(&self) -> (i32, i32) {
+            let output = self
+                .preview
+                .snapshot
+                .nodes
+                .iter()
+                .find_map(|node| {
+                    node.ports
+                        .iter()
+                        .find(|port| port.direction != Direction::Sink)
+                        .map(|port| (node.id, port.pin_id))
+                })
+                .expect("the demo graph has an output port");
+            let input = self
+                .preview
+                .snapshot
+                .nodes
+                .iter()
+                .filter(|node| node.id != output.0)
+                .find_map(|node| {
+                    node.ports
+                        .iter()
+                        .find(|port| port.direction == Direction::Sink)
+                        .map(|port| port.pin_id)
+                })
+                .expect("the demo graph has an input port on another card");
+            (output.1, input)
+        }
+    }
 
-        let easy_drop = Rc::new(RefCell::new(None));
-        window.on_graph_easy_connect({
-            let easy_drop = easy_drop.clone();
-            move |node_id, x, y, _| *easy_drop.borrow_mut() = Some((node_id, x, y))
-        });
-        window.set_connect_mode("easy".into());
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(250.0, 235.0),
-            button: PointerEventButton::Left,
-        });
-        dispatch(WindowEvent::PointerMoved {
-            position: LogicalPosition::new(620.0, 190.0),
-        });
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(620.0, 190.0),
-            button: PointerEventButton::Left,
-        });
-        let (source, x, y) = easy_drop.borrow().expect("easy-mode body drag must finish");
-        assert_eq!(source, 7);
-        assert!((x - 520.0).abs() < 0.1);
-        assert!((y - 166.0).abs() < 0.1);
+    #[test]
+    fn dragging_between_two_rendered_pins_requests_that_exact_pair() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        let (output, input) = harness.connectable_pair();
 
-        // The body drop callback is world-space even when the editor is panned
-        // and zoomed. This guards the hit-test path used by the live connector.
-        window.set_pan_x(130.0);
-        window.set_pan_y(70.0);
-        window.set_zoom(1.5);
-        dispatch(WindowEvent::PointerPressed {
-            position: LogicalPosition::new(431.0, 310.0),
-            button: PointerEventButton::Left,
-        });
-        dispatch(WindowEvent::PointerMoved {
-            position: LogicalPosition::new(986.0, 310.0),
-        });
-        dispatch(WindowEvent::PointerReleased {
-            position: LogicalPosition::new(986.0, 310.0),
-            button: PointerEventButton::Left,
-        });
-        let (source, x, y) = easy_drop
+        harness.drag(harness.pin(output), harness.pin(input));
+
+        let requested = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::LinkRequested(start, end) => Some((start, end)),
+                _ => None,
+            });
+        assert_eq!(requested, Some((output, input)));
+    }
+
+    #[test]
+    fn a_pin_drag_released_over_empty_canvas_cancels_in_advanced_mode() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        let (output, _) = harness.connectable_pair();
+
+        harness.drag(harness.pin(output), (1150.0, 800.0));
+
+        assert!(harness
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, UiEvent::LinkCancelled)));
+    }
+
+    #[test]
+    fn easy_mode_accepts_a_pin_drag_that_lands_anywhere_on_the_target_card() {
+        let harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+        let target = harness.pin(input);
+        // Well clear of the pin dot, but still inside the destination card.
+        let body = (target.0 + 70.0, target.1 + 6.0);
+
+        harness.drag(harness.pin(output), body);
+
+        let dropped = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::LinkDropped(pin, x, y) => Some((pin, x, y)),
+                _ => None,
+            });
+        let (pin, x, y) = dropped.expect("easy mode routes the drop to the whole-card handler");
+        assert_eq!(pin, output);
+        assert!((x - body.0).abs() < 1.0 && (y - body.1).abs() < 1.0);
+    }
+
+    #[test]
+    fn easy_mode_connects_whole_cards_dragged_from_their_body() {
+        let harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+        let source_node = harness
+            .geometry
             .borrow()
-            .expect("panned and zoomed easy-mode drag must finish");
-        assert_eq!(source, 7);
-        assert!((x - 520.0).abs() < 1.0);
-        assert!((y - 166.0).abs() < 1.0);
+            .pin(output)
+            .expect("pin is cached")
+            .node_id;
+        let source = harness.node_row(source_node);
+        let from = harness.body_point(&source);
+
+        harness.drag(from, harness.pin(input));
+
+        let connected = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::NodeConnectDropped(id, _, _, target) => Some((id, target)),
+                _ => None,
+            });
+        assert_eq!(connected, Some((source_node, input)));
+    }
+
+    #[test]
+    fn advanced_mode_moves_the_card_when_its_body_is_dragged() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let card = harness.node_row(harness.preview.snapshot.nodes[0].id);
+        let from = harness.body_point(&card);
+
+        harness.drag(from, (from.0 + 40.0, from.1 + 25.0));
+
+        let moved = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::DragCommitted(id, dx, dy) => Some((id, dx, dy)),
+                _ => None,
+            });
+        let (id, dx, dy) = moved.expect("a body drag moves the card in advanced mode");
+        assert_eq!(id, card.id);
+        assert!((dx - 40.0).abs() < 0.1 && (dy - 25.0).abs() < 0.1);
+        // The rendered row follows immediately, without waiting for a refresh.
+        let after = harness.node_row(card.id);
+        assert!((after.x - card.x - 40.0).abs() < 0.1);
+        assert!((after.y - card.y - 25.0).abs() < 0.1);
+        // ...and the cached pins moved with it, so the edges stay attached.
+        let pin = harness.preview.snapshot.nodes[0]
+            .ports
+            .first()
+            .map(|port| port.pin_id);
+        if let Some(pin) = pin {
+            let cached = harness.geometry.borrow().pin(pin).expect("pin is cached");
+            assert!((cached.x - after.x - canvas::PIN_INSET).abs() < card.width);
+        }
+        harness.sync();
+    }
+
+    #[test]
+    fn dragging_the_header_moves_the_whole_selection() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        let first = harness.node_row(harness.preview.snapshot.nodes[0].id);
+        let second = harness.node_row(harness.preview.snapshot.nodes[1].id);
+
+        harness.click((first.x + 60.0, first.y + 12.0));
+        harness.dispatch(WindowEvent::PointerPressed {
+            position: harness.screen_of((second.x + 60.0, second.y + 12.0)),
+            button: PointerEventButton::Left,
+        });
+        harness.dispatch(WindowEvent::PointerMoved {
+            position: harness.screen_of((second.x + 60.0 + 30.0, second.y + 12.0 + 15.0)),
+        });
+        harness.dispatch(WindowEvent::PointerReleased {
+            position: harness.screen_of((second.x + 60.0 + 30.0, second.y + 12.0 + 15.0)),
+            button: PointerEventButton::Left,
+        });
+
+        // Clicking the second card replaced the selection, so only it moves.
+        assert!((harness.node_row(second.id).x - second.x - 30.0).abs() < 0.1);
+        assert!((harness.node_row(first.id).x - first.x).abs() < 0.1);
+    }
+
+    #[test]
+    fn clicking_a_card_selects_it_and_clicking_the_background_clears_it() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        let card = harness.node_row(harness.preview.snapshot.nodes[0].id);
+
+        harness.click((card.x + 60.0, card.y + 12.0));
+        assert!(harness.node_row(card.id).selected);
+        assert!(harness
+            .geometry
+            .borrow()
+            .node(card.id)
+            .is_some_and(|node| node.selected));
+
+        harness.click((1150.0, 820.0));
+        assert!(!harness.node_row(card.id).selected);
+    }
+
+    #[test]
+    fn the_body_mute_button_keeps_its_own_pointer_gesture() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        let card = harness
+            .preview
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.has_audio_controls)
+            .map(|node| harness.node_row(node.id))
+            .expect("the demo graph has a card with audio controls");
+
+        // The mute button sits at the right of the audio block inside the body.
+        harness.click((card.x + card.width - 22.0, card.y + canvas::BODY_TOP + 20.0));
+
+        assert!(harness
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, UiEvent::ToggleAudioMute(id) if *id == card.id)));
+    }
+
+    #[test]
+    fn a_created_link_is_rendered_as_a_curve_between_its_two_pins() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let (output, input) = harness.connectable_pair();
+
+        harness.drag(harness.pin(output), harness.pin(input));
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.preview, event);
+        }
+        harness.sync();
+
+        let rendered = rows_of(&harness.links);
+        assert_eq!(rendered.len(), 1, "the new link reaches the render model");
+        let commands = harness.window.invoke_graph_link_path(
+            rendered[0].id,
+            harness.window.get_geometry_version(),
+            0.0,
+            0.0,
+        );
+        let start = harness.pin(output);
+        let end = harness.pin(input);
+        assert!(
+            commands.starts_with(&format!("M {:.2} {:.2} C ", start.0, start.1)),
+            "the curve starts on the output pin: {commands}"
+        );
+        assert!(
+            commands.ends_with(&format!(" {:.2} {:.2}", end.0, end.1)),
+            "the curve ends on the input pin: {commands}"
+        );
+    }
+
+    #[test]
+    fn the_background_grid_is_generated_for_the_visible_canvas() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+
+        harness.window.invoke_graph_request_grid();
+
+        let grid = harness.window.get_grid_commands();
+        assert!(!grid.is_empty(), "the canvas asks Rust for its grid lines");
+        assert!(grid.starts_with("M "));
     }
 }
