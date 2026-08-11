@@ -413,6 +413,27 @@ impl ReadOnlyGraphSource {
         Err("graph connections are not available for this backend".into())
     }
 
+    pub(crate) fn disconnect_by_key_if_present(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> Result<bool, String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .disconnect_by_key_if_present(output, input)
+                .map(|link| link.is_some())
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .disconnect_by_key_if_present(output, input)
+                .map(|link| link.is_some())
+                .map_err(|error| error.to_string());
+        }
+        Err("graph connections are not available for this backend".into())
+    }
+
     #[cfg(feature = "relay")]
     pub(crate) fn relay_available(&self) -> bool {
         if let Some(driver) = self.demo.as_ref() {

@@ -610,15 +610,26 @@ impl UiGraphState {
         y: f32,
         exclude: NodeId,
     ) -> Option<NodeId> {
+        self.node_at_with_margin(snapshot, x, y, exclude, 0.0)
+    }
+
+    pub(crate) fn node_at_with_margin(
+        &self,
+        snapshot: &GraphSnapshot,
+        x: f32,
+        y: f32,
+        exclude: NodeId,
+        margin: f32,
+    ) -> Option<NodeId> {
         snapshot
             .nodes
             .iter()
             .find(|node| {
                 node.node_id != exclude
-                    && x >= node.position[0]
-                    && x <= node.position[0] + node.width
-                    && y >= node.position[1]
-                    && y <= node.position[1] + node.height
+                    && x >= node.position[0] - margin
+                    && x <= node.position[0] + node.width + margin
+                    && y >= node.position[1] - margin
+                    && y <= node.position[1] + node.height + margin
             })
             .map(|node| node.node_id)
     }

@@ -69,7 +69,7 @@ enum UiEvent {
     SelectBox(f32, f32, f32, f32, bool),
     LinkRequested(i32, i32),
     LinkCancelled,
-    EasyConnect(i32, f32, f32),
+    EasyConnect(i32, f32, f32, i32),
     ToggleCollapse(i32),
     DragCommitted(i32, f32, f32),
     SetAudioVolume(i32, f32),
@@ -373,8 +373,10 @@ impl UiBridge {
             events.borrow_mut().push(UiEvent::LinkCancelled);
         });
         let events = self.events.clone();
-        self.window.on_graph_easy_connect(move |id, x, y| {
-            events.borrow_mut().push(UiEvent::EasyConnect(id, x, y));
+        self.window.on_graph_easy_connect(move |id, x, y, target_pin| {
+            events
+                .borrow_mut()
+                .push(UiEvent::EasyConnect(id, x, y, target_pin));
         });
         let events = self.events.clone();
         self.window.on_graph_audio_volume_changed(move |id, value| {
@@ -725,7 +727,9 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
         UiEvent::LinkCancelled => {
             set_connection_feedback(preview, "Connection preview cancelled", false);
         }
-        UiEvent::EasyConnect(source, x, y) => easy_connect_nodes(preview, source, x, y),
+        UiEvent::EasyConnect(source, x, y, target_pin) => {
+            easy_connect_nodes(preview, source, x, y, target_pin)
+        }
         UiEvent::ToggleCollapse(id) => {
             preview.view.toggle_local_collapse(id, &preview.snapshot);
             preview.status = "Node expansion changed; configuration will be saved".into();
@@ -859,12 +863,40 @@ fn refresh_connection_graph(preview: &mut PreviewApp) -> Result<(), String> {
     Ok(())
 }
 
-fn easy_connect_nodes(preview: &mut PreviewApp, source_id: i32, x: f32, y: f32) {
+fn easy_connect_nodes(
+    preview: &mut PreviewApp,
+    source_id: i32,
+    x: f32,
+    y: f32,
+    target_pin_id: i32,
+) {
     let Some(source_node) = preview.view.ids.node_id(source_id) else {
         set_connection_feedback(preview, "Easy connect source is no longer available", true);
         return;
     };
-    let Some(target_node) = preview.view.node_at(&preview.snapshot, x, y, source_node) else {
+    // Prefer the actual rendered pin under the release. This is authoritative
+    // even when a transformed/captured TouchArea reports imperfect card-local
+    // coordinates at the edge of another node.
+    let target_from_pin = preview
+        .view
+        .ids
+        .port_id(target_pin_id)
+        .and_then(|port| preview.source.graph().port(port))
+        .map(|port| port.node_id)
+        .filter(|node| *node != source_node);
+    let Some(target_node) = target_from_pin.or_else(|| {
+        // A card-body drop has no pin identity. Keep coordinate hit-testing as
+        // its fallback, including the small margin occupied by edge pins.
+        preview
+            .view
+            .node_at(&preview.snapshot, x, y, source_node)
+            .or_else(|| {
+                preview
+                    .view
+                    .node_at_with_margin(&preview.snapshot, x, y, source_node, 12.0)
+            })
+    })
+    else {
         set_connection_feedback(
             preview,
             "Easy connect cancelled: drop onto another node",
@@ -872,6 +904,14 @@ fn easy_connect_nodes(preview: &mut PreviewApp, source_id: i32, x: f32, y: f32) 
         );
         return;
     };
+    easy_connect_node_pair(preview, source_node, target_node);
+}
+
+fn easy_connect_node_pair(
+    preview: &mut PreviewApp,
+    source_node: pw_graph_core::NodeId,
+    target_node: pw_graph_core::NodeId,
+) {
     let port_keys = {
         let graph = preview.source.graph();
         preview
@@ -1038,11 +1078,11 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
             stop_relay_discovery(preview);
         }
         "save-config" => save_config(preview, true),
+        "delete-selection" => delete_selected_connections(preview),
         "undo"
         | "redo"
         | "save-patchbay"
         | "load-patchbay"
-        | "delete-selection"
         | "activate-patchbay"
         | "save-profile"
         | "choose-patchbay-directory"
@@ -1084,6 +1124,58 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
     }
     if preview.debug {
         eprintln!("[qpwgraph-slint] {}", preview.status);
+    }
+}
+
+fn delete_selected_connections(preview: &mut PreviewApp) {
+    let keys = {
+        let graph = preview.source.graph();
+        preview
+            .view
+            .selected_links
+            .iter()
+            .filter_map(|id| {
+                let link = graph.link(*id)?;
+                Some((
+                    graph.port_key(link.output_port)?,
+                    graph.port_key(link.input_port)?,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    if keys.is_empty() {
+        set_connection_feedback(preview, "Select a connection before deleting", true);
+        return;
+    }
+
+    let mut removed = 0usize;
+    for (output, input) in keys {
+        match preview.source.disconnect_by_key_if_present(&output, &input) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(error) => {
+                let _ = refresh_connection_graph(preview);
+                set_connection_feedback(
+                    preview,
+                    format!("Removed {removed} connection(s), then failed: {error}"),
+                    true,
+                );
+                return;
+            }
+        }
+    }
+    preview.view.clear_selection();
+    match refresh_connection_graph(preview) {
+        Ok(()) => set_connection_feedback(
+            preview,
+            format!("Removed {removed} connection(s)"),
+            false,
+        ),
+        Err(error) => set_connection_feedback(
+            preview,
+            format!("Connection removed, but graph refresh failed: {error}"),
+            true,
+        ),
     }
 }
 
@@ -2555,6 +2647,23 @@ mod tests {
     }
 
     #[test]
+    fn delete_removes_the_selected_connection() {
+        let mut preview = demo_preview();
+        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        connect_pin_pair(&mut preview, output, input);
+        let link = *preview.source.graph().links.keys().next().unwrap();
+        preview.view.selected_links.insert(link);
+
+        delete_selected_connections(&mut preview);
+
+        assert!(preview.source.graph().links.is_empty());
+        assert!(preview.view.selected_links.is_empty());
+        assert_eq!(preview.toast_message, "Removed 1 connection(s)");
+        assert!(!preview.toast_error);
+    }
+
+    #[test]
     fn easy_connections_create_all_matching_demo_channels() {
         let mut preview = demo_preview();
         let source = preview.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
@@ -2571,7 +2680,27 @@ mod tests {
             source,
             target_position[0] + 10.0,
             target_position[1] + 10.0,
+            0,
         );
+
+        assert_eq!(preview.source.graph().links.len(), 2);
+        assert!(preview.toast_message.contains("created 2 connection"));
+    }
+
+    #[test]
+    fn easy_drop_accepts_the_visible_pin_margin() {
+        let mut preview = demo_preview();
+        let source = preview.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
+        let target = preview
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == pw_graph_core::NodeId(2))
+            .unwrap();
+        let pin_edge_x = target.position[0] - 6.0;
+        let pin_y = target.position[1] + target.height / 2.0;
+
+        easy_connect_nodes(&mut preview, source, pin_edge_x, pin_y, 0);
 
         assert_eq!(preview.source.graph().links.len(), 2);
         assert!(preview.toast_message.contains("created 2 connection"));
@@ -2697,6 +2826,49 @@ mod tests {
         });
 
         assert_eq!(*link_result.borrow(), Some((101, 202)));
+
+        // Easy mode groups channels but must retain standard patch-cable
+        // interaction: the pin owns one continuous press-drag-release gesture.
+        let easy_result = Rc::new(RefCell::new(None));
+        window.on_graph_easy_connect({
+            let easy_result = easy_result.clone();
+            move |source, _, _, target_pin| {
+                *easy_result.borrow_mut() = Some((source, target_pin))
+            }
+        });
+        window.set_connect_mode("easy".into());
+        *link_result.borrow_mut() = None;
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(470.5, 180.5),
+            button: PointerEventButton::Left,
+        });
+        dispatch(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(609.5, 180.5),
+        });
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(609.5, 180.5),
+            button: PointerEventButton::Left,
+        });
+        assert_eq!(*link_result.borrow(), Some((101, 202)));
+        assert_eq!(*easy_result.borrow(), None);
+
+        let cancelled = Rc::new(RefCell::new(false));
+        window.on_graph_link_cancelled({
+            let cancelled = cancelled.clone();
+            move || *cancelled.borrow_mut() = true
+        });
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(470.5, 180.5),
+            button: PointerEventButton::Left,
+        });
+        dispatch(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(800.0, 300.0),
+        });
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(800.0, 300.0),
+            button: PointerEventButton::Left,
+        });
+        assert!(*cancelled.borrow());
     }
 
     #[test]
@@ -2909,7 +3081,7 @@ mod tests {
         let easy_drop = Rc::new(RefCell::new(None));
         window.on_graph_easy_connect({
             let easy_drop = easy_drop.clone();
-            move |node_id, x, y| *easy_drop.borrow_mut() = Some((node_id, x, y))
+            move |node_id, x, y, _| *easy_drop.borrow_mut() = Some((node_id, x, y))
         });
         window.set_connect_mode("easy".into());
         dispatch(WindowEvent::PointerPressed {

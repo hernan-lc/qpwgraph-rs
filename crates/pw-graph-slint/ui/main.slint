@@ -273,6 +273,9 @@ component GraphNode inherits BaseNode {
     }
 
     if !data.collapsed && !data.thumbnail: Rectangle {
+        // This stacking context must stay above the Easy-mode body surface so
+        // its pins and audio controls receive their own pointer gestures.
+        z: 2;
         x: 1px;
         y: 41px;
         width: parent.width - 2px;
@@ -312,6 +315,9 @@ component GraphNode inherits BaseNode {
                 overflow: elide;
             }
             Pin {
+                // Easy mode has a body drag surface. Keep the actual pin above
+                // it so press-drag-release always belongs to Pin.
+                z: 10;
                 x: port.direction == 0 ? -9px : parent.width - 2px;
                 y: 5px;
                 pin-id: port.id;
@@ -335,6 +341,7 @@ component GraphNode inherits BaseNode {
     // below the movable header and below audio controls, matching the main
     // canvas interaction while allowing every effect and relay endpoint.
     if root.easy-connect && !data.collapsed && !data.thumbnail: easy-touch := TouchArea {
+        z: 1;
         x: 1px;
         y: data.has-audio-controls ? 84px : 42px;
         width: root.node-width - 2px;
@@ -453,7 +460,7 @@ export component MainWindow inherits Window {
     callback graph-box-selected(length, length, length, length, bool);
     callback graph-link-requested(int, int);
     callback graph-link-cancelled();
-    callback graph-easy-connect(int, float, float);
+    callback graph-easy-connect(int, float, float, int);
     callback graph-audio-volume-changed(int, float);
     callback graph-audio-mute-toggled(int);
     callback graph-node-collapse-toggled(int);
@@ -622,6 +629,7 @@ export component MainWindow inherits Window {
                 selection-cleared => { root.graph-selection-cleared(); }
                 box-selection-committed(x, y, w, h, shift) => { root.graph-box-selected(x, y, w, h, shift); }
                 link-requested(start, end) => { root.graph-link-requested(start, end); }
+                link-dropped(start, x, y) => { root.graph-link-cancelled(); }
                 link-cancelled => { root.graph-link-cancelled(); }
 
                 for node-data in root.nodes: GraphNode {
@@ -632,7 +640,14 @@ export component MainWindow inherits Window {
                     audio-volume-changed(id, value) => { root.graph-audio-volume-changed(id, value); }
                     audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
                     collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
-                    easy-connect-dropped(id, x, y) => { root.graph-easy-connect(id, x, y); }
+                    easy-connect-dropped(id, x, y) => {
+                        root.graph-easy-connect(
+                            id,
+                            x,
+                            y,
+                            root.graph-compute-pin-at(x * 1px, y * 1px)
+                        );
+                    }
                     easy-node-clicked(id, shift) => { root.graph-node-selected(id, shift); }
                 }
             }
