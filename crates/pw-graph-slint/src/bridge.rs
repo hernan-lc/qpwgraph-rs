@@ -3635,4 +3635,196 @@ mod tests {
         assert_eq!(harness.preview.source.graph().links.len(), 2);
         assert!(channels_are_paired_straight(&harness.preview));
     }
+
+    #[test]
+    fn toggling_to_easy_mode_enables_body_connect() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let (output, input) = harness.connectable_pair();
+        let source_node = harness.geometry.borrow().pin(output).unwrap().node_id;
+        let source = harness.node_row(source_node);
+        let target_node = harness.geometry.borrow().pin(input).unwrap().node_id;
+        let target = harness.node_row(target_node);
+        let body_point = (source.x + source.width / 2.0, harness.body_point(&source).1);
+
+        let hit = harness.geometry.borrow().hit_test(body_point.0, body_point.1);
+        assert_eq!(hit.kind, HIT_NODE, "advanced mode drags the card");
+
+        handle_action(&harness.window, &mut harness.preview, "toggle-connect-mode");
+        harness.sync();
+
+        let hit = harness.geometry.borrow().hit_test(body_point.0, body_point.1);
+        assert_eq!(hit.kind, HIT_NODE_BODY, "easy mode turns the body into a connect gesture");
+
+        let body = (target.x + target.width / 2.0, target.y + target.height / 2.0);
+        harness.drag(harness.body_point(&source), body);
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.preview, event);
+        }
+        harness.sync();
+
+        assert_eq!(
+            harness.preview.source.graph().links.len(),
+            2,
+            "links created after toggling to easy"
+        );
+        assert!(channels_are_paired_straight(&harness.preview));
+    }
+
+    #[test]
+    fn pump_path_connects_body_to_body_after_toggling_to_easy() {
+        i_slint_backend_testing::init_no_event_loop();
+        let preview = Rc::new(RefCell::new(demo_preview()));
+        preview.borrow_mut().view.connect_mode = ConnectMode::Advanced;
+        preview.borrow_mut().view.pan = [0.0, 0.0];
+        preview.borrow_mut().view.zoom = 1.0;
+
+        let window = MainWindow::new().unwrap();
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(1400.0, 900.0));
+        let nodes = Rc::new(VecModel::default());
+        let links = Rc::new(VecModel::default());
+        window.set_nodes(ModelRc::from(nodes.clone()));
+        window.set_links(ModelRc::from(links.clone()));
+        let geometry = Rc::new(RefCell::new(CanvasGeometry::default()));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        install_canvas_callbacks(&window, &nodes, &links, &geometry, &events);
+        let minimap = Rc::new(VecModel::default());
+        let shortcuts = Rc::new(VecModel::default());
+        let version = Rc::new(Cell::new(0));
+
+        let screen_of = |world: (f32, f32)| -> LogicalPosition {
+            let preview = preview.borrow();
+            LogicalPosition::new(
+                RAIL_WIDTH + preview.view.pan[0] + world.0,
+                preview.view.pan[1] + world.1,
+            )
+        };
+        let body_of = |row: &NodeRow| -> (f32, f32) {
+            let top = canvas::BODY_TOP
+                + if row.has_audio_controls {
+                    canvas::AUDIO_BLOCK_HEIGHT
+                } else {
+                    canvas::PORT_LIST_TOP
+                };
+            (row.x + row.width / 2.0, row.y + top + 8.0)
+        };
+
+        // First pump establishes advanced geometry, exactly like app startup.
+        pump(
+            &window,
+            &preview,
+            &nodes,
+            &links,
+            &minimap,
+            &shortcuts,
+            &events,
+            &geometry,
+            &version,
+        );
+
+        // Toggle to Easy through the same events queue the toolbar uses.
+        events
+            .borrow_mut()
+            .push(UiEvent::Action("toggle-connect-mode".into()));
+        pump(
+            &window,
+            &preview,
+            &nodes,
+            &links,
+            &minimap,
+            &shortcuts,
+            &events,
+            &geometry,
+            &version,
+        );
+
+        let (output, input) = {
+            let preview = preview.borrow();
+            let output = preview
+                .snapshot
+                .nodes
+                .iter()
+                .find_map(|node| {
+                    node.ports
+                        .iter()
+                        .find(|port| port.direction != Direction::Sink)
+                        .map(|port| port.pin_id)
+                })
+                .expect("the demo graph has an output port");
+            let input = preview
+                .snapshot
+                .nodes
+                .iter()
+                .find_map(|node| {
+                    node.ports
+                        .iter()
+                        .find(|port| port.direction == Direction::Sink)
+                        .map(|port| port.pin_id)
+                })
+                .expect("the demo graph has an input port on another card");
+            (output, input)
+        };
+        let source_node = geometry.borrow().pin(output).expect("source pin cached").node_id;
+        let target_node = geometry.borrow().pin(input).expect("target pin cached").node_id;
+        let source = rows_of(&nodes).into_iter().find(|row| row.id == source_node).unwrap();
+        let target = rows_of(&nodes).into_iter().find(|row| row.id == target_node).unwrap();
+        let body = (target.x + target.width / 2.0, target.y + target.height / 2.0);
+
+        window.window().dispatch_event(WindowEvent::PointerPressed {
+            position: screen_of(body_of(&source)),
+            button: PointerEventButton::Left,
+        });
+        slint::platform::update_timers_and_animations();
+        window.window().dispatch_event(WindowEvent::PointerMoved {
+            position: screen_of(body),
+        });
+        slint::platform::update_timers_and_animations();
+        window.window().dispatch_event(WindowEvent::PointerReleased {
+            position: screen_of(body),
+            button: PointerEventButton::Left,
+        });
+        slint::platform::update_timers_and_animations();
+        for event in std::mem::take(&mut *events.borrow_mut()) {
+            process_event(&window, &mut preview.borrow_mut(), event);
+        }
+        pump(
+            &window,
+            &preview,
+            &nodes,
+            &links,
+            &minimap,
+            &shortcuts,
+            &events,
+            &geometry,
+            &version,
+        );
+
+        assert_eq!(preview.borrow().source.graph().links.len(), 2, "links created");
+        assert!(channels_are_paired_straight(&preview.borrow()));
+    }
+
+    #[test]
+    fn body_drag_released_on_a_target_pin_still_connects_the_whole_group() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+        let source_node = harness.geometry.borrow().pin(output).unwrap().node_id;
+        let source = harness.node_row(source_node);
+
+        // Release the whole-card drag exactly on the target node's rendered
+        // pin: the group under it must still pair both stereo channels.
+        let drop = harness.pin(input);
+        harness.drag(harness.body_point(&source), drop);
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.preview, event);
+        }
+        harness.sync();
+
+        assert_eq!(
+            harness.preview.source.graph().links.len(),
+            2,
+            "drop on a pin fills the whole group"
+        );
+        assert!(channels_are_paired_straight(&harness.preview));
+    }
 }
