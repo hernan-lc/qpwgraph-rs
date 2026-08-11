@@ -603,6 +603,78 @@ impl UiGraphState {
         pair_ports(&target_outputs, &source_inputs)
     }
 
+    /// The rendered pin a pin id belongs to. In Easy mode one pin stands for
+    /// a whole channel group (`capture_FL` + `capture_FR`), so a gesture that
+    /// starts on it means "connect the group", not "connect one port".
+    pub(crate) fn port_group(&self, graph: &Graph, pin_id: i32) -> Option<PortGroupView> {
+        let port = self.ids.port_id(pin_id)?;
+        let node = graph.node(graph.port(port)?.node_id)?;
+        self.project_ports(graph, node)
+            .into_iter()
+            .find(|group| group.pin_id == pin_id)
+    }
+
+    /// The output-to-input pairs for a drag between two rendered pins. The
+    /// channels are matched inside the two groups, so left stays left and
+    /// right stays right whichever way the drag was made.
+    pub(crate) fn matching_pin_pairs(
+        &self,
+        graph: &Graph,
+        source_pin: i32,
+        target_pin: i32,
+    ) -> Vec<(PortId, PortId)> {
+        let Some(source) = self.port_group(graph, source_pin) else {
+            return Vec::new();
+        };
+        let Some(target) = self.port_group(graph, target_pin) else {
+            return Vec::new();
+        };
+        let (outputs, inputs) = match (source.direction, target.direction) {
+            (Direction::Source, Direction::Sink) => (&source.ports, &target.ports),
+            (Direction::Sink, Direction::Source) => (&target.ports, &source.ports),
+            _ => return Vec::new(),
+        };
+        let resolve = |ports: &Vec<PortId>| {
+            ports
+                .iter()
+                .filter_map(|port| graph.port(*port))
+                .collect::<Vec<_>>()
+        };
+        pair_ports(&resolve(outputs), &resolve(inputs))
+    }
+
+    /// The pairs for a drag that started on a pin and was released over a
+    /// card. Only the dragged group's channels are connected, matched against
+    /// whichever ports of that card face the other way.
+    pub(crate) fn matching_group_to_node_pairs(
+        &self,
+        graph: &Graph,
+        source_pin: i32,
+        target: NodeId,
+    ) -> Vec<(PortId, PortId)> {
+        let Some(group) = self.port_group(graph, source_pin) else {
+            return Vec::new();
+        };
+        let Some(target) = graph.node(target) else {
+            return Vec::new();
+        };
+        let group_ports = group
+            .ports
+            .iter()
+            .filter_map(|port| graph.port(*port))
+            .collect::<Vec<_>>();
+        let facing = |direction: Direction| {
+            self.ordered_ports(graph, target)
+                .into_iter()
+                .filter(|port| port.direction == direction)
+                .collect::<Vec<_>>()
+        };
+        match group.direction {
+            Direction::Source => pair_ports(&group_ports, &facing(Direction::Sink)),
+            Direction::Sink => pair_ports(&facing(Direction::Source), &group_ports),
+        }
+    }
+
     pub(crate) fn node_at(
         &self,
         snapshot: &GraphSnapshot,
@@ -817,6 +889,17 @@ pub(crate) fn is_relay_node(node: &Node) -> bool {
 }
 
 fn pair_ports(outputs: &[&Port], inputs: &[&Port]) -> Vec<(PortId, PortId)> {
+    let channel_matched = pair_ports_by_channel(outputs, inputs);
+    if !channel_matched.is_empty() {
+        return channel_matched;
+    }
+    // Nothing lined up by channel — a mono endpoint meeting a stereo one, or
+    // ports that carry no channel at all. Fall back to pairing them in order
+    // so the drag still connects instead of reporting no compatible ports.
+    pair_ports_in_order(outputs, inputs)
+}
+
+fn pair_ports_by_channel(outputs: &[&Port], inputs: &[&Port]) -> Vec<(PortId, PortId)> {
     let mut used = vec![false; inputs.len()];
     let mut pairs = Vec::new();
     for output in outputs {
@@ -839,6 +922,21 @@ fn pair_ports(outputs: &[&Port], inputs: &[&Port]) -> Vec<(PortId, PortId)> {
         if let Some(index) = candidate {
             used[index] = true;
             pairs.push((output.id, inputs[index].id));
+        }
+    }
+    pairs
+}
+
+fn pair_ports_in_order(outputs: &[&Port], inputs: &[&Port]) -> Vec<(PortId, PortId)> {
+    let mut used = vec![false; inputs.len()];
+    let mut pairs = Vec::new();
+    for output in outputs {
+        let candidate = inputs.iter().enumerate().find(|(index, input)| {
+            !used[*index] && ports_compatible(output.port_type, input.port_type)
+        });
+        if let Some((index, input)) = candidate {
+            used[index] = true;
+            pairs.push((output.id, input.id));
         }
     }
     pairs
@@ -1141,5 +1239,161 @@ mod tests {
             assert_eq!(output.node_id, effect);
             assert_eq!(input.node_id, NodeId(2));
         }
+    }
+
+    /// Two stereo cards, where the sink exposes two separate stereo groups.
+    fn stereo_graph() -> Graph {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(NodeId(1), "Capture", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_node(Node::new(NodeId(2), "Playback", NodeType::PipeWire))
+            .unwrap();
+        let ports = [
+            (1, NodeId(1), "capture_FL", Direction::Source, "FL"),
+            (2, NodeId(1), "capture_FR", Direction::Source, "FR"),
+            (3, NodeId(2), "main_FL", Direction::Sink, "FL"),
+            (4, NodeId(2), "main_FR", Direction::Sink, "FR"),
+            (5, NodeId(2), "aux_FL", Direction::Sink, "FL"),
+            (6, NodeId(2), "aux_FR", Direction::Sink, "FR"),
+        ];
+        for (id, node, name, direction, channel) in ports {
+            graph
+                .add_port(
+                    Port::new(PortId(id), node, name, direction, PortType::Audio)
+                        .with_channel(channel),
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    fn easy_state() -> UiGraphState {
+        let mut config = AppConfig::default();
+        config.connect_mode = "easy".into();
+        UiGraphState::from_config(&config)
+    }
+
+    #[test]
+    fn easy_mode_groups_a_stereo_pair_behind_one_pin() {
+        let graph = stereo_graph();
+        let mut state = easy_state();
+        state.ids.rebuild(&graph);
+        let capture = state.ids.port(PortId(1)).unwrap();
+
+        let group = state.port_group(&graph, capture).unwrap();
+
+        assert_eq!(group.label, "capture");
+        assert_eq!(group.ports, vec![PortId(1), PortId(2)]);
+    }
+
+    #[test]
+    fn easy_pin_pairs_keep_left_on_left_in_both_drag_directions() {
+        let graph = stereo_graph();
+        let mut state = easy_state();
+        state.ids.rebuild(&graph);
+        let capture = state.ids.port(PortId(1)).unwrap();
+        let main = state.ids.port(PortId(3)).unwrap();
+
+        let forward = state.matching_pin_pairs(&graph, capture, main);
+        let backward = state.matching_pin_pairs(&graph, main, capture);
+
+        assert_eq!(
+            forward,
+            vec![(PortId(1), PortId(3)), (PortId(2), PortId(4))]
+        );
+        assert_eq!(backward, forward);
+    }
+
+    #[test]
+    fn easy_pin_pairs_refuse_two_pins_that_face_the_same_way() {
+        let graph = stereo_graph();
+        let mut state = easy_state();
+        state.ids.rebuild(&graph);
+        let main = state.ids.port(PortId(3)).unwrap();
+        let aux = state.ids.port(PortId(5)).unwrap();
+
+        assert!(state.matching_pin_pairs(&graph, main, aux).is_empty());
+    }
+
+    #[test]
+    fn a_group_dropped_on_a_card_only_fills_one_of_its_groups() {
+        let graph = stereo_graph();
+        let mut state = easy_state();
+        state.ids.rebuild(&graph);
+        let capture = state.ids.port(PortId(1)).unwrap();
+
+        let pairs = state.matching_group_to_node_pairs(&graph, capture, NodeId(2));
+
+        // Both channels land, both in the same destination group (the first
+        // one the card renders), and left stays on left.
+        assert_eq!(pairs.len(), 2);
+        let base = |port: PortId| channel_base_name(graph.port(port).unwrap()).unwrap();
+        let channel = |port: PortId| channel_identity(graph.port(port).unwrap()).unwrap();
+        assert_eq!(base(pairs[0].1), base(pairs[1].1));
+        assert!(pairs
+            .iter()
+            .all(|(output, input)| channel(*output) == channel(*input)));
+        assert_ne!(pairs[0].1, pairs[1].1);
+    }
+
+    #[test]
+    fn a_mono_endpoint_still_connects_to_a_stereo_one() {
+        let mut graph = stereo_graph();
+        graph
+            .add_node(Node::new(NodeId(3), "Mono sink", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_port(
+                Port::new(
+                    PortId(7),
+                    NodeId(3),
+                    "input_MONO",
+                    Direction::Sink,
+                    PortType::Audio,
+                )
+                .with_channel("MONO"),
+            )
+            .unwrap();
+        let mut state = easy_state();
+        state.ids.rebuild(&graph);
+
+        // Nothing lines up by channel, so the drag pairs in order instead of
+        // reporting that there is nothing to connect.
+        let pairs = state.matching_port_pairs(&graph, NodeId(1), NodeId(3));
+
+        assert_eq!(pairs, vec![(PortId(1), PortId(7))]);
+    }
+
+    #[test]
+    fn channel_matching_wins_over_port_order() {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(NodeId(1), "Capture", NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_node(Node::new(NodeId(2), "Playback", NodeType::PipeWire))
+            .unwrap();
+        // The sink lists its right channel first.
+        for (id, node, name, direction, channel) in [
+            (1, NodeId(1), "capture_FL", Direction::Source, "FL"),
+            (2, NodeId(1), "capture_FR", Direction::Source, "FR"),
+            (3, NodeId(2), "playback_FR", Direction::Sink, "FR"),
+            (4, NodeId(2), "playback_FL", Direction::Sink, "FL"),
+        ] {
+            graph
+                .add_port(
+                    Port::new(PortId(id), node, name, direction, PortType::Audio)
+                        .with_channel(channel),
+                )
+                .unwrap();
+        }
+        let mut state = easy_state();
+        state.ids.rebuild(&graph);
+
+        let pairs = state.matching_port_pairs(&graph, NodeId(1), NodeId(2));
+
+        assert_eq!(pairs, vec![(PortId(1), PortId(4)), (PortId(2), PortId(3))]);
     }
 }

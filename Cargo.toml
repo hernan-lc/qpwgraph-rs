@@ -18,10 +18,6 @@ members = [
     "crates/pw-graph-relay-android",
     "vendor/nnnoiseless",
 ]
-exclude = [
-    # This is a pinned Slint component dependency with its own example workspace.
-    "vendor/slint-node-editor",
-]
 
 [patch.crates-io]
 audiopus_sys = { path = "vendor/audiopus_sys" }

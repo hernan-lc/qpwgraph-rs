@@ -15,7 +15,7 @@ use pw_graph_backend::{
 };
 use pw_graph_backend::{EffectInsertRequest, EffectNodeRequest, MeterPolicy};
 use pw_graph_config::{config_path, AppConfig, PersistedEffect};
-use pw_graph_core::Direction;
+use pw_graph_core::{Direction, PortKey};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use serde::{Deserialize, Serialize};
@@ -866,7 +866,13 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
 fn handle_link_requested(preview: &mut PreviewApp, start_id: i32, end_id: i32) {
     if start_id != end_id {
         preview.pending_connection_pin = None;
-        connect_pin_pair(preview, start_id, end_id);
+        if preview.view.connect_mode == ConnectMode::Easy {
+            // A rendered pin stands for a whole channel group here, so the
+            // drag connects every channel it holds, not just the first one.
+            easy_connect_pin_pair(preview, start_id, end_id);
+        } else {
+            connect_pin_pair(preview, start_id, end_id);
+        }
         return;
     }
 
@@ -999,6 +1005,25 @@ fn easy_connect_nodes(
         .and_then(|port| preview.source.graph().port(port))
         .map(|port| port.node_id)
         .filter(|node| *node != source_node);
+    if target_from_pin.is_some() {
+        // The drop landed on a rendered pin, so fill just that group instead
+        // of everything the destination card exposes.
+        let port_keys = {
+            let graph = preview.source.graph();
+            preview
+                .view
+                .matching_group_to_node_pairs(graph, target_pin_id, source_node)
+                .into_iter()
+                .filter_map(|(output, input)| {
+                    Some((graph.port_key(output)?, graph.port_key(input)?))
+                })
+                .collect::<Vec<_>>()
+        };
+        if !port_keys.is_empty() {
+            apply_easy_pairs(preview, port_keys);
+            return;
+        }
+    }
     let Some(target_node) = target_from_pin.or_else(|| {
         // A card-body drop has no pin identity. Keep coordinate hit-testing as
         // its fallback, including the small margin occupied by edge pins.
@@ -1040,6 +1065,35 @@ fn easy_connect_from_pin(preview: &mut PreviewApp, source_pin_id: i32, x: f32, y
         set_connection_feedback(preview, "Easy connect source is no longer available", true);
         return;
     };
+    // The drag began on a pin, so connect that group's channels rather than
+    // everything the destination card happens to expose. Whole-card pairing
+    // stays as the fallback when the group has nothing to face.
+    let target_node = preview
+        .view
+        .node_at(&preview.snapshot, x, y, source_node)
+        .or_else(|| {
+            preview
+                .view
+                .node_at_with_margin(&preview.snapshot, x, y, source_node, 12.0)
+        });
+    if let Some(target_node) = target_node {
+        let port_keys = {
+            let graph = preview.source.graph();
+            preview
+                .view
+                .matching_group_to_node_pairs(graph, source_pin_id, target_node)
+                .into_iter()
+                .filter_map(|(output, input)| {
+                    Some((graph.port_key(output)?, graph.port_key(input)?))
+                })
+                .collect::<Vec<_>>()
+        };
+        if !port_keys.is_empty() {
+            preview.pending_connection_pin = None;
+            apply_easy_pairs(preview, port_keys);
+            return;
+        }
+    }
     easy_connect_nodes(preview, source_id, x, y, 0);
 }
 
@@ -1069,7 +1123,26 @@ fn easy_connect_pin_pair(preview: &mut PreviewApp, source_pin_id: i32, target_pi
         set_connection_feedback(preview, "Connection cancelled: select another node", false);
         return;
     }
-    easy_connect_node_pair(preview, source_node, target_node);
+
+    // Pair the channels inside the two groups the user actually aimed at.
+    let port_keys = {
+        let graph = preview.source.graph();
+        preview
+            .view
+            .matching_pin_pairs(graph, source_pin_id, target_pin_id)
+            .into_iter()
+            .filter_map(|(output, input)| Some((graph.port_key(output)?, graph.port_key(input)?)))
+            .collect::<Vec<_>>()
+    };
+    if port_keys.is_empty() {
+        set_connection_feedback(
+            preview,
+            "Easy connect needs one output pin and one input pin",
+            true,
+        );
+        return;
+    }
+    apply_easy_pairs(preview, port_keys);
 }
 
 fn easy_connect_node_pair(
@@ -1094,7 +1167,12 @@ fn easy_connect_node_pair(
         );
         return;
     }
+    apply_easy_pairs(preview, port_keys);
+}
 
+/// Create every pair an Easy-mode gesture resolved to, then report what
+/// happened as a single message.
+fn apply_easy_pairs(preview: &mut PreviewApp, port_keys: Vec<(PortKey, PortKey)>) {
     let mut connected = 0usize;
     let mut already_connected = 0usize;
     for (output, input) in port_keys {
@@ -2940,6 +3018,7 @@ mod tests {
 
         assert_eq!(preview.source.graph().links.len(), 2);
         assert!(preview.toast_message.contains("created 2 connection"));
+        assert!(channels_are_paired_straight(&preview));
     }
 
     #[test]
@@ -2964,6 +3043,9 @@ mod tests {
     #[test]
     fn easy_port_drag_connects_when_released_on_the_target_body() {
         let mut preview = demo_preview();
+        // This drop is only reachable in Easy mode, where the pin the drag
+        // started on stands for the whole capture channel group.
+        preview.view.connect_mode = ConnectMode::Easy;
         let source_pin = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
         let (target_x, target_y) = preview
             .snapshot
@@ -2983,6 +3065,7 @@ mod tests {
         assert_eq!(preview.source.graph().links.len(), 2);
         assert!(preview.toast_message.contains("created 2 connection"));
         assert!(!preview.toast_error);
+        assert!(channels_are_paired_straight(&preview));
     }
 
     #[test]
@@ -3016,6 +3099,7 @@ mod tests {
         assert_eq!(preview.source.graph().links.len(), 2);
         assert!(preview.toast_message.contains("created 2 connection"));
         assert!(!preview.toast_error);
+        assert!(channels_are_paired_straight(&preview));
     }
 
     #[test]
@@ -3464,5 +3548,91 @@ mod tests {
         let grid = harness.window.get_grid_commands();
         assert!(!grid.is_empty(), "the canvas asks Rust for its grid lines");
         assert!(grid.starts_with("M "));
+    }
+
+    #[test]
+    fn easy_mode_pin_drag_connects_every_channel_of_the_two_groups() {
+        let mut preview = demo_preview();
+        preview.view.connect_mode = ConnectMode::Easy;
+        // In Easy mode the capture and playback cards each render one grouped
+        // pin that stands for both FL and FR.
+        let capture = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let playback = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+
+        handle_link_requested(&mut preview, capture, playback);
+
+        assert_eq!(preview.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&preview));
+    }
+
+    #[test]
+    fn easy_mode_pin_drag_keeps_the_channels_straight_when_dragged_backwards() {
+        let mut preview = demo_preview();
+        preview.view.connect_mode = ConnectMode::Easy;
+        let capture = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let playback = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+
+        handle_link_requested(&mut preview, playback, capture);
+
+        assert_eq!(preview.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&preview));
+    }
+
+    /// Every link joins two ports whose channel suffix is the same, so left
+    /// stays left and right stays right.
+    fn channels_are_paired_straight(preview: &PreviewApp) -> bool {
+        let graph = preview.source.graph();
+        graph.links.values().all(|link| {
+            let output = graph.port(link.output_port).map(|port| port.name.clone());
+            let input = graph.port(link.input_port).map(|port| port.name.clone());
+            match (output, input) {
+                (Some(output), Some(input)) => {
+                    let suffix =
+                        |name: &str| name.rsplit('_').next().unwrap_or_default().to_owned();
+                    suffix(&output) == suffix(&input)
+                }
+                _ => false,
+            }
+        })
+    }
+
+    #[test]
+    fn an_easy_mode_pin_drag_on_the_canvas_connects_both_channels() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+
+        harness.drag(harness.pin(output), harness.pin(input));
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.preview, event);
+        }
+        harness.sync();
+
+        // One grouped pin at each end, two channels, two links.
+        assert_eq!(harness.preview.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&harness.preview));
+        assert_eq!(rows_of(&harness.links).len(), 2);
+    }
+
+    #[test]
+    fn an_easy_mode_card_drag_on_the_canvas_connects_both_channels() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+        let source = harness.node_row(
+            harness
+                .geometry
+                .borrow()
+                .pin(output)
+                .expect("pin is cached")
+                .node_id,
+        );
+
+        harness.drag(harness.body_point(&source), harness.pin(input));
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.preview, event);
+        }
+        harness.sync();
+
+        assert_eq!(harness.preview.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&harness.preview));
     }
 }
