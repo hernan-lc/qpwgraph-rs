@@ -132,7 +132,9 @@ export component NodeAudioControl inherits Rectangle {
     in property <float> volume-position: 0.9;
     in property <bool> muted: false;
     in property <float> meter-peak: 0.0;
+    in property <float> meter-peak-position: 0.0;
     in property <bool> meter-available: false;
+    in property <string> meter-label: "N/A";
     in property <color> accent: #57c785;
     callback volume-changed(float);
     callback mute-toggled();
@@ -141,6 +143,23 @@ export component NodeAudioControl inherits Rectangle {
     background: transparent;
     property <length> mute-width: 28px;
     property <length> slider-width: root.width - root.mute-width - 5px;
+    property <float> displayed-volume-position: slider-touch.pending
+        ? slider-touch.drag-position
+        : root.volume-position;
+    property <bool> displayed-muted: mute-touch.pending
+        ? mute-touch.requested-muted
+        : root.muted;
+
+    changed volume-position => {
+        if (slider-touch.pending && abs(root.volume-position - slider-touch.drag-position) < 0.002) {
+            slider-touch.pending = false;
+        }
+    }
+    changed muted => {
+        if (mute-touch.pending && root.muted == mute-touch.requested-muted) {
+            mute-touch.pending = false;
+        }
+    }
 
     slider := Rectangle {
         width: root.slider-width;
@@ -151,7 +170,7 @@ export component NodeAudioControl inherits Rectangle {
         border-radius: 5px;
 
         Rectangle { x: 8px; y: 8px; width: parent.width - 16px; height: 3px; background: #4d5864; border-radius: 2px; }
-        Rectangle { x: 8px; y: 8px; width: (parent.width - 16px) * root.volume-position; height: 3px; background: #9aa7b2; border-radius: 2px; }
+        Rectangle { x: 8px; y: 8px; width: (parent.width - 16px) * root.displayed-volume-position; height: 3px; background: #9aa7b2; border-radius: 2px; }
 
         for _[index] in 31: Rectangle {
             property <float> fraction: index / 30;
@@ -159,13 +178,15 @@ export component NodeAudioControl inherits Rectangle {
             y: 18px;
             width: 1px;
             height: 4px;
-            background: root.meter-available && self.fraction <= root.meter-peak
+            background: root.meter-available && self.fraction <= root.meter-peak-position
                 ? self.fraction < 0.72 ? #39a6e0 : self.fraction < 0.90 ? #dca44c : #dd4b48
                 : self.fraction < 0.72 ? #22465b : self.fraction < 0.90 ? #5b482d : #5c292a;
         }
 
         Rectangle {
-            x: 8px + (parent.width - 32px) * root.volume-position;
+            // The knob is centered on the same 8px…width-8px range used by
+            // the pointer-to-position conversion below.
+            x: (parent.width - 16px) * root.displayed-volume-position;
             y: 2px;
             width: 16px;
             height: 16px;
@@ -176,12 +197,23 @@ export component NodeAudioControl inherits Rectangle {
         }
 
         slider-touch := TouchArea {
+            property <bool> pending: false;
+            property <float> drag-position: root.volume-position;
             width: 100%; height: 100%;
             mouse-cursor: MouseCursor.pointer;
-            clicked => { root.volume-changed(clamp((self.mouse-x - 8px) / (slider.width - 16px), 0, 1)); }
-            moved => {
-                if (self.pressed) {
-                    root.volume-changed(clamp((self.mouse-x - 8px) / (slider.width - 16px), 0, 1));
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    drag-position = clamp((self.mouse-x - 8px) / max(slider.width - 16px, 1px), 0, 1);
+                    pending = true;
+                    root.volume-changed(drag-position);
+                } else if (event.kind == PointerEventKind.move && pending) {
+                    drag-position = clamp((self.mouse-x - 8px) / max(slider.width - 16px, 1px), 0, 1);
+                    root.volume-changed(drag-position);
+                } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                    drag-position = clamp((self.mouse-x - 8px) / max(slider.width - 16px, 1px), 0, 1);
+                    root.volume-changed(drag-position);
+                } else if (event.kind == PointerEventKind.cancel) {
+                    pending = false;
                 }
             }
         }
@@ -192,15 +224,24 @@ export component NodeAudioControl inherits Rectangle {
         width: root.mute-width;
         height: 27px;
         background: mute-touch.has-hover ? #303a45 : #1f252e;
-        border-color: root.muted ? root.accent : #455162;
+        border-color: root.displayed-muted ? root.accent : #455162;
         border-width: 1px;
         border-radius: 5px;
         Image {
             x: 6px; y: 5px; width: 16px; height: 16px;
-            source: root.muted ? @image-url("../../pw-graph-ui/assets/icons/volume_muted.svg") : @image-url("../../pw-graph-ui/assets/icons/volume.svg");
-            opacity: root.muted ? 0.95 : 0.82;
+            source: root.displayed-muted ? @image-url("../../pw-graph-ui/assets/icons/volume_muted.svg") : @image-url("../../pw-graph-ui/assets/icons/volume.svg");
+            opacity: root.displayed-muted ? 0.95 : 0.82;
         }
-        mute-touch := TouchArea { width: 100%; height: 100%; mouse-cursor: MouseCursor.pointer; clicked => { root.mute-toggled(); } }
+        mute-touch := TouchArea {
+            property <bool> pending: false;
+            property <bool> requested-muted: root.muted;
+            width: 100%; height: 100%; mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                requested-muted = !root.displayed-muted;
+                pending = true;
+                root.mute-toggled();
+            }
+        }
     }
 }
 
@@ -219,7 +260,7 @@ export component ShortcutsDialog inherits Rectangle {
     Rectangle { x: 0px; y: 48px; width: parent.width; height: 1px; background: #3d4a56; }
     Text { x: 12px; y: 56px; width: parent.width - 24px; height: 18px; text: "Press F1 to toggle this help. Shortcuts are disabled while typing in a text field."; color: #b9c7d1; font-size: 10px; }
     Text { x: 12px; y: 82px; width: 45px; height: 31px; text: "Search"; color: #e1e8ed; font-size: 11px; vertical-alignment: center; }
-    LineEdit { x: 61px; y: 82px; width: parent.width - 73px; height: 31px; placeholder-text: "Filter by key or description… (Ctrl/Cmd+F focuses this field)"; text <=> root.search-text; }
+    search := LineEdit { x: 61px; y: 82px; width: parent.width - 73px; height: 31px; placeholder-text: "Filter by key or description… (Ctrl/Cmd+F focuses this field)"; text <=> root.search-text; }
     Text { x: 12px; y: 117px; width: parent.width - 24px; height: 18px; text: root.entries.length + " shortcuts shown"; color: #93a4b1; font-size: 9px; }
 
     ScrollView {
@@ -235,6 +276,10 @@ export component ShortcutsDialog inherits Rectangle {
         }
     }
     DialogButton { x: parent.width - 94px; y: parent.height - 39px; width: 82px; text: "Close"; clicked => { root.close(); } }
+
+    public function focus-search() {
+        search.focus();
+    }
 }
 
 export component PreferencesDialog inherits Rectangle {

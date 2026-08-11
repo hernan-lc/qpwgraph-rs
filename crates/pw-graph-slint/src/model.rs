@@ -364,27 +364,27 @@ impl UiGraphState {
             });
         }
 
-        let links = (!self.thumbnail_mode)
-            .then(|| {
-                graph
-                    .links
-                    .values()
-                    .filter_map(|link| {
-                        let output = graph.port(link.output_port)?;
-                        let input = graph.port(link.input_port)?;
-                        (visible.contains(&output.node_id) && visible.contains(&input.node_id))
-                            .then_some(LinkView {
-                                id: self.ids.link(link.id)?,
-                                link_id: link.id,
-                                start_pin_id: *pin_groups.get(&link.output_port)?,
-                                end_pin_id: *pin_groups.get(&link.input_port)?,
-                                color: port_type_color(output.port_type),
-                                selected: self.selected_links.contains(&link.id),
-                            })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let links = if !self.thumbnail_mode {
+            graph
+                .links
+                .values()
+                .filter_map(|link| {
+                    let output = graph.port(link.output_port)?;
+                    let input = graph.port(link.input_port)?;
+                    (visible.contains(&output.node_id) && visible.contains(&input.node_id))
+                        .then_some(LinkView {
+                            id: self.ids.link(link.id)?,
+                            link_id: link.id,
+                            start_pin_id: *pin_groups.get(&link.output_port)?,
+                            end_pin_id: *pin_groups.get(&link.input_port)?,
+                            color: port_type_color(output.port_type),
+                            selected: self.selected_links.contains(&link.id),
+                        })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         GraphSnapshot { nodes, links }
     }

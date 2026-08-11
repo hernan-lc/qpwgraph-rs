@@ -10,7 +10,7 @@ use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use serde::{Deserialize, Serialize};
 use slint::{
-    Color, ComponentHandle, ModelRc, PhysicalSize, SharedString, Timer, TimerMode, VecModel,
+    Color, ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, Timer, TimerMode, VecModel,
 };
 use slint_node_editor::{GraphLogic, MovableNode, NodeEditorController, NodeEditorSetup};
 use std::cell::RefCell;
@@ -247,20 +247,33 @@ impl UiBridge {
                 .push(UiEvent::Action(action.to_string()));
         });
         let events = self.events.clone();
+        let nodes = self.nodes.clone();
+        let links = self.links.clone();
         self.window.on_graph_node_selected(move |id, shift| {
+            project_node_selection(&nodes, &links, id, shift);
             events.borrow_mut().push(UiEvent::SelectNode(id, shift));
         });
         let events = self.events.clone();
+        let nodes = self.nodes.clone();
+        let links = self.links.clone();
         self.window.on_graph_link_selected(move |id, shift| {
+            project_link_selection(&nodes, &links, id, shift);
             events.borrow_mut().push(UiEvent::SelectLink(id, shift));
         });
         let events = self.events.clone();
+        let nodes = self.nodes.clone();
+        let links = self.links.clone();
         self.window.on_graph_selection_cleared(move || {
+            clear_model_selection(&nodes, &links);
             events.borrow_mut().push(UiEvent::ClearSelection);
         });
         let events = self.events.clone();
+        let nodes = self.nodes.clone();
+        let links = self.links.clone();
+        let controller = self.controller.clone();
         self.window
             .on_graph_box_selected(move |x, y, width, height, shift| {
+                project_box_selection(&nodes, &links, &controller, x, y, width, height, shift);
                 events
                     .borrow_mut()
                     .push(UiEvent::SelectBox(x, y, width, height, shift));
@@ -314,6 +327,10 @@ impl UiBridge {
             .on_double_click_node(move |node_id| {
                 events.borrow_mut().push(UiEvent::ToggleCollapse(node_id));
             });
+        let events = self.events.clone();
+        self.window.on_graph_node_collapse_toggled(move |node_id| {
+            events.borrow_mut().push(UiEvent::ToggleCollapse(node_id));
+        });
     }
 
     pub(crate) fn run(self) -> Result<(), slint::PlatformError> {
@@ -370,6 +387,7 @@ impl UiBridge {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pump(
     window: &MainWindow,
     app: &Rc<RefCell<PreviewApp>>,
@@ -380,7 +398,7 @@ fn pump(
     events: &Rc<RefCell<Vec<UiEvent>>>,
     controller: &Rc<NodeEditorController>,
 ) {
-    let pending = std::mem::take(&mut *events.borrow_mut());
+    let pending = coalesce_audio_volume_events(std::mem::take(&mut *events.borrow_mut()));
     let mut preview = app.borrow_mut();
     read_window_state(window, &mut preview);
     for event in pending {
@@ -410,6 +428,108 @@ fn pump(
         minimap_nodes,
         controller,
     );
+}
+
+fn project_node_selection(
+    nodes: &Rc<VecModel<NodeRow>>,
+    links: &Rc<VecModel<LinkData>>,
+    node_id: i32,
+    shift: bool,
+) {
+    if !shift {
+        slint_node_editor::selection::clear_selection(links, |link| &mut link.selected);
+    }
+    slint_node_editor::selection::apply_click(
+        nodes,
+        |node| node.id,
+        |node| &mut node.selected,
+        node_id,
+        shift,
+    );
+}
+
+fn project_link_selection(
+    nodes: &Rc<VecModel<NodeRow>>,
+    links: &Rc<VecModel<LinkData>>,
+    link_id: i32,
+    shift: bool,
+) {
+    if !shift {
+        slint_node_editor::selection::clear_selection(nodes, |node| &mut node.selected);
+    }
+    slint_node_editor::selection::apply_click(
+        links,
+        |link| link.id,
+        |link| &mut link.selected,
+        link_id,
+        shift,
+    );
+}
+
+fn clear_model_selection(nodes: &Rc<VecModel<NodeRow>>, links: &Rc<VecModel<LinkData>>) {
+    slint_node_editor::selection::clear_selection(nodes, |node| &mut node.selected);
+    slint_node_editor::selection::clear_selection(links, |link| &mut link.selected);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_box_selection(
+    nodes: &Rc<VecModel<NodeRow>>,
+    links: &Rc<VecModel<LinkData>>,
+    controller: &NodeEditorController,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    shift: bool,
+) {
+    let (node_hits, link_hits) = {
+        let cache = controller.cache();
+        let cache = cache.borrow();
+        let rows = (0..links.row_count())
+            .filter_map(|index| links.row_data(index))
+            .map(|link| (link.id, link.start_pin_id, link.end_pin_id));
+        (
+            cache.nodes_in_selection_box(x, y, width, height),
+            cache.links_in_selection_box(x, y, width, height, rows),
+        )
+    };
+
+    if !shift {
+        clear_model_selection(nodes, links);
+    }
+    slint_node_editor::selection::apply_box(
+        nodes,
+        |node| node.id,
+        |node| &mut node.selected,
+        node_hits,
+        shift,
+    );
+    slint_node_editor::selection::apply_box(
+        links,
+        |link| link.id,
+        |link| &mut link.selected,
+        link_hits,
+        shift,
+    );
+}
+
+fn coalesce_audio_volume_events(pending: Vec<UiEvent>) -> Vec<UiEvent> {
+    let mut compacted = Vec::with_capacity(pending.len());
+    let mut volume_indices = BTreeMap::<i32, usize>::new();
+    for event in pending {
+        match event {
+            UiEvent::SetAudioVolume(id, position) => {
+                if let Some(index) = volume_indices.get(&id).copied() {
+                    compacted[index] = UiEvent::SetAudioVolume(id, position);
+                } else {
+                    volume_indices.insert(id, compacted.len());
+                    compacted.push(UiEvent::SetAudioVolume(id, position));
+                }
+            }
+            event => compacted.push(event),
+        }
+    }
+    compacted
 }
 
 fn refresh_meters(window: &MainWindow, preview: &mut PreviewApp) {
@@ -979,12 +1099,17 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl) -> NodeRow {
         accent: color(
             node.appearance
                 .color
-                .or_else(|| node.ports.first().map(|port| port_type_color(port.port_type)))
+                .or_else(|| {
+                    node.ports
+                        .first()
+                        .map(|port| port_type_color(port.port_type))
+                })
                 .unwrap_or_else(|| node_type_color(node.node_type)),
         ),
         has_audio_controls: node.has_audio_controls,
         meter_rms: node.meter.rms,
         meter_peak: node.meter.peak,
+        meter_peak_position: meter_fraction(node.meter.peak),
         meter_available: matches!(node.meter.state, MeterState::Live | MeterState::Demo),
         meter_label: SharedString::from(node.meter.state.label()),
         audio_volume_position: audio.volume_position,
@@ -1064,8 +1189,15 @@ fn volume_from_track_position(position: f32) -> f32 {
     }
 }
 
+/// Match the canvas meter scale: audio levels are shown over a -60 dBFS to
+/// 0 dBFS range, not as a linear 0.0–1.0 amplitude fraction.
+fn meter_fraction(value: f32) -> f32 {
+    let value = value.clamp(0.000001, 1.0);
+    ((20.0 * value.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
 fn shortcut_rows(i18n: &I18n, query: &str) -> Vec<ShortcutRow> {
-    const ENTRIES: [(&str, &str); 21] = [
+    const ENTRIES: [(&str, &str); 22] = [
         ("F1", "shortcuts.help"),
         ("Esc", "shortcuts.close_cancel"),
         ("Delete / Backspace", "shortcuts.delete_link"),
@@ -1075,6 +1207,7 @@ fn shortcut_rows(i18n: &I18n, query: &str) -> Vec<ShortcutRow> {
         ("Ctrl/Cmd+S", "shortcuts.save_config"),
         ("Ctrl/Cmd+Shift+S", "shortcuts.save_patchbay"),
         ("Ctrl/Cmd+O", "shortcuts.load_patchbay"),
+        ("Ctrl/Cmd+F", "shortcuts.search_hint"),
         ("R", "shortcuts.refresh"),
         ("A", "shortcuts.arrange"),
         ("T", "shortcuts.thumbnail"),
@@ -1203,7 +1336,7 @@ mod tests {
     #[test]
     fn shortcut_catalog_matches_the_egui_help_dialog() {
         let i18n = I18n::from_language("en");
-        assert_eq!(shortcut_rows(&i18n, "").len(), 21);
+        assert_eq!(shortcut_rows(&i18n, "").len(), 22);
         let filtered = shortcut_rows(&i18n, "thumbnail");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].keys.as_str(), "T");
@@ -1214,6 +1347,30 @@ mod tests {
         assert!((volume_from_track_position(0.9) - 1.0).abs() < f32::EPSILON);
         assert!((volume_from_track_position(1.0) - 1.5).abs() < f32::EPSILON);
         assert!((volume_from_track_position(0.45) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn meter_track_uses_dbfs_scale() {
+        assert_eq!(meter_fraction(0.0), 0.0);
+        assert_eq!(meter_fraction(0.001), 0.0);
+        assert!((meter_fraction(0.01) - (1.0 / 3.0)).abs() < 0.001);
+        assert_eq!(meter_fraction(1.0), 1.0);
+    }
+
+    #[test]
+    fn audio_slider_updates_are_coalesced_per_node() {
+        let compacted = coalesce_audio_volume_events(vec![
+            UiEvent::SetAudioVolume(7, 0.1),
+            UiEvent::SetAudioVolume(7, 0.8),
+            UiEvent::SetAudioVolume(8, 0.4),
+        ]);
+        assert_eq!(compacted.len(), 2);
+        assert!(
+            matches!(compacted[0], UiEvent::SetAudioVolume(7, value) if (value - 0.8).abs() < f32::EPSILON)
+        );
+        assert!(
+            matches!(compacted[1], UiEvent::SetAudioVolume(8, value) if (value - 0.4).abs() < f32::EPSILON)
+        );
     }
 
     #[test]

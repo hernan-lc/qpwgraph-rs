@@ -41,6 +41,7 @@ export struct NodeRow {
     has-audio-controls: bool,
     meter-rms: float,
     meter-peak: float,
+    meter-peak-position: float,
     meter-available: bool,
     meter-label: string,
     audio-volume-position: float,
@@ -149,6 +150,7 @@ component GraphNode inherits BaseNode {
     in property <NodeRow> data;
     callback audio-volume-changed(int, float);
     callback audio-mute-toggled(int);
+    callback collapse-toggled(int);
 
     node-id: data.id;
     selected: data.selected;
@@ -156,7 +158,10 @@ component GraphNode inherits BaseNode {
     world-y: data.y * 1px;
     node-width: data.width * 1px;
     node-height: data.height * 1px;
-    drag-handle-height: 40px;
+    // The editor's drag surface covers the node. Interactive children (the
+    // audio control and pins) are deeper in the item tree and receive their
+    // own pointer gestures first.
+    drag-handle-height: data.height * 1px;
     accessible-label: data.node-title;
 
     Rectangle {
@@ -222,6 +227,12 @@ component GraphNode inherits BaseNode {
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.collapse-toggled(data.id); }
+            }
         }
     }
 
@@ -240,6 +251,8 @@ component GraphNode inherits BaseNode {
             volume-position: data.audio-volume-position;
             muted: data.audio-muted;
             meter-peak: data.meter-peak;
+            meter-peak-position: data.meter-peak-position;
+            meter-label: data.meter-label;
             meter-available: data.meter-available;
             accent: data.accent;
             volume-changed(value) => { root.audio-volume-changed(data.id, value); }
@@ -281,8 +294,10 @@ component GraphNode inherits BaseNode {
 export component MainWindow inherits Window {
     title: "qpwgraph-rs";
     background: #191d24;
-    width: 1100px;
-    height: 760px;
+    preferred-width: 1100px;
+    preferred-height: 760px;
+    min-width: 760px;
+    min-height: 520px;
 
     in property <[NodeRow]> nodes: [];
     in property <[LinkData]> links: [];
@@ -344,13 +359,20 @@ export component MainWindow inherits Window {
     callback graph-link-cancelled();
     callback graph-audio-volume-changed(int, float);
     callback graph-audio-mute-toggled(int);
+    callback graph-node-collapse-toggled(int);
     callback graph-compute-pin-at(length, length) -> int;
     callback graph-compute-link-at(length, length) -> int;
     callback graph-request-grid();
 
     changed show-preferences => { if (!root.show-preferences) { editor.focus(); } }
     changed show-history => { if (!root.show-history) { editor.focus(); } }
-    changed show-shortcuts => { if (!root.show-shortcuts) { editor.focus(); } }
+    changed show-shortcuts => {
+        if (root.show-shortcuts) {
+            workspace.focus-shortcut-search();
+        } else {
+            editor.focus();
+        }
+    }
     changed show-effects => { if (!root.show-effects) { editor.focus(); } }
 
     Rectangle {
@@ -362,47 +384,59 @@ export component MainWindow inherits Window {
         Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #36414c; }
         Image { x: 22px; y: 14px; width: 32px; height: 32px; source: @image-url("../../pw-graph-app/assets/icons/brand.svg"); }
 
-        preferences_button := RailButton {
-            x: 17px; y: 62px; width: 42px;
-            icon: @image-url("../../pw-graph-app/assets/icons/settings.svg");
-            label: "Preferences"; active: root.show-preferences;
-            clicked => { root.action("preferences"); }
-        }
-        relay_button := RailButton {
-            x: 17px; y: 110px; width: 42px;
-            icon: @image-url("../../pw-graph-app/assets/icons/relay.svg");
-            label: "Relay"; active: root.show-relay;
-            clicked => { root.action("relay"); }
-        }
-        shortcuts_button := RailButton {
-            x: 17px; y: 158px; width: 42px;
-            icon: @image-url("../../pw-graph-app/assets/icons/help.svg");
-            label: "Keyboard shortcuts"; active: root.show-shortcuts;
-            clicked => { root.action("shortcuts"); }
-        }
+        rail-scroll := ScrollView {
+            x: 0px;
+            y: 54px;
+            width: parent.width;
+            height: max(1px, parent.height - 54px);
+            VerticalBox {
+                x: 17px;
+                width: 42px;
+                spacing: 6px;
 
-        Rectangle { x: 12px; y: 214px; width: 52px; height: 1px; background: #35414d; }
-        minimap_button := RailButton { x: 17px; y: 226px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/minimap.svg"); label: "Minimap"; active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
-        refresh_button := RailButton { x: 17px; y: 274px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/refresh.svg"); label: "Refresh graph"; clicked => { root.action("refresh"); } }
-        undo_button := RailButton { x: 17px; y: 322px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/undo.svg"); label: "Undo (read-only)"; clicked => { root.action("undo"); } }
-        redo_button := RailButton { x: 17px; y: 370px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/redo.svg"); label: "Redo (read-only)"; clicked => { root.action("redo"); } }
-        history_button := RailButton { x: 17px; y: 418px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); label: "History"; active: root.show-history; clicked => { root.action("history"); } }
-        connect_button := RailButton { x: 17px; y: 466px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); label: root.connect-mode == "easy" ? "Easy connection mode" : "Advanced connection mode"; active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
-        arrange_button := RailButton { x: 17px; y: 514px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); label: "Arrange nodes"; clicked => { root.action("arrange"); } }
-        effects_button := RailButton { x: 17px; y: 562px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/effects.svg"); label: "Effects"; active: root.show-effects; clicked => { root.action("effects"); } }
-        save_button := RailButton { x: 17px; y: 610px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/save.svg"); label: "Save patchbay (read-only)"; clicked => { root.action("save-patchbay"); } }
-        filter_button := RailButton { x: 17px; y: 658px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/filter.svg"); label: "Cycle media filter"; active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
+                Rectangle { width: 42px; height: 2px; background: transparent; }
+                preferences_button := RailButton {
+                    width: 42px;
+                    icon: @image-url("../../pw-graph-app/assets/icons/settings.svg");
+                    label: "Preferences"; active: root.show-preferences;
+                    clicked => { root.action("preferences"); }
+                }
+                relay_button := RailButton {
+                    width: 42px;
+                    icon: @image-url("../../pw-graph-app/assets/icons/relay.svg");
+                    label: "Relay"; active: root.show-relay;
+                    clicked => { root.action("relay"); }
+                }
+                shortcuts_button := RailButton {
+                    width: 42px;
+                    icon: @image-url("../../pw-graph-app/assets/icons/help.svg");
+                    label: "Keyboard shortcuts"; active: root.show-shortcuts;
+                    clicked => { root.action("shortcuts"); }
+                }
 
-        Rectangle {
-            x: 9px;
-            y: parent.height - 43px;
-            width: parent.width - 18px;
-            height: 29px;
-            background: #182029;
-            border-color: #394653;
-            border-width: 1px;
-            border-radius: 4px;
-            Text { width: parent.width; height: parent.height; text: root.media-filter == "audio" ? "1" : root.media-filter == "video" ? "2" : root.media-filter == "midi" ? "3" : "0"; color: #a9b7c3; horizontal-alignment: center; vertical-alignment: center; font-size: 11px; }
+                Rectangle { width: 52px; x: -5px; height: 1px; background: #35414d; }
+                Rectangle { width: 42px; height: 7px; background: transparent; }
+                minimap_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/minimap.svg"); label: "Minimap"; active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
+                refresh_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/refresh.svg"); label: "Refresh graph"; clicked => { root.action("refresh"); } }
+                undo_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/undo.svg"); label: "Undo (read-only)"; clicked => { root.action("undo"); } }
+                redo_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/redo.svg"); label: "Redo (read-only)"; clicked => { root.action("redo"); } }
+                history_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); label: "History"; active: root.show-history; clicked => { root.action("history"); } }
+                connect_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); label: root.connect-mode == "easy" ? "Easy connection mode" : "Advanced connection mode"; active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
+                arrange_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); label: "Arrange nodes"; clicked => { root.action("arrange"); } }
+                effects_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/effects.svg"); label: "Effects"; active: root.show-effects; clicked => { root.action("effects"); } }
+                save_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/save.svg"); label: "Save patchbay (read-only)"; clicked => { root.action("save-patchbay"); } }
+                filter_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/filter.svg"); label: "Cycle media filter"; active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
+
+                Rectangle {
+                    width: 42px;
+                    height: 29px;
+                    background: #182029;
+                    border-color: #394653;
+                    border-width: 1px;
+                    border-radius: 4px;
+                    Text { width: parent.width; height: parent.height; text: root.media-filter == "audio" ? "1" : root.media-filter == "video" ? "2" : root.media-filter == "midi" ? "3" : "0"; color: #a9b7c3; horizontal-alignment: center; vertical-alignment: center; font-size: 11px; }
+                }
+            }
         }
     }
 
@@ -413,8 +447,20 @@ export component MainWindow inherits Window {
         height: root.height - root.status-height;
         background: #191d24;
 
+        public function focus-shortcut-search() {
+            shortcut-dialog.focus-search();
+        }
+
         workspace_focus := FocusScope {
             width: 100%; height: 100%;
+            startup-focus := Timer {
+                interval: 1ms;
+                running: true;
+                triggered => {
+                    self.running = false;
+                    editor.focus();
+                }
+            }
             // Keep focus on the editor itself. Its key events bubble through
             // this scope, so the preview shortcuts work on startup and again
             // after a graph click.
@@ -422,12 +468,20 @@ export component MainWindow inherits Window {
             key-pressed(event) => {
                 if (event.text == Key.F1) { root.action("shortcuts"); return accept; }
                 if (event.text == Key.Escape) { root.action("escape"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "f" || event.text == "F") && root.show-shortcuts) {
+                    workspace.focus-shortcut-search();
+                    return accept;
+                }
+                // Text fields own their editing shortcuts. In particular, do
+                // not turn a typed 'r', 'a', or digit into a graph action.
+                if (TextInputInterface.text-input-focused) { return reject; }
                 if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "z" || event.text == "Z")) { root.action("redo"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "z" || event.text == "Z")) { root.action("undo"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "y" || event.text == "Y")) { root.action("redo"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "s" || event.text == "S")) { root.action("save-patchbay"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "s" || event.text == "S")) { root.action("save-config"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "o" || event.text == "O")) { root.action("load-patchbay"); return accept; }
+                if (event.modifiers.control || event.modifiers.meta) { return reject; }
                 if (event.text == Key.Delete || event.text == Key.Backspace) { root.action("delete-selection"); return accept; }
                 if (event.text == "r" || event.text == "R") { root.action("refresh"); return accept; }
                 if (event.text == "a" || event.text == "A") { root.action("arrange"); return accept; }
@@ -476,6 +530,7 @@ export component MainWindow inherits Window {
                     viewport-height: editor.height;
                     audio-volume-changed(id, value) => { root.graph-audio-volume-changed(id, value); }
                     audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
+                    collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
                 }
             }
         }
@@ -586,17 +641,19 @@ export component MainWindow inherits Window {
             Rectangle { x: 20px; y: 132px; width: parent.width - 40px; height: 86px; background: #2b343d; border-radius: 5px; Text { width: parent.width; height: parent.height; text: "No actions yet"; color: #9eafbc; horizontal-alignment: center; vertical-alignment: center; } }
         }
 
-        if root.show-shortcuts: Rectangle {
+        shortcut-overlay := Rectangle {
+            visible: root.show-shortcuts;
             width: parent.width; height: parent.height; background: #05070a99;
-            ShortcutsDialog {
-                x: max(16px, (parent.width - min(650px, parent.width - 32px)) / 2);
-                y: max(16px, (parent.height - min(590px, parent.height - 32px)) / 2);
-                width: min(650px, parent.width - 32px);
-                height: min(590px, parent.height - 32px);
-                entries: root.shortcuts;
-                search-text <=> root.shortcut-search;
-                close => { root.action("shortcuts"); }
-            }
+        }
+        shortcut-dialog := ShortcutsDialog {
+            visible: root.show-shortcuts;
+            x: max(16px, (parent.width - min(650px, parent.width - 32px)) / 2);
+            y: max(16px, (parent.height - min(590px, parent.height - 32px)) / 2);
+            width: min(650px, parent.width - 32px);
+            height: min(590px, parent.height - 32px);
+            entries: root.shortcuts;
+            search-text <=> root.shortcut-search;
+            close => { root.action("shortcuts"); }
         }
 
         if root.show-effects: Rectangle {

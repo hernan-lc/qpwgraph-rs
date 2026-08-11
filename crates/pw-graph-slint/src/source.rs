@@ -156,13 +156,10 @@ impl ReadOnlyGraphSource {
 
     pub(crate) fn has_meter_backend(&self) -> bool {
         #[cfg(feature = "pipewire")]
-        {
-            return self.pipewire.is_some();
-        }
+        let has_pipewire = self.pipewire.is_some();
         #[cfg(not(feature = "pipewire"))]
-        {
-            false
-        }
+        let has_pipewire = false;
+        has_pipewire
     }
 
     pub(crate) fn request_meters(
