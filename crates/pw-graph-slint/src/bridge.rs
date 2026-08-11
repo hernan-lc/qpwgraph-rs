@@ -1,9 +1,10 @@
 use crate::args::Args;
 use crate::model::{
     node_type_color, node_type_label, port_type_color, ConnectMode, GraphSnapshot, LinkView,
-    MediaFilter, NodeView, UiGraphState,
+    MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
 };
 use crate::source::ReadOnlyGraphSource;
+use pw_graph_backend::MeterPolicy;
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
@@ -12,6 +13,7 @@ use slint::{
 };
 use slint_node_editor::{GraphLogic, MovableNode, NodeEditorController, NodeEditorSetup};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -64,6 +66,8 @@ struct PreviewApp {
     status: String,
     debug: bool,
     last_refresh: Instant,
+    meters: BTreeMap<pw_graph_core::NodeId, MeterReading>,
+    meter_error: Option<String>,
 }
 
 pub(crate) struct UiBridge {
@@ -85,7 +89,8 @@ impl UiBridge {
             .clone()
             .unwrap_or_else(|| config.language.clone());
         let i18n = I18n::from_language(&language);
-        let (source, status) = ReadOnlyGraphSource::new(&args);
+        let meter_policy = MeterPolicy::parse(&config.audio_meters);
+        let (source, status) = ReadOnlyGraphSource::new(&args, meter_policy);
         let view = UiGraphState::from_config(&config);
         let app = Rc::new(RefCell::new(PreviewApp {
             source,
@@ -96,6 +101,8 @@ impl UiBridge {
             status,
             debug: args.debug,
             last_refresh: Instant::now(),
+            meters: BTreeMap::new(),
+            meter_error: None,
         }));
 
         let window = MainWindow::new()?;
@@ -156,6 +163,7 @@ impl UiBridge {
             controller,
         };
         bridge.install_callbacks();
+        bridge.refresh_meters();
         bridge.sync_models();
         Ok(bridge)
     }
@@ -252,7 +260,9 @@ impl UiBridge {
                 &controller,
             );
         });
-        self.window.run()
+        let result = self.window.run();
+        self.app.borrow_mut().source.reset_meters();
+        result
     }
 
     fn sync_models(&self) {
@@ -265,6 +275,11 @@ impl UiBridge {
             &self.minimap_nodes,
             &self.controller,
         );
+    }
+
+    fn refresh_meters(&self) {
+        let mut app = self.app.borrow_mut();
+        refresh_meters(&self.window, &mut app);
     }
 }
 
@@ -291,6 +306,7 @@ fn pump(
             preview.last_refresh = Instant::now();
         }
     }
+    refresh_meters(window, &mut preview);
     sync_models(
         window,
         &mut preview,
@@ -299,6 +315,77 @@ fn pump(
         minimap_nodes,
         controller,
     );
+}
+
+fn refresh_meters(window: &MainWindow, preview: &mut PreviewApp) {
+    if preview.source.meter_policy() == MeterPolicy::Disabled {
+        preview.meters.clear();
+        preview.meter_error = None;
+        return;
+    }
+
+    let visible_audio_nodes = if window.window().is_minimized() {
+        BTreeSet::new()
+    } else {
+        preview
+            .snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.has_audio_controls)
+            .map(|node| node.node_id)
+            .collect()
+    };
+
+    if let Err(error) = preview.source.request_meters(&visible_audio_nodes) {
+        record_meter_error(preview, error);
+        return;
+    }
+
+    match preview.source.audio_meters() {
+        Ok(readings) => {
+            let live_state = if preview.source.is_demo() {
+                MeterState::Demo
+            } else {
+                MeterState::Live
+            };
+            preview.meters = readings
+                .into_iter()
+                .map(|reading| {
+                    let state = if reading.available && reading.age_ms <= 1_500 {
+                        live_state
+                    } else {
+                        MeterState::Waiting
+                    };
+                    (
+                        reading.node_id,
+                        MeterReading {
+                            rms: if state == MeterState::Waiting {
+                                0.0
+                            } else {
+                                reading.rms.clamp(0.0, 1.0)
+                            },
+                            peak: if state == MeterState::Waiting {
+                                0.0
+                            } else {
+                                reading.peak.clamp(0.0, 1.0)
+                            },
+                            state,
+                        },
+                    )
+                })
+                .collect();
+            preview.meter_error = None;
+        }
+        Err(error) => record_meter_error(preview, error),
+    }
+}
+
+fn record_meter_error(preview: &mut PreviewApp, error: String) {
+    if preview.meter_error.as_deref() != Some(error.as_str()) {
+        preview.status = format!("Audio monitoring is unavailable: {error}");
+        preview.meter_error = Some(error);
+    }
+    preview.meters.clear();
 }
 
 fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) {
@@ -460,9 +547,12 @@ fn sync_models(
     minimap_nodes: &Rc<VecModel<MinimapNode>>,
     controller: &Rc<NodeEditorController>,
 ) {
-    let snapshot = preview
-        .view
-        .snapshot(preview.source.graph(), &preview.config);
+    let snapshot = preview.view.snapshot_with_meters(
+        preview.source.graph(),
+        &preview.config,
+        &preview.meters,
+        meter_fallback(&preview.source),
+    );
     nodes.set_vec(snapshot.nodes.iter().map(node_row).collect::<Vec<_>>());
     links.set_vec(snapshot.links.iter().map(link_row).collect::<Vec<_>>());
     minimap_nodes.set_vec(
@@ -521,6 +611,10 @@ fn node_row(node: &NodeView) -> NodeRow {
                 .unwrap_or_else(|| node_type_color(node.node_type)),
         ),
         has_audio_controls: node.has_audio_controls,
+        meter_rms: node.meter.rms,
+        meter_peak: node.meter.peak,
+        meter_available: matches!(node.meter.state, MeterState::Live | MeterState::Demo),
+        meter_label: SharedString::from(node.meter.state.label()),
         ports: ModelRc::from(Rc::new(VecModel::from(
             node.ports
                 .iter()
@@ -538,6 +632,18 @@ fn node_row(node: &NodeView) -> NodeRow {
                 })
                 .collect::<Vec<_>>(),
         ))),
+    }
+}
+
+fn meter_fallback(source: &ReadOnlyGraphSource) -> MeterState {
+    if source.meter_policy() == MeterPolicy::Disabled {
+        MeterState::Disabled
+    } else if source.is_demo() {
+        MeterState::Demo
+    } else if source.has_meter_backend() {
+        MeterState::Waiting
+    } else {
+        MeterState::Unavailable
     }
 }
 

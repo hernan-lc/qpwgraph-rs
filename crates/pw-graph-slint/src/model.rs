@@ -13,6 +13,35 @@ const PORT_ROW_HEIGHT: f32 = 25.0;
 const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum MeterState {
+    #[default]
+    Unavailable,
+    Disabled,
+    Waiting,
+    Live,
+    Demo,
+}
+
+impl MeterState {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "N/A",
+            Self::Disabled => "OFF",
+            Self::Waiting => "WAIT",
+            Self::Live => "LIVE",
+            Self::Demo => "DEMO",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MeterReading {
+    pub(crate) rms: f32,
+    pub(crate) peak: f32,
+    pub(crate) state: MeterState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum MediaFilter {
     #[default]
     All,
@@ -187,6 +216,7 @@ pub(crate) struct NodeView {
     pub(crate) font_scale: f32,
     pub(crate) appearance: NodeAppearance,
     pub(crate) has_audio_controls: bool,
+    pub(crate) meter: MeterReading,
     pub(crate) ports: Vec<PortGroupView>,
 }
 
@@ -245,7 +275,18 @@ impl UiGraphState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&mut self, graph: &Graph, config: &AppConfig) -> GraphSnapshot {
+        self.snapshot_with_meters(graph, config, &BTreeMap::new(), MeterState::Unavailable)
+    }
+
+    pub(crate) fn snapshot_with_meters(
+        &mut self,
+        graph: &Graph,
+        config: &AppConfig,
+        meters: &BTreeMap<NodeId, MeterReading>,
+        meter_fallback: MeterState,
+    ) -> GraphSnapshot {
         self.ids.rebuild(graph);
         self.local_positions
             .retain(|id, _| graph.nodes.contains_key(id));
@@ -284,11 +325,12 @@ impl UiGraphState {
                     pin_groups.insert(*id, port.pin_id);
                 }
             }
-            let has_audio_controls = node.ports.iter().any(|id| {
-                graph
-                    .port(*id)
-                    .is_some_and(|port| port.port_type == PortType::Audio)
-            });
+            let has_audio_controls = node.node_type != NodeType::Effect
+                && node.ports.iter().any(|id| {
+                    graph
+                        .port(*id)
+                        .is_some_and(|port| port.port_type == PortType::Audio)
+                });
             let collapsed = appearance.collapsed;
             let thumbnail = self.thumbnail_mode;
             let height = node_height(thumbnail, collapsed, has_audio_controls, ports.len());
@@ -314,6 +356,10 @@ impl UiGraphState {
                 font_scale: self.node_text_scale,
                 appearance,
                 has_audio_controls,
+                meter: meters.get(&node.id).copied().unwrap_or(MeterReading {
+                    state: meter_fallback,
+                    ..MeterReading::default()
+                }),
                 ports,
             });
         }
@@ -759,5 +805,39 @@ mod tests {
 
         assert!(state.snapshot(&graph, &config).nodes[0].collapsed);
         assert!(config.node_view_by_name.is_empty());
+    }
+
+    #[test]
+    fn supplied_meters_are_projected_without_changing_the_graph() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let mut meters = BTreeMap::new();
+        meters.insert(
+            NodeId(1),
+            MeterReading {
+                rms: 0.42,
+                peak: 0.81,
+                state: MeterState::Live,
+            },
+        );
+
+        let snapshot = state.snapshot_with_meters(&graph, &config, &meters, MeterState::Waiting);
+        let source = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(1))
+            .unwrap();
+        let sink = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(2))
+            .unwrap();
+
+        assert_eq!(source.meter.rms, 0.42);
+        assert_eq!(source.meter.peak, 0.81);
+        assert_eq!(source.meter.state, MeterState::Live);
+        assert_eq!(sink.meter.state, MeterState::Waiting);
+        assert_eq!(graph.links.len(), 1);
     }
 }

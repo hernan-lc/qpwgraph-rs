@@ -32,6 +32,10 @@ export struct NodeRow {
     font-scale: float,
     accent: color,
     has-audio-controls: bool,
+    meter-rms: float,
+    meter-peak: float,
+    meter-available: bool,
+    meter-label: string,
     ports: [PortRow],
 }
 
@@ -62,6 +66,7 @@ component RailButton inherits Rectangle {
     in property <string> label;
     in property <bool> active: false;
     in property <bool> enabled: true;
+    out property <bool> hovered: touch.has-hover;
     callback clicked();
 
     height: 42px;
@@ -76,34 +81,36 @@ component RailButton inherits Rectangle {
         source: root.icon;
         opacity: root.enabled ? 1 : 0.42;
     }
-    Rectangle {
-        visible: touch.has-hover;
-        x: parent.width + 8px;
-        y: 5px;
-        width: 176px;
-        height: 30px;
-        z: 100;
-        background: #11161ce8;
-        border-color: #4b5a69;
-        border-width: 1px;
-        border-radius: 4px;
-        Text {
-            x: 9px;
-            width: parent.width - 18px;
-            height: parent.height;
-            text: root.label;
-            color: #edf3f8;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
     touch := TouchArea {
         width: 100%;
         height: 100%;
         clicked => {
             if (root.enabled) { root.clicked(); }
         }
+    }
+}
+
+component RailTooltip inherits Rectangle {
+    in property <string> text;
+    in property <bool> shown: false;
+
+    visible: root.shown;
+    width: 184px;
+    height: 30px;
+    z: 1000;
+    background: #11161cf2;
+    border-color: #4b5a69;
+    border-width: 1px;
+    border-radius: 4px;
+    Text {
+        x: 9px;
+        width: parent.width - 18px;
+        height: parent.height;
+        text: root.text;
+        color: #edf3f8;
+        font-size: 11px;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -221,9 +228,10 @@ component GraphNode inherits BaseNode {
             border-color: #3b4651;
             border-width: 1px;
             border-radius: 4px;
-            Rectangle { x: 7px; y: 11px; width: 50px; height: 5px; background: #57c785; border-radius: 3px; }
+            Text { x: 7px; y: 8px; width: 49px; height: 11px; text: data.meter-label; color: data.meter-available ? #9fdcb8 : #8b9aa6; font-size: 7px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
             Rectangle { x: 63px; y: 8px; width: parent.width - 103px; height: 11px; background: #394550; border-radius: 5px; }
-            Rectangle { x: 63px; y: 8px; width: (parent.width - 103px) * 0.72; height: 11px; background: #57c785; border-radius: 5px; }
+            Rectangle { x: 63px; y: 8px; width: (parent.width - 103px) * data.meter-rms; height: 11px; visible: data.meter-available; background: #57c785; border-radius: 5px; }
+            Rectangle { x: 63px + (parent.width - 105px) * data.meter-peak; y: 6px; width: 2px; height: 15px; visible: data.meter-available; background: #e9d576; border-radius: 1px; }
             Image { x: parent.width - 29px; y: 5px; width: 18px; height: 18px; source: @image-url("../../pw-graph-ui/assets/icons/volume.svg"); }
         }
 
@@ -317,19 +325,19 @@ export component MainWindow inherits Window {
         Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #36414c; }
         Image { x: 22px; y: 14px; width: 32px; height: 32px; source: @image-url("../../pw-graph-app/assets/icons/brand.svg"); }
 
-        RailButton {
+        preferences_button := RailButton {
             x: 17px; y: 62px; width: 42px;
             icon: @image-url("../../pw-graph-app/assets/icons/settings.svg");
             label: "Preferences"; active: root.show-preferences;
             clicked => { root.action("preferences"); }
         }
-        RailButton {
+        relay_button := RailButton {
             x: 17px; y: 110px; width: 42px;
             icon: @image-url("../../pw-graph-app/assets/icons/relay.svg");
             label: "Relay"; active: root.show-relay;
             clicked => { root.action("relay"); }
         }
-        RailButton {
+        shortcuts_button := RailButton {
             x: 17px; y: 158px; width: 42px;
             icon: @image-url("../../pw-graph-app/assets/icons/help.svg");
             label: "Keyboard shortcuts"; active: root.show-shortcuts;
@@ -337,16 +345,16 @@ export component MainWindow inherits Window {
         }
 
         Rectangle { x: 12px; y: 214px; width: 52px; height: 1px; background: #35414d; }
-        RailButton { x: 17px; y: 226px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/minimap.svg"); label: "Minimap"; active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
-        RailButton { x: 17px; y: 274px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/refresh.svg"); label: "Refresh graph"; clicked => { root.action("refresh"); } }
-        RailButton { x: 17px; y: 322px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/undo.svg"); label: "Undo (read-only)"; clicked => { root.action("undo"); } }
-        RailButton { x: 17px; y: 370px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/redo.svg"); label: "Redo (read-only)"; clicked => { root.action("redo"); } }
-        RailButton { x: 17px; y: 418px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); label: "History"; active: root.show-history; clicked => { root.action("history"); } }
-        RailButton { x: 17px; y: 466px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); label: root.connect-mode == "easy" ? "Easy connection mode" : "Advanced connection mode"; active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
-        RailButton { x: 17px; y: 514px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); label: "Arrange nodes"; clicked => { root.action("arrange"); } }
-        RailButton { x: 17px; y: 562px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/effects.svg"); label: "Effects"; active: root.show-effects; clicked => { root.action("effects"); } }
-        RailButton { x: 17px; y: 610px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/save.svg"); label: "Save patchbay (read-only)"; clicked => { root.action("save-patchbay"); } }
-        RailButton { x: 17px; y: 658px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/filter.svg"); label: "Cycle media filter"; active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
+        minimap_button := RailButton { x: 17px; y: 226px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/minimap.svg"); label: "Minimap"; active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
+        refresh_button := RailButton { x: 17px; y: 274px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/refresh.svg"); label: "Refresh graph"; clicked => { root.action("refresh"); } }
+        undo_button := RailButton { x: 17px; y: 322px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/undo.svg"); label: "Undo (read-only)"; clicked => { root.action("undo"); } }
+        redo_button := RailButton { x: 17px; y: 370px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/redo.svg"); label: "Redo (read-only)"; clicked => { root.action("redo"); } }
+        history_button := RailButton { x: 17px; y: 418px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); label: "History"; active: root.show-history; clicked => { root.action("history"); } }
+        connect_button := RailButton { x: 17px; y: 466px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); label: root.connect-mode == "easy" ? "Easy connection mode" : "Advanced connection mode"; active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
+        arrange_button := RailButton { x: 17px; y: 514px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); label: "Arrange nodes"; clicked => { root.action("arrange"); } }
+        effects_button := RailButton { x: 17px; y: 562px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/effects.svg"); label: "Effects"; active: root.show-effects; clicked => { root.action("effects"); } }
+        save_button := RailButton { x: 17px; y: 610px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/save.svg"); label: "Save patchbay (read-only)"; clicked => { root.action("save-patchbay"); } }
+        filter_button := RailButton { x: 17px; y: 658px; width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/filter.svg"); label: "Cycle media filter"; active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
 
         Rectangle {
             x: 9px;
@@ -368,8 +376,12 @@ export component MainWindow inherits Window {
         height: root.height - root.status-height;
         background: #191d24;
 
-        FocusScope {
+        workspace_focus := FocusScope {
             width: 100%; height: 100%;
+            // Keep focus on the editor itself. Its key events bubble through
+            // this scope, so the preview shortcuts work on startup and again
+            // after a graph click.
+            init => { editor.focus(); }
             key-pressed(event) => {
                 if (event.text == Key.F1) { root.action("shortcuts"); return accept; }
                 if (event.text == Key.Escape) { root.action("escape"); return accept; }
@@ -600,4 +612,18 @@ export component MainWindow inherits Window {
         Rectangle { width: parent.width; height: 1px; background: #36414c; }
         Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.status + " · " + root.graph-counts + " [" + root.backend + "]"; color: #bdc9d2; font-size: 10px; vertical-alignment: center; overflow: elide; }
     }
+
+    RailTooltip { x: root.rail-width + 8px; y: preferences_button.y + 6px; text: preferences_button.label; shown: preferences_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: relay_button.y + 6px; text: relay_button.label; shown: relay_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: shortcuts_button.y + 6px; text: shortcuts_button.label; shown: shortcuts_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: minimap_button.y + 6px; text: minimap_button.label; shown: minimap_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: refresh_button.y + 6px; text: refresh_button.label; shown: refresh_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: undo_button.y + 6px; text: undo_button.label; shown: undo_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: redo_button.y + 6px; text: redo_button.label; shown: redo_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: history_button.y + 6px; text: history_button.label; shown: history_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: connect_button.y + 6px; text: connect_button.label; shown: connect_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: arrange_button.y + 6px; text: arrange_button.label; shown: arrange_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: effects_button.y + 6px; text: effects_button.label; shown: effects_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: save_button.y + 6px; text: save_button.label; shown: save_button.hovered; }
+    RailTooltip { x: root.rail-width + 8px; y: filter_button.y + 6px; text: filter_button.label; shown: filter_button.hovered; }
 }
