@@ -214,9 +214,6 @@ impl UiBridge {
                 preview.config.window_height.max(520.0).round() as u32,
             ));
             window.set_show_statusbar(preview.config.statusbar);
-            window.set_read_only_message(SharedString::from(
-                preview.i18n.text("status.slint_preview_message"),
-            ));
             window.set_show_minimap(preview.view.minimap_visible);
             window.set_search_text(SharedString::from(preview.view.search_query.clone()));
             window.set_media_filter(SharedString::from(preview.view.media_filter.as_str()));
@@ -1763,9 +1760,6 @@ fn sync_models(
     }
     let (node_count, port_count, link_count) = preview.view.visible_counts(&snapshot);
     window.set_status(SharedString::from(preview.status.clone()));
-    window.set_read_only_message(SharedString::from(
-        preview.i18n.text("status.slint_preview_message"),
-    ));
     window.set_backend(SharedString::from(preview.source.backend_name()));
     window.set_graph_counts(SharedString::from(format!(
         "{node_count} nodes · {port_count} ports · {link_count} links"

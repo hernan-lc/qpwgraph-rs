@@ -335,6 +335,7 @@ component GraphNode inherits BaseNode {
 
 export component MainWindow inherits Window {
     title: UiI18n.localized("app.title");
+    icon: @image-url("../../pw-graph-app/assets/icons/brand.svg");
     background: #191d24;
     preferred-width: 1100px;
     preferred-height: 760px;
@@ -353,7 +354,6 @@ export component MainWindow inherits Window {
     in property <string> status: "Starting Slint UI…";
     in property <string> backend: "";
     in property <string> graph-counts: "";
-    in property <string> read-only-message: "";
     in-out property <bool> show-statusbar: true;
     in-out property <bool> show-common-actions: true;
     in-out property <bool> show-patchbay-toolbar: true;
@@ -602,12 +602,6 @@ export component MainWindow inherits Window {
             }
         }
 
-        Rectangle {
-            x: 16px; y: 15px; width: min(375px, parent.width - 32px); height: 32px;
-            background: #202933e8; border-color: #3c4c5b; border-width: 1px; border-radius: 5px;
-            Image { x: 9px; y: 8px; width: 16px; height: 16px; source: @image-url("../../pw-graph-app/assets/icons/brand.svg"); }
-            Text { x: 32px; width: parent.width - 40px; height: parent.height; text: root.read-only-message; color: #c7d4de; font-size: 10px; vertical-alignment: center; overflow: elide; }
-        }
         LineEdit {
             x: parent.width - 244px; y: 15px; width: 228px; height: 32px;
             placeholder-text: UiI18n.localized("search.placeholder");
