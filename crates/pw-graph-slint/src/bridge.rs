@@ -1,7 +1,7 @@
 use crate::args::Args;
 use crate::model::{
-    node_layout_key, node_type_color, port_type_color, ConnectMode, GraphSnapshot,
-    LinkView, MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
+    node_layout_key, node_type_color, port_type_color, ConnectMode, GraphSnapshot, LinkView,
+    MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
 };
 use crate::source::ReadOnlyGraphSource;
 #[cfg(feature = "relay")]
@@ -11,6 +11,7 @@ use pw_graph_backend::{
 };
 use pw_graph_backend::{EffectInsertRequest, EffectNodeRequest, MeterPolicy};
 use pw_graph_config::{config_path, AppConfig, PersistedEffect};
+use pw_graph_core::Direction;
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,9 @@ struct PreviewApp {
     view: UiGraphState,
     snapshot: GraphSnapshot,
     status: String,
+    toast_message: String,
+    toast_until: Option<Instant>,
+    toast_error: bool,
     debug: bool,
     last_refresh: Instant,
     meters: BTreeMap<pw_graph_core::NodeId, MeterReading>,
@@ -165,6 +169,9 @@ impl UiBridge {
             view,
             snapshot: GraphSnapshot::default(),
             status,
+            toast_message: String::new(),
+            toast_until: None,
+            toast_error: false,
             debug: args.debug,
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
@@ -687,6 +694,22 @@ fn record_meter_error(preview: &mut PreviewApp, error: String) {
     preview.meters.clear();
 }
 
+const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);
+
+fn set_connection_feedback(preview: &mut PreviewApp, message: impl Into<String>, error: bool) {
+    let message = message.into();
+    preview.status = message.clone();
+    preview.toast_message = message;
+    preview.toast_error = error;
+    preview.toast_until = Some(Instant::now() + CONNECTION_TOAST_DURATION);
+}
+
+fn toast_visible(preview: &PreviewApp) -> bool {
+    preview
+        .toast_until
+        .is_some_and(|deadline| Instant::now() < deadline)
+}
+
 fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) {
     match event {
         UiEvent::Action(action) => handle_action(window, preview, &action),
@@ -698,13 +721,9 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
                 .view
                 .select_box(&preview.snapshot, x, y, width, height, shift)
         }
-        UiEvent::LinkRequested(start, end) => {
-            preview.status = format!(
-                "Read-only preview: connection request {start} → {end} was not sent to PipeWire"
-            );
-        }
+        UiEvent::LinkRequested(start, end) => connect_pin_pair(preview, start, end),
         UiEvent::LinkCancelled => {
-            preview.status = "Connection preview cancelled".into();
+            set_connection_feedback(preview, "Connection preview cancelled", false);
         }
         UiEvent::EasyConnect(source, x, y) => easy_connect_nodes(preview, source, x, y),
         UiEvent::ToggleCollapse(id) => {
@@ -756,16 +775,101 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
     }
 }
 
-fn easy_connect_nodes(preview: &mut PreviewApp, source_id: i32, x: f32, y: f32) {
-    let Some(source_node) = preview.view.ids.node_id(source_id) else {
-        preview.status = "Easy connect source is no longer available".into();
+fn connect_pin_pair(preview: &mut PreviewApp, start_id: i32, end_id: i32) {
+    let Some(start_port) = preview.view.ids.port_id(start_id) else {
+        set_connection_feedback(
+            preview,
+            format!("Connection failed: source pin {start_id} is no longer available"),
+            true,
+        );
         return;
     };
-    let Some(target_node) = preview
-        .view
-        .node_at(&preview.snapshot, x, y, source_node)
-    else {
-        preview.status = "Easy connect cancelled: drop onto another node".into();
+    let Some(end_port) = preview.view.ids.port_id(end_id) else {
+        set_connection_feedback(
+            preview,
+            format!("Connection failed: destination pin {end_id} is no longer available"),
+            true,
+        );
+        return;
+    };
+
+    let (output, input) = {
+        let graph = preview.source.graph();
+        let Some(start) = graph.port(start_port) else {
+            set_connection_feedback(preview, "Connection failed: source pin disappeared", true);
+            return;
+        };
+        let Some(end) = graph.port(end_port) else {
+            set_connection_feedback(
+                preview,
+                "Connection failed: destination pin disappeared",
+                true,
+            );
+            return;
+        };
+        match (start.direction, end.direction) {
+            (Direction::Source, Direction::Sink) => (start_port, end_port),
+            (Direction::Sink, Direction::Source) => (end_port, start_port),
+            _ => {
+                set_connection_feedback(
+                    preview,
+                    "Connection failed: connect one output pin to one input pin",
+                    true,
+                );
+                return;
+            }
+        }
+    };
+
+    let Some((output, input)) = ({
+        let graph = preview.source.graph();
+        graph.port_key(output).zip(graph.port_key(input))
+    }) else {
+        set_connection_feedback(
+            preview,
+            "Connection failed: pin identity is unavailable",
+            true,
+        );
+        return;
+    };
+
+    match preview.source.connect_by_key_if_missing(&output, &input) {
+        Ok(created) => match refresh_connection_graph(preview) {
+            Ok(()) => {
+                let message = if created {
+                    "Connection created"
+                } else {
+                    "Connection already exists"
+                };
+                set_connection_feedback(preview, message, false);
+            }
+            Err(error) => set_connection_feedback(
+                preview,
+                format!("Connection succeeded, but graph refresh failed: {error}"),
+                true,
+            ),
+        },
+        Err(error) => set_connection_feedback(preview, format!("Connection failed: {error}"), true),
+    }
+}
+
+fn refresh_connection_graph(preview: &mut PreviewApp) -> Result<(), String> {
+    preview.source.refresh()?;
+    preview.last_refresh = Instant::now();
+    Ok(())
+}
+
+fn easy_connect_nodes(preview: &mut PreviewApp, source_id: i32, x: f32, y: f32) {
+    let Some(source_node) = preview.view.ids.node_id(source_id) else {
+        set_connection_feedback(preview, "Easy connect source is no longer available", true);
+        return;
+    };
+    let Some(target_node) = preview.view.node_at(&preview.snapshot, x, y, source_node) else {
+        set_connection_feedback(
+            preview,
+            "Easy connect cancelled: drop onto another node",
+            true,
+        );
         return;
     };
     let port_keys = {
@@ -778,30 +882,50 @@ fn easy_connect_nodes(preview: &mut PreviewApp, source_id: i32, x: f32, y: f32) 
             .collect::<Vec<_>>()
     };
     if port_keys.is_empty() {
-        preview.status = "Easy connect found no compatible output/input ports".into();
+        set_connection_feedback(
+            preview,
+            "Easy connect found no compatible output/input ports",
+            true,
+        );
         return;
     }
 
     let mut connected = 0usize;
+    let mut already_connected = 0usize;
     for (output, input) in port_keys {
         match preview.source.connect_by_key_if_missing(&output, &input) {
-            Ok(()) => connected += 1,
+            Ok(true) => connected += 1,
+            Ok(false) => already_connected += 1,
             Err(error) => {
-                preview.status = format!(
-                    "Easy connect created {connected} connection(s), then failed: {error}"
+                let _ = refresh_connection_graph(preview);
+                set_connection_feedback(
+                    preview,
+                    format!("Easy connect created {connected} connection(s), then failed: {error}"),
+                    true,
                 );
                 return;
             }
         }
     }
-    match preview.source.refresh() {
+    match refresh_connection_graph(preview) {
         Ok(()) => {
-            preview.last_refresh = Instant::now();
-            preview.status = format!("Easy connect created {connected} connection(s)");
+            let message = if connected == 0 {
+                format!("Easy connect: {already_connected} connection(s) already exist")
+            } else if already_connected == 0 {
+                format!("Easy connect created {connected} connection(s)")
+            } else {
+                format!(
+                    "Easy connect created {connected} connection(s); {already_connected} already exist"
+                )
+            };
+            set_connection_feedback(preview, message, false);
         }
         Err(error) => {
-            preview.status =
-                format!("Easy connect succeeded, but graph refresh failed: {error}");
+            set_connection_feedback(
+                preview,
+                format!("Easy connect succeeded, but graph refresh failed: {error}"),
+                true,
+            );
         }
     }
 }
@@ -983,6 +1107,7 @@ fn restore_configured_effects(
         let result = match (&saved.source, &saved.destination) {
             (Some(source_port), Some(destination_port)) => source
                 .connect_by_key_if_missing(source_port, destination_port)
+                .map(|_| ())
                 .and_then(|_| {
                     source.insert_effect(EffectInsertRequest {
                         instance_id: saved.instance.instance_id.clone(),
@@ -1760,6 +1885,9 @@ fn sync_models(
     }
     let (node_count, port_count, link_count) = preview.view.visible_counts(&snapshot);
     window.set_status(SharedString::from(preview.status.clone()));
+    window.set_toast_message(SharedString::from(preview.toast_message.clone()));
+    window.set_toast_visible(toast_visible(preview));
+    window.set_toast_error(preview.toast_error);
     window.set_backend(SharedString::from(preview.source.backend_name()));
     window.set_graph_counts(SharedString::from(format!(
         "{node_count} nodes · {port_count} ports · {link_count} links"
@@ -2353,6 +2481,112 @@ mod tests {
     use slint::platform::{PointerEventButton, WindowEvent};
     use slint::{LogicalPosition, ModelRc};
 
+    fn demo_preview() -> PreviewApp {
+        let args = Args {
+            demo: true,
+            ..Args::default()
+        };
+        let (source, status) = ReadOnlyGraphSource::new(&args, MeterPolicy::Disabled);
+        let config = AppConfig::default();
+        let mut view = UiGraphState::from_config(&config);
+        let snapshot = view.snapshot(source.graph(), &config);
+        PreviewApp {
+            source,
+            config: config.clone(),
+            config_file: PathBuf::new(),
+            config_saved_snapshot: config,
+            config_dirty_since: None,
+            state_file: PathBuf::new(),
+            state_saved_snapshot: PersistedSlintState::default(),
+            state_dirty_since: None,
+            i18n: I18n::from_language("en"),
+            view,
+            snapshot,
+            status,
+            toast_message: String::new(),
+            toast_until: None,
+            toast_error: false,
+            debug: false,
+            last_refresh: Instant::now(),
+            meters: BTreeMap::new(),
+            meter_error: None,
+            audio_controls: BTreeMap::new(),
+            #[cfg(feature = "relay")]
+            relay_levels: BTreeMap::new(),
+            #[cfg(feature = "relay")]
+            relay_connecting: None,
+        }
+    }
+
+    #[test]
+    fn advanced_pin_connections_reach_demo_backend_in_both_directions() {
+        let mut preview = demo_preview();
+        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+
+        connect_pin_pair(&mut preview, output, input);
+        assert!(preview
+            .source
+            .graph()
+            .links
+            .values()
+            .any(|link| link.output_port.0 == 1 && link.input_port.0 == 3));
+        assert_eq!(preview.toast_message, "Connection created");
+        assert!(!preview.toast_error);
+
+        connect_pin_pair(&mut preview, input, output);
+        assert_eq!(preview.toast_message, "Connection already exists");
+        assert!(!preview.toast_error);
+    }
+
+    #[test]
+    fn advanced_connection_rejects_stale_and_same_direction_pins() {
+        let mut preview = demo_preview();
+        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let other_output = preview.view.ids.port(pw_graph_core::PortId(2)).unwrap();
+
+        connect_pin_pair(&mut preview, output, 99_999);
+        assert!(preview.toast_error);
+        assert!(preview.toast_message.contains("no longer available"));
+
+        connect_pin_pair(&mut preview, output, other_output);
+        assert!(preview.toast_error);
+        assert!(preview.toast_message.contains("one output pin"));
+    }
+
+    #[test]
+    fn easy_connections_create_all_matching_demo_channels() {
+        let mut preview = demo_preview();
+        let source = preview.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
+        let target_position = preview
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == pw_graph_core::NodeId(2))
+            .map(|node| node.position)
+            .unwrap();
+
+        easy_connect_nodes(
+            &mut preview,
+            source,
+            target_position[0] + 10.0,
+            target_position[1] + 10.0,
+        );
+
+        assert_eq!(preview.source.graph().links.len(), 2);
+        assert!(preview.toast_message.contains("created 2 connection"));
+    }
+
+    #[test]
+    fn connection_feedback_is_transient() {
+        let mut preview = demo_preview();
+        set_connection_feedback(&mut preview, "test connection", false);
+        assert!(toast_visible(&preview));
+
+        preview.toast_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!toast_visible(&preview));
+    }
+
     #[test]
     fn shortcut_catalog_matches_the_egui_help_dialog() {
         let i18n = I18n::from_language("en");
@@ -2581,5 +2815,28 @@ mod tests {
         assert_eq!(source, 7);
         assert!((x - 520.0).abs() < 0.1);
         assert!((y - 166.0).abs() < 0.1);
+
+        // The body drop callback is world-space even when the editor is panned
+        // and zoomed. This guards the hit-test path used by the live connector.
+        window.set_pan_x(130.0);
+        window.set_pan_y(70.0);
+        window.set_zoom(1.5);
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(431.0, 310.0),
+            button: PointerEventButton::Left,
+        });
+        dispatch(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(986.0, 310.0),
+        });
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(986.0, 310.0),
+            button: PointerEventButton::Left,
+        });
+        let (source, x, y) = easy_drop
+            .borrow()
+            .expect("panned and zoomed easy-mode drag must finish");
+        assert_eq!(source, 7);
+        assert!((x - 520.0).abs() < 1.0);
+        assert!((y - 166.0).abs() < 1.0);
     }
 }

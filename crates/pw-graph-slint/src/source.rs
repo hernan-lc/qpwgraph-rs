@@ -396,21 +396,19 @@ impl ReadOnlyGraphSource {
         &mut self,
         output: &PortKey,
         input: &PortKey,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if let Some(driver) = self.demo.as_mut() {
-            driver
+            return driver
                 .connect_by_key_if_missing(output, input)
-                .map(|_| ())
-                .map_err(|error| error.to_string())?;
-            return Ok(());
+                .map(|link| link.is_some())
+                .map_err(|error| error.to_string());
         }
         #[cfg(feature = "pipewire")]
         if let Some(driver) = self.pipewire.as_mut() {
-            driver
+            return driver
                 .connect_by_key_if_missing(output, input)
-                .map(|_| ())
-                .map_err(|error| error.to_string())?;
-            return Ok(());
+                .map(|link| link.is_some())
+                .map_err(|error| error.to_string());
         }
         Err("graph connections are not available for this backend".into())
     }
@@ -638,6 +636,23 @@ mod tests {
 
         source.set_node_volume(node, 0.42).unwrap();
         source.set_node_mute(node, true).unwrap();
+    }
+
+    #[test]
+    fn demo_source_connects_stable_ports_and_is_idempotent() {
+        let (mut source, _) = ReadOnlyGraphSource::new(&demo_args(), MeterPolicy::Disabled);
+        let output = source.graph().port_key(pw_graph_core::PortId(1)).unwrap();
+        let input = source.graph().port_key(pw_graph_core::PortId(3)).unwrap();
+
+        assert!(source.connect_by_key_if_missing(&output, &input).unwrap());
+        assert!(!source.connect_by_key_if_missing(&output, &input).unwrap());
+        source.refresh().unwrap();
+
+        assert!(source
+            .graph()
+            .links
+            .values()
+            .any(|link| link.output_port.0 == 1 && link.input_port.0 == 3));
     }
 
     #[test]

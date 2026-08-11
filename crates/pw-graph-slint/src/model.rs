@@ -149,6 +149,12 @@ impl SlintIdMap {
         self.ports.get(&id).copied()
     }
 
+    pub(crate) fn port_id(&self, id: i32) -> Option<PortId> {
+        self.ports
+            .iter()
+            .find_map(|(port_id, mapped)| (*mapped == id).then_some(*port_id))
+    }
+
     pub(crate) fn link(&self, id: LinkId) -> Option<i32> {
         self.links.get(&id).copied()
     }
@@ -958,6 +964,10 @@ mod tests {
         ids.rebuild(&graph);
         assert_ne!(ids.port(PortId(u64::MAX)).unwrap() as u64, u64::MAX);
         assert_eq!(ids.node_id(ids.node(NodeId(1)).unwrap()), Some(NodeId(1)));
+        assert_eq!(
+            ids.port_id(ids.port(PortId(u64::MAX)).unwrap()),
+            Some(PortId(u64::MAX))
+        );
     }
 
     #[test]
