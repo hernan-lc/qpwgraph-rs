@@ -1,8 +1,4 @@
-//! Read-only backend snapshots for the Slint preview.
-//!
-//! This module deliberately exposes no topology, device, effect, relay, or
-//! persistence mutation API. The preview can observe the same graph as the
-//! Egui application without becoming a second controller for the session.
+//! Backend snapshots and the node-level controls implemented by the Slint UI.
 
 use crate::args::Args;
 use pw_graph_backend::{AudioMeter, DemoDriver, GraphDriver, MeterPolicy};
@@ -47,7 +43,7 @@ impl ReadOnlyGraphSource {
                     #[cfg(feature = "alsa")]
                     alsa: None,
                 },
-                "Slint preview connected to deterministic demo data".into(),
+                "Slint UI connected to deterministic demo data".into(),
             );
         }
 
@@ -101,7 +97,7 @@ impl ReadOnlyGraphSource {
         };
         let status = match source.refresh() {
             Ok(()) if !source.graph.nodes.is_empty() => {
-                "Slint preview is observing the live graph (read-only)".into()
+                "Slint UI connected to the live graph".into()
             }
             Ok(()) => "No live graph is available; use --demo for a preview graph".into(),
             Err(error) => format!("Could not refresh live graph: {error}"),
@@ -237,6 +233,36 @@ impl ReadOnlyGraphSource {
         Ok(())
     }
 
+    pub(crate) fn set_node_volume(&mut self, node: NodeId, volume: f32) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .set_node_volume(node, volume)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .set_node_volume(node, volume)
+                .map_err(|error| error.to_string());
+        }
+        Err("this node is not controlled by an audio backend".into())
+    }
+
+    pub(crate) fn set_node_mute(&mut self, node: NodeId, muted: bool) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .set_node_mute(node, muted)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .set_node_mute(node, muted)
+                .map_err(|error| error.to_string());
+        }
+        Err("this node is not controlled by an audio backend".into())
+    }
+
     fn demo_meters(&self) -> Vec<AudioMeter> {
         if self.meter_policy == MeterPolicy::Disabled {
             return Vec::new();
@@ -314,5 +340,14 @@ mod tests {
         let (mut source, _) = ReadOnlyGraphSource::new(&demo_args(), MeterPolicy::Disabled);
 
         assert!(source.audio_meters().unwrap().is_empty());
+    }
+
+    #[test]
+    fn demo_source_accepts_node_audio_controls() {
+        let (mut source, _) = ReadOnlyGraphSource::new(&demo_args(), MeterPolicy::Disabled);
+        let node = *source.graph().nodes.keys().next().unwrap();
+
+        source.set_node_volume(node, 0.42).unwrap();
+        source.set_node_mute(node, true).unwrap();
     }
 }

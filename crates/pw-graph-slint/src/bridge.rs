@@ -1,19 +1,21 @@
 use crate::args::Args;
 use crate::model::{
-    node_type_color, node_type_label, port_type_color, ConnectMode, GraphSnapshot, LinkView,
-    MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
+    node_layout_key, node_type_color, node_type_label, port_type_color, ConnectMode, GraphSnapshot,
+    LinkView, MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
 };
 use crate::source::ReadOnlyGraphSource;
 use pw_graph_backend::MeterPolicy;
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
+use serde::{Deserialize, Serialize};
 use slint::{
     Color, ComponentHandle, ModelRc, PhysicalSize, SharedString, Timer, TimerMode, VecModel,
 };
 use slint_node_editor::{GraphLogic, MovableNode, NodeEditorController, NodeEditorSetup};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -59,10 +61,16 @@ enum UiEvent {
     ToggleAudioMute(i32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 struct PreviewAudioControl {
     volume_position: f32,
     muted: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+struct PersistedSlintState {
+    audio_controls: BTreeMap<String, PreviewAudioControl>,
 }
 
 impl Default for PreviewAudioControl {
@@ -77,6 +85,12 @@ impl Default for PreviewAudioControl {
 struct PreviewApp {
     source: ReadOnlyGraphSource,
     config: AppConfig,
+    config_file: PathBuf,
+    config_saved_snapshot: AppConfig,
+    config_dirty_since: Option<Instant>,
+    state_file: PathBuf,
+    state_saved_snapshot: PersistedSlintState,
+    state_dirty_since: Option<Instant>,
     i18n: I18n,
     view: UiGraphState,
     snapshot: GraphSnapshot,
@@ -109,11 +123,20 @@ impl UiBridge {
             .unwrap_or_else(|| config.language.clone());
         let i18n = I18n::from_language(&language);
         let meter_policy = MeterPolicy::parse(&config.audio_meters);
-        let (source, status) = ReadOnlyGraphSource::new(&args, meter_policy);
+        let (mut source, status) = ReadOnlyGraphSource::new(&args, meter_policy);
         let view = UiGraphState::from_config(&config);
+        let state_file = config_file.with_file_name("slint-state.toml");
+        let persisted_state = load_slint_state(&state_file);
+        let audio_controls = restore_audio_controls(&mut source, &persisted_state);
         let app = Rc::new(RefCell::new(PreviewApp {
             source,
-            config,
+            config: config.clone(),
+            config_file,
+            config_saved_snapshot: config,
+            config_dirty_since: None,
+            state_file,
+            state_saved_snapshot: persisted_state,
+            state_dirty_since: None,
             i18n,
             view,
             snapshot: GraphSnapshot::default(),
@@ -122,7 +145,7 @@ impl UiBridge {
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
             meter_error: None,
-            audio_controls: BTreeMap::new(),
+            audio_controls,
         }));
 
         let window = MainWindow::new()?;
@@ -157,7 +180,9 @@ impl UiBridge {
             window.set_profile_name(SharedString::from(
                 preview.config.active_patchbay_profile.clone(),
             ));
-            window.set_config_path(SharedString::from(config_file.display().to_string()));
+            window.set_config_path(SharedString::from(
+                preview.config_file.display().to_string(),
+            ));
             window.set_patchbay_path(SharedString::from(
                 selected_patchbay_path(&preview.config)
                     .display()
@@ -317,7 +342,13 @@ impl UiBridge {
             );
         });
         let result = self.window.run();
-        self.app.borrow_mut().source.reset_meters();
+        {
+            let mut preview = self.app.borrow_mut();
+            read_window_state(&self.window, &mut preview);
+            save_config(&mut preview, false);
+            save_slint_state(&mut preview, false);
+            preview.source.reset_meters();
+        }
         result
     }
 
@@ -363,7 +394,10 @@ fn pump(
             preview.last_refresh = Instant::now();
         }
     }
+    restore_missing_audio_controls(&mut preview);
     refresh_meters(window, &mut preview);
+    autosave_config(&mut preview);
+    autosave_slint_state(&mut preview);
     shortcuts.set_vec(shortcut_rows(
         &preview.i18n,
         window.get_shortcut_search().as_str(),
@@ -470,31 +504,48 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
         }
         UiEvent::ToggleCollapse(id) => {
             preview.view.toggle_local_collapse(id, &preview.snapshot);
-            preview.status = "Node expansion changed locally; it will not be saved".into();
+            preview.status = "Node expansion changed; configuration will be saved".into();
         }
         UiEvent::DragCommitted(id, dx, dy) => {
             preview.view.move_selected(id, dx, dy, &preview.snapshot);
-            preview.status = "Node arrangement changed locally; it will not be saved".into();
+            preview.status = "Node arrangement changed; configuration will be saved".into();
         }
         UiEvent::SetAudioVolume(id, position) => {
             if let Some(node_id) = preview.view.ids.node_id(id) {
-                let control = preview.audio_controls.entry(node_id).or_default();
-                control.volume_position = position.clamp(0.0, 1.0);
-                preview.status = format!(
-                    "Node volume preview: {:.0}% (local only)",
-                    volume_from_track_position(control.volume_position) * 100.0
-                );
+                let position = position.clamp(0.0, 1.0);
+                let volume = volume_from_track_position(position);
+                match preview.source.set_node_volume(node_id, volume) {
+                    Ok(()) => {
+                        preview
+                            .audio_controls
+                            .entry(node_id)
+                            .or_default()
+                            .volume_position = position;
+                        preview.status = format!("Node volume: {:.0}%", volume * 100.0);
+                    }
+                    Err(error) => preview.status = format!("Could not change node volume: {error}"),
+                }
             }
         }
         UiEvent::ToggleAudioMute(id) => {
             if let Some(node_id) = preview.view.ids.node_id(id) {
-                let control = preview.audio_controls.entry(node_id).or_default();
-                control.muted = !control.muted;
-                preview.status = if control.muted {
-                    "Node muted in the Slint preview (local only)".into()
-                } else {
-                    "Node unmuted in the Slint preview (local only)".into()
-                };
+                let muted = !preview
+                    .audio_controls
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_default()
+                    .muted;
+                match preview.source.set_node_mute(node_id, muted) {
+                    Ok(()) => {
+                        preview.audio_controls.entry(node_id).or_default().muted = muted;
+                        preview.status = if muted {
+                            "Node muted".into()
+                        } else {
+                            "Node unmuted".into()
+                        };
+                    }
+                    Err(error) => preview.status = format!("Could not change node mute: {error}"),
+                }
             }
         }
     }
@@ -554,7 +605,7 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
                         .set_local_position(ui_id, position[0], position[1]);
                 }
             }
-            preview.status = "Nodes arranged locally; no layout was persisted".into();
+            preview.status = "Nodes arranged; configuration will be saved".into();
         }
         "preferences" => toggle_overlay(window, Overlay::Preferences),
         "history" => toggle_overlay(window, Overlay::History),
@@ -577,9 +628,9 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
             window.set_show_relay(false);
             window.set_show_qr(false);
         }
+        "save-config" => save_config(preview, true),
         "undo"
         | "redo"
-        | "save-config"
         | "save-patchbay"
         | "load-patchbay"
         | "delete-selection"
@@ -656,6 +707,8 @@ fn read_window_state(window: &MainWindow, preview: &mut PreviewApp) {
     preview.config.patchbay_auto_pin = window.get_patchbay_auto_pin();
     preview.config.patchbay_activated = window.get_patchbay_activated();
     preview.config.language = language_code(window.get_language_index()).into();
+    preview.config.window_width = window.get_width_().max(760.0);
+    preview.config.window_height = window.get_height_().max(520.0);
 
     let meter_policy = meter_policy_from_index(window.get_meter_policy_index());
     if meter_policy != preview.source.meter_policy() {
@@ -672,6 +725,162 @@ fn read_window_state(window: &MainWindow, preview: &mut PreviewApp) {
     }
 }
 
+fn sync_config(preview: &mut PreviewApp) {
+    preview.config.zoom = preview.view.zoom;
+    preview.config.thumbnail_view = preview.view.thumbnail_mode;
+    preview.config.minimap_visible = preview.view.minimap_visible;
+    preview.config.connect_mode = preview.view.connect_mode.as_str().into();
+    preview.config.media_filter = preview.view.media_filter.as_str().into();
+    preview.config.graph_search = preview.view.search_query.clone();
+    preview.config.node_text_scale = preview.view.node_text_scale;
+    preview
+        .view
+        .write_to_config(preview.source.graph(), &mut preview.config);
+}
+
+fn autosave_config(preview: &mut PreviewApp) {
+    sync_config(preview);
+    if preview.config == preview.config_saved_snapshot {
+        preview.config_dirty_since = None;
+        return;
+    }
+    let dirty_since = preview.config_dirty_since.get_or_insert_with(Instant::now);
+    if dirty_since.elapsed() >= Duration::from_millis(500) {
+        save_config(preview, false);
+    }
+}
+
+fn save_config(preview: &mut PreviewApp, report_success: bool) {
+    sync_config(preview);
+    match preview.config.save_to(&preview.config_file) {
+        Ok(()) => {
+            preview.config_saved_snapshot = preview.config.clone();
+            preview.config_dirty_since = None;
+            if report_success {
+                preview.status =
+                    format!("Configuration saved to {}", preview.config_file.display());
+            }
+        }
+        Err(error) => {
+            preview.status = format!("Could not save configuration: {error}");
+            preview.config_dirty_since = Some(Instant::now());
+        }
+    }
+}
+
+fn current_slint_state(preview: &PreviewApp) -> PersistedSlintState {
+    let mut audio_controls = preview.state_saved_snapshot.audio_controls.clone();
+    audio_controls.extend(
+        preview
+            .audio_controls
+            .iter()
+            .filter_map(|(node_id, control)| {
+                preview
+                    .source
+                    .graph()
+                    .node(*node_id)
+                    .map(|node| (node_layout_key(node), *control))
+            }),
+    );
+    PersistedSlintState { audio_controls }
+}
+
+fn load_slint_state(path: &std::path::Path) -> PersistedSlintState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| toml::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn restore_audio_controls(
+    source: &mut ReadOnlyGraphSource,
+    state: &PersistedSlintState,
+) -> BTreeMap<pw_graph_core::NodeId, PreviewAudioControl> {
+    let controls: Vec<_> = source
+        .graph()
+        .nodes
+        .values()
+        .filter_map(|node| {
+            state
+                .audio_controls
+                .get(&node_layout_key(node))
+                .copied()
+                .map(|control| (node.id, control))
+        })
+        .collect();
+    let mut restored = BTreeMap::new();
+    for (node_id, control) in controls {
+        let volume = volume_from_track_position(control.volume_position);
+        if source.set_node_volume(node_id, volume).is_ok()
+            && source.set_node_mute(node_id, control.muted).is_ok()
+        {
+            restored.insert(node_id, control);
+        }
+    }
+    restored
+}
+
+fn restore_missing_audio_controls(preview: &mut PreviewApp) {
+    let missing_keys: BTreeSet<_> = preview
+        .source
+        .graph()
+        .nodes
+        .values()
+        .filter(|node| !preview.audio_controls.contains_key(&node.id))
+        .map(node_layout_key)
+        .collect();
+    let missing: PersistedSlintState = PersistedSlintState {
+        audio_controls: preview
+            .state_saved_snapshot
+            .audio_controls
+            .iter()
+            .filter(|(key, _)| missing_keys.contains(*key))
+            .map(|(key, control)| (key.clone(), *control))
+            .collect(),
+    };
+    let restored = restore_audio_controls(&mut preview.source, &missing);
+    for (node_id, control) in restored {
+        preview.audio_controls.entry(node_id).or_insert(control);
+    }
+}
+
+fn autosave_slint_state(preview: &mut PreviewApp) {
+    let state = current_slint_state(preview);
+    if state == preview.state_saved_snapshot {
+        preview.state_dirty_since = None;
+        return;
+    }
+    let dirty_since = preview.state_dirty_since.get_or_insert_with(Instant::now);
+    if dirty_since.elapsed() >= Duration::from_millis(500) {
+        save_slint_state(preview, false);
+    }
+}
+
+fn save_slint_state(preview: &mut PreviewApp, report_success: bool) {
+    let state = current_slint_state(preview);
+    let result = toml::to_string_pretty(&state)
+        .map_err(|error| error.to_string())
+        .and_then(|contents| {
+            if let Some(parent) = preview.state_file.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            std::fs::write(&preview.state_file, contents).map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(()) => {
+            preview.state_saved_snapshot = state;
+            preview.state_dirty_since = None;
+            if report_success {
+                preview.status = format!("Slint state saved to {}", preview.state_file.display());
+            }
+        }
+        Err(error) => {
+            preview.status = format!("Could not save Slint state: {error}");
+            preview.state_dirty_since = Some(Instant::now());
+        }
+    }
+}
+
 fn sync_models(
     window: &MainWindow,
     preview: &mut PreviewApp,
@@ -680,9 +889,6 @@ fn sync_models(
     minimap_nodes: &Rc<VecModel<MinimapNode>>,
     controller: &Rc<NodeEditorController>,
 ) {
-    preview
-        .audio_controls
-        .retain(|node_id, _| preview.source.graph().nodes.contains_key(node_id));
     let snapshot = preview.view.snapshot_with_meters(
         preview.source.graph(),
         &preview.config,
@@ -760,8 +966,8 @@ fn sync_models(
 fn node_row(node: &NodeView, audio: PreviewAudioControl) -> NodeRow {
     NodeRow {
         id: node.id,
-        title: SharedString::from(node.title.clone()),
-        subtitle: SharedString::from(node_type_label(node.node_type)),
+        node_title: SharedString::from(node.title.clone()),
+        node_subtitle: SharedString::from(node_type_label(node.node_type)),
         x: node.position[0],
         y: node.position[1],
         width: node.width,
@@ -773,6 +979,7 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl) -> NodeRow {
         accent: color(
             node.appearance
                 .color
+                .or_else(|| node.ports.first().map(|port| port_type_color(port.port_type)))
                 .unwrap_or_else(|| node_type_color(node.node_type)),
         ),
         has_audio_controls: node.has_audio_controls,
@@ -1017,5 +1224,22 @@ mod tests {
         for code in ["en", "es", "fr"] {
             assert_eq!(language_code(language_index(code)), code);
         }
+    }
+
+    #[test]
+    fn slint_audio_state_round_trips_stable_node_keys() {
+        let mut state = PersistedSlintState::default();
+        state.audio_controls.insert(
+            "PipeWire:Audio Capture".into(),
+            PreviewAudioControl {
+                volume_position: 0.42,
+                muted: true,
+            },
+        );
+
+        let encoded = toml::to_string_pretty(&state).unwrap();
+        let decoded: PersistedSlintState = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, state);
     }
 }

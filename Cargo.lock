@@ -4623,9 +4623,11 @@ dependencies = [
  "pw-graph-effects",
  "pw-graph-i18n",
  "pw-graph-patchbay",
+ "serde",
  "slint",
  "slint-build",
  "slint-node-editor",
+ "toml 0.8.23",
 ]
 
 [[package]]

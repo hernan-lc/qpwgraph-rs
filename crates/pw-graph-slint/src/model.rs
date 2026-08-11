@@ -488,6 +488,64 @@ impl UiGraphState {
         self.local_appearances.insert(node_id, appearance);
     }
 
+    /// Write the effective Slint layout and node appearance into the shared
+    /// application configuration using the same stable keys as the Egui UI.
+    pub(crate) fn write_to_config(&self, graph: &Graph, config: &mut AppConfig) {
+        let configured_positions = configured_positions(graph, config);
+        let configured_appearances = configured_appearances(graph, config);
+        let mut key_counts = BTreeMap::<String, usize>::new();
+        for node in graph.nodes.values() {
+            *key_counts.entry(node_layout_key(node)).or_default() += 1;
+        }
+
+        config.node_positions = graph
+            .nodes
+            .values()
+            .map(|node| {
+                let position = self
+                    .local_positions
+                    .get(&node.id)
+                    .copied()
+                    .or_else(|| configured_positions.get(&node.id).copied())
+                    .unwrap_or(node.position);
+                (node.id.0.to_string(), position)
+            })
+            .collect();
+        config.node_positions_by_name = graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let key = node_layout_key(node);
+                (key_counts.get(&key) == Some(&1)).then(|| {
+                    let position = self
+                        .local_positions
+                        .get(&node.id)
+                        .copied()
+                        .or_else(|| configured_positions.get(&node.id).copied())
+                        .unwrap_or(node.position);
+                    (key, position)
+                })
+            })
+            .collect();
+        config.node_view_by_name = graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let key = node_layout_key(node);
+                if key_counts.get(&key) != Some(&1) {
+                    return None;
+                }
+                let appearance = self
+                    .local_appearances
+                    .get(&node.id)
+                    .cloned()
+                    .or_else(|| configured_appearances.get(&node.id).cloned())
+                    .unwrap_or_default();
+                (appearance != NodeAppearance::default()).then_some((key, appearance))
+            })
+            .collect();
+    }
+
     pub(crate) fn visible_counts(&self, snapshot: &GraphSnapshot) -> (usize, usize, usize) {
         (
             snapshot.nodes.len(),
@@ -673,7 +731,7 @@ fn configured_appearances(graph: &Graph, config: &AppConfig) -> BTreeMap<NodeId,
         .collect()
 }
 
-fn node_layout_key(node: &Node) -> String {
+pub(crate) fn node_layout_key(node: &Node) -> String {
     let kind = match node.node_type {
         NodeType::PipeWire => "PipeWire",
         NodeType::Effect => "Effect",
@@ -765,9 +823,9 @@ mod tests {
     }
 
     #[test]
-    fn local_positions_do_not_touch_config() {
+    fn local_positions_are_explicitly_written_to_config() {
         let graph = graph();
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
         let mut state = UiGraphState::from_config(&config);
         let snapshot = state.snapshot(&graph, &config);
         state.set_local_position(snapshot.nodes[0].id, 99.0, 101.0);
@@ -776,6 +834,14 @@ mod tests {
             [99.0, 101.0]
         );
         assert!(config.node_positions.is_empty());
+
+        state.write_to_config(&graph, &mut config);
+
+        assert_eq!(config.node_positions.get("1"), Some(&[99.0, 101.0]));
+        assert_eq!(
+            config.node_positions_by_name.get("PipeWire:Source"),
+            Some(&[99.0, 101.0])
+        );
     }
 
     #[test]
@@ -795,9 +861,9 @@ mod tests {
     }
 
     #[test]
-    fn collapse_is_local_to_the_preview() {
+    fn collapse_is_restored_through_config() {
         let graph = graph();
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
         let mut state = UiGraphState::from_config(&config);
         let snapshot = state.snapshot(&graph, &config);
 
@@ -805,6 +871,10 @@ mod tests {
 
         assert!(state.snapshot(&graph, &config).nodes[0].collapsed);
         assert!(config.node_view_by_name.is_empty());
+
+        state.write_to_config(&graph, &mut config);
+        let mut restored = UiGraphState::from_config(&config);
+        assert!(restored.snapshot(&graph, &config).nodes[0].collapsed);
     }
 
     #[test]
