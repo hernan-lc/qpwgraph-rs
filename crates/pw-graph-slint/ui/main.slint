@@ -1,6 +1,7 @@
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
 import {
     BaseNode,
+    DragState,
     LinkData,
     MinimapNode,
     NodeEditor,
@@ -166,10 +167,9 @@ component GraphNode inherits BaseNode {
     world-y: data.y * 1px;
     node-width: data.width * 1px;
     node-height: data.height * 1px;
-    // The editor's drag surface covers the node. Interactive children (the
-    // audio control and pins) are deeper in the item tree and receive their
-    // own pointer gestures first.
-    drag-handle-height: data.height * 1px;
+    // Keep dragging on the header so the audio controls and pins in the body
+    // receive pointer events without competing with BaseNode's drag gesture.
+    drag-handle-height: 40px;
     accessible-label: data.node-title;
 
     Rectangle {
@@ -372,6 +372,7 @@ export component MainWindow inherits Window {
     in-out property <string> grid-commands: "";
     out property <float> width_: self.width / 1px;
     out property <float> height_: self.height / 1px;
+    out property <bool> graph-node-dragging: DragState.is-dragging;
     property <length> rail-width: 76px;
     property <length> status-height: root.show-statusbar ? 31px : 0px;
 

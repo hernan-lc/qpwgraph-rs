@@ -31,3 +31,6 @@ toml.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
+
+[dev-dependencies]
+i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "e100f5e11da59897f58a2bf1937b245f4ca6c2e6" }

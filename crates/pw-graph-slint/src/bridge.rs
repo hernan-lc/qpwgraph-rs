@@ -1650,23 +1650,22 @@ fn sync_models(
         &preview.meters,
         meter_fallback(&preview.source),
     );
-    nodes.set_vec(
-        snapshot
-            .nodes
-            .iter()
-            .map(|node| {
-                node_row(
-                    node,
-                    preview
-                        .audio_controls
-                        .get(&node.node_id)
-                        .copied()
-                        .unwrap_or_default(),
-                    &preview.i18n,
-                )
-            })
-            .collect::<Vec<_>>(),
-    );
+    let node_rows = snapshot
+        .nodes
+        .iter()
+        .map(|node| {
+            node_row(
+                node,
+                preview
+                    .audio_controls
+                    .get(&node.node_id)
+                    .copied()
+                    .unwrap_or_default(),
+                &preview.i18n,
+            )
+        })
+        .collect::<Vec<_>>();
+    sync_node_rows(window, nodes, node_rows);
     links.set_vec(snapshot.links.iter().map(link_row).collect::<Vec<_>>());
     minimap_nodes.set_vec(
         snapshot
@@ -1765,6 +1764,25 @@ fn sync_models(
         window.set_relay_qr_image(Image::default());
     }
     preview.snapshot = snapshot;
+}
+
+/// Replacing a Slint model invalidates its repeated component instances. Update
+/// stable rows in place so the 50ms refresh timer cannot cancel pointer capture
+/// between mouse-down and release. Defer structural changes during a drag.
+fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<NodeRow>) {
+    let stable_shape = nodes.row_count() == rows.len()
+        && rows.iter().enumerate().all(|(index, row)| {
+            nodes
+                .row_data(index)
+                .is_some_and(|current| current.id == row.id)
+        });
+    if stable_shape {
+        for (index, row) in rows.into_iter().enumerate() {
+            nodes.set_row_data(index, row);
+        }
+    } else if !window.get_graph_node_dragging() {
+        nodes.set_vec(rows);
+    }
 }
 
 fn node_row(node: &NodeView, audio: PreviewAudioControl, i18n: &I18n) -> NodeRow {
@@ -2266,6 +2284,8 @@ fn color(rgba: [u8; 4]) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{LogicalPosition, ModelRc};
 
     #[test]
     fn shortcut_catalog_matches_the_egui_help_dialog() {
@@ -2332,5 +2352,113 @@ mod tests {
         let decoded: PersistedSlintState = toml::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn node_header_drag_and_body_mute_button_receive_pointer_events() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let window = MainWindow::new().unwrap();
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(1100.0, 760.0));
+        let nodes = Rc::new(VecModel::from(vec![NodeRow {
+            id: 7,
+            node_title: "Test audio node".into(),
+            node_subtitle: "PipeWire node".into(),
+            x: 100.0,
+            y: 100.0,
+            width: 280.0,
+            height: 110.0,
+            selected: false,
+            collapsed: false,
+            thumbnail: false,
+            font_scale: 1.0,
+            accent: Color::from_rgb_u8(87, 199, 133),
+            has_audio_controls: true,
+            meter_rms: 0.0,
+            meter_peak: 0.0,
+            meter_peak_position: 0.0,
+            meter_available: false,
+            meter_label: "N/A".into(),
+            audio_volume_position: 0.9,
+            audio_muted: false,
+            ports: ModelRc::default(),
+        }]));
+        window.set_nodes(ModelRc::from(nodes.clone()));
+
+        let drag_result = Rc::new(RefCell::new(None));
+        window
+            .global::<NodeEditorInternalCallbacks>()
+            .on_end_node_drag({
+                let drag_result = drag_result.clone();
+                let nodes = nodes.clone();
+                move |node_id, dx, dy| {
+                    GraphLogic::commit_drag(&nodes, node_id, dx, dy);
+                    *drag_result.borrow_mut() = Some((node_id, dx, dy));
+                }
+            });
+        let muted_node = Rc::new(RefCell::new(None));
+        window.on_graph_audio_mute_toggled({
+            let muted_node = muted_node.clone();
+            move |node_id| *muted_node.borrow_mut() = Some(node_id)
+        });
+
+        let dispatch = |event| {
+            window.window().dispatch_event(event);
+            slint::platform::update_timers_and_animations();
+        };
+
+        // Workspace starts at x=76; editor pan is (24, 24). The node header
+        // therefore starts at screen position (200, 124).
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(240.0, 140.0),
+            button: PointerEventButton::Left,
+        });
+
+        // The refresh timer may run after mouse-down but before the pointer
+        // crosses the drag threshold. Updating the stable row must retain the
+        // component instance and its pointer capture.
+        let mut pressed_refresh = nodes.row_data(0).unwrap();
+        pressed_refresh.meter_peak = 0.25;
+        sync_node_rows(&window, &nodes, vec![pressed_refresh]);
+        assert_eq!(nodes.row_data(0).unwrap().meter_peak, 0.25);
+
+        dispatch(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(270.0, 160.0),
+        });
+        assert!(window.get_graph_node_dragging());
+
+        // It may run again during the drag; another in-place update must also
+        // preserve the gesture through release.
+        let mut stale_refresh = nodes.row_data(0).unwrap();
+        stale_refresh.meter_peak = 0.5;
+        sync_node_rows(&window, &nodes, vec![stale_refresh]);
+        assert_eq!(nodes.row_data(0).unwrap().meter_peak, 0.5);
+
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(270.0, 160.0),
+            button: PointerEventButton::Left,
+        });
+
+        let (node_id, dx, dy) = drag_result.borrow().expect("header drag must finish");
+        assert_eq!(node_id, 7);
+        assert!((dx - 30.0).abs() < 0.1);
+        assert!((dy - 20.0).abs() < 0.1);
+        assert!(!window.get_graph_node_dragging());
+        assert!((nodes.row_data(0).unwrap().x - 130.0).abs() < 0.1);
+        assert!((nodes.row_data(0).unwrap().y - 120.0).abs() < 0.1);
+
+        // The mute button is in the node body. It must not be captured by the
+        // inherited drag area after the node has visually moved by (30, 20).
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(485.0, 205.0),
+            button: PointerEventButton::Left,
+        });
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(485.0, 205.0),
+            button: PointerEventButton::Left,
+        });
+        assert_eq!(*muted_node.borrow(), Some(7));
     }
 }

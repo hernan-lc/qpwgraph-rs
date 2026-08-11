@@ -4616,6 +4616,7 @@ dependencies = [
 name = "pw-graph-slint"
 version = "0.1.0"
 dependencies = [
+ "i-slint-backend-testing",
  "pw-graph-alsamidi",
  "pw-graph-backend",
  "pw-graph-config",
