@@ -408,7 +408,10 @@ export component MainWindow inherits Window {
     out property <float> height_: self.height / 1px;
     out property <bool> graph-node-dragging: DragState.is-dragging;
     property <length> rail-width: 76px;
-    property <length> status-height: root.show-statusbar ? 31px : 0px;
+    // The preview uses the full window for the graph. Status is still kept in
+    // the bridge for diagnostics and preferences compatibility, but it is not
+    // rendered as a second bottom strip.
+    property <length> status-height: 0px;
 
     callback action(string);
     callback graph-node-selected(int, bool);
@@ -602,17 +605,6 @@ export component MainWindow inherits Window {
             }
         }
 
-        LineEdit {
-            x: parent.width - 244px; y: 15px; width: 228px; height: 32px;
-            placeholder-text: UiI18n.localized("search.placeholder");
-            text <=> root.search-text;
-        }
-        Rectangle {
-            x: parent.width - 134px; y: 57px; width: 118px; height: 24px;
-            background: #202933dc; border-radius: 4px;
-            Text { width: parent.width; height: parent.height; text: root.graph-counts; color: #b9c7d1; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
-        }
-
         if root.show-relay: Rectangle {
             x: parent.width - min(380px, parent.width - 36px);
             y: 0px;
@@ -789,13 +781,6 @@ export component MainWindow inherits Window {
             Text { x: 22px; y: 342px; width: parent.width - 44px; text: UiI18n.localized("relay.qr_hint"); color: #aebdca; font-size: 10px; horizontal-alignment: center; }
             ActionButton { x: parent.width - 105px; y: parent.height - 45px; width: 88px; text: UiI18n.localized("shortcuts.close"); clicked => { root.action("close-qr"); } }
         }
-    }
-
-    if root.show-statusbar: Rectangle {
-        x: 0px; y: root.height - root.status-height; width: root.width; height: root.status-height;
-        background: #20262d;
-        Rectangle { width: parent.width; height: 1px; background: #36414c; }
-        Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.status + " · " + root.graph-counts + " [" + root.backend + "]"; color: #bdc9d2; font-size: 10px; vertical-alignment: center; overflow: elide; }
     }
 
     RailTooltip { x: root.rail-width + 8px; y: preferences_button.y + 6px; text: preferences_button.label; shown: preferences_button.hovered; }
