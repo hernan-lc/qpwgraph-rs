@@ -2588,6 +2588,118 @@ mod tests {
     }
 
     #[test]
+    fn rendered_pin_drag_reports_the_visible_output_to_input_pair() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let window = MainWindow::new().unwrap();
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(1100.0, 760.0));
+        let source_ports = Rc::new(VecModel::from(vec![PortRow {
+            id: 101,
+            label: "output".into(),
+            direction: 1,
+            color: Color::from_rgb_u8(87, 199, 133),
+            y: 0.0,
+        }]));
+        let target_ports = Rc::new(VecModel::from(vec![PortRow {
+            id: 202,
+            label: "input".into(),
+            direction: 0,
+            color: Color::from_rgb_u8(87, 199, 133),
+            y: 0.0,
+        }]));
+        let nodes = Rc::new(VecModel::from(vec![
+            NodeRow {
+                id: 7,
+                node_title: "Source".into(),
+                node_subtitle: "PipeWire node".into(),
+                x: 100.0,
+                y: 100.0,
+                width: 280.0,
+                height: 100.0,
+                selected: false,
+                collapsed: false,
+                thumbnail: false,
+                font_scale: 1.0,
+                accent: Color::from_rgb_u8(87, 199, 133),
+                has_audio_controls: false,
+                meter_rms: 0.0,
+                meter_peak: 0.0,
+                meter_peak_position: 0.0,
+                meter_available: false,
+                meter_label: "N/A".into(),
+                audio_volume_position: 0.9,
+                audio_muted: false,
+                ports: ModelRc::from(source_ports),
+            },
+            NodeRow {
+                id: 8,
+                node_title: "Target".into(),
+                node_subtitle: "PipeWire node".into(),
+                x: 500.0,
+                y: 100.0,
+                width: 280.0,
+                height: 100.0,
+                selected: false,
+                collapsed: false,
+                thumbnail: false,
+                font_scale: 1.0,
+                accent: Color::from_rgb_u8(87, 199, 133),
+                has_audio_controls: false,
+                meter_rms: 0.0,
+                meter_peak: 0.0,
+                meter_peak_position: 0.0,
+                meter_available: false,
+                meter_label: "N/A".into(),
+                audio_volume_position: 0.9,
+                audio_muted: false,
+                ports: ModelRc::from(target_ports),
+            },
+        ]));
+        window.set_nodes(ModelRc::from(nodes));
+
+        let setup = NodeEditorSetup::new(|_, _, _| {});
+        let controller = setup.controller().clone();
+        slint_node_editor::wire_node_editor!(window, setup);
+        window.on_graph_compute_pin_at({
+            let controller = controller.clone();
+            move |x, y| controller.cache().borrow().find_pin_at(x, y, 10.0)
+        });
+        let link_result = Rc::new(RefCell::new(None));
+        window.on_graph_link_requested({
+            let link_result = link_result.clone();
+            move |start, end| *link_result.borrow_mut() = Some((start, end))
+        });
+        // Seed the same world-space geometry that the Pin reporting callbacks
+        // provide once the render loop has laid out the rows.
+        controller.handle_node_rect(7, 100.0, 100.0, 280.0, 100.0);
+        controller.handle_node_rect(8, 500.0, 100.0, 280.0, 100.0);
+        controller.handle_pin_position(101, 7, 2, 270.5, 56.5);
+        controller.handle_pin_position(202, 8, 1, 9.5, 56.5);
+
+        let dispatch = |event| {
+            window.window().dispatch_event(event);
+            slint::platform::update_timers_and_animations();
+        };
+        // Workspace starts at x=76 and the editor pan is (24, 24). These are
+        // the visible centers after including the body and port-row offsets.
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(470.5, 180.5),
+            button: PointerEventButton::Left,
+        });
+        dispatch(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(609.5, 180.5),
+        });
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(609.5, 180.5),
+            button: PointerEventButton::Left,
+        });
+
+        assert_eq!(*link_result.borrow(), Some((101, 202)));
+    }
+
+    #[test]
     fn shortcut_catalog_matches_the_egui_help_dialog() {
         let i18n = I18n::from_language("en");
         assert_eq!(shortcut_rows(&i18n, "").len(), 22);

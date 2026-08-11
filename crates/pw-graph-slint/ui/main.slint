@@ -319,6 +319,11 @@ component GraphNode inherits BaseNode {
                 pin-type: port.direction == 0 ? PinTypes.input : PinTypes.output;
                 node-screen-x: root.screen-x;
                 node-screen-y: root.screen-y;
+                // Pin is nested inside the port-row rectangle. Report the
+                // row origin so the editor's world-space cache matches the
+                // visible dot for hit-testing and drag previews.
+                parent-offset-x: 13px;
+                parent-offset-y: 41px + (data.has-audio-controls ? 45px : 5px) + port.y * 1px;
                 base-color: port.color;
                 hover-color: port.color.brighter(25%);
                 base-size: 11px;

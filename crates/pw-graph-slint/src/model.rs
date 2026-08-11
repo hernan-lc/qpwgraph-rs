@@ -24,18 +24,6 @@ pub(crate) enum MeterState {
     Demo,
 }
 
-impl MeterState {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Unavailable => "N/A",
-            Self::Disabled => "OFF",
-            Self::Waiting => "WAIT",
-            Self::Live => "LIVE",
-            Self::Demo => "DEMO",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct MeterReading {
     pub(crate) rms: f32,
@@ -702,15 +690,6 @@ impl UiGraphState {
         query.is_empty()
             || node.name.to_ascii_lowercase().contains(&query)
             || port.name.to_ascii_lowercase().contains(&query)
-    }
-}
-
-pub(crate) fn node_type_label(node_type: NodeType) -> &'static str {
-    match node_type {
-        NodeType::PipeWire => "PipeWire node",
-        NodeType::Effect => "Effect node",
-        NodeType::AlsaMidi => "ALSA MIDI node",
-        NodeType::Unknown => "Unknown node",
     }
 }
 
