@@ -54,9 +54,16 @@ export struct EffectRow {
     vendor: string,
     description: string,
     enabled: bool,
+    has-parameter: bool,
+    parameter-id: string,
+    parameter-label: string,
+    parameter-minimum: float,
+    parameter-maximum: float,
+    parameter-value: float,
 }
 
 export struct RelayRow {
+    id: string,
     name: string,
     address: string,
     state: string,
@@ -305,11 +312,13 @@ export component MainWindow inherits Window {
     in property <[RuleRow]> rules: [];
     in property <[ShortcutRow]> shortcuts: [];
     in property <[EffectRow]> effects: [];
+    in property <[string]> effect-options: [];
+    in property <bool> effects-available: false;
     in property <[RelayRow]> relay-rows: [];
     in property <string> status: "Starting Slint UI…";
     in property <string> backend: "";
     in property <string> graph-counts: "";
-    in property <string> read-only-message: "Slint migration build — layout and audio controls are active.";
+    in property <string> read-only-message: "Slint migration build — graph, effects, relay, layout and audio controls are active.";
     in-out property <bool> show-statusbar: true;
     in-out property <bool> show-common-actions: true;
     in-out property <bool> show-patchbay-toolbar: true;
@@ -338,6 +347,21 @@ export component MainWindow inherits Window {
     in-out property <bool> show-qr: false;
     in-out property <int> preferences-tab: 0;
     in-out property <int> relay-tab: 0;
+    in-out property <string> relay-device-name: "";
+    in-out property <string> relay-host-pin: "";
+    in-out property <string> relay-host-port-text: "0";
+    in-out property <string> relay-client-target: "";
+    in-out property <string> relay-client-pin: "";
+    in-out property <int> relay-role-index: 2;
+    in-out property <int> relay-codec-index: 0;
+    in-out property <int> relay-frame-index: 0;
+    in-out property <int> relay-transport-index: 0;
+    in-out property <int> effect-selection-index: 0;
+    in property <bool> relay-available: false;
+    in property <bool> relay-host-active: false;
+    in property <string> relay-host-endpoint: "";
+    in property <string> relay-qr-payload: "";
+    in property <image> relay-qr-image;
     in-out property <string> search-text: "";
     in-out property <string> media-filter: "all";
     in-out property <string> connect-mode: "advanced";
@@ -570,6 +594,12 @@ export component MainWindow inherits Window {
                 x: 16px; y: 106px; width: parent.width - 32px; height: parent.height - 124px;
                 VerticalBox {
                     spacing: 7px;
+                    Rectangle {
+                        height: 82px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
+                        LineEdit { x: 8px; y: 8px; width: parent.width - 112px; height: 29px; placeholder-text: "host:port or QR payload"; text <=> root.relay-client-target; }
+                        LineEdit { x: 8px; y: 45px; width: parent.width - 200px; height: 29px; placeholder-text: "PIN"; text <=> root.relay-client-pin; }
+                        ActionButton { x: parent.width - 96px; y: 27px; width: 82px; text: "Connect"; enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
+                    }
                     Text { text: "Nearby and remembered relay peers"; color: #aebdca; font-size: 11px; }
                     for row in root.relay-rows: Rectangle {
                         height: 51px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
@@ -577,26 +607,48 @@ export component MainWindow inherits Window {
                         Text { x: 9px; y: 26px; width: 185px; height: 16px; text: row.state + " · " + row.address; color: #aebdca; font-size: 9px; overflow: elide; }
                         Rectangle { x: parent.width - 80px; y: 21px; width: 42px; height: 5px; background: #151a20; border-radius: 3px; }
                         Rectangle { x: parent.width - 80px; y: 21px; width: row.level * 42px; height: 5px; background: #57c785; border-radius: 3px; }
-                        ActionButton { x: parent.width - 31px; y: 12px; width: 22px; text: "+"; clicked => { root.action("relay-connect"); } }
+                        ActionButton {
+                            x: parent.width - 31px; y: 12px; width: 22px;
+                            text: row.state == "connected · send + receive" || row.state == "connected · send" || row.state == "connected · receive" || row.state == "connected" ? "−" : row.state == "connecting" ? "…" : "+";
+                            enabled: root.relay-available && row.id != "" && row.state != "connecting";
+                            clicked => {
+                                if (row.state == "connected · send + receive" || row.state == "connected · send" || row.state == "connected · receive" || row.state == "connected") {
+                                    root.action("relay-disconnect:" + row.id);
+                                } else {
+                                    root.action("relay-connect:" + row.id);
+                                }
+                            }
+                        }
                     }
                 }
             }
             if root.relay-tab == 1: Rectangle {
-                x: 16px; y: 108px; width: parent.width - 32px; height: 230px; background: #29323c; border-radius: 5px;
+                x: 16px; y: 108px; width: parent.width - 32px; height: 330px; background: #29323c; border-radius: 5px;
                 Text { x: 12px; y: 12px; text: "Host your graph"; color: #edf3f7; font-size: 14px; }
-                Text { x: 12px; y: 40px; width: parent.width - 24px; text: "Choose a network, start a host, then share the generated address."; color: #aebdca; font-size: 11px; wrap: word-wrap; }
-                ActionButton { x: 12px; y: 95px; width: 112px; text: "Start host"; clicked => { root.action("relay-host-start"); } }
-                ActionButton { x: 132px; y: 95px; width: 112px; text: "Show QR"; clicked => { root.action("relay-show-qr"); } }
-                Text { x: 12px; y: 147px; text: "Read-only preview"; color: #e9b864; font-size: 10px; }
+                Text { x: 12px; y: 40px; width: parent.width - 24px; text: "Start a host, then share the endpoint and pairing PIN."; color: #aebdca; font-size: 11px; wrap: word-wrap; }
+                Text { x: 12px; y: 78px; text: "Device name"; color: #aebdca; font-size: 10px; }
+                LineEdit { x: 100px; y: 68px; width: parent.width - 112px; height: 29px; text <=> root.relay-device-name; }
+                Text { x: 12px; y: 115px; text: "Host PIN"; color: #aebdca; font-size: 10px; }
+                LineEdit { x: 100px; y: 105px; width: parent.width - 112px; height: 29px; text <=> root.relay-host-pin; }
+                Text { x: 12px; y: 152px; text: "Port"; color: #aebdca; font-size: 10px; }
+                LineEdit { x: 100px; y: 142px; width: 110px; height: 29px; placeholder-text: "0 = auto"; text <=> root.relay-host-port-text; }
+                ActionButton { x: 12px; y: 190px; width: 112px; text: root.relay-host-active ? "Stop host" : "Start host"; enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
+                ActionButton { x: 132px; y: 190px; width: 112px; text: "Show QR"; enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
+                Text { x: 12px; y: 237px; width: parent.width - 24px; text: root.relay-host-active ? "Listening at " + root.relay-host-endpoint : "Host is stopped"; color: root.relay-host-active ? #57c785 : #aebdca; font-size: 10px; overflow: elide; }
+                Text { x: 12px; y: 263px; width: parent.width - 24px; text: root.relay-host-active ? "Pairing PIN: " + root.relay-host-pin : "Relay settings are saved automatically."; color: #aebdca; font-size: 10px; overflow: elide; }
             }
             if root.relay-tab == 2: Rectangle {
-                x: 16px; y: 108px; width: parent.width - 32px; height: 238px; background: #29323c; border-radius: 5px;
+                x: 16px; y: 108px; width: parent.width - 32px; height: 300px; background: #29323c; border-radius: 5px;
                 Text { x: 12px; y: 12px; text: "Advanced settings"; color: #edf3f7; font-size: 14px; }
-                Text { x: 12px; y: 45px; text: "Codec"; color: #aebdca; font-size: 11px; }
-                ComboBox { x: 98px; y: 34px; width: 140px; model: ["Opus", "PCM"]; }
-                Text { x: 12px; y: 89px; text: "Frame length"; color: #aebdca; font-size: 11px; }
-                ComboBox { x: 98px; y: 78px; width: 140px; model: ["10 ms", "20 ms", "40 ms"]; }
-                Text { x: 12px; y: 145px; width: parent.width - 24px; text: "Changes are intentionally unavailable in this read-only preview."; color: #e9b864; font-size: 10px; wrap: word-wrap; }
+                Text { x: 12px; y: 45px; text: "Role"; color: #aebdca; font-size: 11px; }
+                ComboBox { x: 98px; y: 34px; width: 140px; model: ["Emit", "Receive", "Both"]; current-index <=> root.relay-role-index; }
+                Text { x: 12px; y: 89px; text: "Codec"; color: #aebdca; font-size: 11px; }
+                ComboBox { x: 98px; y: 78px; width: 140px; model: ["Opus", "PCM"]; current-index <=> root.relay-codec-index; }
+                Text { x: 12px; y: 133px; text: "Frame length"; color: #aebdca; font-size: 11px; }
+                ComboBox { x: 98px; y: 122px; width: 140px; model: ["5 ms", "10 ms", "20 ms", "40 ms", "60 ms"]; current-index <=> root.relay-frame-index; }
+                Text { x: 12px; y: 177px; text: "Transport"; color: #aebdca; font-size: 11px; }
+                ComboBox { x: 98px; y: 166px; width: 140px; model: ["Auto", "Wi-Fi", "Bluetooth PAN", "LAN"]; current-index <=> root.relay-transport-index; }
+                Text { x: 12px; y: 222px; width: parent.width - 24px; text: "These settings apply to the next host or client connection."; color: #aebdca; font-size: 10px; wrap: word-wrap; }
             }
         }
 
@@ -660,31 +712,44 @@ export component MainWindow inherits Window {
             x: max(24px, (parent.width - 700px) / 2); y: max(28px, (parent.height - 510px) / 2); width: min(700px, parent.width - 48px); height: min(510px, parent.height - 56px);
             background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
             Text { x: 20px; y: 18px; text: "Effects"; color: #f0f4f7; font-size: 19px; }
-            Text { x: 20px; y: 45px; width: parent.width - 90px; text: "Choose an effect and inspect its settings; creation remains disabled in this preview."; color: #aebdca; font-size: 11px; overflow: elide; }
+            Text { x: 20px; y: 45px; width: parent.width - 90px; text: "Create realtime effect nodes, bypass them, or remove them from the graph."; color: #aebdca; font-size: 11px; overflow: elide; }
             ActionButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; clicked => { root.action("effects"); } }
             ScrollView {
                 x: 20px; y: 86px; width: parent.width - 40px; height: parent.height - 145px;
                 VerticalBox {
                     spacing: 8px;
+                    if root.effects.length == 0: Text { text: "No effect instances yet."; color: #9eafbc; font-size: 11px; }
                     for effect in root.effects: Rectangle {
-                        height: 75px; background: #2a333d; border-color: #40505f; border-width: 1px; border-radius: 5px;
-                        Text { x: 11px; y: 8px; width: parent.width - 90px; height: 17px; text: effect.name; color: #edf3f7; font-size: 12px; overflow: elide; }
-                        Text { x: 11px; y: 27px; width: parent.width - 90px; height: 15px; text: effect.vendor; color: #96a8b6; font-size: 9px; overflow: elide; }
-                        Text { x: 11px; y: 47px; width: parent.width - 90px; height: 18px; text: effect.description; color: #b9c7d1; font-size: 10px; overflow: elide; }
-                        ActionButton { x: parent.width - 65px; y: 22px; width: 53px; text: effect.enabled ? "Inspect" : "Off"; clicked => { root.action("inspect-effect"); } }
+                        height: 105px; background: #2a333d; border-color: #40505f; border-width: 1px; border-radius: 5px;
+                        Text { x: 11px; y: 8px; width: parent.width - 180px; height: 17px; text: effect.name; color: #edf3f7; font-size: 12px; overflow: elide; }
+                        Text { x: 11px; y: 27px; width: parent.width - 180px; height: 15px; text: effect.vendor; color: #96a8b6; font-size: 9px; overflow: elide; }
+                        Text { x: 11px; y: 47px; width: parent.width - 180px; height: 18px; text: effect.description; color: #b9c7d1; font-size: 10px; overflow: elide; }
+                        if effect.has-parameter: Text { x: 11px; y: 72px; width: 102px; height: 18px; text: effect.parameter-label; color: #aebdca; font-size: 9px; overflow: elide; }
+                        if effect.has-parameter: Slider {
+                            x: 118px; y: 68px; width: parent.width - 310px; height: 24px;
+                            minimum: effect.parameter-minimum;
+                            maximum: effect.parameter-maximum;
+                            value: effect.parameter-value;
+                            changed(value) => { root.action("effect-parameter:" + effect.description + ":" + effect.parameter-id + ":" + value); }
+                        }
+                        ActionButton { x: parent.width - 168px; y: 10px; width: 76px; text: effect.enabled ? "Disable" : "Enable"; clicked => { root.action("effect-toggle:" + effect.description); } }
+                        ActionButton { x: parent.width - 86px; y: 10px; width: 76px; text: "Details"; clicked => { root.action("effect-inspect:" + effect.description); } }
+                        ActionButton { x: parent.width - 86px; y: 43px; width: 76px; text: "Remove"; clicked => { root.action("effect-remove:" + effect.description); } }
                     }
                 }
             }
-            ActionButton { x: 20px; y: parent.height - 43px; width: 112px; text: "Add effect"; clicked => { root.action("create-effect"); } }
-            Text { x: 145px; y: parent.height - 35px; text: "Read-only preview"; color: #e9b864; font-size: 10px; }
+            ComboBox { x: 20px; y: parent.height - 48px; width: 230px; model: root.effect-options; current-index <=> root.effect-selection-index; }
+            ActionButton { x: 260px; y: parent.height - 48px; width: 112px; text: "Add effect"; enabled: root.effects-available && root.effect-options.length > 0; clicked => { root.action("effect-create"); } }
+            Text { x: 385px; y: parent.height - 39px; text: "Changes are saved automatically."; color: #aebdca; font-size: 10px; }
         }
 
         if root.show-qr: Rectangle {
             x: max(24px, (parent.width - 380px) / 2); y: max(28px, (parent.height - 435px) / 2); width: min(380px, parent.width - 48px); height: min(435px, parent.height - 56px);
             background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
             Text { x: 18px; y: 18px; text: "Relay QR code"; color: #f0f4f7; font-size: 18px; }
-            Rectangle { x: 72px; y: 65px; width: 236px; height: 236px; background: #f5f5f5; border-radius: 4px; Text { width: parent.width; height: parent.height; text: "QR"; color: #111; font-size: 42px; horizontal-alignment: center; vertical-alignment: center; } }
-            Text { x: 22px; y: 320px; width: parent.width - 44px; text: "QR payload is shown as a visual placeholder in this read-only UI pass."; color: #aebdca; font-size: 11px; horizontal-alignment: center; wrap: word-wrap; }
+            Rectangle { x: 72px; y: 65px; width: 236px; height: 236px; background: #f5f5f5; border-radius: 4px; Image { width: parent.width; height: parent.height; source: root.relay-qr-image; } }
+            Text { x: 22px; y: 310px; width: parent.width - 44px; text: root.relay-qr-payload; color: #aebdca; font-size: 10px; horizontal-alignment: center; wrap: word-wrap; overflow: elide; }
+            Text { x: 22px; y: 342px; width: parent.width - 44px; text: "Scan this code on the peer device."; color: #aebdca; font-size: 10px; horizontal-alignment: center; }
             ActionButton { x: parent.width - 105px; y: parent.height - 45px; width: 88px; text: "Close"; clicked => { root.action("close-qr"); } }
         }
     }

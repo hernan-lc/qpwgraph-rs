@@ -1,10 +1,19 @@
 //! Backend snapshots and the node-level controls implemented by the Slint UI.
 
 use crate::args::Args;
-use pw_graph_backend::{AudioMeter, DemoDriver, GraphDriver, MeterPolicy};
+use pw_graph_backend::{
+    AudioMeter, DemoDriver, EffectDriver, EffectInsertRequest, EffectInstance, EffectNodeRequest,
+    GraphDriver, MeterPolicy,
+};
+#[cfg(feature = "relay")]
+use pw_graph_backend::{
+    RelayDriver, RelayEngineStatus, RelayEvent, RelayHostRequest, RelayLocalLink, RelayPeerInfo,
+    RelayRoles, RelaySessionId,
+};
 #[cfg(any(feature = "pipewire", feature = "alsa"))]
 use pw_graph_core::GraphError;
-use pw_graph_core::{Graph, NodeId, PortType};
+use pw_graph_core::{Graph, NodeId, PortKey, PortType};
+use pw_graph_effects::EffectDescriptor;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -260,6 +269,289 @@ impl ReadOnlyGraphSource {
         Err("this node is not controlled by an audio backend".into())
     }
 
+    pub(crate) fn effect_descriptors(&self) -> Vec<EffectDescriptor> {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.effect_descriptors();
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_ref() {
+            return driver.effect_descriptors();
+        }
+        pw_graph_effects::EffectHost::new().descriptors()
+    }
+
+    pub(crate) fn effect_instances(&self) -> Vec<EffectInstance> {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.effect_instances();
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_ref() {
+            return driver.effect_instances();
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn supports_effect_nodes(&self) -> bool {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.supports_effect_nodes();
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_ref() {
+            return driver.supports_effect_nodes();
+        }
+        false
+    }
+
+    pub(crate) fn create_effect_node(
+        &mut self,
+        request: EffectNodeRequest,
+    ) -> Result<EffectInstance, String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .create_effect_node(request)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .create_effect_node(request)
+                .map_err(|error| error.to_string());
+        }
+        Err("effect processing is not available for this backend".into())
+    }
+
+    pub(crate) fn insert_effect(
+        &mut self,
+        request: EffectInsertRequest,
+    ) -> Result<EffectInstance, String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .insert_effect(request)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .insert_effect(request)
+                .map_err(|error| error.to_string());
+        }
+        Err("effect processing is not available for this backend".into())
+    }
+
+    pub(crate) fn set_effect_enabled(
+        &mut self,
+        instance_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .set_effect_enabled(instance_id, enabled)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .set_effect_enabled(instance_id, enabled)
+                .map_err(|error| error.to_string());
+        }
+        Err("effect processing is not available for this backend".into())
+    }
+
+    pub(crate) fn set_effect_parameter(
+        &mut self,
+        instance_id: &str,
+        parameter: &str,
+        value: f32,
+    ) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .set_effect_parameter(instance_id, parameter, value)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .set_effect_parameter(instance_id, parameter, value)
+                .map_err(|error| error.to_string());
+        }
+        Err("effect processing is not available for this backend".into())
+    }
+
+    pub(crate) fn remove_effect(&mut self, instance_id: &str) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .remove_effect(instance_id)
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            return driver
+                .remove_effect(instance_id)
+                .map_err(|error| error.to_string());
+        }
+        Err("effect processing is not available for this backend".into())
+    }
+
+    pub(crate) fn connect_by_key_if_missing(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            driver
+                .connect_by_key_if_missing(output, input)
+                .map(|_| ())
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        #[cfg(feature = "pipewire")]
+        if let Some(driver) = self.pipewire.as_mut() {
+            driver
+                .connect_by_key_if_missing(output, input)
+                .map(|_| ())
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        Err("graph connections are not available for this backend".into())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_available(&self) -> bool {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.relay_available();
+        }
+        self.pipewire
+            .as_ref()
+            .is_some_and(|driver| driver.relay_available())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_status(&self) -> RelayEngineStatus {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.relay_status();
+        }
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.relay_status())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_start_host(&mut self, request: RelayHostRequest) -> Result<u16, String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .relay_start_host(request)
+                .map_err(|error| error.to_string());
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| "audio relay is not available for this backend".to_owned())?
+            .relay_start_host(request)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_stop_host(&mut self) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver.relay_stop_host().map_err(|error| error.to_string());
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| "audio relay is not available for this backend".to_owned())?
+            .relay_stop_host()
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_connect(
+        &mut self,
+        target: std::net::SocketAddr,
+        pin: &str,
+        roles: RelayRoles,
+    ) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .relay_connect(target, pin, roles)
+                .map_err(|error| error.to_string());
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| "audio relay is not available for this backend".to_owned())?
+            .relay_connect(target, pin, roles)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_disconnect(&mut self, session: RelaySessionId) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .relay_disconnect(session)
+                .map_err(|error| error.to_string());
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| "audio relay is not available for this backend".to_owned())?
+            .relay_disconnect(session)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_events(&mut self) -> Vec<RelayEvent> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver.relay_events();
+        }
+        self.pipewire
+            .as_mut()
+            .map(|driver| driver.relay_events())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_discovery_start(&mut self) -> Result<(), String> {
+        if let Some(driver) = self.demo.as_mut() {
+            return driver
+                .relay_discovery_start()
+                .map_err(|error| error.to_string());
+        }
+        self.pipewire
+            .as_mut()
+            .ok_or_else(|| "audio relay is not available for this backend".to_owned())?
+            .relay_discovery_start()
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_discovery_stop(&mut self) {
+        if let Some(driver) = self.demo.as_mut() {
+            driver.relay_discovery_stop();
+        }
+        if let Some(driver) = self.pipewire.as_mut() {
+            driver.relay_discovery_stop();
+        }
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_peers(&self) -> Vec<RelayPeerInfo> {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.relay_peers();
+        }
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.relay_peers())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_local_links(&self) -> Vec<RelayLocalLink> {
+        if let Some(driver) = self.demo.as_ref() {
+            return driver.relay_local_links();
+        }
+        self.pipewire
+            .as_ref()
+            .map(|driver| driver.relay_local_links())
+            .unwrap_or_default()
+    }
+
     fn demo_meters(&self) -> Vec<AudioMeter> {
         if self.meter_policy == MeterPolicy::Disabled {
             return Vec::new();
@@ -346,5 +638,36 @@ mod tests {
 
         source.set_node_volume(node, 0.42).unwrap();
         source.set_node_mute(node, true).unwrap();
+    }
+
+    #[test]
+    fn demo_source_manages_effect_nodes() {
+        let (mut source, _) = ReadOnlyGraphSource::new(&demo_args(), MeterPolicy::Disabled);
+        let descriptor = source.effect_descriptors().into_iter().next().unwrap();
+        let parameters = descriptor
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.id.clone(), parameter.default))
+            .collect();
+        let instance = source
+            .create_effect_node(EffectNodeRequest {
+                instance_id: "slint-test-effect".into(),
+                effect_id: descriptor.id,
+                module_path: None,
+                enabled: true,
+                parameters,
+                position: [260.0, 180.0],
+            })
+            .unwrap();
+
+        assert_eq!(source.effect_instances().len(), 1);
+        source
+            .set_effect_enabled(&instance.config.instance_id, false)
+            .unwrap();
+        assert!(!source.effect_instances()[0].config.enabled);
+        source.remove_effect(&instance.config.instance_id).unwrap();
+        source.refresh().unwrap();
+        assert!(source.effect_instances().is_empty());
+        assert!(source.graph().node(instance.node_id).is_none());
     }
 }

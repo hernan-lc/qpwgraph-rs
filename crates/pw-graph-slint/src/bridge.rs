@@ -4,19 +4,32 @@ use crate::model::{
     LinkView, MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
 };
 use crate::source::ReadOnlyGraphSource;
-use pw_graph_backend::MeterPolicy;
-use pw_graph_config::{config_path, AppConfig};
+#[cfg(feature = "relay")]
+use pw_graph_backend::{
+    relay_build_qr_payload, relay_parse_qr_payload, relay_qr, RelayCodecKind, RelayEvent,
+    RelayHostRequest, RelayRoles, RelaySessionId, RelayTransportPreference,
+};
+use pw_graph_backend::{EffectInsertRequest, EffectNodeRequest, MeterPolicy};
+use pw_graph_config::{config_path, AppConfig, PersistedEffect};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
 use serde::{Deserialize, Serialize};
 use slint::{
-    Color, ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, Timer, TimerMode, VecModel,
+    Color, ComponentHandle, Image, Model, ModelRc, PhysicalSize, SharedString, Timer, TimerMode,
+    VecModel,
 };
+#[cfg(feature = "relay")]
+use slint::{Rgba8Pixel, SharedPixelBuffer};
 use slint_node_editor::{GraphLogic, MovableNode, NodeEditorController, NodeEditorSetup};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "relay")]
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::rc::Rc;
+#[cfg(feature = "relay")]
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 slint::include_modules!();
@@ -100,6 +113,10 @@ struct PreviewApp {
     meters: BTreeMap<pw_graph_core::NodeId, MeterReading>,
     meter_error: Option<String>,
     audio_controls: BTreeMap<pw_graph_core::NodeId, PreviewAudioControl>,
+    #[cfg(feature = "relay")]
+    relay_levels: BTreeMap<u64, f32>,
+    #[cfg(feature = "relay")]
+    relay_connecting: Option<String>,
 }
 
 pub(crate) struct UiBridge {
@@ -123,7 +140,13 @@ impl UiBridge {
             .unwrap_or_else(|| config.language.clone());
         let i18n = I18n::from_language(&language);
         let meter_policy = MeterPolicy::parse(&config.audio_meters);
-        let (mut source, status) = ReadOnlyGraphSource::new(&args, meter_policy);
+        let (mut source, mut status) = ReadOnlyGraphSource::new(&args, meter_policy);
+        restore_configured_effects(&mut source, &config, &mut status);
+        if !config.effects.is_empty() {
+            if let Err(error) = source.refresh() {
+                status = format!("{status} · Could not restore effects: {error}");
+            }
+        }
         let view = UiGraphState::from_config(&config);
         let state_file = config_file.with_file_name("slint-state.toml");
         let persisted_state = load_slint_state(&state_file);
@@ -146,6 +169,10 @@ impl UiBridge {
             meters: BTreeMap::new(),
             meter_error: None,
             audio_controls,
+            #[cfg(feature = "relay")]
+            relay_levels: BTreeMap::new(),
+            #[cfg(feature = "relay")]
+            relay_connecting: None,
         }));
 
         let window = MainWindow::new()?;
@@ -188,6 +215,23 @@ impl UiBridge {
                     .display()
                     .to_string(),
             ));
+            window.set_relay_device_name(SharedString::from(
+                preview.config.relay_device_name.clone(),
+            ));
+            window.set_relay_host_pin(SharedString::from(preview.config.relay_host_pin.clone()));
+            window.set_relay_host_port_text(SharedString::from(
+                preview.config.relay_host_port.to_string(),
+            ));
+            window.set_relay_client_target(SharedString::from(
+                preview.config.relay_client_target.clone(),
+            ));
+            window
+                .set_relay_client_pin(SharedString::from(preview.config.relay_client_pin.clone()));
+            window.set_relay_role_index(relay_role_index(&preview.config.relay_role));
+            window.set_relay_codec_index(relay_codec_index(&preview.config.relay_codec));
+            window.set_relay_frame_index(relay_frame_index(preview.config.relay_frame_ms));
+            window
+                .set_relay_transport_index(relay_transport_index(&preview.config.relay_transport));
             window.window().set_minimized(args.minimized);
         }
 
@@ -202,12 +246,16 @@ impl UiBridge {
         window.set_rules(ModelRc::from(Rc::new(VecModel::from(rule_rows(
             &app.borrow().config,
         )))));
-        window.set_effects(ModelRc::from(Rc::new(VecModel::from(effect_rows(
-            &app.borrow().config,
-        )))));
-        window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(
-            &app.borrow().config,
-        )))));
+        {
+            let preview = app.borrow();
+            window.set_effects(ModelRc::from(Rc::new(VecModel::from(effect_rows(
+                &preview.source,
+            )))));
+            window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(&preview)))));
+            window.set_effect_options(ModelRc::from(Rc::new(VecModel::from(effect_options(
+                &preview.source,
+            )))));
+        }
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let setup = NodeEditorSetup::new({
@@ -404,6 +452,7 @@ fn pump(
     for event in pending {
         process_event(window, &mut preview, event);
     }
+    poll_relay_events(&mut preview);
     if preview.source.graph_dirty() || preview.last_refresh.elapsed() >= Duration::from_millis(500)
     {
         if let Err(error) = preview.source.refresh() {
@@ -732,11 +781,40 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
         "shortcuts" => toggle_overlay(window, Overlay::Shortcuts),
         "effects" => toggle_overlay(window, Overlay::Effects),
         "relay" => {
-            window.set_show_relay(!window.get_show_relay());
+            let show = !window.get_show_relay();
+            window.set_show_relay(show);
             close_modals(window);
+            if show {
+                start_relay_discovery(preview);
+            } else {
+                stop_relay_discovery(preview);
+            }
         }
-        "relay-show-qr" => window.set_show_qr(true),
+        "relay-show-qr" => {
+            if relay_qr_payload(preview).is_some() {
+                window.set_show_qr(true);
+            } else {
+                preview.status = "Start the relay host before showing its QR code".into();
+            }
+        }
         "close-qr" => window.set_show_qr(false),
+        "relay-connect-configured" => connect_relay(preview, None),
+        "relay-connect" => connect_relay(preview, None),
+        "relay-host-toggle" => {
+            if relay_host_active(preview) {
+                stop_relay_host(preview);
+            } else {
+                start_relay_host(preview);
+            }
+        }
+        "relay-host-start" => start_relay_host(preview),
+        "relay-host-stop" => stop_relay_host(preview),
+        _ if action == "effect-create" || action == "create-effect" => {
+            create_effect(window, preview);
+        }
+        _ if action == "effect-inspect" || action == "inspect-effect" => {
+            inspect_effect(preview, None);
+        }
         "toggle-statusbar" => window.set_show_statusbar(!window.get_show_statusbar()),
         "reset-audio" => {
             preview.source.reset_meters();
@@ -747,6 +825,7 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
             close_modals(window);
             window.set_show_relay(false);
             window.set_show_qr(false);
+            stop_relay_discovery(preview);
         }
         "save-config" => save_config(preview, true),
         "undo"
@@ -757,15 +836,37 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
         | "activate-patchbay"
         | "save-profile"
         | "choose-patchbay-directory"
-        | "add-rule"
-        | "create-effect"
-        | "inspect-effect"
-        | "relay-connect"
-        | "relay-host-start" => {
+        | "add-rule" => {
             preview.status = format!(
                 "Read-only preview: {} is not available",
                 action.replace('-', " ")
             );
+        }
+        _ if action.strip_prefix("effect-toggle:").is_some() => {
+            let instance_id = action.strip_prefix("effect-toggle:").unwrap_or_default();
+            toggle_effect(preview, instance_id);
+        }
+        _ if action.strip_prefix("effect-parameter:").is_some() => {
+            let details = action.strip_prefix("effect-parameter:").unwrap_or_default();
+            set_effect_parameter(preview, details);
+        }
+        _ if action.strip_prefix("effect-remove:").is_some() => {
+            let instance_id = action.strip_prefix("effect-remove:").unwrap_or_default();
+            remove_effect(preview, instance_id);
+        }
+        _ if action.strip_prefix("effect-inspect:").is_some() => {
+            let instance_id = action.strip_prefix("effect-inspect:").unwrap_or_default();
+            inspect_effect(preview, Some(instance_id));
+        }
+        _ if action.strip_prefix("relay-connect:").is_some() => {
+            let target = action.strip_prefix("relay-connect:").unwrap_or_default();
+            connect_relay(preview, Some(target));
+        }
+        _ if action.strip_prefix("relay-disconnect:").is_some() => {
+            let session = action
+                .strip_prefix("relay-disconnect:")
+                .and_then(|value| value.parse::<u64>().ok());
+            disconnect_relay(preview, session);
         }
         _ => {
             preview.status = format!("Read-only preview: {action} is not available");
@@ -774,6 +875,488 @@ fn handle_action(window: &MainWindow, preview: &mut PreviewApp, action: &str) {
     if preview.debug {
         eprintln!("[qpwgraph-slint] {}", preview.status);
     }
+}
+
+fn restore_configured_effects(
+    source: &mut ReadOnlyGraphSource,
+    config: &AppConfig,
+    status: &mut String,
+) {
+    if config.effects.is_empty() {
+        return;
+    }
+    if !source.supports_effect_nodes() {
+        *status = format!(
+            "{status} · {} saved effect(s) could not be restored: effect processing is unavailable",
+            config.effects.len()
+        );
+        return;
+    }
+
+    for saved in config.effects.iter().cloned() {
+        let result = match (&saved.source, &saved.destination) {
+            (Some(source_port), Some(destination_port)) => source
+                .connect_by_key_if_missing(source_port, destination_port)
+                .and_then(|_| {
+                    source.insert_effect(EffectInsertRequest {
+                        instance_id: saved.instance.instance_id.clone(),
+                        effect_id: saved.instance.effect_id.clone(),
+                        module_path: saved.instance.module_path.clone(),
+                        source: source_port.clone(),
+                        destination: destination_port.clone(),
+                        enabled: saved.instance.enabled,
+                        parameters: saved.instance.parameters.clone(),
+                        position: saved.position,
+                    })
+                }),
+            (None, None) => source.create_effect_node(EffectNodeRequest {
+                instance_id: saved.instance.instance_id.clone(),
+                effect_id: saved.instance.effect_id.clone(),
+                module_path: saved.instance.module_path.clone(),
+                enabled: saved.instance.enabled,
+                parameters: saved.instance.parameters.clone(),
+                position: saved.position,
+            }),
+            _ => Err("effect routing is incomplete".into()),
+        };
+        if let Err(error) = result {
+            *status = format!("{status} · Could not restore effect: {error}");
+        }
+    }
+}
+
+fn create_effect(window: &MainWindow, preview: &mut PreviewApp) {
+    if !preview.source.supports_effect_nodes() {
+        preview.status = "Effect processing is not available for this backend".into();
+        return;
+    }
+    let descriptors = preview.source.effect_descriptors();
+    let Some(descriptor) = descriptors
+        .get(window.get_effect_selection_index().max(0) as usize)
+        .or_else(|| descriptors.first())
+    else {
+        preview.status = "No effects are available".into();
+        return;
+    };
+
+    let instance_id = unique_effect_id(preview);
+    let parameters = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.id.clone(), parameter.default))
+        .collect();
+    let request = EffectNodeRequest {
+        instance_id,
+        effect_id: descriptor.id.clone(),
+        module_path: None,
+        enabled: true,
+        parameters,
+        position: preferred_effect_position(preview),
+    };
+    match preview.source.create_effect_node(request) {
+        Ok(instance) => {
+            let name = descriptor.name.clone();
+            persist_effect(preview, instance);
+            match preview.source.refresh() {
+                Ok(()) => preview.last_refresh = Instant::now(),
+                Err(error) => {
+                    preview.status = format!("Effect created, but graph refresh failed: {error}");
+                    return;
+                }
+            }
+            preview.status = format!("Effect created: {name}");
+        }
+        Err(error) => preview.status = format!("Could not create effect: {error}"),
+    }
+}
+
+fn toggle_effect(preview: &mut PreviewApp, instance_id: &str) {
+    let Some(instance) = preview
+        .source
+        .effect_instances()
+        .into_iter()
+        .find(|instance| instance.config.instance_id == instance_id)
+    else {
+        preview.status = format!("Effect instance not found: {instance_id}");
+        return;
+    };
+    let enabled = !instance.config.enabled;
+    match preview.source.set_effect_enabled(instance_id, enabled) {
+        Ok(()) => {
+            if let Some(saved) = preview
+                .config
+                .effects
+                .iter_mut()
+                .find(|effect| effect.instance.instance_id == instance_id)
+            {
+                saved.instance.enabled = enabled;
+            }
+            preview.status = format!(
+                "Effect {}: {}",
+                instance_id,
+                if enabled { "enabled" } else { "bypassed" }
+            );
+        }
+        Err(error) => preview.status = format!("Could not change effect state: {error}"),
+    }
+}
+
+fn set_effect_parameter(preview: &mut PreviewApp, details: &str) {
+    let Some((details, value)) = details.rsplit_once(':') else {
+        preview.status = "Invalid effect parameter action".into();
+        return;
+    };
+    let Some((instance_id, parameter)) = details.rsplit_once(':') else {
+        preview.status = "Invalid effect parameter action".into();
+        return;
+    };
+    let Ok(value) = value.parse::<f32>() else {
+        preview.status = "Invalid effect parameter value".into();
+        return;
+    };
+    match preview
+        .source
+        .set_effect_parameter(instance_id, parameter, value)
+    {
+        Ok(()) => {
+            if let Some(saved) = preview
+                .config
+                .effects
+                .iter_mut()
+                .find(|effect| effect.instance.instance_id == instance_id)
+            {
+                saved
+                    .instance
+                    .parameters
+                    .insert(parameter.to_owned(), value);
+            }
+            preview.status = format!("{instance_id} · {parameter} = {value:.2}");
+        }
+        Err(error) => preview.status = format!("Could not change effect parameter: {error}"),
+    }
+}
+
+fn remove_effect(preview: &mut PreviewApp, instance_id: &str) {
+    match preview.source.remove_effect(instance_id) {
+        Ok(()) => {
+            preview
+                .config
+                .effects
+                .retain(|effect| effect.instance.instance_id != instance_id);
+            if let Err(error) = preview.source.refresh() {
+                preview.status = format!("Effect removed, but graph refresh failed: {error}");
+            } else {
+                preview.last_refresh = Instant::now();
+                preview.status = format!("Effect removed: {instance_id}");
+            }
+        }
+        Err(error) => preview.status = format!("Could not remove effect: {error}"),
+    }
+}
+
+fn inspect_effect(preview: &mut PreviewApp, instance_id: Option<&str>) {
+    let instance = match instance_id {
+        Some(instance_id) => preview
+            .source
+            .effect_instances()
+            .into_iter()
+            .find(|instance| instance.config.instance_id == instance_id),
+        None => preview.source.effect_instances().into_iter().next(),
+    };
+    let Some(instance) = instance else {
+        preview.status = "No effect instance is available".into();
+        return;
+    };
+    let descriptor = preview
+        .source
+        .effect_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.id == instance.config.effect_id);
+    let name = descriptor
+        .as_ref()
+        .map(|descriptor| descriptor.name.as_str())
+        .unwrap_or(instance.config.effect_id.as_str());
+    let parameters = instance
+        .config
+        .parameters
+        .iter()
+        .map(|(id, value)| format!("{id}={value:.2}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    preview.status = if parameters.is_empty() {
+        format!("{name} · {}", instance.config.instance_id)
+    } else {
+        format!("{name} · {} · {parameters}", instance.config.instance_id)
+    };
+}
+
+fn persist_effect(preview: &mut PreviewApp, instance: pw_graph_backend::EffectInstance) {
+    let position = preview
+        .source
+        .graph()
+        .node(instance.node_id)
+        .map(|node| node.position)
+        .unwrap_or([260.0, 180.0]);
+    preview
+        .config
+        .effects
+        .retain(|effect| effect.instance.instance_id != instance.config.instance_id);
+    preview.config.effects.push(PersistedEffect {
+        instance: instance.config,
+        source: instance.source,
+        destination: instance.destination,
+        position,
+    });
+}
+
+fn preferred_effect_position(preview: &PreviewApp) -> [f32; 2] {
+    let rightmost = preview
+        .source
+        .graph()
+        .nodes
+        .values()
+        .map(|node| node.position[0])
+        .fold(0.0_f32, f32::max);
+    [rightmost + 290.0, 180.0]
+}
+
+fn unique_effect_id(preview: &PreviewApp) -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let id = format!("slint-effect-{sequence}");
+        if !preview
+            .source
+            .effect_instances()
+            .iter()
+            .any(|effect| effect.config.instance_id == id)
+            && !preview
+                .config
+                .effects
+                .iter()
+                .any(|effect| effect.instance.instance_id == id)
+        {
+            return id;
+        }
+    }
+}
+
+fn start_relay_discovery(preview: &mut PreviewApp) {
+    #[cfg(feature = "relay")]
+    {
+        if let Err(error) = preview.source.relay_discovery_start() {
+            preview.status = format!("Relay discovery unavailable: {error}");
+        }
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        preview.status = "Relay support is not enabled in this build".into();
+    }
+}
+
+fn stop_relay_discovery(preview: &mut PreviewApp) {
+    #[cfg(feature = "relay")]
+    preview.source.relay_discovery_stop();
+    #[cfg(not(feature = "relay"))]
+    let _ = preview;
+}
+
+fn relay_host_active(preview: &PreviewApp) -> bool {
+    #[cfg(feature = "relay")]
+    {
+        return preview.source.relay_status().host_active;
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        let _ = preview;
+        false
+    }
+}
+
+fn start_relay_host(preview: &mut PreviewApp) {
+    #[cfg(feature = "relay")]
+    {
+        let request = RelayHostRequest {
+            device_name: preview.config.relay_device_name.trim().to_owned(),
+            pin: preview.config.relay_host_pin.trim().to_owned(),
+            port: preview.config.relay_host_port,
+            codec: relay_codec(&preview.config.relay_codec),
+            frame_ms: preview.config.relay_frame_ms.clamp(5, 60),
+            transport: relay_transport(&preview.config.relay_transport),
+        };
+        match preview.source.relay_start_host(request) {
+            Ok(port) => preview.status = format!("Relay host started on port {port}"),
+            Err(error) => preview.status = format!("Could not start relay host: {error}"),
+        }
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        preview.status = "Relay support is not enabled in this build".into();
+    }
+}
+
+fn stop_relay_host(preview: &mut PreviewApp) {
+    #[cfg(feature = "relay")]
+    {
+        match preview.source.relay_stop_host() {
+            Ok(()) => preview.status = "Relay host stopped".into(),
+            Err(error) => preview.status = format!("Could not stop relay host: {error}"),
+        }
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        preview.status = "Relay support is not enabled in this build".into();
+    }
+}
+
+fn connect_relay(preview: &mut PreviewApp, requested_target: Option<&str>) {
+    #[cfg(feature = "relay")]
+    {
+        let raw_target = requested_target
+            .map(str::to_owned)
+            .unwrap_or_else(|| preview.config.relay_client_target.clone());
+        let raw_target = raw_target.trim().to_owned();
+        if raw_target.is_empty() {
+            preview.status = "Enter a relay address before connecting".into();
+            return;
+        }
+        let target_text = match relay_parse_qr_payload(&raw_target) {
+            Some(payload) => {
+                preview.config.relay_client_target = payload.target.clone();
+                if let Some(pin) = payload.pin {
+                    preview.config.relay_client_pin = pin;
+                }
+                payload.target
+            }
+            None => {
+                if requested_target.is_some() {
+                    preview.config.relay_client_target = raw_target.clone();
+                }
+                raw_target
+            }
+        };
+        let target = match target_text
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+        {
+            Some(target) => target,
+            None => {
+                preview.status = format!("Invalid relay target: {target_text}");
+                return;
+            }
+        };
+        match preview.source.relay_connect(
+            target,
+            preview.config.relay_client_pin.trim(),
+            relay_roles(&preview.config.relay_role),
+        ) {
+            Ok(()) => {
+                preview.relay_connecting = Some(target.to_string());
+                preview.status = format!("Connecting to relay peer {target}");
+            }
+            Err(error) => preview.status = format!("Could not connect to relay peer: {error}"),
+        }
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        let _ = requested_target;
+        preview.status = "Relay support is not enabled in this build".into();
+    }
+}
+
+fn disconnect_relay(preview: &mut PreviewApp, session: Option<u64>) {
+    #[cfg(feature = "relay")]
+    {
+        let Some(session) = session else {
+            preview.status = "Invalid relay session".into();
+            return;
+        };
+        match preview.source.relay_disconnect(RelaySessionId(session)) {
+            Ok(()) => preview.status = "Disconnecting relay peer".into(),
+            Err(error) => preview.status = format!("Could not disconnect relay peer: {error}"),
+        }
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        let _ = session;
+        preview.status = "Relay support is not enabled in this build".into();
+    }
+}
+
+#[cfg(feature = "relay")]
+fn poll_relay_events(preview: &mut PreviewApp) {
+    for event in preview.source.relay_events() {
+        match event {
+            RelayEvent::HostStarted { port } => {
+                preview.status = format!("Relay host started on port {port}");
+            }
+            RelayEvent::HostStopped => preview.status = "Relay host stopped".into(),
+            RelayEvent::PeerDiscovered { peer } => {
+                preview.status = format!("Relay peer discovered: {}", peer.name);
+            }
+            RelayEvent::PeerLost { peer } => {
+                preview.status = format!("Relay peer lost: {}", peer.name);
+            }
+            RelayEvent::SessionEstablished { peer, .. } => {
+                preview.relay_connecting = None;
+                preview.status = format!("Relay connected: {}", peer.name);
+            }
+            RelayEvent::SessionLost { id, reason } => {
+                preview.relay_levels.remove(&id.0);
+                preview.status = format!("Relay session lost: {reason}");
+            }
+            RelayEvent::AudioLevel { id, rms } => {
+                preview.relay_levels.insert(id.0, rms.clamp(0.0, 1.0));
+            }
+            RelayEvent::Error { message } => {
+                preview.relay_connecting = None;
+                preview.status = format!("Relay error: {message}");
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "relay"))]
+fn poll_relay_events(_preview: &mut PreviewApp) {}
+
+#[cfg(feature = "relay")]
+fn relay_roles(value: &str) -> RelayRoles {
+    match value {
+        "emit" => RelayRoles::emit_only(),
+        "receive" => RelayRoles::receive_only(),
+        _ => RelayRoles::both(),
+    }
+}
+
+#[cfg(feature = "relay")]
+fn relay_codec(value: &str) -> RelayCodecKind {
+    if value.eq_ignore_ascii_case("pcm") {
+        RelayCodecKind::Pcm
+    } else {
+        RelayCodecKind::Opus
+    }
+}
+
+#[cfg(feature = "relay")]
+fn relay_transport(value: &str) -> RelayTransportPreference {
+    RelayTransportPreference::from_str(value).unwrap_or_default()
+}
+
+#[cfg(feature = "relay")]
+fn relay_qr_payload(preview: &PreviewApp) -> Option<String> {
+    let port = preview.source.relay_status().host_port?;
+    let link = preview.source.relay_local_links().into_iter().next()?;
+    Some(relay_build_qr_payload(
+        link.addr,
+        port,
+        preview.config.relay_host_pin.trim(),
+    ))
+}
+
+#[cfg(not(feature = "relay"))]
+fn relay_qr_payload(_preview: &PreviewApp) -> Option<String> {
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -829,6 +1412,20 @@ fn read_window_state(window: &MainWindow, preview: &mut PreviewApp) {
     preview.config.language = language_code(window.get_language_index()).into();
     preview.config.window_width = window.get_width_().max(760.0);
     preview.config.window_height = window.get_height_().max(520.0);
+    preview.config.relay_device_name = window.get_relay_device_name().to_string();
+    preview.config.relay_host_pin = window.get_relay_host_pin().to_string();
+    preview.config.relay_host_port = window
+        .get_relay_host_port_text()
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(preview.config.relay_host_port);
+    preview.config.relay_client_target = window.get_relay_client_target().to_string();
+    preview.config.relay_client_pin = window.get_relay_client_pin().to_string();
+    preview.config.relay_role = relay_role_from_index(window.get_relay_role_index()).into();
+    preview.config.relay_codec = relay_codec_from_index(window.get_relay_codec_index()).into();
+    preview.config.relay_frame_ms = relay_frame_from_index(window.get_relay_frame_index());
+    preview.config.relay_transport =
+        relay_transport_from_index(window.get_relay_transport_index()).into();
 
     let meter_policy = meter_policy_from_index(window.get_meter_policy_index());
     if meter_policy != preview.source.meter_policy() {
@@ -1080,6 +1677,48 @@ fn sync_models(
     window.set_zoom(preview.view.zoom);
     window.set_pan_x(preview.view.pan[0]);
     window.set_pan_y(preview.view.pan[1]);
+    window.set_relay_device_name(SharedString::from(preview.config.relay_device_name.clone()));
+    window.set_relay_host_pin(SharedString::from(preview.config.relay_host_pin.clone()));
+    window.set_relay_host_port_text(SharedString::from(
+        preview.config.relay_host_port.to_string(),
+    ));
+    window.set_relay_client_target(SharedString::from(
+        preview.config.relay_client_target.clone(),
+    ));
+    window.set_relay_client_pin(SharedString::from(preview.config.relay_client_pin.clone()));
+    window.set_relay_role_index(relay_role_index(&preview.config.relay_role));
+    window.set_relay_codec_index(relay_codec_index(&preview.config.relay_codec));
+    window.set_relay_frame_index(relay_frame_index(preview.config.relay_frame_ms));
+    window.set_relay_transport_index(relay_transport_index(&preview.config.relay_transport));
+    window.set_effects(ModelRc::from(Rc::new(VecModel::from(effect_rows(
+        &preview.source,
+    )))));
+    window.set_effect_options(ModelRc::from(Rc::new(VecModel::from(effect_options(
+        &preview.source,
+    )))));
+    window.set_effects_available(preview.source.supports_effect_nodes());
+    window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(preview)))));
+    #[cfg(feature = "relay")]
+    {
+        let relay_status = preview.source.relay_status();
+        window.set_relay_available(preview.source.relay_available());
+        window.set_relay_host_active(relay_status.host_active);
+        window.set_relay_host_endpoint(SharedString::from(relay_host_endpoint(
+            preview,
+            relay_status.host_port,
+        )));
+        let payload = relay_qr_payload(preview).unwrap_or_default();
+        window.set_relay_qr_payload(SharedString::from(payload.clone()));
+        window.set_relay_qr_image(qr_image(&payload));
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        window.set_relay_available(false);
+        window.set_relay_host_active(false);
+        window.set_relay_host_endpoint(SharedString::new());
+        window.set_relay_qr_payload(SharedString::new());
+        window.set_relay_qr_image(Image::default());
+    }
     preview.snapshot = snapshot;
 }
 
@@ -1279,50 +1918,279 @@ fn selected_patchbay_path(config: &AppConfig) -> std::path::PathBuf {
         .unwrap_or(default_file)
 }
 
-fn effect_rows(config: &AppConfig) -> Vec<EffectRow> {
-    if config.effects.is_empty() {
-        return vec![
+fn effect_rows(source: &ReadOnlyGraphSource) -> Vec<EffectRow> {
+    let descriptors = source.effect_descriptors();
+    let mut instances = source.effect_instances();
+    instances.sort_by(|a, b| a.config.instance_id.cmp(&b.config.instance_id));
+    instances
+        .into_iter()
+        .map(|instance| {
+            let descriptor = descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == instance.config.effect_id);
+            let name = descriptor
+                .map(|descriptor| descriptor.name.clone())
+                .unwrap_or_else(|| instance.config.effect_id.clone());
+            let vendor = descriptor
+                .map(|descriptor| descriptor.vendor.clone())
+                .unwrap_or_else(|| "Unknown effect provider".into());
+            let description = instance.config.instance_id.clone();
+            let vendor = match instance.error {
+                Some(error) => format!("{vendor} · error: {error}"),
+                None => vendor,
+            };
+            let parameter = descriptor.and_then(|descriptor| descriptor.parameters.first());
             EffectRow {
-                name: "Adaptive noise reduction".into(),
-                vendor: "qpwgraph-rs".into(),
-                description: "Reduce stationary background noise".into(),
-                enabled: true,
-            },
-            EffectRow {
-                name: "Noise gate".into(),
-                vendor: "qpwgraph-rs".into(),
-                description: "Attenuate audio below a configured threshold".into(),
-                enabled: true,
-            },
-        ];
-    }
-    config
-        .effects
-        .iter()
-        .map(|effect| EffectRow {
-            name: SharedString::from(effect.instance.effect_id.clone()),
-            vendor: SharedString::from("Configured effect"),
-            description: SharedString::from(effect.instance.instance_id.clone()),
-            enabled: effect.instance.enabled,
+                name: SharedString::from(name),
+                vendor: SharedString::from(vendor),
+                description: SharedString::from(description),
+                enabled: instance.config.enabled,
+                has_parameter: parameter.is_some(),
+                parameter_id: SharedString::from(
+                    parameter
+                        .map(|parameter| parameter.id.clone())
+                        .unwrap_or_default(),
+                ),
+                parameter_label: SharedString::from(
+                    parameter
+                        .map(|parameter| parameter.name.clone())
+                        .unwrap_or_default(),
+                ),
+                parameter_minimum: parameter.map(|parameter| parameter.minimum).unwrap_or(0.0),
+                parameter_maximum: parameter.map(|parameter| parameter.maximum).unwrap_or(1.0),
+                parameter_value: parameter
+                    .map(|parameter| {
+                        instance
+                            .config
+                            .parameters
+                            .get(&parameter.id)
+                            .copied()
+                            .unwrap_or(parameter.default)
+                    })
+                    .unwrap_or_default(),
+            }
         })
         .collect()
 }
 
-fn relay_rows(config: &AppConfig) -> Vec<RelayRow> {
-    if config.relay_client_target.trim().is_empty() {
-        return vec![RelayRow {
-            name: "No peer selected".into(),
-            address: "Use the working app to discover peers".into(),
-            state: "idle".into(),
-            level: 0.0,
-        }];
+fn effect_options(source: &ReadOnlyGraphSource) -> Vec<SharedString> {
+    source
+        .effect_descriptors()
+        .into_iter()
+        .map(|descriptor| SharedString::from(descriptor.name))
+        .collect()
+}
+
+fn relay_rows(preview: &PreviewApp) -> Vec<RelayRow> {
+    #[cfg(not(feature = "relay"))]
+    let _ = preview;
+    #[cfg(feature = "relay")]
+    {
+        let status = preview.source.relay_status();
+        let mut rows = Vec::new();
+        let mut connected = BTreeSet::new();
+        for session in status.sessions {
+            let address = session.peer.addr.to_string();
+            connected.insert(address.clone());
+            let direction = match (session.sending, session.receiving) {
+                (true, true) => "send + receive",
+                (true, false) => "send",
+                (false, true) => "receive",
+                (false, false) => "connected",
+            };
+            rows.push(RelayRow {
+                id: SharedString::from(session.id.0.to_string()),
+                name: SharedString::from(session.peer.name),
+                address: SharedString::from(address),
+                state: SharedString::from(format!("connected · {direction}")),
+                level: preview
+                    .relay_levels
+                    .get(&session.id.0)
+                    .copied()
+                    .unwrap_or_default(),
+            });
+        }
+        let connecting = preview.relay_connecting.as_deref();
+        let mut peers = preview.source.relay_peers();
+        peers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.addr.cmp(&b.addr)));
+        for peer in peers {
+            let address = peer.addr.to_string();
+            if connected.contains(&address) {
+                continue;
+            }
+            let state = if connecting == Some(address.as_str()) {
+                "connecting"
+            } else {
+                "available"
+            };
+            rows.push(RelayRow {
+                id: SharedString::from(address.clone()),
+                name: SharedString::from(peer.name),
+                address: SharedString::from(address),
+                state: SharedString::from(state),
+                level: 0.0,
+            });
+        }
+        if let Some(target) = connecting {
+            if !rows.iter().any(|row| row.address == target) {
+                rows.push(RelayRow {
+                    id: SharedString::from(target),
+                    name: SharedString::from(target),
+                    address: SharedString::from(target),
+                    state: "connecting".into(),
+                    level: 0.0,
+                });
+            }
+        }
+        if rows.is_empty() && !preview.config.relay_client_target.trim().is_empty() {
+            rows.push(RelayRow {
+                id: SharedString::from(preview.config.relay_client_target.clone()),
+                name: "Configured peer".into(),
+                address: SharedString::from(preview.config.relay_client_target.clone()),
+                state: "configured".into(),
+                level: 0.0,
+            });
+        }
+        if rows.is_empty() {
+            rows.push(RelayRow {
+                id: SharedString::new(),
+                name: "No relay peers discovered".into(),
+                address: "Open discovery or enter an address above".into(),
+                state: "idle".into(),
+                level: 0.0,
+            });
+        }
+        return rows;
     }
-    vec![RelayRow {
-        name: SharedString::from(config.relay_device_name.clone()),
-        address: SharedString::from(config.relay_client_target.clone()),
-        state: "configured".into(),
-        level: 0.0,
-    }]
+    #[cfg(not(feature = "relay"))]
+    {
+        vec![RelayRow {
+            id: SharedString::new(),
+            name: "Relay support not compiled".into(),
+            address: "Build with the relay feature to connect peers".into(),
+            state: "unavailable".into(),
+            level: 0.0,
+        }]
+    }
+}
+
+fn relay_role_index(value: &str) -> i32 {
+    match value {
+        "emit" => 0,
+        "receive" => 1,
+        _ => 2,
+    }
+}
+
+fn relay_role_from_index(index: i32) -> &'static str {
+    match index {
+        0 => "emit",
+        1 => "receive",
+        _ => "both",
+    }
+}
+
+fn relay_codec_index(value: &str) -> i32 {
+    if value.eq_ignore_ascii_case("pcm") {
+        1
+    } else {
+        0
+    }
+}
+
+fn relay_codec_from_index(index: i32) -> &'static str {
+    if index == 1 {
+        "pcm"
+    } else {
+        "opus"
+    }
+}
+
+fn relay_frame_index(frame_ms: u16) -> i32 {
+    match frame_ms {
+        0..=5 => 0,
+        6..=15 => 1,
+        16..=30 => 2,
+        31..=50 => 3,
+        _ => 4,
+    }
+}
+
+fn relay_frame_from_index(index: i32) -> u16 {
+    match index {
+        1 => 10,
+        2 => 20,
+        3 => 40,
+        4 => 60,
+        _ => 5,
+    }
+}
+
+fn relay_transport_index(value: &str) -> i32 {
+    match value {
+        "wifi" => 1,
+        "bluetooth" => 2,
+        "lan" => 3,
+        _ => 0,
+    }
+}
+
+fn relay_transport_from_index(index: i32) -> &'static str {
+    match index {
+        1 => "wifi",
+        2 => "bluetooth",
+        3 => "lan",
+        _ => "auto",
+    }
+}
+
+#[cfg(feature = "relay")]
+fn relay_host_endpoint(preview: &PreviewApp, port: Option<u16>) -> String {
+    let Some(port) = port else {
+        return String::new();
+    };
+    preview
+        .source
+        .relay_local_links()
+        .into_iter()
+        .next()
+        .map(|link| format!("{}:{port}", link.addr))
+        .unwrap_or_else(|| format!("0.0.0.0:{port}"))
+}
+
+#[cfg(feature = "relay")]
+fn qr_image(payload: &str) -> Image {
+    let Some(scale) = relay_qr::module_scale_for(payload, 236) else {
+        return Image::default();
+    };
+    let Some(bitmap) = relay_qr::render(payload, scale, relay_qr::DEFAULT_QUIET_MODULES) else {
+        return Image::default();
+    };
+    let pixels: Vec<Rgba8Pixel> = bitmap
+        .dark
+        .into_iter()
+        .map(|dark| {
+            if dark {
+                Rgba8Pixel {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }
+            } else {
+                Rgba8Pixel {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: 255,
+                }
+            }
+        })
+        .collect();
+    let mut buffer =
+        SharedPixelBuffer::<Rgba8Pixel>::new(bitmap.width as u32, bitmap.height as u32);
+    buffer.make_mut_slice().copy_from_slice(&pixels);
+    Image::from_rgba8(buffer)
 }
 
 fn color(rgba: [u8; 4]) -> Color {
