@@ -1,0 +1,31 @@
+[package]
+name = "pw-graph-slint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "qpwgraph-rs-slint"
+path = "src/main.rs"
+
+[features]
+default = ["pipewire", "alsa", "relay"]
+pipewire = ["pw-graph-backend/pipewire"]
+alsa = ["dep:pw-graph-alsamidi", "pw-graph-alsamidi/alsa"]
+relay = ["pw-graph-backend/relay", "pipewire"]
+
+[dependencies]
+slint.workspace = true
+slint-node-editor = { path = "../../vendor/slint-node-editor" }
+pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false, optional = true }
+pw-graph-backend = { path = "../pw-graph-backend", default-features = false }
+pw-graph-config = { path = "../pw-graph-config" }
+pw-graph-core = { path = "../pw-graph-core" }
+pw-graph-effects = { path = "../pw-graph-effects" }
+pw-graph-i18n = { path = "../pw-graph-i18n" }
+pw-graph-patchbay = { path = "../pw-graph-patchbay" }
+
+[build-dependencies]
+slint-build.workspace = true

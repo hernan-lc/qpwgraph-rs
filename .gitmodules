@@ -1,0 +1,3 @@
+[submodule "slint-node-editor"]
+	path = vendor/slint-node-editor
+	url = https://github.com/tilladam/slint-node-editor.git

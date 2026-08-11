@@ -12,10 +12,15 @@ members = [
     "crates/pw-graph-i18n",
     "crates/pw-graph-ui",
     "crates/pw-graph-app",
+    "crates/pw-graph-slint",
     "crates/pw-graph-relay",
     "crates/pw-graph-relay-sdk",
     "crates/pw-graph-relay-android",
     "vendor/nnnoiseless",
+]
+exclude = [
+    # This is a pinned Slint component dependency with its own example workspace.
+    "vendor/slint-node-editor",
 ]
 
 [patch.crates-io]
@@ -33,6 +38,8 @@ anyhow = "1.0"
 eframe = { version = "0.29", default-features = false, features = ["glow", "x11"] }
 egui = "0.29"
 egui_extras = { version = "0.29", default-features = false, features = ["svg"] }
+slint = { git = "https://github.com/slint-ui/slint", rev = "e100f5e11da59897f58a2bf1937b245f4ca6c2e6", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "renderer-software"] }
+slint-build = { git = "https://github.com/slint-ui/slint", rev = "e100f5e11da59897f58a2bf1937b245f4ca6c2e6" }
 rfd = "0.15"
 quick-xml = "0.41"
 serde = { version = "1.0", features = ["derive"] }

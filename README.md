@@ -24,6 +24,9 @@ The code is split into small crates:
   `canvas/{mod,node,links,ports,names,geometry}.rs`; component usage is in
   [`docs/ui-components.md`](docs/ui-components.md).
 - `pw-graph-app`: desktop shell, backend composition, panels, tray, and CLI.
+- `pw-graph-slint`: an additive Slint visual preview that projects the same
+  graph read-only. It preserves the Egui application while the UI migration is
+  developed incrementally, using the pinned `slint-node-editor` submodule.
 
 ## Interface
 
@@ -78,6 +81,22 @@ cargo run -p pw-graph-app -- --lang es
 
 `--demo` starts the deterministic demo graph. Without it, a missing live
 backend produces an empty graph and an explanatory status message.
+
+### Slint preview
+
+The parallel Slint UI is intentionally read-only during its first migration
+milestone: it can observe the live graph and supports local viewport,
+selection, filtering, arrangement, and node-collapse interactions, but never
+changes PipeWire, ALSA, effects, relay state, patchbay files, or the Egui
+configuration.
+
+```bash
+git submodule update --init --recursive
+cargo run -p pw-graph-slint -- --demo
+```
+
+Omit `--demo` to observe the available native graph sources. The original
+Egui executable remains `cargo run -p pw-graph-app`.
 
 ## Nix
 
