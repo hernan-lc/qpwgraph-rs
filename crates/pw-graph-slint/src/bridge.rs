@@ -1,6 +1,6 @@
 use crate::args::Args;
 use crate::model::{
-    node_layout_key, node_type_color, node_type_label, port_type_color, ConnectMode, GraphSnapshot,
+    node_layout_key, node_type_color, port_type_color, ConnectMode, GraphSnapshot,
     LinkView, MediaFilter, MeterReading, MeterState, NodeView, UiGraphState,
 };
 use crate::source::ReadOnlyGraphSource;
@@ -177,12 +177,45 @@ impl UiBridge {
 
         let window = MainWindow::new()?;
         {
+            let app_for_text = app.clone();
+            window.global::<UiI18n>().on_text(move |key| {
+                SharedString::from(app_for_text.borrow().i18n.text(key.as_str()))
+            });
+            let app_for_format = app.clone();
+            window
+                .global::<UiI18n>()
+                .on_format_one(move |key, value| {
+                    let value = value.to_string();
+                    SharedString::from(
+                        app_for_format
+                            .borrow()
+                            .i18n
+                            .format(
+                                key.as_str(),
+                                &[
+                                    ("count", value.clone()),
+                                    ("path", value.clone()),
+                                    ("port", value.clone()),
+                                    ("pin", value),
+                                ],
+                            ),
+                    )
+                });
+            let preview = app.borrow();
+            window
+                .global::<UiI18n>()
+                .set_version(language_index(&preview.config.language));
+        }
+        {
             let preview = app.borrow();
             window.window().set_size(PhysicalSize::new(
                 preview.config.window_width.max(760.0).round() as u32,
                 preview.config.window_height.max(520.0).round() as u32,
             ));
             window.set_show_statusbar(preview.config.statusbar);
+            window.set_read_only_message(SharedString::from(
+                preview.i18n.text("status.slint_preview_message"),
+            ));
             window.set_show_minimap(preview.view.minimap_visible);
             window.set_search_text(SharedString::from(preview.view.search_query.clone()));
             window.set_media_filter(SharedString::from(preview.view.media_filter.as_str()));
@@ -1409,7 +1442,12 @@ fn read_window_state(window: &MainWindow, preview: &mut PreviewApp) {
     preview.config.patchbay_auto_disconnect = window.get_patchbay_auto_disconnect();
     preview.config.patchbay_auto_pin = window.get_patchbay_auto_pin();
     preview.config.patchbay_activated = window.get_patchbay_activated();
-    preview.config.language = language_code(window.get_language_index()).into();
+    let language = language_code(window.get_language_index());
+    if preview.config.language != language {
+        preview.config.language = language.into();
+        preview.i18n = I18n::from_language(language);
+        preview.status = preview.i18n.text("status.language_changed");
+    }
     preview.config.window_width = window.get_width_().max(760.0);
     preview.config.window_height = window.get_height_().max(520.0);
     preview.config.relay_device_name = window.get_relay_device_name().to_string();
@@ -1624,6 +1662,7 @@ fn sync_models(
                         .get(&node.node_id)
                         .copied()
                         .unwrap_or_default(),
+                    &preview.i18n,
                 )
             })
             .collect::<Vec<_>>(),
@@ -1653,6 +1692,9 @@ fn sync_models(
     }
     let (node_count, port_count, link_count) = preview.view.visible_counts(&snapshot);
     window.set_status(SharedString::from(preview.status.clone()));
+    window.set_read_only_message(SharedString::from(
+        preview.i18n.text("status.slint_preview_message"),
+    ));
     window.set_backend(SharedString::from(preview.source.backend_name()));
     window.set_graph_counts(SharedString::from(format!(
         "{node_count} nodes · {port_count} ports · {link_count} links"
@@ -1666,6 +1708,9 @@ fn sync_models(
     window.set_repel_overlaps(preview.config.repel_overlapping_nodes);
     window.set_connect_through(preview.config.connect_through_nodes);
     window.set_language_index(language_index(&preview.config.language));
+    window
+        .global::<UiI18n>()
+        .set_version(language_index(&preview.config.language));
     window.set_meter_policy_index(meter_policy_index(preview.source.meter_policy()));
     window.set_ui_text_scale(preview.config.ui_text_scale);
     window.set_panel_text_scale(preview.config.panel_text_scale);
@@ -1722,11 +1767,11 @@ fn sync_models(
     preview.snapshot = snapshot;
 }
 
-fn node_row(node: &NodeView, audio: PreviewAudioControl) -> NodeRow {
+fn node_row(node: &NodeView, audio: PreviewAudioControl, i18n: &I18n) -> NodeRow {
     NodeRow {
         id: node.id,
         node_title: SharedString::from(node.title.clone()),
-        node_subtitle: SharedString::from(node_type_label(node.node_type)),
+        node_subtitle: SharedString::from(localized_node_type(i18n, node.node_type)),
         x: node.position[0],
         y: node.position[1],
         width: node.width,
@@ -1750,7 +1795,7 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl) -> NodeRow {
         meter_peak: node.meter.peak,
         meter_peak_position: meter_fraction(node.meter.peak),
         meter_available: matches!(node.meter.state, MeterState::Live | MeterState::Demo),
-        meter_label: SharedString::from(node.meter.state.label()),
+        meter_label: SharedString::from(localized_meter_label(i18n, node.meter.state)),
         audio_volume_position: audio.volume_position,
         audio_muted: audio.muted,
         ports: ModelRc::from(Rc::new(VecModel::from(
@@ -1771,6 +1816,27 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl) -> NodeRow {
                 .collect::<Vec<_>>(),
         ))),
     }
+}
+
+fn localized_node_type(i18n: &I18n, node_type: pw_graph_core::NodeType) -> String {
+    let key = match node_type {
+        pw_graph_core::NodeType::PipeWire => "canvas.node_type_pipewire",
+        pw_graph_core::NodeType::Effect => "canvas.node_type_effect",
+        pw_graph_core::NodeType::AlsaMidi => "canvas.node_type_alsa_midi",
+        pw_graph_core::NodeType::Unknown => "canvas.node_type_unknown",
+    };
+    i18n.text(key)
+}
+
+fn localized_meter_label(i18n: &I18n, state: MeterState) -> String {
+    let key = match state {
+        MeterState::Unavailable => "canvas.unknown",
+        MeterState::Disabled => "meters.off",
+        MeterState::Waiting => "canvas.audio_meter_starting",
+        MeterState::Live => "canvas.audio_meter_live",
+        MeterState::Demo => "canvas.audio_meter_demo",
+    };
+    i18n.text(key)
 }
 
 fn meter_fallback(source: &ReadOnlyGraphSource) -> MeterState {

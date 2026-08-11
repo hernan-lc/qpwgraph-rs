@@ -15,6 +15,7 @@ import {
     RuleRow,
     ShortcutsDialog,
     ShortcutRow,
+    UiI18n,
 } from "parity-components.slint";
 
 export struct PortRow {
@@ -70,7 +71,7 @@ export struct RelayRow {
     level: float,
 }
 
-export { NodeEditorComputations, NodeEditorInternalCallbacks }
+export { NodeEditorComputations, NodeEditorInternalCallbacks, UiI18n }
 
 component RailButton inherits Rectangle {
     in property <image> icon;
@@ -299,7 +300,7 @@ component GraphNode inherits BaseNode {
 }
 
 export component MainWindow inherits Window {
-    title: "qpwgraph-rs";
+    title: UiI18n.localized("app.title");
     background: #191d24;
     preferred-width: 1100px;
     preferred-height: 760px;
@@ -318,7 +319,7 @@ export component MainWindow inherits Window {
     in property <string> status: "Starting Slint UI…";
     in property <string> backend: "";
     in property <string> graph-counts: "";
-    in property <string> read-only-message: "Slint migration build — graph, effects, relay, layout and audio controls are active.";
+    in property <string> read-only-message: "";
     in-out property <bool> show-statusbar: true;
     in-out property <bool> show-common-actions: true;
     in-out property <bool> show-patchbay-toolbar: true;
@@ -422,34 +423,34 @@ export component MainWindow inherits Window {
                 preferences_button := RailButton {
                     width: 42px;
                     icon: @image-url("../../pw-graph-app/assets/icons/settings.svg");
-                    label: "Preferences"; active: root.show-preferences;
+                    label: UiI18n.localized("nav.preferences"); active: root.show-preferences;
                     clicked => { root.action("preferences"); }
                 }
                 relay_button := RailButton {
                     width: 42px;
                     icon: @image-url("../../pw-graph-app/assets/icons/relay.svg");
-                    label: "Relay"; active: root.show-relay;
+                    label: UiI18n.localized("nav.relay"); active: root.show-relay;
                     clicked => { root.action("relay"); }
                 }
                 shortcuts_button := RailButton {
                     width: 42px;
                     icon: @image-url("../../pw-graph-app/assets/icons/help.svg");
-                    label: "Keyboard shortcuts"; active: root.show-shortcuts;
+                    label: UiI18n.localized("nav.shortcuts"); active: root.show-shortcuts;
                     clicked => { root.action("shortcuts"); }
                 }
 
                 Rectangle { width: 52px; x: -5px; height: 1px; background: #35414d; }
                 Rectangle { width: 42px; height: 7px; background: transparent; }
-                minimap_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/minimap.svg"); label: "Minimap"; active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
-                refresh_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/refresh.svg"); label: "Refresh graph"; clicked => { root.action("refresh"); } }
-                undo_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/undo.svg"); label: "Undo (read-only)"; clicked => { root.action("undo"); } }
-                redo_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/redo.svg"); label: "Redo (read-only)"; clicked => { root.action("redo"); } }
-                history_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); label: "History"; active: root.show-history; clicked => { root.action("history"); } }
-                connect_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); label: root.connect-mode == "easy" ? "Easy connection mode" : "Advanced connection mode"; active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
-                arrange_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); label: "Arrange nodes"; clicked => { root.action("arrange"); } }
-                effects_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/effects.svg"); label: "Effects"; active: root.show-effects; clicked => { root.action("effects"); } }
-                save_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/save.svg"); label: "Save patchbay (read-only)"; clicked => { root.action("save-patchbay"); } }
-                filter_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/filter.svg"); label: "Cycle media filter"; active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
+                minimap_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
+                refresh_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } }
+                undo_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } }
+                redo_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } }
+                history_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } }
+                connect_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
+                arrange_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } }
+                effects_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } }
+                save_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } }
+                filter_button := RailButton { width: 42px; icon: @image-url("../../pw-graph-app/assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
 
                 Rectangle {
                     width: 42px;
@@ -505,6 +506,13 @@ export component MainWindow inherits Window {
                 if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "s" || event.text == "S")) { root.action("save-patchbay"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "s" || event.text == "S")) { root.action("save-config"); return accept; }
                 if ((event.modifiers.control || event.modifiers.meta) && (event.text == "o" || event.text == "O")) { root.action("load-patchbay"); return accept; }
+                // Arrow navigation is a canvas command too. Handle it before
+                // the generic Ctrl/Cmd guard so Ctrl/Cmd+Arrow can use the
+                // documented fastest movement step.
+                if (event.text == Key.LeftArrow) { root.pan-x += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
+                if (event.text == Key.RightArrow) { root.pan-x -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
+                if (event.text == Key.UpArrow) { root.pan-y += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
+                if (event.text == Key.DownArrow) { root.pan-y -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
                 if (event.modifiers.control || event.modifiers.meta) { return reject; }
                 if (event.text == Key.Delete || event.text == Key.Backspace) { root.action("delete-selection"); return accept; }
                 if (event.text == "r" || event.text == "R") { root.action("refresh"); return accept; }
@@ -516,10 +524,6 @@ export component MainWindow inherits Window {
                 if (event.text == "3") { root.action("filter-midi"); return accept; }
                 if (event.text == "+" || event.text == "=") { root.action("zoom-in"); return accept; }
                 if (event.text == "-" || event.text == "_") { root.action("zoom-out"); return accept; }
-                if (event.text == Key.LeftArrow) { root.pan-x -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.text == Key.RightArrow) { root.pan-x += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.text == Key.UpArrow) { root.pan-y -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.text == Key.DownArrow) { root.pan-y += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
                 return reject;
             }
             editor := NodeEditor {
@@ -567,7 +571,7 @@ export component MainWindow inherits Window {
         }
         LineEdit {
             x: parent.width - 244px; y: 15px; width: 228px; height: 32px;
-            placeholder-text: "Search graph";
+            placeholder-text: UiI18n.localized("search.placeholder");
             text <=> root.search-text;
         }
         Rectangle {
@@ -584,23 +588,23 @@ export component MainWindow inherits Window {
             background: #20262df7;
             border-color: #506171;
             border-width: 1px;
-            Text { x: 18px; y: 14px; text: "Relay"; color: #f0f4f7; font-size: 18px; }
+            Text { x: 18px; y: 14px; text: UiI18n.localized("relay.title"); color: #f0f4f7; font-size: 18px; }
             ActionButton { x: parent.width - 47px; y: 12px; width: 30px; text: "×"; clicked => { root.action("relay"); } }
             Rectangle { x: 16px; y: 49px; width: parent.width - 32px; height: 1px; background: #3d4a56; }
-            ActionButton { x: 16px; y: 62px; width: 110px; text: "Connections"; selected: root.relay-tab == 0; clicked => { root.relay-tab = 0; } }
-            ActionButton { x: 134px; y: 62px; width: 80px; text: "Host"; selected: root.relay-tab == 1; clicked => { root.relay-tab = 1; } }
-            ActionButton { x: 222px; y: 62px; width: 80px; text: "Advanced"; selected: root.relay-tab == 2; clicked => { root.relay-tab = 2; } }
+            ActionButton { x: 16px; y: 62px; width: 110px; text: UiI18n.localized("relay.tab_connections"); selected: root.relay-tab == 0; clicked => { root.relay-tab = 0; } }
+            ActionButton { x: 134px; y: 62px; width: 80px; text: UiI18n.localized("relay.tab_host"); selected: root.relay-tab == 1; clicked => { root.relay-tab = 1; } }
+            ActionButton { x: 222px; y: 62px; width: 80px; text: UiI18n.localized("relay.advanced"); selected: root.relay-tab == 2; clicked => { root.relay-tab = 2; } }
             if root.relay-tab == 0: ScrollView {
                 x: 16px; y: 106px; width: parent.width - 32px; height: parent.height - 124px;
                 VerticalBox {
                     spacing: 7px;
                     Rectangle {
                         height: 82px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
-                        LineEdit { x: 8px; y: 8px; width: parent.width - 112px; height: 29px; placeholder-text: "host:port or QR payload"; text <=> root.relay-client-target; }
-                        LineEdit { x: 8px; y: 45px; width: parent.width - 200px; height: 29px; placeholder-text: "PIN"; text <=> root.relay-client-pin; }
-                        ActionButton { x: parent.width - 96px; y: 27px; width: 82px; text: "Connect"; enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
+                        LineEdit { x: 8px; y: 8px; width: parent.width - 112px; height: 29px; placeholder-text: UiI18n.localized("relay.target"); text <=> root.relay-client-target; }
+                        LineEdit { x: 8px; y: 45px; width: parent.width - 200px; height: 29px; placeholder-text: UiI18n.localized("relay.pin"); text <=> root.relay-client-pin; }
+                        ActionButton { x: parent.width - 96px; y: 27px; width: 82px; text: UiI18n.localized("relay.connect"); enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
                     }
-                    Text { text: "Nearby and remembered relay peers"; color: #aebdca; font-size: 11px; }
+                    Text { text: UiI18n.localized("relay.group_available"); color: #aebdca; font-size: 11px; }
                     for row in root.relay-rows: Rectangle {
                         height: 51px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
                         Text { x: 9px; y: 5px; width: 185px; height: 17px; text: row.name; color: #edf3f7; font-size: 11px; overflow: elide; }
@@ -624,31 +628,31 @@ export component MainWindow inherits Window {
             }
             if root.relay-tab == 1: Rectangle {
                 x: 16px; y: 108px; width: parent.width - 32px; height: 330px; background: #29323c; border-radius: 5px;
-                Text { x: 12px; y: 12px; text: "Host your graph"; color: #edf3f7; font-size: 14px; }
-                Text { x: 12px; y: 40px; width: parent.width - 24px; text: "Start a host, then share the endpoint and pairing PIN."; color: #aebdca; font-size: 11px; wrap: word-wrap; }
-                Text { x: 12px; y: 78px; text: "Device name"; color: #aebdca; font-size: 10px; }
+                Text { x: 12px; y: 12px; text: UiI18n.localized("relay.title"); color: #edf3f7; font-size: 14px; }
+                Text { x: 12px; y: 40px; width: parent.width - 24px; text: UiI18n.localized("relay.emitter_hint"); color: #aebdca; font-size: 11px; wrap: word-wrap; }
+                Text { x: 12px; y: 78px; text: UiI18n.localized("relay.device_name"); color: #aebdca; font-size: 10px; }
                 LineEdit { x: 100px; y: 68px; width: parent.width - 112px; height: 29px; text <=> root.relay-device-name; }
-                Text { x: 12px; y: 115px; text: "Host PIN"; color: #aebdca; font-size: 10px; }
+                Text { x: 12px; y: 115px; text: UiI18n.localized("relay.pin"); color: #aebdca; font-size: 10px; }
                 LineEdit { x: 100px; y: 105px; width: parent.width - 112px; height: 29px; text <=> root.relay-host-pin; }
-                Text { x: 12px; y: 152px; text: "Port"; color: #aebdca; font-size: 10px; }
-                LineEdit { x: 100px; y: 142px; width: 110px; height: 29px; placeholder-text: "0 = auto"; text <=> root.relay-host-port-text; }
-                ActionButton { x: 12px; y: 190px; width: 112px; text: root.relay-host-active ? "Stop host" : "Start host"; enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
-                ActionButton { x: 132px; y: 190px; width: 112px; text: "Show QR"; enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
-                Text { x: 12px; y: 237px; width: parent.width - 24px; text: root.relay-host-active ? "Listening at " + root.relay-host-endpoint : "Host is stopped"; color: root.relay-host-active ? #57c785 : #aebdca; font-size: 10px; overflow: elide; }
-                Text { x: 12px; y: 263px; width: parent.width - 24px; text: root.relay-host-active ? "Pairing PIN: " + root.relay-host-pin : "Relay settings are saved automatically."; color: #aebdca; font-size: 10px; overflow: elide; }
+                Text { x: 12px; y: 152px; text: UiI18n.localized("relay.port"); color: #aebdca; font-size: 10px; }
+                LineEdit { x: 100px; y: 142px; width: 110px; height: 29px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; }
+                ActionButton { x: 12px; y: 190px; width: 112px; text: root.relay-host-active ? UiI18n.localized("relay.stop_host") : UiI18n.localized("relay.start_host"); enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
+                ActionButton { x: 132px; y: 190px; width: 112px; text: UiI18n.localized("relay.show_qr"); enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
+                Text { x: 12px; y: 237px; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.listening", root.relay-host-endpoint) : UiI18n.localized("relay.host_stopped"); color: root.relay-host-active ? #57c785 : #aebdca; font-size: 10px; overflow: elide; }
+                Text { x: 12px; y: 263px; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.qr_pin", root.relay-host-pin) : UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px; overflow: elide; }
             }
             if root.relay-tab == 2: Rectangle {
                 x: 16px; y: 108px; width: parent.width - 32px; height: 300px; background: #29323c; border-radius: 5px;
-                Text { x: 12px; y: 12px; text: "Advanced settings"; color: #edf3f7; font-size: 14px; }
-                Text { x: 12px; y: 45px; text: "Role"; color: #aebdca; font-size: 11px; }
-                ComboBox { x: 98px; y: 34px; width: 140px; model: ["Emit", "Receive", "Both"]; current-index <=> root.relay-role-index; }
-                Text { x: 12px; y: 89px; text: "Codec"; color: #aebdca; font-size: 11px; }
+                Text { x: 12px; y: 12px; text: UiI18n.localized("relay.advanced"); color: #edf3f7; font-size: 14px; }
+                Text { x: 12px; y: 45px; text: UiI18n.localized("relay.role"); color: #aebdca; font-size: 11px; }
+                ComboBox { x: 98px; y: 34px; width: 140px; model: [UiI18n.localized("relay.role_emit"), UiI18n.localized("relay.role_receive"), UiI18n.localized("relay.role_both")]; current-index <=> root.relay-role-index; }
+                Text { x: 12px; y: 89px; text: UiI18n.localized("relay.codec"); color: #aebdca; font-size: 11px; }
                 ComboBox { x: 98px; y: 78px; width: 140px; model: ["Opus", "PCM"]; current-index <=> root.relay-codec-index; }
-                Text { x: 12px; y: 133px; text: "Frame length"; color: #aebdca; font-size: 11px; }
+                Text { x: 12px; y: 133px; text: UiI18n.localized("relay.frame_ms"); color: #aebdca; font-size: 11px; }
                 ComboBox { x: 98px; y: 122px; width: 140px; model: ["5 ms", "10 ms", "20 ms", "40 ms", "60 ms"]; current-index <=> root.relay-frame-index; }
-                Text { x: 12px; y: 177px; text: "Transport"; color: #aebdca; font-size: 11px; }
+                Text { x: 12px; y: 177px; text: UiI18n.localized("relay.transport"); color: #aebdca; font-size: 11px; }
                 ComboBox { x: 98px; y: 166px; width: 140px; model: ["Auto", "Wi-Fi", "Bluetooth PAN", "LAN"]; current-index <=> root.relay-transport-index; }
-                Text { x: 12px; y: 222px; width: parent.width - 24px; text: "These settings apply to the next host or client connection."; color: #aebdca; font-size: 10px; wrap: word-wrap; }
+                Text { x: 12px; y: 222px; width: parent.width - 24px; text: UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px; wrap: word-wrap; }
             }
         }
 
@@ -687,10 +691,10 @@ export component MainWindow inherits Window {
         if root.show-history: Rectangle {
             x: max(24px, (parent.width - 560px) / 2); y: max(32px, (parent.height - 350px) / 2); width: min(560px, parent.width - 48px); height: min(350px, parent.height - 64px);
             background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
-            Text { x: 20px; y: 18px; text: "History"; color: #f0f4f7; font-size: 19px; }
+            Text { x: 20px; y: 18px; text: UiI18n.localized("history.title"); color: #f0f4f7; font-size: 19px; }
             ActionButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; clicked => { root.action("history"); } }
-            Text { x: 20px; y: 62px; width: parent.width - 40px; text: "Undo and redo history stays empty because this preview never performs backend mutations."; color: #aebdca; font-size: 12px; wrap: word-wrap; }
-            Rectangle { x: 20px; y: 132px; width: parent.width - 40px; height: 86px; background: #2b343d; border-radius: 5px; Text { width: parent.width; height: parent.height; text: "No actions yet"; color: #9eafbc; horizontal-alignment: center; vertical-alignment: center; } }
+            Text { x: 20px; y: 62px; width: parent.width - 40px; text: UiI18n.localized("history.hint"); color: #aebdca; font-size: 12px; wrap: word-wrap; }
+            Rectangle { x: 20px; y: 132px; width: parent.width - 40px; height: 86px; background: #2b343d; border-radius: 5px; Text { width: parent.width; height: parent.height; text: UiI18n.localized("history.empty"); color: #9eafbc; horizontal-alignment: center; vertical-alignment: center; } }
         }
 
         shortcut-overlay := Rectangle {
@@ -711,14 +715,14 @@ export component MainWindow inherits Window {
         if root.show-effects: Rectangle {
             x: max(24px, (parent.width - 700px) / 2); y: max(28px, (parent.height - 510px) / 2); width: min(700px, parent.width - 48px); height: min(510px, parent.height - 56px);
             background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
-            Text { x: 20px; y: 18px; text: "Effects"; color: #f0f4f7; font-size: 19px; }
-            Text { x: 20px; y: 45px; width: parent.width - 90px; text: "Create realtime effect nodes, bypass them, or remove them from the graph."; color: #aebdca; font-size: 11px; overflow: elide; }
+            Text { x: 20px; y: 18px; text: UiI18n.localized("effects.title"); color: #f0f4f7; font-size: 19px; }
+            Text { x: 20px; y: 45px; width: parent.width - 90px; text: UiI18n.localized("effects.gallery_hint"); color: #aebdca; font-size: 11px; overflow: elide; }
             ActionButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; clicked => { root.action("effects"); } }
             ScrollView {
                 x: 20px; y: 86px; width: parent.width - 40px; height: parent.height - 145px;
                 VerticalBox {
                     spacing: 8px;
-                    if root.effects.length == 0: Text { text: "No effect instances yet."; color: #9eafbc; font-size: 11px; }
+                    if root.effects.length == 0: Text { text: UiI18n.localized("effects.no_available"); color: #9eafbc; font-size: 11px; }
                     for effect in root.effects: Rectangle {
                         height: 105px; background: #2a333d; border-color: #40505f; border-width: 1px; border-radius: 5px;
                         Text { x: 11px; y: 8px; width: parent.width - 180px; height: 17px; text: effect.name; color: #edf3f7; font-size: 12px; overflow: elide; }
@@ -732,25 +736,25 @@ export component MainWindow inherits Window {
                             value: effect.parameter-value;
                             changed(value) => { root.action("effect-parameter:" + effect.description + ":" + effect.parameter-id + ":" + value); }
                         }
-                        ActionButton { x: parent.width - 168px; y: 10px; width: 76px; text: effect.enabled ? "Disable" : "Enable"; clicked => { root.action("effect-toggle:" + effect.description); } }
-                        ActionButton { x: parent.width - 86px; y: 10px; width: 76px; text: "Details"; clicked => { root.action("effect-inspect:" + effect.description); } }
-                        ActionButton { x: parent.width - 86px; y: 43px; width: 76px; text: "Remove"; clicked => { root.action("effect-remove:" + effect.description); } }
+                        ActionButton { x: parent.width - 168px; y: 10px; width: 76px; text: effect.enabled ? UiI18n.localized("effects.enabled") : UiI18n.localized("effects.cancel"); clicked => { root.action("effect-toggle:" + effect.description); } }
+                        ActionButton { x: parent.width - 86px; y: 10px; width: 76px; text: UiI18n.localized("effects.setup"); clicked => { root.action("effect-inspect:" + effect.description); } }
+                        ActionButton { x: parent.width - 86px; y: 43px; width: 76px; text: UiI18n.localized("effects.remove"); clicked => { root.action("effect-remove:" + effect.description); } }
                     }
                 }
             }
             ComboBox { x: 20px; y: parent.height - 48px; width: 230px; model: root.effect-options; current-index <=> root.effect-selection-index; }
-            ActionButton { x: 260px; y: parent.height - 48px; width: 112px; text: "Add effect"; enabled: root.effects-available && root.effect-options.length > 0; clicked => { root.action("effect-create"); } }
-            Text { x: 385px; y: parent.height - 39px; text: "Changes are saved automatically."; color: #aebdca; font-size: 10px; }
+            ActionButton { x: 260px; y: parent.height - 48px; width: 112px; text: UiI18n.localized("effects.add"); enabled: root.effects-available && root.effect-options.length > 0; clicked => { root.action("effect-create"); } }
+            Text { x: 385px; y: parent.height - 39px; text: UiI18n.localized("help.configuration"); color: #aebdca; font-size: 10px; }
         }
 
         if root.show-qr: Rectangle {
             x: max(24px, (parent.width - 380px) / 2); y: max(28px, (parent.height - 435px) / 2); width: min(380px, parent.width - 48px); height: min(435px, parent.height - 56px);
             background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
-            Text { x: 18px; y: 18px; text: "Relay QR code"; color: #f0f4f7; font-size: 18px; }
+            Text { x: 18px; y: 18px; text: UiI18n.localized("relay.qr_title"); color: #f0f4f7; font-size: 18px; }
             Rectangle { x: 72px; y: 65px; width: 236px; height: 236px; background: #f5f5f5; border-radius: 4px; Image { width: parent.width; height: parent.height; source: root.relay-qr-image; } }
             Text { x: 22px; y: 310px; width: parent.width - 44px; text: root.relay-qr-payload; color: #aebdca; font-size: 10px; horizontal-alignment: center; wrap: word-wrap; overflow: elide; }
-            Text { x: 22px; y: 342px; width: parent.width - 44px; text: "Scan this code on the peer device."; color: #aebdca; font-size: 10px; horizontal-alignment: center; }
-            ActionButton { x: parent.width - 105px; y: parent.height - 45px; width: 88px; text: "Close"; clicked => { root.action("close-qr"); } }
+            Text { x: 22px; y: 342px; width: parent.width - 44px; text: UiI18n.localized("relay.qr_hint"); color: #aebdca; font-size: 10px; horizontal-alignment: center; }
+            ActionButton { x: parent.width - 105px; y: parent.height - 45px; width: 88px; text: UiI18n.localized("shortcuts.close"); clicked => { root.action("close-qr"); } }
         }
     }
 

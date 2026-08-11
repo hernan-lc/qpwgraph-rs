@@ -1,5 +1,28 @@
 import { CheckBox, ComboBox, LineEdit, ScrollView, Slider, VerticalBox } from "std-widgets.slint";
 
+/// Localization is owned by the Rust bridge. `version` is deliberately part
+/// of the helper's dependency graph so changing the language invalidates all
+/// translated bindings, including bindings in already-open dialogs.
+export global UiI18n {
+    in-out property <int> version: 0;
+    pure callback text(string) -> string;
+    pure callback format-one(string, string) -> string;
+
+    pure public function localized(key: string) -> string {
+        if self.version >= 0 {
+            return self.text(key);
+        }
+        return "";
+    }
+
+    pure public function formatted-one(key: string, value: string) -> string {
+        if self.version >= 0 {
+            return self.format-one(key, value);
+        }
+        return "";
+    }
+}
+
 export struct ShortcutRow {
     keys: string,
     description: string,
@@ -255,13 +278,13 @@ export component ShortcutsDialog inherits Rectangle {
     border-width: 1px;
     border-radius: 7px;
 
-    Text { x: 18px; y: 12px; width: parent.width - 76px; height: 28px; text: "Keyboard shortcuts"; color: #eef3f7; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+    Text { x: 18px; y: 12px; width: parent.width - 76px; height: 28px; text: UiI18n.localized("shortcuts.title"); color: #eef3f7; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
     DialogButton { x: parent.width - 43px; y: 10px; width: 30px; text: "×"; clicked => { root.close(); } }
     Rectangle { x: 0px; y: 48px; width: parent.width; height: 1px; background: #3d4a56; }
-    Text { x: 12px; y: 56px; width: parent.width - 24px; height: 18px; text: "Press F1 to toggle this help. Shortcuts are disabled while typing in a text field."; color: #b9c7d1; font-size: 10px; }
-    Text { x: 12px; y: 82px; width: 45px; height: 31px; text: "Search"; color: #e1e8ed; font-size: 11px; vertical-alignment: center; }
-    search := LineEdit { x: 61px; y: 82px; width: parent.width - 73px; height: 31px; placeholder-text: "Filter by key or description… (Ctrl/Cmd+F focuses this field)"; text <=> root.search-text; }
-    Text { x: 12px; y: 117px; width: parent.width - 24px; height: 18px; text: root.entries.length + " shortcuts shown"; color: #93a4b1; font-size: 9px; }
+    Text { x: 12px; y: 56px; width: parent.width - 24px; height: 18px; text: UiI18n.localized("shortcuts.hint"); color: #b9c7d1; font-size: 10px; }
+    Text { x: 12px; y: 82px; width: 45px; height: 31px; text: UiI18n.localized("shortcuts.search"); color: #e1e8ed; font-size: 11px; vertical-alignment: center; }
+    search := LineEdit { x: 61px; y: 82px; width: parent.width - 73px; height: 31px; placeholder-text: UiI18n.localized("shortcuts.search_hint"); text <=> root.search-text; }
+    Text { x: 12px; y: 117px; width: parent.width - 24px; height: 18px; text: UiI18n.formatted-one("shortcuts.result_count", root.entries.length); color: #93a4b1; font-size: 9px; }
 
     ScrollView {
         x: 12px; y: 137px; width: parent.width - 24px; height: parent.height - 183px;
@@ -272,10 +295,10 @@ export component ShortcutsDialog inherits Rectangle {
                 Text { x: 0px; width: 190px; height: parent.height; text: entry.keys; color: #edf3f7; font-family: "monospace"; font-weight: 600; font-size: 10px; vertical-alignment: center; overflow: elide; }
                 Text { x: 203px; width: parent.width - 203px; height: parent.height; text: entry.description; color: #cad4dc; font-size: 10px; vertical-alignment: center; overflow: elide; }
             }
-            if root.entries.length == 0: Text { height: 42px; text: "No shortcuts match the current search."; color: #93a4b1; font-size: 10px; vertical-alignment: center; horizontal-alignment: center; }
+            if root.entries.length == 0: Text { height: 42px; text: UiI18n.localized("shortcuts.no_results"); color: #93a4b1; font-size: 10px; vertical-alignment: center; horizontal-alignment: center; }
         }
     }
-    DialogButton { x: parent.width - 94px; y: parent.height - 39px; width: 82px; text: "Close"; clicked => { root.close(); } }
+    DialogButton { x: parent.width - 94px; y: parent.height - 39px; width: 82px; text: UiI18n.localized("shortcuts.close"); clicked => { root.close(); } }
 
     public function focus-search() {
         search.focus();
@@ -311,12 +334,12 @@ export component PreferencesDialog inherits Rectangle {
     border-width: 1px;
     border-radius: 7px;
 
-    Text { x: 18px; y: 10px; width: parent.width - 76px; height: 29px; text: "Preferences"; color: #eef3f7; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+    Text { x: 18px; y: 10px; width: parent.width - 76px; height: 29px; text: UiI18n.localized("preferences.title"); color: #eef3f7; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
     DialogButton { x: parent.width - 43px; y: 9px; width: 30px; text: "×"; clicked => { root.close(); } }
     Rectangle { x: 0px; y: 47px; width: parent.width; height: 1px; background: #3d4a56; }
 
-    DialogButton { x: 12px; y: 57px; width: 118px; text: "⚙  Interface"; selected: root.tab == 0; clicked => { root.tab = 0; } }
-    DialogButton { x: 138px; y: 57px; width: 154px; text: "⇄  Patchbay options"; selected: root.tab == 1; clicked => { root.tab = 1; } }
+    DialogButton { x: 12px; y: 57px; width: 118px; text: "⚙  " + UiI18n.localized("preferences.tab.interface"); selected: root.tab == 0; clicked => { root.tab = 0; } }
+    DialogButton { x: 138px; y: 57px; width: 154px; text: "⇄  " + UiI18n.localized("preferences.tab.patchbay"); selected: root.tab == 1; clicked => { root.tab = 1; } }
     Rectangle { x: 12px; y: 96px; width: parent.width - 24px; height: 1px; background: #3d4a56; }
 
     if root.tab == 0: ScrollView {
@@ -324,44 +347,44 @@ export component PreferencesDialog inherits Rectangle {
         VerticalBox {
             spacing: 10px;
             SettingsSection {
-                title: "Configuration";
-                summary: "Application options and filters are saved automatically after changes. Patchbay link files still use explicit save actions.";
+                title: UiI18n.localized("inspector.configuration");
+                summary: UiI18n.localized("help.configuration");
                 section-height: 178px;
-                SelectSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/language.svg"); title: "Language"; help: "Choose the interface language. The choice is saved for the next launch."; options: ["English", "Español", "Français"]; current-index <=> root.language-index; }
+                SelectSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/language.svg"); title: UiI18n.localized("language.label"); help: UiI18n.localized("help.language"); options: ["English", "Español", "Français"]; current-index <=> root.language-index; }
                 Rectangle {
                     x: 0px; y: 65px; width: parent.width; height: 61px;
                     Image { x: 4px; y: 19px; width: 16px; height: 16px; source: @image-url("../../pw-graph-app/assets/icons/save.svg"); opacity: 0.76; }
-                    Text { x: 32px; y: 6px; width: parent.width - 205px; height: 18px; text: "Save configuration now"; color: #e6edf2; font-size: 11px; }
-                    Text { x: 32px; y: 27px; width: parent.width - 205px; height: 21px; text: "Config file: " + root.config-path; color: #8393a0; font-size: 8px; overflow: elide; }
-                    DialogButton { x: parent.width - 166px; y: 12px; width: 154px; text: "Save application config"; clicked => { root.action("save-config"); } }
+                    Text { x: 32px; y: 6px; width: parent.width - 205px; height: 18px; text: UiI18n.localized("inspector.save_configuration"); color: #e6edf2; font-size: 11px; }
+                    Text { x: 32px; y: 27px; width: parent.width - 205px; height: 21px; text: UiI18n.formatted-one("inspector.config_path", root.config-path); color: #8393a0; font-size: 8px; overflow: elide; }
+                    DialogButton { x: parent.width - 166px; y: 12px; width: 154px; text: UiI18n.localized("shortcuts.save_config"); clicked => { root.action("save-config"); } }
                 }
             }
             SettingsSection {
-                title: "Interface"; section-height: 207px;
-                SwitchSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/toolbar.svg"); title: "Show common actions in sidebar"; help: "Show refresh, undo, redo, and other common graph actions in the sidebar."; checked <=> root.show-common-actions; }
-                SwitchSettingRow { x: 0px; y: 55px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/statusbar.svg"); title: "Show status bar"; help: "Show connection status and backend information at the bottom."; checked <=> root.show-statusbar; }
-                SwitchSettingRow { x: 0px; y: 110px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/patchbay.svg"); title: "Show patchbay toolbar"; help: "Show save, load, snapshot, and activate patchbay actions in the sidebar."; checked <=> root.show-patchbay-toolbar; }
+                title: UiI18n.localized("inspector.interface"); section-height: 207px;
+                SwitchSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/toolbar.svg"); title: UiI18n.localized("inspector.toolbar_visible"); help: UiI18n.localized("help.toolbar_visible"); checked <=> root.show-common-actions; }
+                SwitchSettingRow { x: 0px; y: 55px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/statusbar.svg"); title: UiI18n.localized("inspector.statusbar_visible"); help: UiI18n.localized("help.statusbar_visible"); checked <=> root.show-statusbar; }
+                SwitchSettingRow { x: 0px; y: 110px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/patchbay.svg"); title: UiI18n.localized("inspector.patchbay_toolbar_visible"); help: UiI18n.localized("help.patchbay_toolbar_visible"); checked <=> root.show-patchbay-toolbar; }
             }
             SettingsSection {
-                title: "Graph behavior"; section-height: 207px;
-                SwitchSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); title: "Repel overlapping nodes"; help: "Move overlapping nodes apart automatically while the graph is idle."; checked <=> root.repel-overlaps; }
-                SwitchSettingRow { x: 0px; y: 55px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); title: "Connect through nodes"; help: "Click a node body to connect to its first compatible sink port."; checked <=> root.connect-through; }
-                SwitchSettingRow { x: 0px; y: 110px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/thumbnail.svg"); title: "Thumbnail view"; help: "Show compact node cards without ports or link lines."; checked <=> root.thumbnail-view; }
+                title: UiI18n.localized("inspector.behavior"); section-height: 207px;
+                SwitchSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/repel.svg"); title: UiI18n.localized("inspector.repel_overlaps"); help: UiI18n.localized("help.repel_overlaps"); checked <=> root.repel-overlaps; }
+                SwitchSettingRow { x: 0px; y: 55px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/connect.svg"); title: UiI18n.localized("inspector.connect_through"); help: UiI18n.localized("help.connect_through"); checked <=> root.connect-through; }
+                SwitchSettingRow { x: 0px; y: 110px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/thumbnail.svg"); title: UiI18n.localized("inspector.thumbnail_view"); help: UiI18n.localized("help.thumbnail_view"); checked <=> root.thumbnail-view; }
             }
             SettingsSection {
-                title: "Audio metering"; section-height: 187px;
-                SelectSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/diagnostics.svg"); title: "Measure levels"; help: "Choose when PipeWire helper streams may monitor visible audio nodes."; options: ["Off", "On demand", "Always"]; current-index <=> root.meter-policy-index; }
-                Rectangle { x: 4px; y: 65px; width: parent.width - 8px; height: 42px; background: #1d242c; border-color: #3f4c59; border-width: 1px; border-radius: 4px; Text { x: 9px; width: parent.width - 18px; height: parent.height; text: root.meter-policy-index == 0 ? "Meters stay disabled and do not attach helper streams." : root.meter-policy-index == 1 ? "Only audio nodes visible in this window are measured." : "Every compatible audio node is measured continuously."; color: #93a4b1; font-size: 9px; wrap: word-wrap; vertical-alignment: center; } }
-                DialogButton { x: parent.width - 151px; y: 115px; width: 147px; text: "Reset audio config"; clicked => { root.action("reset-audio"); } }
+                title: UiI18n.localized("inspector.audio_metering"); section-height: 187px;
+                SelectSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/diagnostics.svg"); title: UiI18n.localized("inspector.audio_metering_policy"); help: UiI18n.localized("help.audio_metering_policy"); options: [UiI18n.localized("meters.off"), UiI18n.localized("meters.on_demand"), UiI18n.localized("meters.always")]; current-index <=> root.meter-policy-index; }
+                Rectangle { x: 4px; y: 65px; width: parent.width - 8px; height: 42px; background: #1d242c; border-color: #3f4c59; border-width: 1px; border-radius: 4px; Text { x: 9px; width: parent.width - 18px; height: parent.height; text: root.meter-policy-index == 0 ? UiI18n.localized("meters.off_hint") : root.meter-policy-index == 1 ? UiI18n.localized("meters.on_demand_hint") : UiI18n.localized("meters.always_hint"); color: #93a4b1; font-size: 9px; wrap: word-wrap; vertical-alignment: center; } }
+                DialogButton { x: parent.width - 151px; y: 115px; width: 147px; text: UiI18n.localized("inspector.audio_reset"); clicked => { root.action("reset-audio"); } }
             }
             SettingsSection {
-                title: "Typography";
-                summary: "Use the sliders below. Values are limited to 0.80–2.00 in 0.05 steps.";
+                title: UiI18n.localized("inspector.typography");
+                summary: UiI18n.localized("help.typography_controls");
                 section-height: 273px;
-                DialogButton { x: parent.width - 169px; y: 0px; width: 165px; text: "Use recommended sizes"; clicked => { root.ui-scale = 1.10; root.panel-scale = 1.20; root.node-scale = 1.15; } }
-                ScaleSettingRow { x: 0px; y: 38px; width: parent.width; title: "Application text"; help: "Scale toolbar, status bar, and application chrome text."; value <=> root.ui-scale; }
-                ScaleSettingRow { x: 0px; y: 97px; width: parent.width; title: "Panel text"; help: "Scale navigation and Preferences text independently."; value <=> root.panel-scale; }
-                ScaleSettingRow { x: 0px; y: 156px; width: parent.width; title: "Node text"; help: "Scale node titles, ports, and counters independently."; value <=> root.node-scale; }
+                DialogButton { x: parent.width - 169px; y: 0px; width: 165px; text: UiI18n.localized("inspector.typography_recommended"); clicked => { root.ui-scale = 1.10; root.panel-scale = 1.20; root.node-scale = 1.15; } }
+                ScaleSettingRow { x: 0px; y: 38px; width: parent.width; title: UiI18n.localized("inspector.ui_text_scale"); help: UiI18n.localized("help.ui_text_scale"); value <=> root.ui-scale; }
+                ScaleSettingRow { x: 0px; y: 97px; width: parent.width; title: UiI18n.localized("inspector.panel_text_scale"); help: UiI18n.localized("help.panel_text_scale"); value <=> root.panel-scale; }
+                ScaleSettingRow { x: 0px; y: 156px; width: parent.width; title: UiI18n.localized("inspector.node_text_scale"); help: UiI18n.localized("help.node_text_scale"); value <=> root.node-scale; }
             }
         }
     }
@@ -371,35 +394,35 @@ export component PreferencesDialog inherits Rectangle {
         VerticalBox {
             spacing: 10px;
             SettingsSection {
-                title: "Patchbay options"; section-height: 261px;
-                SwitchSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/exclusive.svg"); title: "Exclusive activation"; help: "Disconnect links that are not part of the active patchbay."; checked <=> root.patchbay-exclusive; }
-                SwitchSettingRow { x: 0px; y: 55px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/auto_disconnect.svg"); title: "Auto-disconnect sinks"; help: "Disconnect conflicting sink links before applying a rule."; checked <=> root.patchbay-auto-disconnect; }
-                SwitchSettingRow { x: 0px; y: 110px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/pin.svg"); title: "Auto-pin new links"; help: "Add newly created graph links to the current patchbay."; checked <=> root.patchbay-auto-pin; }
-                SwitchSettingRow { x: 0px; y: 165px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); title: "Activate patchbay on startup"; help: "Apply the selected patchbay automatically when the app starts."; checked <=> root.patchbay-activated; }
+                title: UiI18n.localized("inspector.patchbay_options"); section-height: 261px;
+                SwitchSettingRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/exclusive.svg"); title: UiI18n.localized("inspector.exclusive"); help: UiI18n.localized("help.exclusive"); checked <=> root.patchbay-exclusive; }
+                SwitchSettingRow { x: 0px; y: 55px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/auto_disconnect.svg"); title: UiI18n.localized("inspector.auto_disconnect"); help: UiI18n.localized("help.auto_disconnect"); checked <=> root.patchbay-auto-disconnect; }
+                SwitchSettingRow { x: 0px; y: 110px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/pin.svg"); title: UiI18n.localized("inspector.auto_pin"); help: UiI18n.localized("help.auto_pin"); checked <=> root.patchbay-auto-pin; }
+                SwitchSettingRow { x: 0px; y: 165px; width: parent.width; icon: @image-url("../../pw-graph-app/assets/icons/timer.svg"); title: UiI18n.localized("inspector.patchbay_activated"); help: UiI18n.localized("help.patchbay_activated"); checked <=> root.patchbay-activated; }
             }
             SettingsSection {
-                title: "Patchbay file"; section-height: 206px;
-                Text { x: 4px; y: 3px; width: parent.width - 8px; height: 18px; text: "Profile name"; color: #e6edf2; font-size: 11px; }
+                title: UiI18n.localized("patchbay.file_options"); section-height: 206px;
+                Text { x: 4px; y: 3px; width: parent.width - 8px; height: 18px; text: UiI18n.localized("patchbay.profile_name"); color: #e6edf2; font-size: 11px; }
                 LineEdit { x: 4px; y: 27px; width: parent.width - 151px; height: 31px; placeholder-text: "default"; text <=> root.profile-name; }
-                DialogButton { x: parent.width - 139px; y: 27px; width: 135px; text: "Save profile"; enabled: root.profile-name != ""; clicked => { root.action("save-profile"); } }
-                Text { x: 4px; y: 72px; width: parent.width - 8px; height: 32px; text: "Current file: " + root.patchbay-path; color: #93a4b1; font-size: 9px; wrap: word-wrap; overflow: elide; }
-                DialogButton { x: 4px; y: 116px; width: 138px; text: "Choose directory"; clicked => { root.action("choose-patchbay-directory"); } }
-                DialogButton { x: 151px; y: 116px; width: 126px; text: "Load patchbay"; clicked => { root.action("load-patchbay"); } }
-                DialogButton { x: 286px; y: 116px; width: 126px; text: "Save patchbay"; clicked => { root.action("save-patchbay"); } }
+                DialogButton { x: parent.width - 139px; y: 27px; width: 135px; text: UiI18n.localized("patchbay.save_profile"); enabled: root.profile-name != ""; clicked => { root.action("save-profile"); } }
+                Text { x: 4px; y: 72px; width: parent.width - 8px; height: 32px; text: UiI18n.formatted-one("patchbay.current_path", root.patchbay-path); color: #93a4b1; font-size: 9px; wrap: word-wrap; overflow: elide; }
+                DialogButton { x: 4px; y: 116px; width: 138px; text: UiI18n.localized("patchbay.choose_directory"); clicked => { root.action("choose-patchbay-directory"); } }
+                DialogButton { x: 151px; y: 116px; width: 126px; text: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } }
+                DialogButton { x: 286px; y: 116px; width: 126px; text: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } }
             }
             SettingsSection {
-                title: "Connection rules";
-                summary: "Rules from the selected patchbay are shown here without changing the live graph.";
+                title: UiI18n.localized("patchbay.connections");
+                summary: UiI18n.localized("patchbay.profile_help");
                 section-height: max(145px, 79px + root.rules.length * 52px);
                 for rule[index] in root.rules: Rectangle {
                     x: 0px; y: index * 52px; width: parent.width; height: 47px;
                     background: #2a333d; border-color: #40505f; border-width: 1px; border-radius: 5px;
                     Text { x: 10px; y: 5px; width: parent.width - 20px; height: 16px; text: rule.output; color: #e4ecf2; font-size: 10px; overflow: elide; }
                     Text { x: 10px; y: 25px; width: parent.width - 70px; height: 14px; text: "→ " + rule.input; color: #aebdca; font-size: 9px; overflow: elide; }
-                    Text { x: parent.width - 57px; y: 16px; width: 48px; text: rule.pinned ? "Pinned" : "Rule"; color: rule.pinned ? #57c785 : #9fadb8; font-size: 8px; horizontal-alignment: right; }
+                    Text { x: parent.width - 57px; y: 16px; width: 48px; text: rule.pinned ? UiI18n.localized("inspector.pinned") : UiI18n.localized("patchbay.rule"); color: rule.pinned ? #57c785 : #9fadb8; font-size: 8px; horizontal-alignment: right; }
                 }
-                if root.rules.length == 0: Text { x: 4px; y: 7px; width: parent.width - 8px; height: 38px; text: "No saved connection rules in the selected patchbay."; color: #93a4b1; font-size: 9px; vertical-alignment: center; }
-                DialogButton { x: parent.width - 113px; y: max(54px, root.rules.length * 52px + 4px); width: 109px; text: "Add rule"; clicked => { root.action("add-rule"); } }
+                if root.rules.length == 0: Text { x: 4px; y: 7px; width: parent.width - 8px; height: 38px; text: UiI18n.localized("patchbay.no_connections"); color: #93a4b1; font-size: 9px; vertical-alignment: center; }
+                DialogButton { x: parent.width - 113px; y: max(54px, root.rules.length * 52px + 4px); width: 109px; text: UiI18n.localized("patchbay.add_rule"); clicked => { root.action("add-rule"); } }
             }
         }
     }
