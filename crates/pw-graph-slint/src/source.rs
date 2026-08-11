@@ -226,7 +226,7 @@ impl ReadOnlyGraphSource {
         Ok(())
     }
 
-    fn set_meter_policy(&mut self, policy: MeterPolicy) -> Result<(), String> {
+    pub(crate) fn set_meter_policy(&mut self, policy: MeterPolicy) -> Result<(), String> {
         self.meter_policy = policy;
         #[cfg(feature = "pipewire")]
         if let Some(driver) = self.pipewire.as_mut() {

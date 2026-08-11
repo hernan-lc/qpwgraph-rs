@@ -9,6 +9,13 @@ import {
     Pin,
     PinTypes,
 } from "@slint-node-editor/node-editor.slint";
+import {
+    NodeAudioControl,
+    PreferencesDialog,
+    RuleRow,
+    ShortcutsDialog,
+    ShortcutRow,
+} from "parity-components.slint";
 
 export struct PortRow {
     id: int,
@@ -36,13 +43,9 @@ export struct NodeRow {
     meter-peak: float,
     meter-available: bool,
     meter-label: string,
+    audio-volume-position: float,
+    audio-muted: bool,
     ports: [PortRow],
-}
-
-export struct RuleRow {
-    output: string,
-    input: string,
-    pinned: bool,
 }
 
 export struct EffectRow {
@@ -144,6 +147,8 @@ component ActionButton inherits Rectangle {
 
 component GraphNode inherits BaseNode {
     in property <NodeRow> data;
+    callback audio-volume-changed(int, float);
+    callback audio-mute-toggled(int);
 
     node-id: data.id;
     selected: data.selected;
@@ -219,20 +224,17 @@ component GraphNode inherits BaseNode {
         background: #242a31;
         border-radius: 6px;
 
-        if data.has-audio-controls: Rectangle {
+        if data.has-audio-controls: NodeAudioControl {
             x: 10px;
             y: 7px;
             width: parent.width - 20px;
-            height: 27px;
-            background: #1d232a;
-            border-color: #3b4651;
-            border-width: 1px;
-            border-radius: 4px;
-            Text { x: 7px; y: 8px; width: 49px; height: 11px; text: data.meter-label; color: data.meter-available ? #9fdcb8 : #8b9aa6; font-size: 7px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
-            Rectangle { x: 63px; y: 8px; width: parent.width - 103px; height: 11px; background: #394550; border-radius: 5px; }
-            Rectangle { x: 63px; y: 8px; width: (parent.width - 103px) * data.meter-rms; height: 11px; visible: data.meter-available; background: #57c785; border-radius: 5px; }
-            Rectangle { x: 63px + (parent.width - 105px) * data.meter-peak; y: 6px; width: 2px; height: 15px; visible: data.meter-available; background: #e9d576; border-radius: 1px; }
-            Image { x: parent.width - 29px; y: 5px; width: 18px; height: 18px; source: @image-url("../../pw-graph-ui/assets/icons/volume.svg"); }
+            volume-position: data.audio-volume-position;
+            muted: data.audio-muted;
+            meter-peak: data.meter-peak;
+            meter-available: data.meter-available;
+            accent: data.accent;
+            volume-changed(value) => { root.audio-volume-changed(data.id, value); }
+            mute-toggled => { root.audio-mute-toggled(data.id); }
         }
 
         for port in data.ports: Rectangle {
@@ -277,13 +279,32 @@ export component MainWindow inherits Window {
     in property <[LinkData]> links: [];
     in property <[MinimapNode]> minimap-nodes: [];
     in property <[RuleRow]> rules: [];
+    in property <[ShortcutRow]> shortcuts: [];
     in property <[EffectRow]> effects: [];
     in property <[RelayRow]> relay-rows: [];
     in property <string> status: "Starting Slint preview…";
     in property <string> backend: "";
     in property <string> graph-counts: "";
     in property <string> read-only-message: "Read-only preview — changes are not saved or sent to PipeWire.";
-    in property <bool> show-statusbar: true;
+    in-out property <bool> show-statusbar: true;
+    in-out property <bool> show-common-actions: true;
+    in-out property <bool> show-patchbay-toolbar: true;
+    in-out property <bool> repel-overlaps: true;
+    in-out property <bool> connect-through: false;
+    in-out property <bool> thumbnail-view: false;
+    in-out property <int> language-index: 0;
+    in-out property <int> meter-policy-index: 1;
+    in-out property <float> ui-text-scale: 1.1;
+    in-out property <float> panel-text-scale: 1.2;
+    in-out property <float> node-text-scale: 1.15;
+    in-out property <bool> patchbay-exclusive: false;
+    in-out property <bool> patchbay-auto-disconnect: false;
+    in-out property <bool> patchbay-auto-pin: false;
+    in-out property <bool> patchbay-activated: false;
+    in-out property <string> profile-name: "";
+    in-out property <string> shortcut-search: "";
+    in property <string> config-path: "";
+    in property <string> patchbay-path: "";
     in-out property <bool> show-minimap: false;
     in-out property <bool> show-preferences: false;
     in-out property <bool> show-history: false;
@@ -312,9 +333,16 @@ export component MainWindow inherits Window {
     callback graph-box-selected(length, length, length, length, bool);
     callback graph-link-requested(int, int);
     callback graph-link-cancelled();
+    callback graph-audio-volume-changed(int, float);
+    callback graph-audio-mute-toggled(int);
     callback graph-compute-pin-at(length, length) -> int;
     callback graph-compute-link-at(length, length) -> int;
     callback graph-request-grid();
+
+    changed show-preferences => { if (!root.show-preferences) { editor.focus(); } }
+    changed show-history => { if (!root.show-history) { editor.focus(); } }
+    changed show-shortcuts => { if (!root.show-shortcuts) { editor.focus(); } }
+    changed show-effects => { if (!root.show-effects) { editor.focus(); } }
 
     Rectangle {
         x: 0px;
@@ -385,14 +413,26 @@ export component MainWindow inherits Window {
             key-pressed(event) => {
                 if (event.text == Key.F1) { root.action("shortcuts"); return accept; }
                 if (event.text == Key.Escape) { root.action("escape"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "z" || event.text == "Z")) { root.action("redo"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "z" || event.text == "Z")) { root.action("undo"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "y" || event.text == "Y")) { root.action("redo"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "s" || event.text == "S")) { root.action("save-patchbay"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "s" || event.text == "S")) { root.action("save-config"); return accept; }
+                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "o" || event.text == "O")) { root.action("load-patchbay"); return accept; }
+                if (event.text == Key.Delete || event.text == Key.Backspace) { root.action("delete-selection"); return accept; }
                 if (event.text == "r" || event.text == "R") { root.action("refresh"); return accept; }
                 if (event.text == "a" || event.text == "A") { root.action("arrange"); return accept; }
+                if (event.text == "t" || event.text == "T") { root.action("toggle-thumbnail"); return accept; }
                 if (event.text == "0") { root.action("filter-all"); return accept; }
                 if (event.text == "1") { root.action("filter-audio"); return accept; }
                 if (event.text == "2") { root.action("filter-video"); return accept; }
                 if (event.text == "3") { root.action("filter-midi"); return accept; }
                 if (event.text == "+" || event.text == "=") { root.action("zoom-in"); return accept; }
                 if (event.text == "-" || event.text == "_") { root.action("zoom-out"); return accept; }
+                if (event.text == Key.LeftArrow) { root.pan-x -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
+                if (event.text == Key.RightArrow) { root.pan-x += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
+                if (event.text == Key.UpArrow) { root.pan-y -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
+                if (event.text == Key.DownArrow) { root.pan-y += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
                 return reject;
             }
             editor := NodeEditor {
@@ -425,6 +465,8 @@ export component MainWindow inherits Window {
                     data: node-data;
                     viewport-width: editor.width;
                     viewport-height: editor.height;
+                    audio-volume-changed(id, value) => { root.graph-audio-volume-changed(id, value); }
+                    audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
                 }
             }
         }
@@ -495,50 +537,34 @@ export component MainWindow inherits Window {
         }
 
         if root.show-preferences: Rectangle {
-            x: max(24px, (parent.width - min(780px, parent.width - 48px)) / 2);
-            y: max(28px, (parent.height - min(570px, parent.height - 56px)) / 2);
-            width: min(780px, parent.width - 48px);
-            height: min(570px, parent.height - 56px);
-            background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
-            Text { x: 20px; y: 16px; text: "Preferences"; color: #f0f4f7; font-size: 19px; }
-            Text { x: 20px; y: 43px; width: parent.width - 150px; text: "Visual controls are live only for this Slint preview."; color: #aebdca; font-size: 10px; overflow: elide; }
-            ActionButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; clicked => { root.action("preferences"); } }
-            Rectangle { x: 20px; y: 72px; width: parent.width - 40px; height: 1px; background: #40505f; }
-            ActionButton { x: 20px; y: 86px; width: 105px; text: "Interface"; selected: root.preferences-tab == 0; clicked => { root.preferences-tab = 0; } }
-            ActionButton { x: 133px; y: 86px; width: 105px; text: "Patchbay"; selected: root.preferences-tab == 1; clicked => { root.preferences-tab = 1; } }
-            ActionButton { x: 246px; y: 86px; width: 86px; text: "Rules"; selected: root.preferences-tab == 2; clicked => { root.preferences-tab = 2; } }
-            if root.preferences-tab == 0: ScrollView {
-                x: 20px; y: 132px; width: parent.width - 40px; height: parent.height - 152px;
-                VerticalBox {
-                    spacing: 10px;
-                    Text { text: "Interface"; color: #edf3f7; font-size: 14px; }
-                    CheckBox { text: "Show status bar"; checked: root.show-statusbar; toggled => { root.action("toggle-statusbar"); } }
-                    CheckBox { text: "Show minimap"; checked: root.show-minimap; toggled => { root.action("toggle-minimap"); } }
-                    Text { text: "Language"; color: #b7c4ce; font-size: 11px; }
-                    ComboBox { width: 220px; model: ["English", "Español", "Français"]; }
-                    Text { text: "Node and panel scaling are displayed from your current config and are not persisted by the preview."; color: #96a8b6; font-size: 11px; wrap: word-wrap; }
-                }
-            }
-            if root.preferences-tab == 1: ScrollView {
-                x: 20px; y: 132px; width: parent.width - 40px; height: parent.height - 152px;
-                VerticalBox {
-                    spacing: 9px;
-                    Text { text: "Patchbay profiles"; color: #edf3f7; font-size: 14px; }
-                    Text { text: "Saved connections are shown without changing the selected profile."; color: #aebdca; font-size: 11px; }
-                    for rule in root.rules: Rectangle {
-                        height: 47px; background: #2a333d; border-color: #40505f; border-width: 1px; border-radius: 5px;
-                        Text { x: 10px; y: 5px; width: parent.width - 20px; height: 16px; text: rule.output; color: #e4ecf2; font-size: 11px; overflow: elide; }
-                        Text { x: 10px; y: 25px; width: parent.width - 70px; height: 14px; text: "→ " + rule.input; color: #aebdca; font-size: 10px; overflow: elide; }
-                        Text { x: parent.width - 51px; y: 16px; width: 42px; text: rule.pinned ? "Pinned" : "Rule"; color: rule.pinned ? #57c785 : #9fadb8; font-size: 9px; horizontal-alignment: right; }
-                    }
-                    ActionButton { width: 158px; text: "Activate patchbay"; clicked => { root.action("activate-patchbay"); } }
-                }
-            }
-            if root.preferences-tab == 2: Rectangle {
-                x: 20px; y: 136px; width: parent.width - 40px; height: parent.height - 156px; background: #2a333d; border-radius: 5px;
-                Text { x: 14px; y: 14px; text: "Connection rules"; color: #edf3f7; font-size: 14px; }
-                Text { x: 14px; y: 46px; width: parent.width - 28px; text: "Rule editing is intentionally displayed but not enabled until the functional migration milestone."; color: #aebdca; font-size: 11px; wrap: word-wrap; }
-                ActionButton { x: 14px; y: 115px; width: 112px; text: "Add rule"; clicked => { root.action("add-rule"); } }
+            width: parent.width; height: parent.height; background: #05070a99;
+            PreferencesDialog {
+                x: max(16px, (parent.width - min(930px, parent.width - 32px)) / 2);
+                y: max(16px, (parent.height - min(700px, parent.height - 32px)) / 2);
+                width: min(930px, parent.width - 32px);
+                height: min(700px, parent.height - 32px);
+                tab <=> root.preferences-tab;
+                language-index <=> root.language-index;
+                show-common-actions <=> root.show-common-actions;
+                show-statusbar <=> root.show-statusbar;
+                show-patchbay-toolbar <=> root.show-patchbay-toolbar;
+                repel-overlaps <=> root.repel-overlaps;
+                connect-through <=> root.connect-through;
+                thumbnail-view <=> root.thumbnail-view;
+                meter-policy-index <=> root.meter-policy-index;
+                ui-scale <=> root.ui-text-scale;
+                panel-scale <=> root.panel-text-scale;
+                node-scale <=> root.node-text-scale;
+                patchbay-exclusive <=> root.patchbay-exclusive;
+                patchbay-auto-disconnect <=> root.patchbay-auto-disconnect;
+                patchbay-auto-pin <=> root.patchbay-auto-pin;
+                patchbay-activated <=> root.patchbay-activated;
+                profile-name <=> root.profile-name;
+                config-path: root.config-path;
+                patchbay-path: root.patchbay-path;
+                rules: root.rules;
+                close => { root.action("preferences"); }
+                action(action) => { root.action(action); }
             }
         }
 
@@ -552,25 +578,16 @@ export component MainWindow inherits Window {
         }
 
         if root.show-shortcuts: Rectangle {
-            x: max(24px, (parent.width - 640px) / 2); y: max(28px, (parent.height - 470px) / 2); width: min(640px, parent.width - 48px); height: min(470px, parent.height - 56px);
-            background: #222a33fa; border-color: #617080; border-width: 1px; border-radius: 8px;
-            Text { x: 20px; y: 18px; text: "Keyboard shortcuts"; color: #f0f4f7; font-size: 19px; }
-            ActionButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; clicked => { root.action("shortcuts"); } }
-            LineEdit { x: 20px; y: 58px; width: parent.width - 40px; height: 31px; placeholder-text: "Search shortcuts"; }
-            Rectangle { x: 20px; y: 110px; width: parent.width - 40px; height: 1px; background: #40505f; }
-            Text { x: 24px; y: 128px; width: 120px; text: "F1"; color: #73b5ed; font-family: "monospace"; }
-            Text { x: 154px; y: 128px; text: "Open keyboard shortcuts"; color: #d8e2e9; }
-            Text { x: 24px; y: 159px; width: 120px; text: "R"; color: #73b5ed; font-family: "monospace"; }
-            Text { x: 154px; y: 159px; text: "Refresh graph"; color: #d8e2e9; }
-            Text { x: 24px; y: 190px; width: 120px; text: "A"; color: #73b5ed; font-family: "monospace"; }
-            Text { x: 154px; y: 190px; text: "Arrange nodes locally"; color: #d8e2e9; }
-            Text { x: 24px; y: 221px; width: 120px; text: "0–3"; color: #73b5ed; font-family: "monospace"; }
-            Text { x: 154px; y: 221px; text: "Change media filter"; color: #d8e2e9; }
-            Text { x: 24px; y: 252px; width: 120px; text: "Ctrl + wheel"; color: #73b5ed; font-family: "monospace"; }
-            Text { x: 154px; y: 252px; text: "Zoom graph"; color: #d8e2e9; }
-            Text { x: 24px; y: 283px; width: 120px; text: "Double-click node"; color: #73b5ed; font-family: "monospace"; font-size: 10px; }
-            Text { x: 154px; y: 283px; text: "Toggle node detail locally"; color: #d8e2e9; }
-            Text { x: 24px; y: 335px; width: parent.width - 48px; text: "Connection and device-edit shortcuts are intentionally disabled in read-only preview mode."; color: #e9b864; font-size: 11px; wrap: word-wrap; }
+            width: parent.width; height: parent.height; background: #05070a99;
+            ShortcutsDialog {
+                x: max(16px, (parent.width - min(650px, parent.width - 32px)) / 2);
+                y: max(16px, (parent.height - min(590px, parent.height - 32px)) / 2);
+                width: min(650px, parent.width - 32px);
+                height: min(590px, parent.height - 32px);
+                entries: root.shortcuts;
+                search-text <=> root.shortcut-search;
+                close => { root.action("shortcuts"); }
+            }
         }
 
         if root.show-effects: Rectangle {
