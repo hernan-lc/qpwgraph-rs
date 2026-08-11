@@ -11,6 +11,8 @@ const NODE_HEADER_HEIGHT: f32 = 42.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
+const RELAY_SOURCE_NAME: &str = "qpwgraph-rs.relay.source";
+const RELAY_SINK_NAME: &str = "qpwgraph-rs.relay.sink";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum MeterState {
@@ -247,6 +249,7 @@ pub(crate) struct UiGraphState {
     pub(crate) connect_mode: ConnectMode,
     pub(crate) media_filter: MediaFilter,
     pub(crate) search_query: String,
+    pub(crate) relay_nodes_visible: bool,
     pub(crate) selected_nodes: BTreeSet<NodeId>,
     pub(crate) selected_links: BTreeSet<LinkId>,
     pub(crate) ids: SlintIdMap,
@@ -267,6 +270,7 @@ impl UiGraphState {
             connect_mode: ConnectMode::parse(&config.connect_mode),
             media_filter: MediaFilter::parse(&config.media_filter),
             search_query: config.graph_search.clone(),
+            relay_nodes_visible: false,
             selected_nodes: BTreeSet::new(),
             selected_links: BTreeSet::new(),
             ids: SlintIdMap::default(),
@@ -296,6 +300,7 @@ impl UiGraphState {
         let visible: BTreeSet<_> = graph
             .nodes
             .values()
+            .filter(|node| self.relay_nodes_visible || !is_relay_node(node))
             .filter(|node| self.media_filter.matches_node(graph, node))
             .filter(|node| self.search_matches(graph, node))
             .map(|node| node.id)
@@ -559,22 +564,73 @@ impl UiGraphState {
         )
     }
 
-    fn project_ports(&self, graph: &Graph, node: &Node) -> Vec<PortGroupView> {
-        let mut ports: Vec<_> = node
-            .ports
+    /// Return the compatible output-to-input pairs for an Easy-mode drag.
+    /// Try the visual drag direction first, then reverse it so effects and
+    /// relay endpoints work without requiring users to know which side owns
+    /// the source ports.
+    pub(crate) fn matching_port_pairs(
+        &self,
+        graph: &Graph,
+        source: NodeId,
+        target: NodeId,
+    ) -> Vec<(PortId, PortId)> {
+        let Some(source) = graph.node(source) else {
+            return Vec::new();
+        };
+        let Some(target) = graph.node(target) else {
+            return Vec::new();
+        };
+        let source_ports = self.ordered_ports(graph, source);
+        let target_ports = self.ordered_ports(graph, target);
+        let source_outputs = source_ports
             .iter()
-            .filter_map(|id| graph.port(*id))
-            .filter(|port| self.media_filter.matches_port_type(port.port_type))
-            .filter(|port| self.search_matches_port(node, port))
-            .collect();
-        if self.sort_ports_by_name {
-            ports.sort_by_key(|port| port.name.to_ascii_lowercase());
-        } else {
-            ports.sort_by_key(|port| port.id);
+            .copied()
+            .filter(|port| port.direction == Direction::Source)
+            .collect::<Vec<_>>();
+        let target_inputs = target_ports
+            .iter()
+            .copied()
+            .filter(|port| port.direction == Direction::Sink)
+            .collect::<Vec<_>>();
+        let forward = pair_ports(&source_outputs, &target_inputs);
+        if !forward.is_empty() {
+            return forward;
         }
-        if self.sort_ports_descending {
-            ports.reverse();
-        }
+        let target_outputs = target_ports
+            .iter()
+            .copied()
+            .filter(|port| port.direction == Direction::Source)
+            .collect::<Vec<_>>();
+        let source_inputs = source_ports
+            .iter()
+            .copied()
+            .filter(|port| port.direction == Direction::Sink)
+            .collect::<Vec<_>>();
+        pair_ports(&target_outputs, &source_inputs)
+    }
+
+    pub(crate) fn node_at(
+        &self,
+        snapshot: &GraphSnapshot,
+        x: f32,
+        y: f32,
+        exclude: NodeId,
+    ) -> Option<NodeId> {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_id != exclude
+                    && x >= node.position[0]
+                    && x <= node.position[0] + node.width
+                    && y >= node.position[1]
+                    && y <= node.position[1] + node.height
+            })
+            .map(|node| node.node_id)
+    }
+
+    fn project_ports(&self, graph: &Graph, node: &Node) -> Vec<PortGroupView> {
+        let ports = self.ordered_ports(graph, node);
 
         let mut groups: Vec<PortGroupView> = Vec::new();
         let mut group_index = HashMap::<(Direction, PortType, String), usize>::new();
@@ -603,6 +659,25 @@ impl UiGraphState {
             }
         }
         groups
+    }
+
+    fn ordered_ports<'a>(&self, graph: &'a Graph, node: &Node) -> Vec<&'a Port> {
+        let mut ports: Vec<_> = node
+            .ports
+            .iter()
+            .filter_map(|id| graph.port(*id))
+            .filter(|port| self.media_filter.matches_port_type(port.port_type))
+            .filter(|port| self.search_matches_port(node, port))
+            .collect();
+        if self.sort_ports_by_name {
+            ports.sort_by_key(|port| port.name.to_ascii_lowercase());
+        } else {
+            ports.sort_by_key(|port| port.id);
+        }
+        if self.sort_ports_descending {
+            ports.reverse();
+        }
+        ports
     }
 
     fn search_matches(&self, graph: &Graph, node: &Node) -> bool {
@@ -739,6 +814,81 @@ pub(crate) fn node_layout_key(node: &Node) -> String {
         NodeType::Unknown => "Unknown",
     };
     format!("{kind}:{}", node.name)
+}
+
+pub(crate) fn is_relay_node(node: &Node) -> bool {
+    matches!(node.name.as_str(), RELAY_SOURCE_NAME | RELAY_SINK_NAME)
+}
+
+fn pair_ports(outputs: &[&Port], inputs: &[&Port]) -> Vec<(PortId, PortId)> {
+    let mut used = vec![false; inputs.len()];
+    let mut pairs = Vec::new();
+    for output in outputs {
+        let candidate = inputs
+            .iter()
+            .enumerate()
+            .filter(|(index, input)| {
+                !used[*index]
+                    && ports_compatible(output.port_type, input.port_type)
+                    && channels_can_pair(output, input)
+            })
+            .max_by_key(|(index, input)| {
+                (
+                    channel_pair_score(output, input),
+                    name_pair_score(output, input),
+                    std::cmp::Reverse(*index),
+                )
+            })
+            .map(|(index, _)| index);
+        if let Some(index) = candidate {
+            used[index] = true;
+            pairs.push((output.id, inputs[index].id));
+        }
+    }
+    pairs
+}
+
+fn ports_compatible(output: PortType, input: PortType) -> bool {
+    output == input || output == PortType::Unknown || input == PortType::Unknown
+}
+
+fn channels_can_pair(output: &Port, input: &Port) -> bool {
+    match (channel_identity(output), channel_identity(input)) {
+        (Some(output), Some(input)) => output.eq_ignore_ascii_case(&input),
+        _ => true,
+    }
+}
+
+fn channel_pair_score(output: &Port, input: &Port) -> u8 {
+    match (channel_identity(output), channel_identity(input)) {
+        (Some(output), Some(input)) if output.eq_ignore_ascii_case(&input) => 100,
+        (Some(_), Some(_)) => 0,
+        (Some(_), None) | (None, Some(_)) => 20,
+        (None, None) => 10,
+    }
+}
+
+fn name_pair_score(output: &Port, input: &Port) -> u8 {
+    match (channel_base_name(output), channel_base_name(input)) {
+        (Some(output), Some(input)) if output.eq_ignore_ascii_case(&input) => 10,
+        _ => 0,
+    }
+}
+
+fn channel_identity(port: &Port) -> Option<String> {
+    port.channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|channel| !channel.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let suffix = port
+                .name
+                .rsplit(['_', '-', ' ', ':', '.'])
+                .next()
+                .unwrap_or_default();
+            is_channel_token(suffix).then(|| suffix.to_owned())
+        })
 }
 
 fn channel_base_name(port: &Port) -> Option<String> {
@@ -909,5 +1059,87 @@ mod tests {
         assert_eq!(source.meter.state, MeterState::Live);
         assert_eq!(sink.meter.state, MeterState::Waiting);
         assert_eq!(graph.links.len(), 1);
+    }
+
+    #[test]
+    fn relay_nodes_are_hidden_until_relay_activity_starts() {
+        let mut graph = graph();
+        graph
+            .add_node(Node::new(NodeId(3), RELAY_SOURCE_NAME, NodeType::PipeWire))
+            .unwrap();
+        graph
+            .add_node(Node::new(NodeId(4), RELAY_SINK_NAME, NodeType::PipeWire))
+            .unwrap();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+
+        let hidden = state.snapshot(&graph, &config);
+        assert_eq!(hidden.nodes.len(), 2);
+        assert!(hidden.nodes.iter().all(|node| node.node_id.0 < 3));
+
+        state.relay_nodes_visible = true;
+        let active = state.snapshot(&graph, &config);
+        assert_eq!(active.nodes.len(), 4);
+        assert!(active.nodes.iter().any(|node| node.node_id == NodeId(3)));
+        assert!(active.nodes.iter().any(|node| node.node_id == NodeId(4)));
+    }
+
+    #[test]
+    fn easy_mode_pairs_every_effect_node_in_either_drag_direction() {
+        let mut graph = graph();
+        graph
+            .add_port(
+                Port::new(
+                    PortId(3),
+                    NodeId(1),
+                    "output_FR",
+                    Direction::Source,
+                    PortType::Audio,
+                )
+                .with_channel("FR"),
+            )
+            .unwrap();
+        for (node_id, first_port) in [(NodeId(3), 30), (NodeId(4), 40)] {
+            graph
+                .add_node(Node::new(
+                    node_id,
+                    format!("Effect {}", node_id.0),
+                    NodeType::Effect,
+                ))
+                .unwrap();
+            for (offset, name, direction, channel) in [
+                (0, "input_FL", Direction::Sink, "FL"),
+                (1, "input_FR", Direction::Sink, "FR"),
+                (2, "output_FL", Direction::Source, "FL"),
+                (3, "output_FR", Direction::Source, "FR"),
+            ] {
+                graph
+                    .add_port(
+                        Port::new(
+                            PortId(first_port + offset),
+                            node_id,
+                            name,
+                            direction,
+                            PortType::Audio,
+                        )
+                        .with_channel(channel),
+                    )
+                    .unwrap();
+            }
+        }
+        let mut config = AppConfig::default();
+        config.connect_mode = "easy".into();
+        let state = UiGraphState::from_config(&config);
+
+        for effect in [NodeId(3), NodeId(4)] {
+            let into_effect = state.matching_port_pairs(&graph, NodeId(1), effect);
+            assert_eq!(into_effect.len(), 2);
+            let from_effect_to_sink = state.matching_port_pairs(&graph, NodeId(2), effect);
+            assert_eq!(from_effect_to_sink.len(), 1);
+            let output = graph.port(from_effect_to_sink[0].0).unwrap();
+            let input = graph.port(from_effect_to_sink[0].1).unwrap();
+            assert_eq!(output.node_id, effect);
+            assert_eq!(input.node_id, NodeId(2));
+        }
     }
 }

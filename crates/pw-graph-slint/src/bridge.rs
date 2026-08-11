@@ -68,6 +68,7 @@ enum UiEvent {
     SelectBox(f32, f32, f32, f32, bool),
     LinkRequested(i32, i32),
     LinkCancelled,
+    EasyConnect(i32, f32, f32),
     ToggleCollapse(i32),
     DragCommitted(i32, f32, f32),
     SetAudioVolume(i32, f32),
@@ -366,6 +367,10 @@ impl UiBridge {
         let events = self.events.clone();
         self.window.on_graph_link_cancelled(move || {
             events.borrow_mut().push(UiEvent::LinkCancelled);
+        });
+        let events = self.events.clone();
+        self.window.on_graph_easy_connect(move |id, x, y| {
+            events.borrow_mut().push(UiEvent::EasyConnect(id, x, y));
         });
         let events = self.events.clone();
         self.window.on_graph_audio_volume_changed(move |id, value| {
@@ -704,6 +709,7 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
         UiEvent::LinkCancelled => {
             preview.status = "Connection preview cancelled".into();
         }
+        UiEvent::EasyConnect(source, x, y) => easy_connect_nodes(preview, source, x, y),
         UiEvent::ToggleCollapse(id) => {
             preview.view.toggle_local_collapse(id, &preview.snapshot);
             preview.status = "Node expansion changed; configuration will be saved".into();
@@ -749,6 +755,56 @@ fn process_event(window: &MainWindow, preview: &mut PreviewApp, event: UiEvent) 
                     Err(error) => preview.status = format!("Could not change node mute: {error}"),
                 }
             }
+        }
+    }
+}
+
+fn easy_connect_nodes(preview: &mut PreviewApp, source_id: i32, x: f32, y: f32) {
+    let Some(source_node) = preview.view.ids.node_id(source_id) else {
+        preview.status = "Easy connect source is no longer available".into();
+        return;
+    };
+    let Some(target_node) = preview
+        .view
+        .node_at(&preview.snapshot, x, y, source_node)
+    else {
+        preview.status = "Easy connect cancelled: drop onto another node".into();
+        return;
+    };
+    let port_keys = {
+        let graph = preview.source.graph();
+        preview
+            .view
+            .matching_port_pairs(graph, source_node, target_node)
+            .into_iter()
+            .filter_map(|(output, input)| Some((graph.port_key(output)?, graph.port_key(input)?)))
+            .collect::<Vec<_>>()
+    };
+    if port_keys.is_empty() {
+        preview.status = "Easy connect found no compatible output/input ports".into();
+        return;
+    }
+
+    let mut connected = 0usize;
+    for (output, input) in port_keys {
+        match preview.source.connect_by_key_if_missing(&output, &input) {
+            Ok(()) => connected += 1,
+            Err(error) => {
+                preview.status = format!(
+                    "Easy connect created {connected} connection(s), then failed: {error}"
+                );
+                return;
+            }
+        }
+    }
+    match preview.source.refresh() {
+        Ok(()) => {
+            preview.last_refresh = Instant::now();
+            preview.status = format!("Easy connect created {connected} connection(s)");
+        }
+        Err(error) => {
+            preview.status =
+                format!("Easy connect succeeded, but graph refresh failed: {error}");
         }
     }
 }
@@ -1206,6 +1262,21 @@ fn relay_host_active(preview: &PreviewApp) -> bool {
     }
 }
 
+fn relay_nodes_visible(preview: &PreviewApp) -> bool {
+    #[cfg(feature = "relay")]
+    {
+        let status = preview.source.relay_status();
+        return status.host_active
+            || !status.sessions.is_empty()
+            || preview.relay_connecting.is_some();
+    }
+    #[cfg(not(feature = "relay"))]
+    {
+        let _ = preview;
+        false
+    }
+}
+
 fn start_relay_host(preview: &mut PreviewApp) {
     #[cfg(feature = "relay")]
     {
@@ -1644,6 +1715,7 @@ fn sync_models(
     minimap_nodes: &Rc<VecModel<MinimapNode>>,
     controller: &Rc<NodeEditorController>,
 ) {
+    preview.view.relay_nodes_visible = relay_nodes_visible(preview);
     let snapshot = preview.view.snapshot_with_meters(
         preview.source.graph(),
         &preview.config,
@@ -2362,29 +2434,54 @@ mod tests {
         window
             .window()
             .set_size(slint::LogicalSize::new(1100.0, 760.0));
-        let nodes = Rc::new(VecModel::from(vec![NodeRow {
-            id: 7,
-            node_title: "Test audio node".into(),
-            node_subtitle: "PipeWire node".into(),
-            x: 100.0,
-            y: 100.0,
-            width: 280.0,
-            height: 110.0,
-            selected: false,
-            collapsed: false,
-            thumbnail: false,
-            font_scale: 1.0,
-            accent: Color::from_rgb_u8(87, 199, 133),
-            has_audio_controls: true,
-            meter_rms: 0.0,
-            meter_peak: 0.0,
-            meter_peak_position: 0.0,
-            meter_available: false,
-            meter_label: "N/A".into(),
-            audio_volume_position: 0.9,
-            audio_muted: false,
-            ports: ModelRc::default(),
-        }]));
+        let nodes = Rc::new(VecModel::from(vec![
+            NodeRow {
+                id: 7,
+                node_title: "Test audio node".into(),
+                node_subtitle: "PipeWire node".into(),
+                x: 100.0,
+                y: 100.0,
+                width: 280.0,
+                height: 110.0,
+                selected: false,
+                collapsed: false,
+                thumbnail: false,
+                font_scale: 1.0,
+                accent: Color::from_rgb_u8(87, 199, 133),
+                has_audio_controls: true,
+                meter_rms: 0.0,
+                meter_peak: 0.0,
+                meter_peak_position: 0.0,
+                meter_available: false,
+                meter_label: "N/A".into(),
+                audio_volume_position: 0.9,
+                audio_muted: false,
+                ports: ModelRc::default(),
+            },
+            NodeRow {
+                id: 8,
+                node_title: "Test effect node".into(),
+                node_subtitle: "Effect node".into(),
+                x: 500.0,
+                y: 100.0,
+                width: 280.0,
+                height: 110.0,
+                selected: false,
+                collapsed: false,
+                thumbnail: false,
+                font_scale: 1.0,
+                accent: Color::from_rgb_u8(82, 117, 176),
+                has_audio_controls: false,
+                meter_rms: 0.0,
+                meter_peak: 0.0,
+                meter_peak_position: 0.0,
+                meter_available: false,
+                meter_label: "N/A".into(),
+                audio_volume_position: 0.9,
+                audio_muted: false,
+                ports: ModelRc::default(),
+            },
+        ]));
         window.set_nodes(ModelRc::from(nodes.clone()));
 
         let drag_result = Rc::new(RefCell::new(None));
@@ -2421,7 +2518,11 @@ mod tests {
         // component instance and its pointer capture.
         let mut pressed_refresh = nodes.row_data(0).unwrap();
         pressed_refresh.meter_peak = 0.25;
-        sync_node_rows(&window, &nodes, vec![pressed_refresh]);
+        sync_node_rows(
+            &window,
+            &nodes,
+            vec![pressed_refresh, nodes.row_data(1).unwrap()],
+        );
         assert_eq!(nodes.row_data(0).unwrap().meter_peak, 0.25);
 
         dispatch(WindowEvent::PointerMoved {
@@ -2433,7 +2534,11 @@ mod tests {
         // preserve the gesture through release.
         let mut stale_refresh = nodes.row_data(0).unwrap();
         stale_refresh.meter_peak = 0.5;
-        sync_node_rows(&window, &nodes, vec![stale_refresh]);
+        sync_node_rows(
+            &window,
+            &nodes,
+            vec![stale_refresh, nodes.row_data(1).unwrap()],
+        );
         assert_eq!(nodes.row_data(0).unwrap().meter_peak, 0.5);
 
         dispatch(WindowEvent::PointerReleased {
@@ -2460,5 +2565,27 @@ mod tests {
             button: PointerEventButton::Left,
         });
         assert_eq!(*muted_node.borrow(), Some(7));
+
+        let easy_drop = Rc::new(RefCell::new(None));
+        window.on_graph_easy_connect({
+            let easy_drop = easy_drop.clone();
+            move |node_id, x, y| *easy_drop.borrow_mut() = Some((node_id, x, y))
+        });
+        window.set_connect_mode("easy".into());
+        dispatch(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(250.0, 235.0),
+            button: PointerEventButton::Left,
+        });
+        dispatch(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(620.0, 190.0),
+        });
+        dispatch(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(620.0, 190.0),
+            button: PointerEventButton::Left,
+        });
+        let (source, x, y) = easy_drop.borrow().expect("easy-mode body drag must finish");
+        assert_eq!(source, 7);
+        assert!((x - 520.0).abs() < 0.1);
+        assert!((y - 166.0).abs() < 0.1);
     }
 }

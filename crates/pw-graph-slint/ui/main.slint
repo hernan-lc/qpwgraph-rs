@@ -157,9 +157,12 @@ component ActionButton inherits Rectangle {
 
 component GraphNode inherits BaseNode {
     in property <NodeRow> data;
+    in property <bool> easy-connect: false;
     callback audio-volume-changed(int, float);
     callback audio-mute-toggled(int);
     callback collapse-toggled(int);
+    callback easy-connect-dropped(int, float, float);
+    callback easy-node-clicked(int, bool);
 
     node-id: data.id;
     selected: data.selected;
@@ -297,6 +300,37 @@ component GraphNode inherits BaseNode {
             }
         }
     }
+
+    // Easy mode connects whole nodes by dragging the body. Keep this surface
+    // below the movable header and below audio controls, matching the main
+    // canvas interaction while allowing every effect and relay endpoint.
+    if root.easy-connect && !data.collapsed && !data.thumbnail: easy-touch := TouchArea {
+        x: 1px;
+        y: data.has-audio-controls ? 84px : 42px;
+        width: root.node-width - 2px;
+        height: max(root.node-height - self.y - 1px, 1px);
+        mouse-cursor: MouseCursor.crosshair;
+        property <length> press-x: 0px;
+        property <length> press-y: 0px;
+        property <bool> shift-held: false;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                press-x = self.mouse-x;
+                press-y = self.mouse-y;
+                shift-held = event.modifiers.shift;
+            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                if (abs(self.mouse-x - press-x) > 5px || abs(self.mouse-y - press-y) > 5px) {
+                    root.easy-connect-dropped(
+                        data.id,
+                        data.x + (self.x + self.mouse-x) / 1px,
+                        data.y + (self.y + self.mouse-y) / 1px
+                    );
+                } else {
+                    root.easy-node-clicked(data.id, shift-held);
+                }
+            }
+        }
+    }
 }
 
 export component MainWindow inherits Window {
@@ -383,6 +417,7 @@ export component MainWindow inherits Window {
     callback graph-box-selected(length, length, length, length, bool);
     callback graph-link-requested(int, int);
     callback graph-link-cancelled();
+    callback graph-easy-connect(int, float, float);
     callback graph-audio-volume-changed(int, float);
     callback graph-audio-mute-toggled(int);
     callback graph-node-collapse-toggled(int);
@@ -555,11 +590,14 @@ export component MainWindow inherits Window {
 
                 for node-data in root.nodes: GraphNode {
                     data: node-data;
+                    easy-connect: root.connect-mode == "easy";
                     viewport-width: editor.width;
                     viewport-height: editor.height;
                     audio-volume-changed(id, value) => { root.graph-audio-volume-changed(id, value); }
                     audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
                     collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
+                    easy-connect-dropped(id, x, y) => { root.graph-easy-connect(id, x, y); }
+                    easy-node-clicked(id, shift) => { root.graph-node-selected(id, shift); }
                 }
             }
         }
