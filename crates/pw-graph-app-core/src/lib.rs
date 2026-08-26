@@ -25,7 +25,7 @@ use pw_graph_alsamidi::AlsaMidiDriver;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 use pw_graph_backend::PipewireDriver;
 #[cfg(target_os = "windows")]
-use pw_graph_backend::WindowsAudioDriver;
+use pw_graph_backend::{WindowsAudioDriver, WindowsMidiDriver};
 
 /// The native driver that owns a pair of graph ports.  This classification is
 /// kept independent of the UI and is used before a mutation is forwarded to a
@@ -94,6 +94,7 @@ pub struct BackendAvailability {
     pub pipewire: bool,
     pub alsa: bool,
     pub windows_audio: bool,
+    pub windows_midi: bool,
     pub failures: Vec<String>,
 }
 
@@ -106,6 +107,8 @@ pub struct CompositeDriver {
     pub alsa: Option<AlsaMidiDriver>,
     #[cfg(target_os = "windows")]
     pub windows_audio: Option<WindowsAudioDriver>,
+    #[cfg(target_os = "windows")]
+    pub windows_midi: Option<WindowsMidiDriver>,
     graph: Graph,
 }
 
@@ -148,6 +151,17 @@ impl CompositeDriver {
             Err(error) => availability.failures.push(error.to_string()),
         }
 
+        #[cfg(target_os = "windows")]
+        if !no_midi {
+            match WindowsMidiDriver::new() {
+                Ok(driver) => {
+                    composite.windows_midi = Some(driver);
+                    availability.windows_midi = true;
+                }
+                Err(error) => availability.failures.push(error.to_string()),
+            }
+        }
+
         (composite, availability)
     }
 
@@ -170,6 +184,7 @@ impl CompositeDriver {
     pub fn with_windows_audio(driver: WindowsAudioDriver) -> Self {
         Self {
             windows_audio: Some(driver),
+            windows_midi: None,
             graph: Graph::default(),
         }
     }
@@ -201,6 +216,10 @@ impl CompositeDriver {
         }
         #[cfg(target_os = "windows")]
         if let Some(driver) = self.windows_audio.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_ref() {
             Self::merge_graph(&mut graph, driver.graph())?;
         }
         self.graph = graph;
@@ -317,6 +336,14 @@ impl CompositeDriver {
                         .map(GraphDriver::capabilities)
                         .unwrap_or_default();
                 }
+                #[cfg(target_os = "windows")]
+                if backend == BackendKind::WindowsMidi {
+                    return self
+                        .windows_midi
+                        .as_ref()
+                        .map(GraphDriver::capabilities)
+                        .unwrap_or_default();
+                }
                 BackendCapabilities::default()
             }
         }
@@ -352,6 +379,10 @@ impl GraphDriver for CompositeDriver {
         if let Some(driver) = self.windows_audio.as_ref() {
             capabilities = capabilities.union(driver.capabilities());
         }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_ref() {
+            capabilities = capabilities.union(driver.capabilities());
+        }
         capabilities
     }
 
@@ -366,6 +397,10 @@ impl GraphDriver for CompositeDriver {
         }
         #[cfg(target_os = "windows")]
         if let Some(driver) = self.windows_audio.as_mut() {
+            driver.refresh()?;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_mut() {
             driver.refresh()?;
         }
         self.rebuild_merged_graph()?;
@@ -398,7 +433,18 @@ impl GraphDriver for CompositeDriver {
                 Err(Self::unsupported("Windows audio routing is not supported"))
             }
             Ok(CompositeRoute::WindowsMidi) => {
-                Err(Self::unsupported("Windows MIDI routing is not supported"))
+                #[cfg(target_os = "windows")]
+                {
+                    let link = self
+                        .windows_midi
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows MIDI backend is unavailable"))?
+                        .connect(src, dst)?;
+                    self.refresh()?;
+                    Ok(link)
+                }
+                #[cfg(not(target_os = "windows"))]
+                Err(Self::unsupported("Windows MIDI backend is unavailable"))
             }
             Ok(CompositeRoute::Demo) => Err(Self::unsupported(
                 "demo resources are not part of the live composite",
@@ -442,7 +488,18 @@ impl GraphDriver for CompositeDriver {
                 Err(Self::unsupported("Windows audio routing is not supported"))
             }
             CompositeRoute::WindowsMidi => {
-                Err(Self::unsupported("Windows MIDI routing is not supported"))
+                #[cfg(target_os = "windows")]
+                {
+                    let removed = self
+                        .windows_midi
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows MIDI backend is unavailable"))?
+                        .disconnect(link)?;
+                    self.refresh()?;
+                    Ok(removed)
+                }
+                #[cfg(not(target_os = "windows"))]
+                Err(Self::unsupported("Windows MIDI backend is unavailable"))
             }
             CompositeRoute::Demo => Err(Self::unsupported(
                 "demo resources are not part of the live composite",

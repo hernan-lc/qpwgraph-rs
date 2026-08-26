@@ -21,12 +21,17 @@ pub use pipewire_stub::PipewireDriver;
 
 #[cfg(target_os = "windows")]
 mod windows;
+/// WinMM MIDI: the one Windows backend with real routing.
+#[cfg(target_os = "windows")]
+mod windows_midi;
 /// WASAPI endpoints that drive the relay engine on Windows.
 #[cfg(all(target_os = "windows", feature = "relay"))]
 mod windows_relay;
 
 #[cfg(target_os = "windows")]
 pub use windows::WindowsAudioDriver;
+#[cfg(target_os = "windows")]
+pub use windows_midi::WindowsMidiDriver;
 #[cfg(all(target_os = "windows", feature = "relay"))]
 pub use windows_relay::RelayEndpoints;
 
