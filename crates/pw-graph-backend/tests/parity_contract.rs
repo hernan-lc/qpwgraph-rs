@@ -7,8 +7,9 @@
 //! genuinely needs a live daemon stays in the driver's own opt-in tests.
 
 use pw_graph_backend::{
-    is_measurable_audio_node, nodes_to_meter, BackendError, DemoDriver, EffectDriver,
-    EffectInsertRequest, GraphDriver, MeterPolicy, NodeAudioState, NodeCapabilities,
+    is_measurable_audio_node, nodes_to_meter, spa_volume_to_ui_volume, ui_volume_to_spa_volume,
+    BackendError, DemoDriver, EffectDriver, EffectInsertRequest, GraphDriver, MeterPolicy,
+    NodeAudioState, NodeCapabilities,
 };
 use pw_graph_core::{NodeId, NodeType, PortId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,6 +81,27 @@ fn a_backend_without_change_notifications_asks_to_be_polled() {
     let driver = DemoDriver::demo();
     assert!(!driver.reports_graph_changes());
     assert!(!driver.graph_dirty());
+}
+
+/// PipeWire stores gain as amplitude cubed. Getting the pair wrong makes a
+/// fader feel correct only at unity and silence, which is easy to miss by eye
+/// and impossible to miss here.
+#[test]
+fn spa_gain_round_trips_through_the_cubed_curve() {
+    for linear in [0.0, 0.25, 0.5, 0.75, 1.0, 1.5] {
+        let stored = ui_volume_to_spa_volume(linear, 1.5);
+        let back = spa_volume_to_ui_volume(stored);
+        assert!(
+            (back - linear).abs() < 1e-4,
+            "{linear} stored as {stored} came back as {back}"
+        );
+    }
+    // Half gain is stored as an eighth, which is the whole point of the curve.
+    assert!((ui_volume_to_spa_volume(0.5, 1.5) - 0.125).abs() < 1e-6);
+    // Out-of-range input is clamped rather than producing NaN.
+    assert!(ui_volume_to_spa_volume(-1.0, 1.5).is_finite());
+    assert!(spa_volume_to_ui_volume(-1.0).is_finite());
+    assert_eq!(ui_volume_to_spa_volume(9.0, 1.0), 1.0);
 }
 
 // === Audio state ==========================================================

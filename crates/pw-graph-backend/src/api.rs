@@ -323,6 +323,21 @@ pub fn nodes_to_meter(
     }
 }
 
+/// Convert a linear gain into the cubed amplitude SPA stores.
+///
+/// PipeWire keeps `volume` and `channelVolumes` as amplitude cubed, so writing
+/// a linear value straight in makes a fader feel wrong at every position but
+/// unity and silence. Both directions live here so the pair can be tested on
+/// any platform, including ones where the PipeWire driver is not compiled.
+pub fn ui_volume_to_spa_volume(volume: f32, max_volume: f32) -> f32 {
+    volume.clamp(0.0, max_volume.max(0.0)).powi(3)
+}
+
+/// Inverse of [`ui_volume_to_spa_volume`], for reading a level back.
+pub fn spa_volume_to_ui_volume(value: f32) -> f32 {
+    value.max(0.0).cbrt()
+}
+
 /// Audio controls exposed by a graph node when its backend supports them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodeAudioControl {

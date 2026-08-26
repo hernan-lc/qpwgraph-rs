@@ -26,6 +26,7 @@ mod filter_runtime;
 mod links;
 mod metering;
 mod properties;
+mod readback;
 mod registry;
 #[cfg(all(target_os = "linux", feature = "relay"))]
 mod relay;
@@ -523,6 +524,9 @@ impl PipewireDriver {
                 .map(|link| link.id)
                 .collect();
             if suppressed.is_empty() || pass == 2 {
+                // Volume and mute are read back here so a change made in
+                // pavucontrol or with a media key reaches the cards.
+                self.read_node_controls_locked();
                 self.ensure_meters_locked();
                 return Ok(());
             }
@@ -1068,12 +1072,9 @@ impl GraphDriver for PipewireDriver {
 
     /// Audio state for one node.
     ///
-    /// Both controls are writable on PipeWire. Reading them back natively needs
-    /// a `Props` param listener on the node proxy, which this driver does not
-    /// bind yet, so a value is reported only once this process has written it.
-    /// Until then `volume`/`muted` stay `None` and `*_readable` stays false --
-    /// deliberately, so the UI shows "not read" instead of inventing a level
-    /// that does not match what the user set outside the app.
+    /// Both controls are writable, and both are read back from the node''s
+    /// `Props` during each graph rebuild. A node that has never answered stays
+    /// `None`, so the UI shows "not read" rather than inventing a level.
     fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
         let record = self
             .graph
@@ -1444,8 +1445,9 @@ fn audio_format_pod() -> BackendResult<Vec<u8>> {
 /// PipeWire's conventional UI volume curve is cubic: a displayed 50% is sent
 /// as 0.5³, which corresponds to roughly −18 dB. Sending the UI percentage
 /// directly made the control much louder than its displayed value implied.
+/// The driver''s own wrapper so call sites do not repeat the boost ceiling.
 fn ui_volume_to_spa_volume(volume: f32) -> f32 {
-    volume.clamp(0.0, 1.5).powi(3)
+    crate::api::ui_volume_to_spa_volume(volume, PIPEWIRE_MAX_VOLUME)
 }
 
 #[cfg(test)]
