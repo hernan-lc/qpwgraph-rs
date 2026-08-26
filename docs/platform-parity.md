@@ -26,9 +26,10 @@ system that the UI has to present honestly instead of pretending around.
 | --- | --- | --- | --- |
 | Read graph topology | Yes | Yes, as endpoints and application sessions | Equivalent |
 | Node/port naming | Yes | Yes | Equivalent |
-| Create a connection | Yes | No | Platform limitation |
-| Remove a connection | Yes | No | Platform limitation |
+| Create a connection | Yes | MIDI only | Partial |
+| Remove a connection | Yes | MIDI only | Partial |
 | Select an existing connection | Yes | Yes | Equivalent |
+| Drag an edge onto another port | Yes | MIDI only | Partial |
 | Patchbay persistence | Yes | Not applicable | Platform limitation |
 
 Windows Core Audio has no arbitrary patchbay. What the driver shows is the
@@ -48,9 +49,9 @@ selectable, and still shown in the graph. Only mutation is refused.
 | --- | --- | --- | --- |
 | Set volume | Yes | Yes (endpoint and session) | Equivalent |
 | Set mute | Yes | Yes (endpoint and session) | Equivalent |
-| Read volume | Only after this app writes it | Yes | Partial (Linux) |
-| Read mute | Only after this app writes it | Yes | Partial (Linux) |
-| Follow external changes | No | Yes, event driven | Partial (Linux) |
+| Read volume | Yes, from node Props | Yes | Equivalent |
+| Read mute | Yes, from node Props | Yes | Equivalent |
+| Follow external changes | At each rebuild | Yes, event driven | Partial (Linux) |
 | Volume above unity | Yes, to 150% | No, clamped at 100% | Platform limitation, reported per node |
 | Per-node capability reporting | Yes | Yes | Equivalent |
 
@@ -63,11 +64,11 @@ visibly wrong on Windows.
 
 Two gaps remain here:
 
-- **Linux native readback** — *Missing*. Reading PipeWire volume and mute needs
-  a `Props` param listener bound to each node proxy, which the driver does not
-  set up yet. Until it does, `node_audio_state` reports a value only for nodes
-  this process has written, and `volume_readable`/`mute_readable` stay false
-  otherwise. The write path is unaffected.
+PipeWire volume and mute are read back from each node's `Props` during a graph
+rebuild, so a level set in pavucontrol or with a media key reaches the cards.
+Windows goes further and follows changes by callback, without waiting for a
+rebuild; doing the same on Linux would mean holding a param subscription per
+node rather than reading on demand.
 Windows volume and mute are event driven: `IAudioSessionEvents` and
 `IAudioEndpointVolumeCallback` carry the new values in their payload, so the
 cache follows a change made anywhere on the system without polling and without
@@ -134,7 +135,7 @@ are flagged passive, monitor-only, and non-reconnecting.
 | Relay: peer audio as a microphone | Yes | No | Platform limitation |
 | Relay: send one application only | Yes | No | Missing (build 20348+) |
 | Relay: choose which endpoint | n/a | Yes | Equivalent |
-| ALSA MIDI | Yes | No | Missing |
+| MIDI | ALSA | WinMM, with routing | Partial |
 
 Effect *insertion* depends on rewiring an existing link, so it cannot exist on
 Windows without routing. Free-standing effect nodes do not have that constraint
@@ -165,29 +166,34 @@ the loopback tap is whole-endpoint.
 
 ## Roadmap
 
-Ordered by how much each one improves what a user actually sees.
+Ordered by how much each one improves what a user actually sees. Everything
+above the line has landed; what is left is blocked on something specific.
 
-1. **PipeWire native volume/mute readback.** Closes the last place where a card
-   can show an unknown value on Linux. Needs a `Props` param listener per node
-   proxy and a cache invalidated by param-changed events.
-2. **Windows process loopback.** One capture path unlocks two features:
-   per-application meters, and relaying a single application instead of the
-   whole endpoint. See the note under Metering for the crash that stopped the
-   first attempt.
-3. **Refresh churn.** Volume events no longer force a rebuild, but the app still
-   refreshes roughly every 500 ms even when the Windows topology is not dirty.
-   `graph_dirty` already exists; the refresh loop should consult it.
-4. **`OnSessionCreated` handling.** Currently coarse; a new session should be
-   folded in without a full re-enumeration.
-5. **Windows MIDI.** WinMM exposes `midiInOpen`/`midiOutOpen` and, importantly,
-   `midiConnect`/`midiDisconnect`, so a `WindowsMidiDriver` could present a
-   genuinely connectable MIDI graph -- unlike audio, this one has real routing.
-   The `BackendNamespace::WindowsMidi` namespace is already reserved. One
-   limitation to model honestly: a MIDI input can generally be connected to one
-   output at a time unless a MIDI-thru driver is involved, so it would not be
-   topologically equivalent to ALSA MIDI.
-6. **Windows free-standing effect nodes.** Requires a processing host that does
+1. **Windows per-app output routing.** *Blocked on an undocumented ABI.* The
+   edge the graph draws between an application session and an endpoint is the
+   one relationship Windows lets a user change -- Settings calls it "App volume
+   and device preferences". The object behind it,
+   `Windows.Media.Internal.AudioPolicyConfig`, **does activate on this machine**
+   (verified: `RoGetActivationFactory` returns S_OK on 10.0.19045). What is
+   missing is a trustworthy vtable layout for `IAudioPolicyConfigFactory`: it is
+   undocumented, differs between Windows 10 and 11, and calling the wrong slot
+   is undefined behaviour rather than an error. Needs the layout confirmed
+   against a known-good implementation before anything calls it.
+2. **Windows process loopback.** *Blocked on the OS build here.* One capture
+   path unlocks per-application meters and relaying a single application. It
+   requires build 20348 or newer; this machine is 10.0.19045, so it cannot be
+   exercised at all, and the first attempt from the API reference alone brought
+   the process down with `STATUS_HEAP_CORRUPTION`. Needs a newer machine and
+   Microsoft's ApplicationLoopback sample rather than the reference.
+3. **`OnSessionCreated` handling.** Currently coarse; a new session should be
+   folded in without a full re-enumeration. The periodic churn is gone, so this
+   is now the only remaining source of unnecessary re-enumeration.
+4. **Linux param subscriptions.** PipeWire controls are read at each rebuild;
+   Windows follows them by callback. Holding a `Props` subscription per node
+   would close that gap.
+5. **Windows free-standing effect nodes.** Requires a processing host that does
    not depend on graph routing.
+6. **Relay: send one application only.** Depends on process loopback above.
 
 ## Testing across platforms
 
@@ -195,12 +201,13 @@ Linux and Windows drivers compile on different machines, so no single run can
 exercise both. Anything both backends depend on is expressed as platform-neutral
 data and tested in `crates/pw-graph-backend/tests/parity_contract.rs`, which
 runs everywhere: meter eligibility, meter policy resolution, audio state
-semantics, and per-node capability reporting.
+semantics, per-node capability reporting, the SPA gain curve, and whether a
+backend asks to be polled.
 
 Behaviour that genuinely needs a live daemon stays in each driver's own tests
 and is opt-in through environment variables (`PW_GRAPH_TEST_METERS`,
-`PW_GRAPH_TEST_LINKS`, `PW_GRAPH_TEST_RELAY`), so an offline or containerised
-build does not fail for want of an audio server.
+`PW_GRAPH_TEST_LINKS`, `PW_GRAPH_TEST_RELAY`, `PW_GRAPH_TEST_VOLUME`), so an
+offline or containerised build does not fail for want of an audio server.
 
 When adding a rule both backends rely on, put the rule in `api` and test it
 there. A shared rule tested only inside one driver is untested on the other
