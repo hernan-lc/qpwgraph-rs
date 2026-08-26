@@ -1072,6 +1072,34 @@ impl GraphDriver for PipewireDriver {
         })
     }
 
+    /// Audio state for one node.
+    ///
+    /// Both controls are writable on PipeWire. Reading them back natively needs
+    /// a `Props` param listener on the node proxy, which this driver does not
+    /// bind yet, so a value is reported only once this process has written it.
+    /// Until then `volume`/`muted` stay `None` and `*_readable` stays false --
+    /// deliberately, so the UI shows "not read" instead of inventing a level
+    /// that does not match what the user set outside the app.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        let record = self
+            .graph
+            .nodes
+            .get(&node)
+            .ok_or(GraphError::MissingNode(node))?;
+        if record.node_type == NodeType::Effect {
+            return Ok(NodeAudioState::UNSUPPORTED);
+        }
+        let known = self.audio_controls.get(&node).copied();
+        Ok(NodeAudioState {
+            volume: known.map(|control| control.volume),
+            muted: known.map(|control| control.muted),
+            volume_readable: known.is_some(),
+            volume_writable: true,
+            mute_readable: known.is_some(),
+            mute_writable: true,
+        })
+    }
+
     fn graph(&self) -> &Graph {
         &self.graph
     }

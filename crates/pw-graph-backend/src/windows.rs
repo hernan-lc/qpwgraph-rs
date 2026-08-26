@@ -9,6 +9,7 @@
 
 use super::api::{
     AudioMeter, BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
+    NodeAudioState, NodeCapabilities,
 };
 use pw_graph_core::{
     encode_backend_id, BackendNamespace, Direction, Graph, GraphError, Link, LinkId, Node, NodeId,
@@ -48,9 +49,20 @@ const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     relay: false,
 };
 
+/// One refresh answer: the graph plus the audio state read for every node in
+/// it. Reading state during the refresh keeps Core Audio calls on the COM
+/// worker and off the UI's per-frame path.
+struct WorkerSnapshot {
+    graph: Graph,
+    audio_states: BTreeMap<NodeId, NodeAudioState>,
+    /// Nodes that can be metered. Endpoints expose `IAudioMeterInformation`;
+    /// application sessions do not.
+    meterable: BTreeSet<NodeId>,
+}
+
 #[derive(Debug)]
 enum WorkerCommand {
-    Refresh(Sender<BackendResult<Graph>>),
+    Refresh(Sender<BackendResult<WorkerSnapshot>>),
     SetVolume(NodeId, f32, Sender<BackendResult<()>>),
     SetMute(NodeId, bool, Sender<BackendResult<()>>),
     SetMeterPolicy(MeterPolicy, Sender<BackendResult<()>>),
@@ -65,6 +77,11 @@ enum WorkerCommand {
 #[derive(Debug)]
 pub struct WindowsAudioDriver {
     graph: Graph,
+    /// Audio state as last read from Core Audio. The backend owns these
+    /// values; nothing upstream is allowed to keep its own copy.
+    audio_states: BTreeMap<NodeId, NodeAudioState>,
+    /// Nodes Core Audio can meter. Endpoints can; sessions cannot.
+    meterable: BTreeSet<NodeId>,
     positions: BTreeMap<NodeId, [f32; 2]>,
     command_tx: Sender<WorkerCommand>,
     dirty: Arc<AtomicBool>,
@@ -84,8 +101,8 @@ impl WindowsAudioDriver {
                 BackendError::Native(format!("could not start audio worker: {error}"))
             })?;
 
-        let graph = match ready_rx.recv() {
-            Ok(Ok(graph)) => graph,
+        let snapshot = match ready_rx.recv() {
+            Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
                 let _ = worker.join();
                 return Err(error);
@@ -99,7 +116,9 @@ impl WindowsAudioDriver {
         };
 
         Ok(Self {
-            graph,
+            graph: snapshot.graph,
+            audio_states: snapshot.audio_states,
+            meterable: snapshot.meterable,
             positions: BTreeMap::new(),
             command_tx,
             dirty,
@@ -118,13 +137,16 @@ impl WindowsAudioDriver {
         self.command_tx
             .send(WorkerCommand::Refresh(sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
-        let mut graph = Self::response(receiver)?;
+        let snapshot = Self::response(receiver)?;
+        let mut graph = snapshot.graph;
         for (node_id, position) in &self.positions {
             if let Some(node) = graph.nodes.get_mut(node_id) {
                 node.position = *position;
             }
         }
         self.graph = graph;
+        self.audio_states = snapshot.audio_states;
+        self.meterable = snapshot.meterable;
         Ok(())
     }
 }
@@ -174,12 +196,46 @@ impl GraphDriver for WindowsAudioDriver {
         Ok(())
     }
 
+    /// Core Audio state as of the last refresh. Reads are served from that
+    /// snapshot rather than re-entering COM, so the UI can ask per node per
+    /// frame without a round trip to the worker thread.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        if !self.graph.nodes.contains_key(&node) {
+            return Err(GraphError::MissingNode(node).into());
+        }
+        Ok(self
+            .audio_states
+            .get(&node)
+            .copied()
+            .unwrap_or(NodeAudioState::UNSUPPORTED))
+    }
+
+    /// Endpoints expose `IAudioMeterInformation`; application sessions do not,
+    /// so a session must not be given a meter it can never fill.
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        let Ok(state) = self.node_audio_state(node) else {
+            return NodeCapabilities::NONE;
+        };
+        let mut capabilities = state.control_capabilities();
+        if self.meterable.contains(&node) {
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+        }
+        capabilities
+    }
+
     fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
         let (sender, receiver) = mpsc::channel();
         self.command_tx
             .send(WorkerCommand::SetMute(node, muted, sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
-        Self::response(receiver)
+        Self::response(receiver)?;
+        // Reflect the write straight away so the card does not flick back to
+        // the previous value while waiting for the next refresh.
+        if let Some(state) = self.audio_states.get_mut(&node) {
+            state.muted = Some(muted);
+        }
+        Ok(())
     }
 
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
@@ -187,7 +243,13 @@ impl GraphDriver for WindowsAudioDriver {
         self.command_tx
             .send(WorkerCommand::SetVolume(node, volume, sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
-        Self::response(receiver)
+        Self::response(receiver)?;
+        // The worker clamps to the endpoint's 0..=1 range, so record what
+        // Windows will actually hold rather than what was asked for.
+        if let Some(state) = self.audio_states.get_mut(&node) {
+            state.volume = Some(volume.clamp(0.0, 1.0));
+        }
+        Ok(())
     }
 
     fn graph(&self) -> &Graph {
@@ -246,7 +308,7 @@ impl super::api::EffectDriver for WindowsAudioDriver {}
 
 fn worker_thread(
     command_rx: Receiver<WorkerCommand>,
-    ready_tx: Sender<BackendResult<Graph>>,
+    ready_tx: Sender<BackendResult<WorkerSnapshot>>,
     dirty: Arc<AtomicBool>,
 ) {
     let initialized = unsafe { Com::CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -268,8 +330,8 @@ fn worker_thread(
     };
 
     match worker.refresh_graph() {
-        Ok(graph) => {
-            let _ = ready_tx.send(Ok(graph));
+        Ok(snapshot) => {
+            let _ = ready_tx.send(Ok(snapshot));
         }
         Err(error) => {
             let _ = ready_tx.send(Err(error));
@@ -369,7 +431,7 @@ impl CoreAudioWorker {
         })
     }
 
-    fn refresh_graph(&mut self) -> BackendResult<Graph> {
+    fn refresh_graph(&mut self) -> BackendResult<WorkerSnapshot> {
         self.clear_session_callbacks();
         let mut endpoint_specs = Vec::new();
         for flow in [Audio::eRender, Audio::eCapture] {
@@ -426,7 +488,84 @@ impl CoreAudioWorker {
         self.endpoints = endpoints;
         self.sessions = sessions;
         self.dirty.store(false, Ordering::Release);
-        Ok(graph)
+        let audio_states = self.read_audio_states();
+        let meterable = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.node_id)
+            .collect();
+        Ok(WorkerSnapshot {
+            graph,
+            audio_states,
+            meterable,
+        })
+    }
+
+    /// Read volume and mute for every endpoint and session Core Audio knows
+    /// about. A node whose control cannot be activated right now is reported as
+    /// unreadable rather than dropped, so the card still renders and simply
+    /// shows no value.
+    fn read_audio_states(&self) -> BTreeMap<NodeId, NodeAudioState> {
+        let mut states = BTreeMap::new();
+        for endpoint in &self.endpoints {
+            states.insert(endpoint.node_id, self.endpoint_audio_state(endpoint));
+        }
+        for session in &self.sessions {
+            states.insert(session.node_id, self.session_audio_state(session));
+        }
+        states
+    }
+
+    fn endpoint_audio_state(&self, endpoint: &EndpointRecord) -> NodeAudioState {
+        let Ok(control) = (unsafe {
+            endpoint
+                .device
+                .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+        }) else {
+            return NodeAudioState::UNSUPPORTED;
+        };
+        // Endpoint volume is a 0..=1 scalar; Windows has no boost range here,
+        // which is why volume never exceeds unity on this backend.
+        let volume = unsafe { control.GetMasterVolumeLevelScalar() }.ok();
+        let muted = unsafe { control.GetMute() }
+            .ok()
+            .map(|muted| muted.as_bool());
+        NodeAudioState {
+            volume,
+            muted,
+            volume_readable: volume.is_some(),
+            volume_writable: true,
+            mute_readable: muted.is_some(),
+            mute_writable: true,
+        }
+    }
+
+    fn session_audio_state(&self, session: &SessionRecord) -> NodeAudioState {
+        let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == session.endpoint_id && endpoint.flow == session.flow)
+        else {
+            return NodeAudioState::UNSUPPORTED;
+        };
+        let Ok(control) = self.find_session_control(endpoint, &session.session_id) else {
+            return NodeAudioState::UNSUPPORTED;
+        };
+        let Ok(volume_control) = control.cast::<Audio::ISimpleAudioVolume>() else {
+            return NodeAudioState::UNSUPPORTED;
+        };
+        let volume = unsafe { volume_control.GetMasterVolume() }.ok();
+        let muted = unsafe { volume_control.GetMute() }
+            .ok()
+            .map(|muted| muted.as_bool());
+        NodeAudioState {
+            volume,
+            muted,
+            volume_readable: volume.is_some(),
+            volume_writable: true,
+            mute_readable: muted.is_some(),
+            mute_writable: true,
+        }
     }
 
     fn enumerate_endpoints(

@@ -4,7 +4,8 @@
 use super::api::RelayDriver;
 use super::api::{
     BackendCapabilities, BackendError, BackendResult, EffectDriver, EffectInsertRequest,
-    EffectInstance, EffectNodeRequest, GraphDriver, NodeAudioControl,
+    EffectInstance, EffectNodeRequest, GraphDriver, NodeAudioControl, NodeAudioState,
+    NodeCapabilities,
 };
 use pw_graph_core::{
     Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
@@ -314,6 +315,36 @@ impl GraphDriver for DemoDriver {
         }
         self.audio_controls.entry(node).or_default().volume = volume.clamp(0.0, 1.5);
         Ok(())
+    }
+
+    /// The demo driver owns its controls outright, so this is a real read of
+    /// backend state rather than a placeholder. Effect nodes carry no audio
+    /// controls, exactly as a DSP node would not on a native backend.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        let record = self
+            .graph
+            .nodes
+            .get(&node)
+            .ok_or(GraphError::MissingNode(node))?;
+        if record.node_type == NodeType::Effect {
+            return Ok(NodeAudioState::UNSUPPORTED);
+        }
+        let control = self.audio_controls.get(&node).copied().unwrap_or_default();
+        Ok(NodeAudioState::readable(control.volume, control.muted))
+    }
+
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        let Ok(state) = self.node_audio_state(node) else {
+            return NodeCapabilities::NONE;
+        };
+        let mut capabilities = state.control_capabilities();
+        // Effect nodes are pass-through DSP: nothing to meter and nothing to
+        // control, so they must not be given a meter either.
+        if state.is_supported() {
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+        }
+        capabilities
     }
 
     fn graph(&self) -> &Graph {

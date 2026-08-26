@@ -321,6 +321,118 @@ impl Default for NodeAudioControl {
     }
 }
 
+/// What one node can actually do, as opposed to what its backend can do
+/// somewhere in the graph.
+///
+/// [`BackendCapabilities`] answers "does this backend have volume support at
+/// all", which is too coarse to drive a card: a Windows endpoint exposes
+/// volume and mute while an observed application session may expose neither,
+/// and a PipeWire effect node has no audio controls even though the PipeWire
+/// backend does. The UI decides which controls to draw from this.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NodeCapabilities {
+    pub volume_read: bool,
+    pub volume_write: bool,
+    pub mute_read: bool,
+    pub mute_write: bool,
+    pub meter_peak: bool,
+    pub meter_rms: bool,
+}
+
+impl NodeCapabilities {
+    /// Nothing is supported. The right answer for a node the backend does not
+    /// recognise, and the safe answer while state is still unknown.
+    pub const NONE: Self = Self {
+        volume_read: false,
+        volume_write: false,
+        mute_read: false,
+        mute_write: false,
+        meter_peak: false,
+        meter_rms: false,
+    };
+
+    /// Full read/write control plus both meter kinds.
+    pub const FULL: Self = Self {
+        volume_read: true,
+        volume_write: true,
+        mute_read: true,
+        mute_write: true,
+        meter_peak: true,
+        meter_rms: true,
+    };
+
+    /// Whether any audio control at all should be drawn for this node.
+    pub const fn has_any_control(self) -> bool {
+        self.volume_read || self.volume_write || self.mute_read || self.mute_write
+    }
+
+    /// Whether any meter should be drawn for this node.
+    pub const fn has_any_meter(self) -> bool {
+        self.meter_peak || self.meter_rms
+    }
+}
+
+/// The audio state of one node, as reported by the backend that owns it.
+///
+/// The backend is the source of truth. `None` means "this backend cannot tell
+/// you", which is deliberately distinct from a real reading -- the UI must not
+/// invent a value to fill the gap, because a fabricated 90%/unmuted card looks
+/// exactly like a real one and misreports the system to the user.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NodeAudioState {
+    /// Linear scalar where 1.0 is unity gain. Backends that allow boost report
+    /// values above 1.0; backends that clamp at unity never do.
+    pub volume: Option<f32>,
+    pub muted: Option<bool>,
+    pub volume_readable: bool,
+    pub volume_writable: bool,
+    pub mute_readable: bool,
+    pub mute_writable: bool,
+}
+
+impl NodeAudioState {
+    /// A node whose backend exposes no audio controls at all.
+    pub const UNSUPPORTED: Self = Self {
+        volume: None,
+        muted: None,
+        volume_readable: false,
+        volume_writable: false,
+        mute_readable: false,
+        mute_writable: false,
+    };
+
+    /// A fully controllable node with both values already read.
+    pub fn readable(volume: f32, muted: bool) -> Self {
+        Self {
+            volume: Some(volume),
+            muted: Some(muted),
+            volume_readable: true,
+            volume_writable: true,
+            mute_readable: true,
+            mute_writable: true,
+        }
+    }
+
+    /// Whether this node exposes any audio control.
+    pub const fn is_supported(&self) -> bool {
+        self.volume_readable || self.volume_writable || self.mute_readable || self.mute_writable
+    }
+
+    /// The control half of this node's capabilities. Meter capability is not
+    /// derivable from audio state, so it is left off here and merged by the
+    /// backend's `node_capabilities`.
+    pub const fn control_capabilities(&self) -> NodeCapabilities {
+        NodeCapabilities {
+            volume_read: self.volume_readable,
+            volume_write: self.volume_writable,
+            mute_read: self.mute_readable,
+            mute_write: self.mute_writable,
+            meter_peak: false,
+            meter_rms: false,
+        }
+    }
+}
+
 /// Common operations needed by commands, patchbay activation, and the UI.
 pub trait GraphDriver: EffectDriver {
     /// Capabilities shared by the resources of this driver.
@@ -431,6 +543,39 @@ pub trait GraphDriver: EffectDriver {
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
         let _ = (node, volume);
         Err(unsupported_node_op("volume"))
+    }
+
+    /// Current audio state of one node, read from the backend.
+    ///
+    /// The backend owns this: callers must render what is returned rather than
+    /// remembering a value of their own. A backend that cannot read a node
+    /// returns [`NodeAudioState::UNSUPPORTED`] rather than an error, so a graph
+    /// containing one uncontrollable node still renders. An error is reserved
+    /// for a node that does not exist or a backend that failed to answer.
+    ///
+    /// The default is `UNSUPPORTED`, which keeps every existing backend honest
+    /// until it implements a real reader.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        let _ = node;
+        Ok(NodeAudioState::UNSUPPORTED)
+    }
+
+    /// What this specific node supports, for deciding which controls to draw.
+    ///
+    /// The default derives the control half from [`Self::node_audio_state`] and
+    /// the meter half from the backend-wide meter capability, which is right
+    /// for backends that meter uniformly. Backends whose nodes differ (Windows
+    /// endpoints meter, sessions do not) override this.
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        let mut capabilities = self
+            .node_audio_state(node)
+            .map(|state| state.control_capabilities())
+            .unwrap_or(NodeCapabilities::NONE);
+        if self.capabilities().meters {
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+        }
+        capabilities
     }
 
     fn graph(&self) -> &Graph;
