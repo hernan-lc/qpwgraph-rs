@@ -9,7 +9,7 @@ authors.workspace = true
 default = ["pipewire", "alsa", "relay"]
 pipewire = ["pw-graph-backend/pipewire"]
 alsa = ["dep:pw-graph-alsamidi", "pw-graph-alsamidi/alsa"]
-relay = ["pw-graph-backend/relay", "pipewire"]
+relay = ["pw-graph-backend/relay"]
 
 [dependencies]
 pw-graph-backend = { path = "../pw-graph-backend", default-features = false }

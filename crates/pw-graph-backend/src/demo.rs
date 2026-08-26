@@ -1,6 +1,6 @@
 //! Deterministic in-memory backend used by demo mode and tests.
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use super::api::RelayDriver;
 use super::api::{
     BackendCapabilities, BackendError, BackendResult, EffectDriver, EffectInsertRequest,
@@ -352,7 +352,7 @@ impl GraphDriver for DemoDriver {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 impl RelayDriver for DemoDriver {}
 
 impl EffectDriver for DemoDriver {

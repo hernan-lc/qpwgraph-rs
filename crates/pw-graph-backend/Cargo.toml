@@ -15,10 +15,12 @@ pw-graph-core = { path = "../pw-graph-core" }
 pw-graph-effects = { path = "../pw-graph-effects" }
 thiserror.workspace = true
 pw-graph-utils = { path = "../pw-graph-utils" }
+# The relay engine (pairing, transport, codec, discovery) is portable; only
+# the audio endpoints that feed it are platform specific.
+pw-graph-relay = { path = "../pw-graph-relay", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { workspace = true, optional = true }
-pw-graph-relay = { path = "../pw-graph-relay", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

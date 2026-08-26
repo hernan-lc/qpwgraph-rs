@@ -86,6 +86,9 @@ pub struct WindowsAudioDriver {
     command_tx: Sender<WorkerCommand>,
     dirty: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    /// Relay engine plus its WASAPI endpoints, created on first use.
+    #[cfg(feature = "relay")]
+    relay: Option<crate::windows_relay::WindowsRelayDevices>,
 }
 
 impl WindowsAudioDriver {
@@ -123,7 +126,53 @@ impl WindowsAudioDriver {
             command_tx,
             dirty,
             worker: Some(worker),
+            #[cfg(feature = "relay")]
+            relay: None,
         })
+    }
+
+    /// Create the relay engine and its WASAPI endpoints on first use.
+    #[cfg(feature = "relay")]
+    fn ensure_relay(
+        &mut self,
+        config: pw_graph_relay::EngineConfig,
+    ) -> BackendResult<&crate::windows_relay::WindowsRelayDevices> {
+        match self.relay.as_ref() {
+            Some(devices) => {
+                devices.handle().update_config(config);
+            }
+            None => {
+                self.relay = Some(crate::windows_relay::WindowsRelayDevices::start(config)?);
+            }
+        }
+        Ok(self.relay.as_ref().expect("relay was just created"))
+    }
+
+    /// The relay's format, fixed by the WASAPI endpoints that carry it.
+    #[cfg(feature = "relay")]
+    fn relay_config(
+        device_name: String,
+        pin: String,
+        port: u16,
+        codec: super::api::RelayCodecKind,
+        frame_ms: u16,
+        transport: super::api::RelayTransportPreference,
+    ) -> pw_graph_relay::EngineConfig {
+        pw_graph_relay::EngineConfig {
+            device_name,
+            device_kind: super::api::RelayDeviceKind::Other,
+            pin,
+            port,
+            codec,
+            frame_ms,
+            sample_rate: crate::windows_relay::RELAY_SAMPLE_RATE,
+            channels: crate::windows_relay::RELAY_CHANNELS,
+            // Windows can send its own output and play what it receives, but it
+            // cannot present received audio as a capture device, so it never
+            // offers the emit-only microphone role.
+            client_roles: super::api::RelayRoles::receive_only(),
+            transport,
+        }
     }
 
     fn response<T>(receiver: Receiver<BackendResult<T>>) -> BackendResult<T> {
@@ -305,6 +354,139 @@ impl GraphDriver for WindowsAudioDriver {
 }
 
 impl super::api::EffectDriver for WindowsAudioDriver {}
+
+/// Relay support on Windows.
+///
+/// The engine is the same one PipeWire uses; only the audio endpoints differ.
+/// See `windows_relay` for why the microphone role cannot be offered here.
+#[cfg(feature = "relay")]
+impl super::api::RelayDriver for WindowsAudioDriver {
+    fn relay_available(&self) -> bool {
+        true
+    }
+
+    fn relay_status(&self) -> super::api::RelayEngineStatus {
+        self.relay
+            .as_ref()
+            .map(|devices| devices.handle().status())
+            .unwrap_or_default()
+    }
+
+    fn relay_devices_active(&self) -> bool {
+        self.relay.is_some()
+    }
+
+    fn relay_start_host(&mut self, request: super::api::RelayHostRequest) -> BackendResult<u16> {
+        let config = Self::relay_config(
+            request.device_name,
+            request.pin,
+            request.port,
+            request.codec,
+            request.frame_ms,
+            request.transport,
+        );
+        let devices = self.ensure_relay(config)?;
+        devices
+            .handle()
+            .host_start()
+            .map_err(|error| BackendError::native(format!("relay host start failed: {error}")))
+    }
+
+    fn relay_stop_host(&mut self) -> BackendResult<()> {
+        if let Some(devices) = self.relay.as_mut() {
+            devices.handle().host_stop().map_err(|error| {
+                BackendError::native(format!("relay host stop failed: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn relay_connect(
+        &mut self,
+        target: std::net::SocketAddr,
+        pin: &str,
+        roles: super::api::RelayRoles,
+    ) -> BackendResult<()> {
+        // Windows can only receive: presenting peer audio as a microphone to
+        // other applications needs a capture endpoint, which user-mode code
+        // cannot create. Asking to emit would advertise a role that can never
+        // carry audio, so it is refused rather than silently downgraded.
+        if roles.emit {
+            return Err(BackendError::unsupported(
+                "Windows cannot send this machine's microphone to a relay peer; \
+                 receiving a peer's audio is supported",
+            ));
+        }
+        let device_name = self
+            .relay
+            .as_ref()
+            .map(|devices| devices.handle().config().device_name)
+            .unwrap_or_else(|| "qpwgraph-rs".into());
+        let config = Self::relay_config(
+            device_name,
+            pin.to_owned(),
+            0,
+            super::api::RelayCodecKind::Opus,
+            10,
+            super::api::RelayTransportPreference::Auto,
+        );
+        let devices = self.ensure_relay(config)?;
+        devices.handle().connect(target, pin, roles);
+        Ok(())
+    }
+
+    fn relay_disconnect(&mut self, session: super::api::RelaySessionId) -> BackendResult<()> {
+        let Some(devices) = self.relay.as_mut() else {
+            return Err(BackendError::native(
+                "no relay session exists to disconnect",
+            ));
+        };
+        devices
+            .handle()
+            .disconnect(session)
+            .map_err(|error| BackendError::native(format!("relay disconnect failed: {error}")))
+    }
+
+    fn relay_events(&mut self) -> Vec<super::api::RelayEvent> {
+        self.relay
+            .as_mut()
+            .map(|devices| devices.handle().events())
+            .unwrap_or_default()
+    }
+
+    fn relay_discovery_start(&mut self) -> BackendResult<()> {
+        let config = Self::relay_config(
+            "qpwgraph-rs".into(),
+            String::new(),
+            0,
+            super::api::RelayCodecKind::Opus,
+            10,
+            super::api::RelayTransportPreference::Auto,
+        );
+        let devices = self.ensure_relay(config)?;
+        devices
+            .handle()
+            .discovery_start()
+            .map_err(|error| BackendError::native(format!("relay discovery failed: {error}")))
+    }
+
+    fn relay_discovery_stop(&mut self) {
+        if let Some(devices) = self.relay.as_ref() {
+            devices.handle().discovery_stop();
+        }
+    }
+
+    fn relay_peers(&self) -> Vec<super::api::RelayPeerInfo> {
+        self.relay
+            .as_ref()
+            .map(|devices| devices.handle().discovered_peers())
+            .unwrap_or_default()
+    }
+
+    fn relay_local_links(&self) -> Vec<super::api::RelayLocalLink> {
+        pw_graph_relay::netlink::display_links()
+    }
+}
 
 fn worker_thread(
     command_rx: Receiver<WorkerCommand>,

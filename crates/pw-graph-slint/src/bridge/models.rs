@@ -7,7 +7,7 @@ use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::{Direction, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 use slint::Image;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -17,9 +17,9 @@ use std::rc::Rc;
 use super::app::{toast_visible, Application};
 use super::effects::{effect_options, effect_rows, effect_setup_rows};
 use super::meters::meter_fallback;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use super::relay::relay_qr_payload;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use super::relay::{qr_image, relay_host_endpoint};
 use super::relay::{
     relay_codec_index, relay_frame_index, relay_nodes_visible, relay_role_index, relay_rows,
@@ -236,7 +236,7 @@ pub(crate) fn sync_models(
         application,
         &application.i18n,
     )))));
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let relay_status = application.source.relay_status();
         window.set_relay_available(application.source.relay_available());
@@ -249,7 +249,7 @@ pub(crate) fn sync_models(
         window.set_relay_qr_payload(SharedString::from(payload.clone()));
         window.set_relay_qr_image(qr_image(&payload));
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         window.set_relay_available(false);
         window.set_relay_host_active(false);

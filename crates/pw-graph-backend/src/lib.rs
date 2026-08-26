@@ -21,6 +21,9 @@ pub use pipewire_stub::PipewireDriver;
 
 #[cfg(target_os = "windows")]
 mod windows;
+/// WASAPI endpoints that drive the relay engine on Windows.
+#[cfg(all(target_os = "windows", feature = "relay"))]
+mod windows_relay;
 
 #[cfg(target_os = "windows")]
 pub use windows::WindowsAudioDriver;
@@ -239,6 +242,73 @@ mod tests {
             .expect("releasing meters should succeed");
         assert_eq!(driver.active_meter_count(), 0);
         assert!(driver.audio_meters().unwrap().is_empty());
+    }
+
+    /// Opt-in: opens real WASAPI endpoints on the default playback device and
+    /// binds a TCP control port, so it is not part of a default run.
+    ///
+    /// `relay_start_host` only returns once both endpoints have reported that
+    /// WASAPI accepted them, so a successful call proves the loopback capture
+    /// client and the render client both opened -- which is the part that
+    /// cannot be checked without real hardware.
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    #[test]
+    fn windows_relay_hosts_through_wasapi_endpoints() {
+        if std::env::var_os("PW_GRAPH_TEST_RELAY").is_none() {
+            return;
+        }
+        let Ok(mut driver) = WindowsAudioDriver::new() else {
+            return;
+        };
+        driver.refresh().expect("registry snapshot should succeed");
+        assert!(driver.relay_available());
+        assert!(!driver.relay_devices_active());
+
+        let port = driver
+            .relay_start_host(RelayHostRequest {
+                device_name: "qpwgraph-rs-test".into(),
+                pin: "123456".into(),
+                port: 0,
+                codec: RelayCodecKind::Opus,
+                frame_ms: 10,
+                transport: Default::default(),
+            })
+            .expect("relay host should start");
+        assert!(port > 0, "an ephemeral control port should be bound");
+        assert!(driver.relay_devices_active());
+
+        let status = driver.relay_status();
+        assert!(status.host_active);
+        assert_eq!(status.host_port, Some(port));
+
+        // Give the endpoint threads a moment to run so a COM or format failure
+        // after start-up still shows up here.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(driver.relay_status().host_active);
+
+        driver.relay_stop_host().expect("relay host should stop");
+        assert!(!driver.relay_status().host_active);
+    }
+
+    /// Windows can play a peer's audio but cannot present it as a microphone,
+    /// so an emit role is refused rather than accepted and silently ignored.
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    #[test]
+    fn windows_relay_refuses_the_microphone_role() {
+        let Ok(mut driver) = WindowsAudioDriver::new() else {
+            return;
+        };
+        let target = "127.0.0.1:9".parse().expect("a valid address");
+
+        let error = driver
+            .relay_connect(target, "123456", RelayRoles::emit_only())
+            .expect_err("emitting requires a capture device Windows cannot create");
+
+        assert!(matches!(error, BackendError::Unsupported(_)), "{error}");
+        assert!(
+            !driver.relay_devices_active(),
+            "a refused role must not leave endpoints running"
+        );
     }
 
     #[cfg(all(target_os = "linux", feature = "pipewire", feature = "relay"))]

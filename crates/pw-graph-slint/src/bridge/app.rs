@@ -55,9 +55,9 @@ pub(crate) struct Application {
     pub(crate) meter_error: Option<String>,
     /// Audio controls are live UI state only. They are intentionally not
     /// restored from a second Slint-specific file on startup.
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) relay_levels: BTreeMap<u64, f32>,
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) relay_connecting: Option<String>,
 }
 

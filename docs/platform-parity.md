@@ -107,12 +107,38 @@ are flagged passive, monitor-only, and non-reconnecting.
 | --- | --- | --- | --- |
 | Effect nodes | Yes | No | Missing |
 | Effect insertion into a link | Yes | No | Platform limitation (needs routing) |
-| Audio relay | Yes | No | Missing |
+| Relay: send this machine's audio | Yes | Yes | Equivalent |
+| Relay: play a peer's audio here | Yes | Yes | Equivalent |
+| Relay: peer audio as a microphone | Yes | No | Platform limitation |
+| Relay: route any app into the relay | Yes | No | Platform limitation |
 | ALSA MIDI | Yes | No | Missing |
 
 Effect *insertion* depends on rewiring an existing link, so it cannot exist on
 Windows without routing. Free-standing effect nodes do not have that constraint
 and are merely unbuilt.
+
+### Relay
+
+The relay engine — pairing, transport, Opus, discovery, QR — is platform
+neutral and builds on both targets. Only the audio endpoints that drive
+`RelayHandle::push_capture` and `RelayHandle::pull_playback` differ.
+
+On Linux those endpoints are two virtual PipeWire nodes, so *any* application
+can be routed into or out of the relay through the patchbay, in either
+direction.
+
+On Windows they are WASAPI streams on the default playback endpoint: a loopback
+capture supplies what this machine is playing, and a render stream plays what
+peers send. That is enough to use a phone as a speaker, or to play a phone's
+audio here.
+
+What Windows cannot do is present received audio as a **microphone** to other
+applications. That needs a capture endpoint, and Windows has no user-mode API
+for creating one — a selectable device requires a kernel-mode driver, which is
+what tools like VB-Cable install. `relay_connect` therefore refuses an emit
+role outright rather than accepting it and carrying no audio. For the same
+reason, individual applications cannot be routed into the relay on Windows;
+the loopback tap is whole-endpoint.
 
 ## Roadmap
 
@@ -133,6 +159,10 @@ Ordered by how much each one improves what a user actually sees.
    folded in without a full re-enumeration.
 6. **Windows free-standing effect nodes.** Requires a processing host that does
    not depend on graph routing.
+7. **Relay endpoint selection on Windows.** The loopback tap and the playback
+   stream are both pinned to the default playback endpoint. Letting the user
+   pick which endpoint to relay is a UI and config change, not a platform
+   constraint.
 
 ## Testing across platforms
 

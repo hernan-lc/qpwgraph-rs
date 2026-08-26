@@ -726,7 +726,7 @@ pub trait GraphDriver: EffectDriver {
 /// `Relay Microphone` (a Source fed by peer audio) and `Relay Speaker` (a
 /// Sink whose input is transmitted to peers) — plus the [`pw_graph_relay`]
 /// engine for transport.
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub use pw_graph_relay::{
     pairing::{
         build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
@@ -739,7 +739,7 @@ pub use pw_graph_relay::{
 };
 
 /// Parameters for starting the relay host.
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 #[derive(Clone, Debug)]
 pub struct RelayHostRequest {
     pub device_name: String,
@@ -753,7 +753,7 @@ pub struct RelayHostRequest {
     pub transport: RelayTransportPreference,
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub trait RelayDriver {
     /// Whether this backend can relay audio at all.
     fn relay_available(&self) -> bool {

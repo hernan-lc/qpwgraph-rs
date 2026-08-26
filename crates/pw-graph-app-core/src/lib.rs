@@ -74,16 +74,16 @@ pub fn route_for_ports(src: PortId, dst: PortId) -> Result<CompositeRoute, &'sta
 
 /// A backend that can be used by the application layer.  Relay is an optional
 /// extension of the same object rather than a second UI-owned driver.
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub trait ApplicationDriver: GraphDriver + pw_graph_backend::RelayDriver {}
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 impl<T> ApplicationDriver for T where T: GraphDriver + pw_graph_backend::RelayDriver {}
 
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 pub trait ApplicationDriver: GraphDriver {}
 
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 impl<T> ApplicationDriver for T where T: GraphDriver {}
 
 /// Result of attempting to open the optional native backends.  A missing
@@ -963,24 +963,66 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+/// Which child driver hosts the relay on this platform.
+///
+/// PipeWire carries it on Linux through virtual devices; Windows carries it
+/// through WASAPI endpoints. Resolving the concrete type once here lets the
+/// delegation below be written a single time, so the two platforms cannot
+/// drift apart method by method.
+#[cfg(feature = "relay")]
+impl CompositeDriver {
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    fn relay_backend(&self) -> Option<&PipewireDriver> {
+        self.pipewire.as_ref()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    fn relay_backend_mut(&mut self) -> Option<&mut PipewireDriver> {
+        self.pipewire.as_mut()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn relay_backend(&self) -> Option<&WindowsAudioDriver> {
+        self.windows_audio.as_ref()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn relay_backend_mut(&mut self) -> Option<&mut WindowsAudioDriver> {
+        self.windows_audio.as_mut()
+    }
+
+    // No relay-capable backend on this target; `DemoDriver` only supplies a
+    // concrete type that implements the trait so the signatures line up.
+    #[cfg(not(any(all(target_os = "linux", feature = "pipewire"), target_os = "windows")))]
+    fn relay_backend(&self) -> Option<&pw_graph_backend::DemoDriver> {
+        None
+    }
+
+    #[cfg(not(any(all(target_os = "linux", feature = "pipewire"), target_os = "windows")))]
+    fn relay_backend_mut(&mut self) -> Option<&mut pw_graph_backend::DemoDriver> {
+        None
+    }
+
+    fn relay_unavailable() -> BackendError {
+        Self::unsupported("audio relay is not available for this backend")
+    }
+}
+
+#[cfg(feature = "relay")]
 impl pw_graph_backend::RelayDriver for CompositeDriver {
     fn relay_available(&self) -> bool {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .is_some_and(|driver| driver.relay_available())
     }
 
     fn relay_status(&self) -> pw_graph_backend::RelayEngineStatus {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .map(|driver| driver.relay_status())
             .unwrap_or_default()
     }
 
     fn relay_devices_active(&self) -> bool {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .is_some_and(|driver| driver.relay_devices_active())
     }
 
@@ -988,11 +1030,20 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         &mut self,
         request: pw_graph_backend::RelayHostRequest,
     ) -> BackendResult<u16> {
-        self.mutate_pipewire(|driver| driver.relay_start_host(request))
+        let port = self
+            .relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_start_host(request)?;
+        // Starting the host can add virtual nodes to the child graph, so the
+        // merged view has to catch up. A no-op where it cannot.
+        self.rebuild_after_native_mutation();
+        Ok(port)
     }
 
     fn relay_stop_host(&mut self) -> BackendResult<()> {
-        self.pipewire_mut()?.relay_stop_host()
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_stop_host()
     }
 
     fn relay_connect(
@@ -1001,40 +1052,45 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         pin: &str,
         roles: pw_graph_backend::RelayRoles,
     ) -> BackendResult<()> {
-        self.mutate_pipewire(|driver| driver.relay_connect(target, pin, roles))
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_connect(target, pin, roles)?;
+        self.rebuild_after_native_mutation();
+        Ok(())
     }
 
     fn relay_disconnect(&mut self, session: pw_graph_backend::RelaySessionId) -> BackendResult<()> {
-        self.pipewire_mut()?.relay_disconnect(session)
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_disconnect(session)
     }
 
     fn relay_events(&mut self) -> Vec<pw_graph_backend::RelayEvent> {
-        self.pipewire
-            .as_mut()
+        self.relay_backend_mut()
             .map(|driver| driver.relay_events())
             .unwrap_or_default()
     }
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {
-        self.pipewire_mut()?.relay_discovery_start()
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_discovery_start()
     }
 
     fn relay_discovery_stop(&mut self) {
-        if let Some(driver) = self.pipewire.as_mut() {
+        if let Some(driver) = self.relay_backend_mut() {
             driver.relay_discovery_stop();
         }
     }
 
     fn relay_peers(&self) -> Vec<pw_graph_backend::RelayPeerInfo> {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .map(|driver| driver.relay_peers())
             .unwrap_or_default()
     }
 
     fn relay_local_links(&self) -> Vec<pw_graph_backend::RelayLocalLink> {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .map(|driver| driver.relay_local_links())
             .unwrap_or_default()
     }

@@ -11,7 +11,7 @@ use pw_graph_backend::{
     AudioMeter, BackendCapabilities, DemoDriver, EffectDriver, EffectInsertRequest, EffectInstance,
     EffectNodeRequest, GraphDriver, MeterPolicy,
 };
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use pw_graph_backend::{
     RelayDriver, RelayEngineStatus, RelayEvent, RelayHostRequest, RelayLocalLink, RelayPeerInfo,
     RelayRoles, RelaySessionId,
@@ -242,27 +242,27 @@ impl ApplicationDriver {
         EffectDriver::remove_effect(self, instance_id).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_available(&self) -> bool {
         RelayDriver::relay_available(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_status(&self) -> RelayEngineStatus {
         RelayDriver::relay_status(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_start_host(&mut self, request: RelayHostRequest) -> Result<u16, String> {
         RelayDriver::relay_start_host(self, request).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_stop_host(&mut self) -> Result<(), String> {
         RelayDriver::relay_stop_host(self).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_connect(
         &mut self,
         target: std::net::SocketAddr,
@@ -272,32 +272,32 @@ impl ApplicationDriver {
         RelayDriver::relay_connect(self, target, pin, roles).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_disconnect(&mut self, session: RelaySessionId) -> Result<(), String> {
         RelayDriver::relay_disconnect(self, session).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_events(&mut self) -> Vec<RelayEvent> {
         RelayDriver::relay_events(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_discovery_start(&mut self) -> Result<(), String> {
         RelayDriver::relay_discovery_start(self).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_discovery_stop(&mut self) {
         RelayDriver::relay_discovery_stop(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_peers(&self) -> Vec<RelayPeerInfo> {
         RelayDriver::relay_peers(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_local_links(&self) -> Vec<RelayLocalLink> {
         RelayDriver::relay_local_links(self)
     }
@@ -538,7 +538,7 @@ impl EffectDriver for ApplicationDriver {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 impl RelayDriver for ApplicationDriver {
     fn relay_available(&self) -> bool {
         match &self.backend {

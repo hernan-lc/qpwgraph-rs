@@ -1,16 +1,16 @@
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use pw_graph_backend::{
     relay_build_qr_payload, relay_parse_qr_payload, relay_qr, RelayCodecKind, RelayEvent,
     RelayHostRequest, RelayRoles, RelaySessionId, RelayTransportPreference,
 };
 use slint::SharedString;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use std::collections::BTreeSet;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use std::net::ToSocketAddrs;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use std::str::FromStr;
 
 use pw_graph_i18n::I18n;
@@ -19,31 +19,31 @@ use super::app::Application;
 use super::RelayRow;
 
 pub(crate) fn start_relay_discovery(application: &mut Application) {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         if let Err(error) = application.source.relay_discovery_start() {
             application.status = application.tf("relay.error", &[("error", error)]);
         }
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         application.status = application.t("relay.unavailable");
     }
 }
 
 pub(crate) fn stop_relay_discovery(application: &mut Application) {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     application.source.relay_discovery_stop();
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     let _ = application;
 }
 
 pub(crate) fn relay_host_active(application: &Application) -> bool {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         application.source.relay_status().host_active
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         let _ = application;
         false
@@ -51,12 +51,12 @@ pub(crate) fn relay_host_active(application: &Application) -> bool {
 }
 
 pub(crate) fn relay_nodes_visible(application: &Application) -> bool {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let status = application.source.relay_status();
         status.host_active || !status.sessions.is_empty() || application.relay_connecting.is_some()
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         let _ = application;
         false
@@ -64,7 +64,7 @@ pub(crate) fn relay_nodes_visible(application: &Application) -> bool {
 }
 
 pub(crate) fn start_relay_host(application: &mut Application) {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let request = RelayHostRequest {
             device_name: application.config.relay_device_name.trim().to_owned(),
@@ -82,28 +82,28 @@ pub(crate) fn start_relay_host(application: &mut Application) {
             Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
         }
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         application.status = application.t("relay.unavailable");
     }
 }
 
 pub(crate) fn stop_relay_host(application: &mut Application) {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         match application.source.relay_stop_host() {
             Ok(()) => application.status = application.t("relay.host_stopped"),
             Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
         }
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         application.status = application.t("relay.unavailable");
     }
 }
 
 pub(crate) fn connect_relay(application: &mut Application, requested_target: Option<&str>) {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let raw_target = requested_target
             .map(str::to_owned)
@@ -152,7 +152,7 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
             Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
         }
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         let _ = requested_target;
         application.status = application.t("relay.unavailable");
@@ -160,7 +160,7 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
 }
 
 pub(crate) fn disconnect_relay(application: &mut Application, session: Option<u64>) {
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let Some(session) = session else {
             application.status = application.t("status.relay_session_invalid");
@@ -171,14 +171,14 @@ pub(crate) fn disconnect_relay(application: &mut Application, session: Option<u6
             Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
         }
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         let _ = session;
         application.status = application.t("relay.unavailable");
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub(crate) fn poll_relay_events(application: &mut Application) {
     for event in application.source.relay_events() {
         match event {
@@ -214,10 +214,10 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
     }
 }
 
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 pub(crate) fn poll_relay_events(_application: &mut Application) {}
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 fn relay_roles(value: &str) -> RelayRoles {
     match value {
         "emit" => RelayRoles::emit_only(),
@@ -226,7 +226,7 @@ fn relay_roles(value: &str) -> RelayRoles {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 fn relay_codec(value: &str) -> RelayCodecKind {
     if value.eq_ignore_ascii_case("pcm") {
         RelayCodecKind::Pcm
@@ -235,12 +235,12 @@ fn relay_codec(value: &str) -> RelayCodecKind {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 fn relay_transport(value: &str) -> RelayTransportPreference {
     RelayTransportPreference::from_str(value).unwrap_or_default()
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
     let port = application.source.relay_status().host_port?;
     let link = application.source.relay_local_links().into_iter().next()?;
@@ -251,14 +251,14 @@ pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
     ))
 }
 
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 pub(crate) fn relay_qr_payload(_application: &Application) -> Option<String> {
     None
 }
 pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow> {
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     let _ = application;
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let status = application.source.relay_status();
         let mut rows = Vec::new();
@@ -349,7 +349,7 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
         }
         rows
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         vec![RelayRow {
             id: SharedString::new(),
@@ -433,7 +433,7 @@ pub(crate) fn relay_transport_from_index(index: i32) -> &'static str {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub(crate) fn relay_host_endpoint(application: &Application, port: Option<u16>) -> String {
     let Some(port) = port else {
         return String::new();
@@ -447,7 +447,7 @@ pub(crate) fn relay_host_endpoint(application: &Application, port: Option<u16>) 
         .unwrap_or_else(|| format!("0.0.0.0:{port}"))
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub(crate) fn qr_image(payload: &str) -> Image {
     let Some(scale) = relay_qr::module_scale_for(payload, 236) else {
         return Image::default();
