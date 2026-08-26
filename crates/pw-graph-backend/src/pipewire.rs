@@ -1117,6 +1117,12 @@ impl GraphDriver for PipewireDriver {
         self.registry_dirty.get()
     }
 
+    /// The registry listener fires for every global added or removed, so the
+    /// dirty flag covers every topology change.
+    fn reports_graph_changes(&self) -> bool {
+        true
+    }
+
     fn is_port_type(&self, port_type: PortType) -> bool {
         matches!(
             port_type,

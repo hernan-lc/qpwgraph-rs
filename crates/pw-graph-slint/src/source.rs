@@ -145,6 +145,10 @@ impl ApplicationDriver {
         GraphDriver::graph_dirty(self)
     }
 
+    pub(crate) fn reports_graph_changes(&self) -> bool {
+        GraphDriver::reports_graph_changes(self)
+    }
+
     pub(crate) fn set_meter_policy(&mut self, policy: MeterPolicy) -> Result<(), String> {
         self.meter_policy = policy;
         GraphDriver::set_meter_policy(self, policy).map_err(|error| error.to_string())
@@ -413,6 +417,13 @@ impl GraphDriver for ApplicationDriver {
         match &self.backend {
             BackendKind::Demo(driver) => driver.graph_dirty(),
             BackendKind::Live(driver) => driver.graph_dirty(),
+        }
+    }
+
+    fn reports_graph_changes(&self) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.reports_graph_changes(),
+            BackendKind::Live(driver) => driver.reports_graph_changes(),
         }
     }
 

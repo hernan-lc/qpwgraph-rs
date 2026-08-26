@@ -426,6 +426,12 @@ impl GraphDriver for WindowsAudioDriver {
         self.dirty.load(Ordering::Acquire)
     }
 
+    /// Device and session notification callbacks set the dirty flag for every
+    /// topology change, so the application does not have to poll for them.
+    fn reports_graph_changes(&self) -> bool {
+        true
+    }
+
     fn is_node_type(&self, node_type: NodeType) -> bool {
         matches!(
             node_type,

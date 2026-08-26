@@ -706,6 +706,29 @@ impl GraphDriver for CompositeDriver {
         }
     }
 
+    /// Only trustworthy when every live child reports its own changes: one
+    /// child that must be polled means the composite must be polled.
+    fn reports_graph_changes(&self) -> bool {
+        let mut children = 0;
+        let mut reporting = 0;
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
+        if let Some(driver) = self.pipewire.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
+        if let Some(driver) = self.alsa.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
+        children > 0 && children == reporting
+    }
+
     fn graph(&self) -> &Graph {
         &self.graph
     }

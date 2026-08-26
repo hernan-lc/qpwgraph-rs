@@ -72,6 +72,16 @@ fn always_policy_meters_every_eligible_node() {
     );
 }
 
+/// A backend that cannot report its own changes must not claim it can: the
+/// application drops to a slow reconciliation timer for backends that do, so a
+/// false claim here would freeze the graph instead of merely wasting work.
+#[test]
+fn a_backend_without_change_notifications_asks_to_be_polled() {
+    let driver = DemoDriver::demo();
+    assert!(!driver.reports_graph_changes());
+    assert!(!driver.graph_dirty());
+}
+
 // === Audio state ==========================================================
 
 /// The first thing the UI does is read; there must be a real value waiting,

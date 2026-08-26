@@ -37,7 +37,7 @@ pub(crate) fn pump(
     }
     poll_relay_events(&mut application);
     if application.source.graph_dirty()
-        || application.last_refresh.elapsed() >= Duration::from_millis(500)
+        || application.last_refresh.elapsed() >= refresh_interval(&application)
     {
         if let Err(error) = application.source.refresh() {
             application.status = application.tf("status.refresh_failed", &[("error", error)]);
@@ -60,6 +60,23 @@ pub(crate) fn pump(
         geometry,
         geometry_version,
     );
+}
+
+/// How often to re-read the graph when nothing has reported a change.
+///
+/// A backend that watches its own registry tells us when the topology moves,
+/// so the timer is only a safety net against a missed notification. Polling it
+/// twice a second re-enumerated every endpoint and session continuously for no
+/// reason. A backend that cannot report changes still has to be polled.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn refresh_interval(application: &Application) -> Duration {
+    if application.source.reports_graph_changes() {
+        RECONCILE_INTERVAL
+    } else {
+        POLL_INTERVAL
+    }
 }
 
 pub(crate) fn coalesce_audio_volume_events(pending: Vec<UiEvent>) -> Vec<UiEvent> {

@@ -626,6 +626,18 @@ pub trait GraphDriver: EffectDriver {
         false
     }
 
+    /// Whether [`Self::graph_dirty`] is a trustworthy signal.
+    ///
+    /// A backend that watches its registry reports every topology change, so
+    /// the application can refresh on the signal and treat its timer as a rare
+    /// safety net. A backend that cannot must be polled, which is why the
+    /// default is `false`: polling something that does report changes only
+    /// wastes work, but trusting a flag that is never set would freeze the
+    /// graph.
+    fn reports_graph_changes(&self) -> bool {
+        false
+    }
+
     fn is_node_type(&self, node_type: NodeType) -> bool {
         matches!(node_type, NodeType::PipeWire | NodeType::Effect)
     }
