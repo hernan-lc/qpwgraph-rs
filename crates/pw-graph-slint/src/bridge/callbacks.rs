@@ -82,10 +82,10 @@ pub(crate) fn install_canvas_callbacks(
     window.on_graph_link_dropped(move |pin, x, y| {
         // Easy mode connects whole cards, so a pin drag that lands on a
         // card rather than on its pin is still a connection request.
-        let easy = weak_window
-            .upgrade()
-            .is_some_and(|window| window.get_connect_mode() == "easy");
-        events.borrow_mut().push(if easy {
+        let can_connect_through = weak_window.upgrade().is_some_and(|window| {
+            window.get_connect_mode() == "easy" || window.get_connect_through()
+        });
+        events.borrow_mut().push(if can_connect_through {
             UiEvent::LinkDropped(pin, x, y)
         } else {
             UiEvent::LinkCancelled

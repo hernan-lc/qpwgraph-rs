@@ -5,7 +5,7 @@
 // No element measures itself and reports its own geometry, so the drag preview,
 // the pin hit-test and the drawn edges can never disagree.
 
-import { NodeAudioControl } from "parity-components.slint";
+import { NodeAudioControl, UiI18n, UiTheme } from "parity-components.slint";
 
 export struct PortRow {
     id: int,
@@ -84,7 +84,7 @@ component GraphNode inherits Rectangle {
     clip: false;
     accessible-role: list-item;
     accessible-label: data.node-title;
-    accessible-description: data.selected ? "selected" : "";
+    accessible-description: data.selected ? UiI18n.localized("canvas.selected") : "";
 
     Rectangle {
         width: 100%;
@@ -116,7 +116,7 @@ component GraphNode inherits Rectangle {
             height: 20px;
             text: data.node-title;
             color: #f5f8fa;
-            font-size: 12px * data.font-scale;
+            font-size: 12px * data.font-scale * UiTheme.node-scale;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -127,7 +127,7 @@ component GraphNode inherits Rectangle {
             height: 21px;
             text: data.node-subtitle;
             color: #d4dde5;
-            font-size: 8px * data.font-scale;
+            font-size: 8px * data.font-scale * UiTheme.node-scale;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -144,7 +144,7 @@ component GraphNode inherits Rectangle {
                 height: parent.height;
                 text: data.collapsed ? "+" : "−";
                 color: #eef4f8;
-                font-size: 11px;
+                font-size: 11px * UiTheme.node-scale;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -200,7 +200,7 @@ component GraphNode inherits Rectangle {
                 height: parent.height;
                 text: port.label;
                 color: #d8e0e7;
-                font-size: 10px * data.font-scale;
+                font-size: 10px * data.font-scale * UiTheme.node-scale;
                 horizontal-alignment: port.direction == 0 ? left : right;
                 vertical-alignment: center;
                 overflow: elide;
@@ -299,6 +299,8 @@ export component NodeCanvas inherits Rectangle {
     in property <float> graph-max-y: 1200;
     /// Easy mode connects whole cards by dragging their body.
     in property <bool> easy-connect: false;
+    /// In precise mode, a body drag can connect the first compatible pair.
+    in property <bool> connect-through: false;
     /// Bumped by the bridge whenever cached geometry changes.
     in property <int> geometry-version: 0;
     in property <string> grid-commands: "";
@@ -351,6 +353,9 @@ export component NodeCanvas inherits Rectangle {
     property <length> pan-origin-y: 0px;
     property <bool> extend-selection: false;
     property <int> active-id: 0;
+    // A pin click can be completed with a second pin/card click. Keep this
+    // intent in the canvas until the bridge accepts or cancels it.
+    property <int> pending-pin: 0;
     property <float> drag-dx: 0;
     property <float> drag-dy: 0;
 
@@ -360,10 +365,11 @@ export component NodeCanvas inherits Rectangle {
     clip: true;
 
     public function cancel-gesture() {
-        if (root.gesture == 4 || root.gesture == 5) {
+        if (root.gesture == 4 || root.gesture == 5 || root.pending-pin != 0) {
             root.link-cancelled();
         }
         root.gesture = 0;
+        root.pending-pin = 0;
         root.drag-dx = 0;
         root.drag-dy = 0;
     }
@@ -482,6 +488,10 @@ export component NodeCanvas inherits Rectangle {
         let hit = root.hit-test(root.to-world-x(root.press-x), root.to-world-y(root.press-y));
         if (ctrl) {
             // Ctrl always means "marquee", even over a card.
+            if (root.pending-pin != 0) {
+                root.link-cancelled();
+                root.pending-pin = 0;
+            }
             root.gesture = 2;
             if (!shift) { root.selection-cleared(); }
             return;
@@ -493,7 +503,13 @@ export component NodeCanvas inherits Rectangle {
             root.gesture = 5;
             root.active-id = hit.id;
         } else if (hit.kind == 2) {
-            root.gesture = 3;
+            if (root.pending-pin != 0 && !root.connect-through) {
+                root.link-cancelled();
+                root.pending-pin = 0;
+                root.gesture = 0;
+                return;
+            }
+            root.gesture = root.easy-connect || (root.connect-through && root.pending-pin != 0) ? 5 : 3;
             root.active-id = hit.id;
             root.drag-dx = 0;
             root.drag-dy = 0;
@@ -506,6 +522,10 @@ export component NodeCanvas inherits Rectangle {
             root.gesture = 0;
             root.link-selected(hit.id, shift);
         } else {
+            if (root.pending-pin != 0) {
+                root.link-cancelled();
+                root.pending-pin = 0;
+            }
             root.gesture = 2;
             if (!shift) { root.selection-cleared(); }
         }
@@ -530,23 +550,55 @@ export component NodeCanvas inherits Rectangle {
                 let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y));
                 if (target.kind == 1 && target.id != root.active-id) {
                     root.link-requested(root.active-id, target.id);
+                    root.pending-pin = 0;
                 } else {
                     root.link-dropped(
                         root.active-id,
                         root.to-world-x(root.current-x),
                         root.to-world-y(root.current-y));
+                    root.pending-pin = 0;
                 }
             } else {
-                root.link-cancelled();
+                if (root.pending-pin != 0 && root.pending-pin != root.active-id) {
+                    root.link-requested(root.pending-pin, root.active-id);
+                    root.pending-pin = 0;
+                } else if (root.pending-pin == root.active-id) {
+                    root.link-requested(root.active-id, root.active-id);
+                    root.pending-pin = 0;
+                } else {
+                    root.link-requested(root.active-id, root.active-id);
+                    root.pending-pin = root.active-id;
+                }
             }
         } else if (root.gesture == 5) {
             if (root.passed-threshold) {
-                root.node-connect-dropped(
-                    root.active-id,
-                    root.to-world-x(root.current-x),
-                    root.to-world-y(root.current-y));
+                if (root.pending-pin != 0) {
+                    let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y));
+                    if (target.kind == 1 && target.id != root.pending-pin) {
+                        root.link-requested(root.pending-pin, target.id);
+                    } else {
+                        root.link-dropped(
+                            root.pending-pin,
+                            root.to-world-x(root.current-x),
+                            root.to-world-y(root.current-y));
+                    }
+                    root.pending-pin = 0;
+                } else {
+                    root.node-connect-dropped(
+                        root.active-id,
+                        root.to-world-x(root.current-x),
+                        root.to-world-y(root.current-y));
+                }
             } else {
-                root.node-selected(root.active-id, root.extend-selection);
+                if (root.pending-pin != 0) {
+                    root.link-dropped(
+                        root.pending-pin,
+                        root.to-world-x(root.current-x),
+                        root.to-world-y(root.current-y));
+                    root.pending-pin = 0;
+                } else {
+                    root.node-selected(root.active-id, root.extend-selection);
+                }
             }
         }
         root.gesture = 0;

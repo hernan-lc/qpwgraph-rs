@@ -1,5 +1,5 @@
 [package]
-name = "pw-graph-slint"
+name = "pw-graph-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,29 +7,36 @@ authors.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "qpwgraph-rs-slint"
+name = "qpwgraph-rs"
 path = "src/main.rs"
 
 [features]
-default = ["pipewire", "alsa", "relay"]
-pipewire = ["pw-graph-backend/pipewire"]
-alsa = ["dep:pw-graph-alsamidi", "pw-graph-alsamidi/alsa"]
-relay = ["pw-graph-backend/relay", "pipewire"]
+default = ["pipewire", "alsa", "relay", "tray"]
+pipewire = ["pw-graph-backend/pipewire", "pw-graph-app-core/pipewire"]
+alsa = ["dep:pw-graph-alsamidi", "pw-graph-alsamidi/alsa", "pw-graph-app-core/alsa"]
+relay = ["pw-graph-backend/relay", "pw-graph-app-core/relay", "pipewire"]
+tray = ["dep:ksni"]
 
 [dependencies]
 slint.workspace = true
+pw-graph-app-core = { path = "../pw-graph-app-core", default-features = false }
 pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false, optional = true }
 pw-graph-backend = { path = "../pw-graph-backend", default-features = false }
+pw-graph-command = { path = "../pw-graph-command" }
 pw-graph-config = { path = "../pw-graph-config" }
 pw-graph-core = { path = "../pw-graph-core" }
 pw-graph-effects = { path = "../pw-graph-effects" }
 pw-graph-i18n = { path = "../pw-graph-i18n" }
 pw-graph-patchbay = { path = "../pw-graph-patchbay" }
+rfd.workspace = true
 serde.workspace = true
 toml.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"], optional = true }
 
 [build-dependencies]
 slint-build.workspace = true
 
 [dev-dependencies]
-i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "e100f5e11da59897f58a2bf1937b245f4ca6c2e6" }
+i-slint-backend-testing = "=1.17.1"

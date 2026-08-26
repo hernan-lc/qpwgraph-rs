@@ -143,9 +143,14 @@ mod tests {
     fn locale_catalogs_cover_the_same_keys() {
         let english = load_catalog(include_str!("../locales/en.json"));
         let spanish = load_catalog(include_str!("../locales/es.json"));
+        let french = load_catalog(include_str!("../locales/fr.json"));
         assert_eq!(
             english.keys().collect::<Vec<_>>(),
             spanish.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            english.keys().collect::<Vec<_>>(),
+            french.keys().collect::<Vec<_>>()
         );
     }
 

@@ -1,23 +1,27 @@
 use crate::model::{MeterReading, MeterState};
-use crate::source::ReadOnlyGraphSource;
+use crate::source::ApplicationDriver;
 use pw_graph_backend::MeterPolicy;
 use slint::ComponentHandle;
 use std::collections::BTreeSet;
 
-use super::app::PreviewApp;
+use super::app::Application;
 use super::MainWindow;
 
-pub(crate) fn refresh_meters(window: &MainWindow, preview: &mut PreviewApp) {
-    if preview.source.meter_policy() == MeterPolicy::Disabled {
-        preview.meters.clear();
-        preview.meter_error = None;
+pub(crate) fn refresh_meters(window: &MainWindow, application: &mut Application) {
+    if application.source.meter_policy() == MeterPolicy::Disabled {
+        // Keep the request lifecycle explicit even when the policy is
+        // disabled. This is important for a live backend that may have
+        // streams left over from a previous policy selection.
+        let _ = application.source.request_meters(&BTreeSet::new());
+        application.meters.clear();
+        application.meter_error = None;
         return;
     }
 
-    let visible_audio_nodes = if window.window().is_minimized() {
+    let visible_audio_nodes = if window.window().is_minimized() || !window.window().is_visible() {
         BTreeSet::new()
     } else {
-        preview
+        application
             .snapshot
             .nodes
             .iter()
@@ -26,19 +30,19 @@ pub(crate) fn refresh_meters(window: &MainWindow, preview: &mut PreviewApp) {
             .collect()
     };
 
-    if let Err(error) = preview.source.request_meters(&visible_audio_nodes) {
-        record_meter_error(preview, error);
+    if let Err(error) = application.source.request_meters(&visible_audio_nodes) {
+        record_meter_error(application, error);
         return;
     }
 
-    match preview.source.audio_meters() {
+    match application.source.audio_meters() {
         Ok(readings) => {
-            let live_state = if preview.source.is_demo() {
+            let live_state = if application.source.is_demo() {
                 MeterState::Demo
             } else {
                 MeterState::Live
             };
-            preview.meters = readings
+            application.meters = readings
                 .into_iter()
                 .map(|reading| {
                     let state = if reading.available && reading.age_ms <= 1_500 {
@@ -64,21 +68,24 @@ pub(crate) fn refresh_meters(window: &MainWindow, preview: &mut PreviewApp) {
                     )
                 })
                 .collect();
-            preview.meter_error = None;
+            application.meter_error = None;
         }
-        Err(error) => record_meter_error(preview, error),
+        Err(error) => record_meter_error(application, error),
     }
 }
 
-fn record_meter_error(preview: &mut PreviewApp, error: String) {
-    if preview.meter_error.as_deref() != Some(error.as_str()) {
-        preview.status = format!("Audio monitoring is unavailable: {error}");
-        preview.meter_error = Some(error);
+fn record_meter_error(application: &mut Application, error: String) {
+    if application.meter_error.as_deref() != Some(error.as_str()) {
+        application.status = application.tf(
+            "status.audio_monitoring_unavailable",
+            &[("error", error.clone())],
+        );
+        application.meter_error = Some(error);
     }
-    preview.meters.clear();
+    application.meters.clear();
 }
 
-pub(crate) fn meter_fallback(source: &ReadOnlyGraphSource) -> MeterState {
+pub(crate) fn meter_fallback(source: &ApplicationDriver) -> MeterState {
     if source.meter_policy() == MeterPolicy::Disabled {
         MeterState::Disabled
     } else if source.is_demo() {

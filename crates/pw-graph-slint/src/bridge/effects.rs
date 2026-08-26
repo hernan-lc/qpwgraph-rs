@@ -1,30 +1,83 @@
-use crate::source::ReadOnlyGraphSource;
-use pw_graph_backend::{EffectInsertRequest, EffectInstance, EffectNodeRequest};
+use crate::source::ApplicationDriver;
+use pw_graph_backend::{EffectInsertRequest, EffectInstance, EffectNodeRequest, GraphDriver};
 use pw_graph_config::{AppConfig, PersistedEffect};
-use slint::SharedString;
+use pw_graph_effects::{EffectDescriptor, EffectParameter};
+use pw_graph_i18n::I18n;
+use slint::{ModelRc, SharedString, VecModel};
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use super::app::PreviewApp;
-use super::{EffectRow, MainWindow};
+use super::app::Application;
+use super::{EffectParameterRow, EffectRow, MainWindow};
 
-pub(crate) fn restore_configured_effects(
-    source: &mut ReadOnlyGraphSource,
+fn default_parameters(descriptor: &EffectDescriptor) -> BTreeMap<String, f32> {
+    descriptor
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.id.clone(), parameter.default))
+        .collect()
+}
+
+fn available_descriptors(driver: &dyn GraphDriver) -> Vec<EffectDescriptor> {
+    let descriptors = driver.effect_descriptors();
+    if descriptors.is_empty() {
+        pw_graph_effects::EffectHost::new().descriptors()
+    } else {
+        descriptors
+    }
+}
+
+pub(crate) fn restore_standalone_effects(
+    source: &mut ApplicationDriver,
     config: &AppConfig,
     status: &mut String,
+    i18n: &I18n,
 ) {
-    if config.effects.is_empty() {
+    let saved = config
+        .effects
+        .iter()
+        .filter(|effect| effect.source.is_none() && effect.destination.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    restore_saved_effects(source, saved, status, i18n);
+}
+
+pub(crate) fn restore_inserted_effects(
+    source: &mut ApplicationDriver,
+    config: &AppConfig,
+    status: &mut String,
+    i18n: &I18n,
+) {
+    let saved = config
+        .effects
+        .iter()
+        .filter(|effect| effect.source.is_some() && effect.destination.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    restore_saved_effects(source, saved, status, i18n);
+}
+
+fn restore_saved_effects(
+    source: &mut ApplicationDriver,
+    saved: Vec<PersistedEffect>,
+    status: &mut String,
+    i18n: &I18n,
+) {
+    if saved.is_empty() {
         return;
     }
     if !source.supports_effect_nodes() {
-        *status = format!(
-            "{status} · {} saved effect(s) could not be restored: effect processing is unavailable",
-            config.effects.len()
-        );
+        status.push_str(" · ");
+        status.push_str(&i18n.format(
+            "status.restore_effects_unavailable",
+            &[("count", saved.len().to_string())],
+        ));
         return;
     }
 
-    for saved in config.effects.iter().cloned() {
+    for saved in saved {
         let result = match (&saved.source, &saved.destination) {
             (Some(source_port), Some(destination_port)) => source
                 .connect_by_key_if_missing(source_port, destination_port)
@@ -52,70 +105,116 @@ pub(crate) fn restore_configured_effects(
             _ => Err("effect routing is incomplete".into()),
         };
         if let Err(error) = result {
-            *status = format!("{status} · Could not restore effect: {error}");
+            status.push_str(" · ");
+            status.push_str(&i18n.format("status.restore_effect", &[("error", error)]));
         }
     }
 }
 
-pub(crate) fn create_effect(window: &MainWindow, preview: &mut PreviewApp) {
-    if !preview.source.supports_effect_nodes() {
-        preview.status = "Effect processing is not available for this backend".into();
+pub(crate) fn create_effect(window: &MainWindow, application: &mut Application) {
+    if !application.source.supports_effect_nodes() {
+        application.status = application.t("status.effect_processing_unavailable");
         return;
     }
-    let descriptors = preview.source.effect_descriptors();
+    let descriptors = available_descriptors(&application.source);
     let Some(descriptor) = descriptors
         .get(window.get_effect_selection_index().max(0) as usize)
         .or_else(|| descriptors.first())
+        .cloned()
     else {
-        preview.status = "No effects are available".into();
+        application.status = application.t("status.no_effects_available");
         return;
     };
 
-    let instance_id = unique_effect_id(preview);
-    let parameters = descriptor
-        .parameters
+    if application.effect_draft_id.as_deref() != Some(descriptor.id.as_str())
+        || !window.get_effect_configuring()
+    {
+        prepare_effect_draft(window, application);
+        application.status = application.t("effects.setup_hint");
+        return;
+    }
+
+    let instance_id = unique_effect_id(application);
+    let parameters = application.effect_draft_parameters.clone();
+    let enabled = application.effect_draft_enabled;
+    let position = preferred_effect_position(application);
+    let selected_link = application
+        .view
+        .selected_links
         .iter()
-        .map(|parameter| (parameter.id.clone(), parameter.default))
-        .collect();
-    let request = EffectNodeRequest {
-        instance_id,
-        effect_id: descriptor.id.clone(),
-        module_path: None,
-        enabled: true,
-        parameters,
-        position: preferred_effect_position(preview),
-    };
-    match preview.source.create_effect_node(request) {
+        .find_map(|id| application.source.graph().link(*id).cloned());
+    let result = selected_link
+        .and_then(|link| {
+            application
+                .source
+                .graph()
+                .port_key(link.output_port)
+                .zip(application.source.graph().port_key(link.input_port))
+                .map(|(source, destination)| {
+                    application.source.insert_effect(EffectInsertRequest {
+                        instance_id: instance_id.clone(),
+                        effect_id: descriptor.id.clone(),
+                        module_path: None,
+                        source,
+                        destination,
+                        enabled,
+                        parameters: parameters.clone(),
+                        position,
+                    })
+                })
+        })
+        .unwrap_or_else(|| {
+            application.source.create_effect_node(EffectNodeRequest {
+                instance_id,
+                effect_id: descriptor.id.clone(),
+                module_path: None,
+                enabled,
+                parameters,
+                position,
+            })
+        });
+    match result {
         Ok(instance) => {
             let name = descriptor.name.clone();
-            persist_effect(preview, instance);
-            match preview.source.refresh() {
-                Ok(()) => preview.last_refresh = Instant::now(),
+            persist_effect(application, instance);
+            match application.source.refresh() {
+                Ok(()) => application.last_refresh = Instant::now(),
                 Err(error) => {
-                    preview.status = format!("Effect created, but graph refresh failed: {error}");
+                    application.status = application.tf(
+                        "status.effect_refresh_failed",
+                        &[("error", error.to_string())],
+                    );
                     return;
                 }
             }
-            preview.status = format!("Effect created: {name}");
+            application.sync_patchbay_connections();
+            application.autosave_patchbay();
+            cancel_effect_setup(window, application);
+            application.status = application.tf("status.effect_created", &[("name", name)]);
         }
-        Err(error) => preview.status = format!("Could not create effect: {error}"),
+        Err(error) => {
+            application.status = application.tf("status.effect_create_failed", &[("error", error)])
+        }
     }
 }
 
-pub(crate) fn toggle_effect(preview: &mut PreviewApp, instance_id: &str) {
-    let Some(instance) = preview
+pub(crate) fn toggle_effect(application: &mut Application, instance_id: &str) {
+    let Some(instance) = application
         .source
         .effect_instances()
         .into_iter()
         .find(|instance| instance.config.instance_id == instance_id)
     else {
-        preview.status = format!("Effect instance not found: {instance_id}");
+        application.status = application.tf(
+            "status.effect_instance_not_found",
+            &[("id", instance_id.to_owned())],
+        );
         return;
     };
     let enabled = !instance.config.enabled;
-    match preview.source.set_effect_enabled(instance_id, enabled) {
+    match application.source.set_effect_enabled(instance_id, enabled) {
         Ok(()) => {
-            if let Some(saved) = preview
+            if let Some(saved) = application
                 .config
                 .effects
                 .iter_mut()
@@ -123,35 +222,46 @@ pub(crate) fn toggle_effect(preview: &mut PreviewApp, instance_id: &str) {
             {
                 saved.instance.enabled = enabled;
             }
-            preview.status = format!(
-                "Effect {}: {}",
-                instance_id,
-                if enabled { "enabled" } else { "bypassed" }
+            application.status = application.tf(
+                "status.effect_state",
+                &[
+                    ("id", instance_id.to_owned()),
+                    (
+                        "state",
+                        application.t(if enabled {
+                            "effects.enabled"
+                        } else {
+                            "effects.disabled"
+                        }),
+                    ),
+                ],
             );
         }
-        Err(error) => preview.status = format!("Could not change effect state: {error}"),
+        Err(error) => {
+            application.status = application.tf("status.effect_state_failed", &[("error", error)])
+        }
     }
 }
 
-pub(crate) fn set_effect_parameter(preview: &mut PreviewApp, details: &str) {
+pub(crate) fn set_effect_parameter(application: &mut Application, details: &str) {
     let Some((details, value)) = details.rsplit_once(':') else {
-        preview.status = "Invalid effect parameter action".into();
+        application.status = application.t("status.effect_parameter_invalid");
         return;
     };
     let Some((instance_id, parameter)) = details.rsplit_once(':') else {
-        preview.status = "Invalid effect parameter action".into();
+        application.status = application.t("status.effect_parameter_invalid");
         return;
     };
     let Ok(value) = value.parse::<f32>() else {
-        preview.status = "Invalid effect parameter value".into();
+        application.status = application.t("status.effect_parameter_value_invalid");
         return;
     };
-    match preview
+    match application
         .source
         .set_effect_parameter(instance_id, parameter, value)
     {
         Ok(()) => {
-            if let Some(saved) = preview
+            if let Some(saved) = application
                 .config
                 .effects
                 .iter_mut()
@@ -162,44 +272,88 @@ pub(crate) fn set_effect_parameter(preview: &mut PreviewApp, details: &str) {
                     .parameters
                     .insert(parameter.to_owned(), value);
             }
-            preview.status = format!("{instance_id} · {parameter} = {value:.2}");
+            application.status = application.tf(
+                "status.effect_parameter_changed",
+                &[
+                    ("id", instance_id.to_owned()),
+                    ("parameter", parameter.to_owned()),
+                    ("value", format!("{value:.2}")),
+                ],
+            );
         }
-        Err(error) => preview.status = format!("Could not change effect parameter: {error}"),
+        Err(error) => {
+            application.status =
+                application.tf("status.effect_parameter_failed", &[("error", error)])
+        }
     }
 }
 
-pub(crate) fn remove_effect(preview: &mut PreviewApp, instance_id: &str) {
-    match preview.source.remove_effect(instance_id) {
+pub(crate) fn remove_effect(application: &mut Application, instance_id: &str) {
+    let effect_node_name = application
+        .source
+        .effect_instances()
+        .into_iter()
+        .find(|instance| instance.config.instance_id == instance_id)
+        .and_then(|instance| {
+            application
+                .source
+                .graph()
+                .node(instance.node_id)
+                .map(|node| node.name.clone())
+        });
+    let saved_pairs = application
+        .config
+        .effects
+        .iter()
+        .find(|effect| effect.instance.instance_id == instance_id)
+        .and_then(|effect| effect.source.clone().zip(effect.destination.clone()));
+    match application.source.remove_effect(instance_id) {
         Ok(()) => {
-            preview
+            application
                 .config
                 .effects
                 .retain(|effect| effect.instance.instance_id != instance_id);
-            if let Err(error) = preview.source.refresh() {
-                preview.status = format!("Effect removed, but graph refresh failed: {error}");
+            if let Err(error) = application.source.refresh() {
+                application.status =
+                    application.tf("status.effect_removed_refresh_failed", &[("error", error)]);
             } else {
-                preview.last_refresh = Instant::now();
-                preview.status = format!("Effect removed: {instance_id}");
+                application.last_refresh = Instant::now();
+                application.sync_patchbay_connections();
+                if let Some(effect_node_name) = effect_node_name {
+                    application
+                        .patchbay
+                        .remove_connections_for_node(&effect_node_name);
+                }
+                if let Some((source, destination)) = saved_pairs {
+                    application
+                        .patchbay
+                        .remove_stable_connection(&source, &destination);
+                }
+                application.autosave_patchbay();
+                application.status =
+                    application.tf("status.effect_removed", &[("id", instance_id.to_owned())]);
             }
         }
-        Err(error) => preview.status = format!("Could not remove effect: {error}"),
+        Err(error) => {
+            application.status = application.tf("status.effect_remove_failed", &[("error", error)])
+        }
     }
 }
 
-pub(crate) fn inspect_effect(preview: &mut PreviewApp, instance_id: Option<&str>) {
+pub(crate) fn inspect_effect(application: &mut Application, instance_id: Option<&str>) {
     let instance = match instance_id {
-        Some(instance_id) => preview
+        Some(instance_id) => application
             .source
             .effect_instances()
             .into_iter()
             .find(|instance| instance.config.instance_id == instance_id),
-        None => preview.source.effect_instances().into_iter().next(),
+        None => application.source.effect_instances().into_iter().next(),
     };
     let Some(instance) = instance else {
-        preview.status = "No effect instance is available".into();
+        application.status = application.t("status.no_effect_instance");
         return;
     };
-    let descriptor = preview
+    let descriptor = application
         .source
         .effect_descriptors()
         .into_iter()
@@ -215,25 +369,32 @@ pub(crate) fn inspect_effect(preview: &mut PreviewApp, instance_id: Option<&str>
         .map(|(id, value)| format!("{id}={value:.2}"))
         .collect::<Vec<_>>()
         .join(", ");
-    preview.status = if parameters.is_empty() {
-        format!("{name} · {}", instance.config.instance_id)
-    } else {
-        format!("{name} · {} · {parameters}", instance.config.instance_id)
-    };
+    application.status = application.tf(
+        if parameters.is_empty() {
+            "status.effect_details"
+        } else {
+            "status.effect_details_with_parameters"
+        },
+        &[
+            ("name", name.to_owned()),
+            ("id", instance.config.instance_id.clone()),
+            ("parameters", parameters),
+        ],
+    );
 }
 
-fn persist_effect(preview: &mut PreviewApp, instance: EffectInstance) {
-    let position = preview
+fn persist_effect(application: &mut Application, instance: EffectInstance) {
+    let position = application
         .source
         .graph()
         .node(instance.node_id)
         .map(|node| node.position)
         .unwrap_or([260.0, 180.0]);
-    preview
+    application
         .config
         .effects
         .retain(|effect| effect.instance.instance_id != instance.config.instance_id);
-    preview.config.effects.push(PersistedEffect {
+    application.config.effects.push(PersistedEffect {
         instance: instance.config,
         source: instance.source,
         destination: instance.destination,
@@ -241,8 +402,8 @@ fn persist_effect(preview: &mut PreviewApp, instance: EffectInstance) {
     });
 }
 
-fn preferred_effect_position(preview: &PreviewApp) -> [f32; 2] {
-    let rightmost = preview
+fn preferred_effect_position(application: &Application) -> [f32; 2] {
+    let rightmost = application
         .source
         .graph()
         .nodes
@@ -252,17 +413,17 @@ fn preferred_effect_position(preview: &PreviewApp) -> [f32; 2] {
     [rightmost + 290.0, 180.0]
 }
 
-fn unique_effect_id(preview: &PreviewApp) -> String {
+fn unique_effect_id(application: &Application) -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     loop {
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let id = format!("slint-effect-{sequence}");
-        if !preview
+        if !application
             .source
             .effect_instances()
             .iter()
             .any(|effect| effect.config.instance_id == id)
-            && !preview
+            && !application
                 .config
                 .effects
                 .iter()
@@ -273,8 +434,8 @@ fn unique_effect_id(preview: &PreviewApp) -> String {
     }
 }
 
-pub(crate) fn effect_rows(source: &ReadOnlyGraphSource) -> Vec<EffectRow> {
-    let descriptors = source.effect_descriptors();
+pub(crate) fn effect_rows(source: &ApplicationDriver, i18n: &I18n) -> Vec<EffectRow> {
+    let descriptors = available_descriptors(source);
     let mut instances = source.effect_instances();
     instances.sort_by(|a, b| a.config.instance_id.cmp(&b.config.instance_id));
     instances
@@ -288,50 +449,180 @@ pub(crate) fn effect_rows(source: &ReadOnlyGraphSource) -> Vec<EffectRow> {
                 .unwrap_or_else(|| instance.config.effect_id.clone());
             let vendor = descriptor
                 .map(|descriptor| descriptor.vendor.clone())
-                .unwrap_or_else(|| "Unknown effect provider".into());
+                .unwrap_or_else(|| i18n.text("effects.unknown_provider"));
             let description = instance.config.instance_id.clone();
             let vendor = match instance.error {
-                Some(error) => format!("{vendor} · error: {error}"),
+                Some(error) => {
+                    i18n.format("effects.error", &[("vendor", vendor), ("error", error)])
+                }
                 None => vendor,
             };
-            let parameter = descriptor.and_then(|descriptor| descriptor.parameters.first());
+            let parameters = descriptor
+                .map(|descriptor| {
+                    descriptor
+                        .parameters
+                        .iter()
+                        .map(|parameter| EffectParameterRow {
+                            id: SharedString::from(parameter.id.clone()),
+                            name: SharedString::from(parameter.name.clone()),
+                            minimum: parameter.minimum,
+                            maximum: parameter.maximum,
+                            default_value: parameter.default,
+                            value: instance
+                                .config
+                                .parameters
+                                .get(&parameter.id)
+                                .copied()
+                                .unwrap_or(parameter.default),
+                            unit: SharedString::from(parameter.unit.clone()),
+                            boolean: parameter.unit == "boolean",
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             EffectRow {
+                instance_id: SharedString::from(instance.config.instance_id.clone()),
                 name: SharedString::from(name),
                 vendor: SharedString::from(vendor),
                 description: SharedString::from(description),
                 enabled: instance.config.enabled,
-                has_parameter: parameter.is_some(),
-                parameter_id: SharedString::from(
-                    parameter
-                        .map(|parameter| parameter.id.clone())
-                        .unwrap_or_default(),
-                ),
-                parameter_label: SharedString::from(
-                    parameter
-                        .map(|parameter| parameter.name.clone())
-                        .unwrap_or_default(),
-                ),
-                parameter_minimum: parameter.map(|parameter| parameter.minimum).unwrap_or(0.0),
-                parameter_maximum: parameter.map(|parameter| parameter.maximum).unwrap_or(1.0),
-                parameter_value: parameter
-                    .map(|parameter| {
-                        instance
-                            .config
-                            .parameters
-                            .get(&parameter.id)
-                            .copied()
-                            .unwrap_or(parameter.default)
-                    })
-                    .unwrap_or_default(),
+                parameters: ModelRc::from(Rc::new(VecModel::from(parameters))),
             }
         })
         .collect()
 }
 
-pub(crate) fn effect_options(source: &ReadOnlyGraphSource) -> Vec<SharedString> {
-    source
-        .effect_descriptors()
+pub(crate) fn effect_options(source: &ApplicationDriver) -> Vec<SharedString> {
+    available_descriptors(source)
         .into_iter()
         .map(|descriptor| SharedString::from(descriptor.name))
         .collect()
+}
+
+fn parameter_row(parameter: &EffectParameter, value: f32) -> EffectParameterRow {
+    EffectParameterRow {
+        id: SharedString::from(parameter.id.clone()),
+        name: SharedString::from(parameter.name.clone()),
+        minimum: parameter.minimum,
+        maximum: parameter.maximum,
+        default_value: parameter.default,
+        value,
+        unit: SharedString::from(parameter.unit.clone()),
+        boolean: parameter.unit == "boolean",
+    }
+}
+
+pub(crate) fn effect_setup_rows(
+    source: &ApplicationDriver,
+    effect_id: Option<&str>,
+    values: &BTreeMap<String, f32>,
+) -> Vec<EffectParameterRow> {
+    let Some(effect_id) = effect_id else {
+        return Vec::new();
+    };
+    available_descriptors(source)
+        .into_iter()
+        .find(|descriptor| descriptor.id == effect_id)
+        .map(|descriptor| {
+            descriptor
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    parameter_row(
+                        parameter,
+                        values
+                            .get(&parameter.id)
+                            .copied()
+                            .unwrap_or(parameter.default),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn prepare_effect_draft(window: &MainWindow, application: &mut Application) {
+    let descriptors = available_descriptors(&application.source);
+    let requested = window.get_effect_selection_index().max(0) as usize;
+    let Some(descriptor) = descriptors
+        .get(requested)
+        .or_else(|| descriptors.first())
+        .cloned()
+    else {
+        application.effect_draft_id = None;
+        application.effect_draft_parameters.clear();
+        window.set_effect_configuring(false);
+        application.status = application.t("status.no_effects_available");
+        return;
+    };
+    let index = descriptors
+        .iter()
+        .position(|candidate| candidate.id == descriptor.id)
+        .unwrap_or(0);
+    application.effect_draft_id = Some(descriptor.id.clone());
+    application.effect_draft_enabled = true;
+    application.effect_draft_parameters = default_parameters(&descriptor);
+    window.set_effect_selection_index(index as i32);
+    window.set_effect_configuring(true);
+}
+
+pub(crate) fn cancel_effect_setup(window: &MainWindow, application: &mut Application) {
+    application.effect_draft_id = None;
+    application.effect_draft_enabled = true;
+    application.effect_draft_parameters.clear();
+    window.set_effect_configuring(false);
+}
+
+pub(crate) fn select_effect_draft(
+    window: &MainWindow,
+    application: &mut Application,
+    index: usize,
+) {
+    window.set_effect_selection_index(index as i32);
+    prepare_effect_draft(window, application);
+}
+
+pub(crate) fn set_effect_draft_enabled(application: &mut Application, enabled: bool) {
+    if application.effect_draft_id.is_some() {
+        application.effect_draft_enabled = enabled;
+    }
+}
+
+pub(crate) fn set_effect_draft_parameter(application: &mut Application, details: &str) {
+    let Some((parameter_id, value)) = details.rsplit_once(':') else {
+        application.status = application.t("status.effect_parameter_invalid");
+        return;
+    };
+    let Ok(value) = value.parse::<f32>() else {
+        application.status = application.t("status.effect_parameter_value_invalid");
+        return;
+    };
+    let Some(effect_id) = application.effect_draft_id.as_deref() else {
+        return;
+    };
+    let Some(parameter) = available_descriptors(&application.source)
+        .into_iter()
+        .find(|descriptor| descriptor.id == effect_id)
+        .and_then(|descriptor| {
+            descriptor
+                .parameters
+                .into_iter()
+                .find(|parameter| parameter.id == parameter_id)
+        })
+    else {
+        application.status = application.t("status.effect_parameter_invalid");
+        return;
+    };
+    application.effect_draft_parameters.insert(
+        parameter.id,
+        if parameter.unit == "boolean" {
+            if value >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            value.clamp(parameter.minimum, parameter.maximum)
+        },
+    );
 }

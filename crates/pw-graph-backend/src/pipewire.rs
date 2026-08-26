@@ -1085,6 +1085,18 @@ impl GraphDriver for PipewireDriver {
         if self.meter_policy != MeterPolicy::OnDemand {
             return Ok(());
         }
+        if nodes.is_empty() {
+            // An empty visible set is an explicit lifecycle event (for
+            // example, the application was minimized or hidden), rather
+            // than a request that should linger until the normal timeout.
+            // Release helper streams immediately so a UI cannot keep an
+            // audio device awake after it disappears.
+            self.meter_requests.clear();
+            return self.with_loop(|driver| {
+                driver.ensure_meters_locked();
+                Ok(())
+            });
+        }
         let now = Instant::now();
         for node_id in nodes {
             self.meter_requests.insert(*node_id, now);

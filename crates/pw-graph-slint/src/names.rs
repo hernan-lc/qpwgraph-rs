@@ -1,5 +1,7 @@
-//! Human-friendly node/port name formatting: stripping transport prefixes,
-//! shortening device identifiers, and truncating long labels for the canvas.
+//! Human-friendly node and port labels used by the canvas.
+//!
+//! Backend names are deliberately kept as the stable identity used for
+//! persistence and matching. This module only changes their presentation.
 
 use pw_graph_i18n::I18n;
 
@@ -63,9 +65,6 @@ fn bluetooth_suffix(detail: &str) -> Option<String> {
     })
 }
 
-/// Cleans up a raw PipeWire/ALSA port name for display: drops the leading
-/// device label some backends prefix onto the port (`"Foo: Port-0"`),
-/// localizes the capture/playback markers, and title-cases the result.
 pub(crate) fn display_port_name(name: &str, i18n: &I18n) -> String {
     let name = name.rsplit(": ").next().unwrap_or(name);
     let name = name
@@ -94,7 +93,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_names_hide_transport_prefixes_without_losing_device_identity() {
+    fn display_names_preserve_backend_identity_without_transport_prefixes() {
         let i18n = I18n::default();
         assert_eq!(display_node_name("Dummy-Driver", &i18n), "Dummy Driver");
         assert_eq!(
@@ -108,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn display_names_use_the_selected_locale() {
+    fn display_names_follow_the_selected_locale() {
         let i18n = I18n::from_language("es");
         assert_eq!(
             display_node_name("bluez_input.B0:F0:0C:5E:99:5A", &i18n),

@@ -1,10 +1,11 @@
 use crate::args::Args;
 use crate::canvas::CanvasGeometry;
-use crate::model::{GraphSnapshot, UiGraphState};
-use crate::source::ReadOnlyGraphSource;
+use crate::model::{restore_node_positions, GraphSnapshot, UiGraphState};
+use crate::source::ApplicationDriver;
 use pw_graph_backend::MeterPolicy;
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_i18n::I18n;
+use pw_graph_patchbay::Patchbay;
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -20,7 +21,7 @@ mod effects;
 mod events;
 mod meters;
 mod models;
-mod persist;
+mod patchbay;
 mod relay;
 mod utils;
 use app::*;
@@ -30,7 +31,7 @@ use effects::*;
 use events::*;
 use meters::*;
 use models::*;
-use persist::*;
+use patchbay::*;
 use relay::*;
 use utils::*;
 
@@ -38,7 +39,7 @@ slint::include_modules!();
 
 pub(crate) struct UiBridge {
     window: MainWindow,
-    app: Rc<RefCell<PreviewApp>>,
+    app: Rc<RefCell<Application>>,
     nodes: Rc<VecModel<NodeRow>>,
     links: Rc<VecModel<LinkRow>>,
     minimap_nodes: Rc<VecModel<MinimapNode>>,
@@ -58,26 +59,52 @@ impl UiBridge {
             .unwrap_or_else(|| config.language.clone());
         let i18n = I18n::from_language(&language);
         let meter_policy = MeterPolicy::parse(&config.audio_meters);
-        let (mut source, mut status) = ReadOnlyGraphSource::new(&args, meter_policy);
-        restore_configured_effects(&mut source, &config, &mut status);
-        if !config.effects.is_empty() {
-            if let Err(error) = source.refresh() {
-                status = format!("{status} · Could not restore effects: {error}");
+        let (mut source, mut status) = ApplicationDriver::new(&args, meter_policy, &i18n);
+        restore_node_positions(&mut source, &config);
+        let patchbay_file = selected_patchbay_path(&config);
+        let patchbay = Patchbay::load_from(&patchbay_file)
+            .unwrap_or_else(|_| Patchbay::new(patchbay_file.display().to_string()));
+        restore_standalone_effects(&mut source, &config, &mut status, &i18n);
+        if config.patchbay_activated {
+            match patchbay.activate(
+                &mut source,
+                config.patchbay_exclusive,
+                config.patchbay_auto_disconnect,
+            ) {
+                Ok(report) if report.failed.is_empty() => {}
+                Ok(report) => status.push_str(&format!(
+                    " · {}",
+                    i18n.format(
+                        "status.activation_failed",
+                        &[("error", report.failed.join("; "))],
+                    )
+                )),
+                Err(error) => status.push_str(&format!(
+                    " · {}",
+                    i18n.format("status.activation_failed", &[("error", error.to_string())])
+                )),
             }
         }
+        restore_inserted_effects(&mut source, &config, &mut status, &i18n);
+        if !config.patchbay_activated {
+            restore_effect_connections(&mut source, &patchbay, &mut status, &i18n);
+        }
+        if let Err(error) = source.refresh() {
+            status = format!(
+                "{status} · {}",
+                i18n.format("status.refresh_failed", &[("error", error)])
+            );
+        }
         let view = UiGraphState::from_config(&config);
-        let state_file = config_file.with_file_name("slint-state.toml");
-        let persisted_state = load_slint_state(&state_file);
-        let audio_controls = restore_audio_controls(&mut source, &persisted_state);
-        let app = Rc::new(RefCell::new(PreviewApp {
+        let app = Rc::new(RefCell::new(Application {
             source,
+            commands: pw_graph_command::CommandStack::new(),
+            patchbay,
+            patchbay_file,
             config: config.clone(),
             config_file,
             config_saved_snapshot: config,
             config_dirty_since: None,
-            state_file,
-            state_saved_snapshot: persisted_state,
-            state_dirty_since: None,
             i18n,
             view,
             snapshot: GraphSnapshot::default(),
@@ -86,11 +113,14 @@ impl UiBridge {
             toast_until: None,
             toast_error: false,
             pending_connection_pin: None,
+            effect_draft_id: None,
+            effect_draft_enabled: true,
+            effect_draft_parameters: BTreeMap::new(),
             debug: args.debug,
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
             meter_error: None,
-            audio_controls,
+            audio_controls: BTreeMap::new(),
             #[cfg(feature = "relay")]
             relay_levels: BTreeMap::new(),
             #[cfg(feature = "relay")]
@@ -116,67 +146,117 @@ impl UiBridge {
                     ],
                 ))
             });
-            let preview = app.borrow();
+            let application = app.borrow();
             window
                 .global::<UiI18n>()
-                .set_version(language_index(&preview.config.language));
+                .set_version(language_index(&application.config.language));
         }
         {
-            let preview = app.borrow();
+            let application = app.borrow();
             window.window().set_size(PhysicalSize::new(
-                preview.config.window_width.max(760.0).round() as u32,
-                preview.config.window_height.max(520.0).round() as u32,
+                application.config.window_width.max(760.0).round() as u32,
+                application.config.window_height.max(520.0).round() as u32,
             ));
-            window.set_show_statusbar(preview.config.statusbar);
-            window.set_show_minimap(preview.view.minimap_visible);
-            window.set_search_text(SharedString::from(preview.view.search_query.clone()));
-            window.set_media_filter(SharedString::from(preview.view.media_filter.as_str()));
-            window.set_connect_mode(SharedString::from(preview.view.connect_mode.as_str()));
-            window.set_pan_x(preview.view.pan[0]);
-            window.set_pan_y(preview.view.pan[1]);
-            window.set_zoom(preview.view.zoom);
-            window.set_show_common_actions(preview.config.toolbar);
-            window.set_show_patchbay_toolbar(preview.config.patchbay_toolbar);
-            window.set_repel_overlaps(preview.config.repel_overlapping_nodes);
-            window.set_connect_through(preview.config.connect_through_nodes);
-            window.set_thumbnail_view(preview.view.thumbnail_mode);
-            window.set_language_index(language_index(&preview.config.language));
+            window.set_show_statusbar(application.config.statusbar);
+            window.set_show_minimap(application.view.minimap_visible);
+            window.set_sort_type(SharedString::from(if application.view.sort_ports_by_name {
+                "name"
+            } else {
+                "id"
+            }));
+            window.set_sort_order(SharedString::from(
+                if application.view.sort_ports_descending {
+                    "descending"
+                } else {
+                    "ascending"
+                },
+            ));
+            window.set_search_text(SharedString::from(application.view.search_query.clone()));
+            window.set_media_filter(SharedString::from(application.view.media_filter.as_str()));
+            window.set_connect_mode(SharedString::from(application.view.connect_mode.as_str()));
+            window.set_pan_x(application.view.pan[0]);
+            window.set_pan_y(application.view.pan[1]);
+            window.set_zoom(application.view.zoom);
+            window.set_show_common_actions(application.config.toolbar);
+            window.set_show_patchbay_toolbar(application.config.patchbay_toolbar);
+            window.set_repel_overlaps(application.config.repel_overlapping_nodes);
+            window.set_connect_through(application.config.connect_through_nodes);
+            window.set_thumbnail_view(application.view.thumbnail_mode);
+            window.set_language_index(language_index(&application.config.language));
             window.set_meter_policy_index(meter_policy_index(meter_policy));
-            window.set_ui_text_scale(preview.config.ui_text_scale);
-            window.set_panel_text_scale(preview.config.panel_text_scale);
-            window.set_node_text_scale(preview.config.node_text_scale);
-            window.set_patchbay_exclusive(preview.config.patchbay_exclusive);
-            window.set_patchbay_auto_disconnect(preview.config.patchbay_auto_disconnect);
-            window.set_patchbay_auto_pin(preview.config.patchbay_auto_pin);
-            window.set_patchbay_activated(preview.config.patchbay_activated);
+            window.set_ui_text_scale(application.config.ui_text_scale);
+            window.set_panel_text_scale(application.config.panel_text_scale);
+            window.set_node_text_scale(application.config.node_text_scale);
+            window
+                .global::<UiTheme>()
+                .set_ui_scale(application.config.ui_text_scale);
+            window
+                .global::<UiTheme>()
+                .set_panel_scale(application.config.panel_text_scale);
+            window
+                .global::<UiTheme>()
+                .set_node_scale(application.config.node_text_scale);
+            window.set_patchbay_exclusive(application.config.patchbay_exclusive);
+            window.set_patchbay_auto_disconnect(application.config.patchbay_auto_disconnect);
+            window.set_patchbay_auto_pin(application.config.patchbay_auto_pin);
+            window.set_patchbay_activated(application.config.patchbay_activated);
             window.set_profile_name(SharedString::from(
-                preview.config.active_patchbay_profile.clone(),
+                application.config.active_patchbay_profile.clone(),
             ));
             window.set_config_path(SharedString::from(
-                preview.config_file.display().to_string(),
+                application.config_file.display().to_string(),
             ));
             window.set_patchbay_path(SharedString::from(
-                selected_patchbay_path(&preview.config)
+                selected_patchbay_path(&application.config)
                     .display()
                     .to_string(),
             ));
+            window.set_profile_options(string_model(profile_options(&application.config)));
+            window.set_profile_index(profile_index(&application.config));
+            window.set_recent_patchbay_paths(string_model(recent_patchbay_paths(
+                &application.config,
+            )));
             window.set_relay_device_name(SharedString::from(
-                preview.config.relay_device_name.clone(),
+                application.config.relay_device_name.clone(),
             ));
-            window.set_relay_host_pin(SharedString::from(preview.config.relay_host_pin.clone()));
+            window.set_relay_host_pin(SharedString::from(
+                application.config.relay_host_pin.clone(),
+            ));
             window.set_relay_host_port_text(SharedString::from(
-                preview.config.relay_host_port.to_string(),
+                application.config.relay_host_port.to_string(),
             ));
             window.set_relay_client_target(SharedString::from(
-                preview.config.relay_client_target.clone(),
+                application.config.relay_client_target.clone(),
             ));
-            window
-                .set_relay_client_pin(SharedString::from(preview.config.relay_client_pin.clone()));
-            window.set_relay_role_index(relay_role_index(&preview.config.relay_role));
-            window.set_relay_codec_index(relay_codec_index(&preview.config.relay_codec));
-            window.set_relay_frame_index(relay_frame_index(preview.config.relay_frame_ms));
-            window
-                .set_relay_transport_index(relay_transport_index(&preview.config.relay_transport));
+            window.set_relay_client_pin(SharedString::from(
+                application.config.relay_client_pin.clone(),
+            ));
+            window.set_relay_role_index(relay_role_index(&application.config.relay_role));
+            window.set_relay_codec_index(relay_codec_index(&application.config.relay_codec));
+            window.set_relay_frame_index(relay_frame_index(application.config.relay_frame_ms));
+            window.set_relay_transport_index(relay_transport_index(
+                &application.config.relay_transport,
+            ));
+            window.set_relay_codec_options(string_model([
+                application.i18n.text("relay.codec_opus"),
+                application.i18n.text("relay.codec_pcm"),
+            ]));
+            window.set_relay_frame_options(string_model(
+                [5, 10, 20, 40, 60]
+                    .into_iter()
+                    .map(|frame| {
+                        application
+                            .i18n
+                            .format("relay.frame_option", &[("frame", frame.to_string())])
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+            window.set_relay_transport_options(string_model([
+                application.i18n.text("relay.transport_auto"),
+                application.i18n.text("relay.transport_wifi"),
+                application.i18n.text("relay.transport_bluetooth_pan"),
+                application.i18n.text("relay.transport_lan"),
+            ]));
             window.window().set_minimized(args.minimized);
         }
 
@@ -189,16 +269,20 @@ impl UiBridge {
         window.set_minimap_nodes(ModelRc::from(minimap_nodes.clone()));
         window.set_shortcuts(ModelRc::from(shortcuts.clone()));
         window.set_rules(ModelRc::from(Rc::new(VecModel::from(rule_rows(
-            &app.borrow().config,
+            &app.borrow().patchbay,
         )))));
         {
-            let preview = app.borrow();
+            let application = app.borrow();
             window.set_effects(ModelRc::from(Rc::new(VecModel::from(effect_rows(
-                &preview.source,
+                &application.source,
+                &application.i18n,
             )))));
-            window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(&preview)))));
+            window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(
+                &application,
+                &application.i18n,
+            )))));
             window.set_effect_options(ModelRc::from(Rc::new(VecModel::from(effect_options(
-                &preview.source,
+                &application.source,
             )))));
         }
 
@@ -237,6 +321,15 @@ impl UiBridge {
     }
 
     pub(crate) fn run(self) -> Result<(), slint::PlatformError> {
+        #[cfg(all(target_os = "linux", feature = "tray"))]
+        let tray = {
+            let application = self.app.borrow();
+            Rc::new(RefCell::new(crate::tray::support::start(
+                application.t("tray.show"),
+                application.t("tray.hide"),
+                application.t("tray.quit"),
+            )))
+        };
         let timer = Timer::default();
         let weak_window = self.window.as_weak();
         let app = self.app.clone();
@@ -247,10 +340,14 @@ impl UiBridge {
         let events = self.events.clone();
         let geometry = self.geometry.clone();
         let geometry_version = self.geometry_version.clone();
+        #[cfg(all(target_os = "linux", feature = "tray"))]
+        let tray_for_timer = tray.clone();
         timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let Some(window) = weak_window.upgrade() else {
                 return;
             };
+            #[cfg(all(target_os = "linux", feature = "tray"))]
+            crate::tray::support::poll(&window, &tray_for_timer);
             pump(
                 &window,
                 &app,
@@ -265,11 +362,23 @@ impl UiBridge {
         });
         let result = self.window.run();
         {
-            let mut preview = self.app.borrow_mut();
-            read_window_state(&self.window, &mut preview);
-            save_config(&mut preview, false);
-            save_slint_state(&mut preview, false);
-            preview.source.reset_meters();
+            let mut application = self.app.borrow_mut();
+            read_window_state(&self.window, &mut application);
+            application.sync_patchbay_connections();
+            application.autosave_patchbay();
+            save_config(&mut application, false);
+            application.source.reset_meters();
+            #[cfg(feature = "relay")]
+            {
+                if application.source.relay_status().host_active {
+                    let _ = application.source.relay_stop_host();
+                }
+                application.source.relay_discovery_stop();
+            }
+        }
+        #[cfg(all(target_os = "linux", feature = "tray"))]
+        if let Some(state) = tray.borrow().as_ref() {
+            state.shutdown();
         }
         result
     }
@@ -308,25 +417,26 @@ mod tests {
     use slint::{LogicalPosition, ModelRc};
     use std::path::PathBuf;
 
-    fn demo_preview() -> PreviewApp {
+    fn demo_application() -> Application {
         let args = Args {
             demo: true,
             ..Args::default()
         };
-        let (source, status) = ReadOnlyGraphSource::new(&args, MeterPolicy::Disabled);
+        let i18n = I18n::from_language("en");
+        let (source, status) = ApplicationDriver::new(&args, MeterPolicy::Disabled, &i18n);
         let config = AppConfig::default();
         let mut view = UiGraphState::from_config(&config);
         let snapshot = view.snapshot(source.graph(), &config);
-        PreviewApp {
+        Application {
             source,
+            commands: pw_graph_command::CommandStack::new(),
+            patchbay: Patchbay::new("test"),
+            patchbay_file: PathBuf::new(),
             config: config.clone(),
             config_file: PathBuf::new(),
             config_saved_snapshot: config,
             config_dirty_since: None,
-            state_file: PathBuf::new(),
-            state_saved_snapshot: PersistedSlintState::default(),
-            state_dirty_since: None,
-            i18n: I18n::from_language("en"),
+            i18n,
             view,
             snapshot,
             status,
@@ -334,6 +444,9 @@ mod tests {
             toast_until: None,
             toast_error: false,
             pending_connection_pin: None,
+            effect_draft_id: None,
+            effect_draft_enabled: true,
+            effect_draft_parameters: BTreeMap::new(),
             debug: false,
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
@@ -348,71 +461,73 @@ mod tests {
 
     #[test]
     fn advanced_pin_connections_reach_demo_backend_in_both_directions() {
-        let mut preview = demo_preview();
-        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        let mut application = demo_application();
+        let output = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = application.view.ids.port(pw_graph_core::PortId(3)).unwrap();
 
-        connect_pin_pair(&mut preview, output, input);
-        assert!(preview
+        connect_pin_pair(&mut application, output, input);
+        assert!(application
             .source
             .graph()
             .links
             .values()
             .any(|link| link.output_port.0 == 1 && link.input_port.0 == 3));
-        assert_eq!(preview.toast_message, "Connection created");
-        assert!(!preview.toast_error);
+        assert_eq!(application.toast_message, "Connection created");
+        assert!(!application.toast_error);
 
-        connect_pin_pair(&mut preview, input, output);
-        assert_eq!(preview.toast_message, "Connection already exists");
-        assert!(!preview.toast_error);
+        connect_pin_pair(&mut application, input, output);
+        assert_eq!(application.toast_message, "Connection already exists");
+        assert!(!application.toast_error);
     }
 
     #[test]
     fn advanced_connection_rejects_stale_and_same_direction_pins() {
-        let mut preview = demo_preview();
-        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let other_output = preview.view.ids.port(pw_graph_core::PortId(2)).unwrap();
+        let mut application = demo_application();
+        let output = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let other_output = application.view.ids.port(pw_graph_core::PortId(2)).unwrap();
 
-        handle_link_requested(&mut preview, output, output);
-        assert_eq!(preview.pending_connection_pin, Some(output));
-        assert!(!preview.toast_error);
-        assert!(preview.toast_message.contains("click a destination pin"));
+        handle_link_requested(&mut application, output, output);
+        assert_eq!(application.pending_connection_pin, Some(output));
+        assert!(!application.toast_error);
+        assert!(application
+            .toast_message
+            .contains("click a destination pin"));
 
-        handle_link_requested(&mut preview, output, output);
-        assert_eq!(preview.pending_connection_pin, None);
-        assert_eq!(preview.toast_message, "Connection cancelled");
+        handle_link_requested(&mut application, output, output);
+        assert_eq!(application.pending_connection_pin, None);
+        assert_eq!(application.toast_message, "Connection cancelled");
 
-        connect_pin_pair(&mut preview, output, 99_999);
-        assert!(preview.toast_error);
-        assert!(preview.toast_message.contains("no longer available"));
+        connect_pin_pair(&mut application, output, 99_999);
+        assert!(application.toast_error);
+        assert!(application.toast_message.contains("no longer available"));
 
-        connect_pin_pair(&mut preview, output, other_output);
-        assert!(preview.toast_error);
-        assert!(preview.toast_message.contains("one output pin"));
+        connect_pin_pair(&mut application, output, other_output);
+        assert!(application.toast_error);
+        assert!(application.toast_message.contains("one output pin"));
     }
 
     #[test]
     fn delete_removes_the_selected_connection() {
-        let mut preview = demo_preview();
-        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
-        connect_pin_pair(&mut preview, output, input);
-        let link = *preview.source.graph().links.keys().next().unwrap();
-        preview.view.selected_links.insert(link);
+        let mut application = demo_application();
+        let output = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = application.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        connect_pin_pair(&mut application, output, input);
+        let link = *application.source.graph().links.keys().next().unwrap();
+        application.view.selected_links.insert(link);
 
-        delete_selected_connections(&mut preview);
+        delete_selected_connections(&mut application);
 
-        assert!(preview.source.graph().links.is_empty());
-        assert!(preview.view.selected_links.is_empty());
-        assert_eq!(preview.toast_message, "Removed 1 connection(s)");
-        assert!(!preview.toast_error);
+        assert!(application.source.graph().links.is_empty());
+        assert!(application.view.selected_links.is_empty());
+        assert_eq!(application.toast_message, "Removed 1 connection(s)");
+        assert!(!application.toast_error);
     }
 
     #[test]
     fn easy_connections_create_all_matching_demo_channels() {
-        let mut preview = demo_preview();
-        let source = preview.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
-        let target_position = preview
+        let mut application = demo_application();
+        let source = application.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
+        let target_position = application
             .snapshot
             .nodes
             .iter()
@@ -421,23 +536,23 @@ mod tests {
             .unwrap();
 
         easy_connect_nodes(
-            &mut preview,
+            &mut application,
             source,
             target_position[0] + 10.0,
             target_position[1] + 10.0,
             0,
         );
 
-        assert_eq!(preview.source.graph().links.len(), 2);
-        assert!(preview.toast_message.contains("created 2 connection"));
-        assert!(channels_are_paired_straight(&preview));
+        assert_eq!(application.source.graph().links.len(), 2);
+        assert!(application.toast_message.contains("created 2 connection"));
+        assert!(channels_are_paired_straight(&application));
     }
 
     #[test]
     fn easy_drop_accepts_the_visible_pin_margin() {
-        let mut preview = demo_preview();
-        let source = preview.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
-        let target = preview
+        let mut application = demo_application();
+        let source = application.view.ids.node(pw_graph_core::NodeId(1)).unwrap();
+        let target = application
             .snapshot
             .nodes
             .iter()
@@ -446,20 +561,20 @@ mod tests {
         let pin_edge_x = target.position[0] - 6.0;
         let pin_y = target.position[1] + target.height / 2.0;
 
-        easy_connect_nodes(&mut preview, source, pin_edge_x, pin_y, 0);
+        easy_connect_nodes(&mut application, source, pin_edge_x, pin_y, 0);
 
-        assert_eq!(preview.source.graph().links.len(), 2);
-        assert!(preview.toast_message.contains("created 2 connection"));
+        assert_eq!(application.source.graph().links.len(), 2);
+        assert!(application.toast_message.contains("created 2 connection"));
     }
 
     #[test]
     fn easy_port_drag_connects_when_released_on_the_target_body() {
-        let mut preview = demo_preview();
+        let mut application = demo_application();
         // This drop is only reachable in Easy mode, where the pin the drag
         // started on stands for the whole capture channel group.
-        preview.view.connect_mode = ConnectMode::Easy;
-        let source_pin = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let (target_x, target_y) = preview
+        application.view.connect_mode = ConnectMode::Easy;
+        let source_pin = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let (target_x, target_y) = application
             .snapshot
             .nodes
             .iter()
@@ -472,60 +587,60 @@ mod tests {
             })
             .unwrap();
 
-        easy_connect_from_pin(&mut preview, source_pin, target_x, target_y);
+        easy_connect_from_pin(&mut application, source_pin, target_x, target_y);
 
-        assert_eq!(preview.source.graph().links.len(), 2);
-        assert!(preview.toast_message.contains("created 2 connection"));
-        assert!(!preview.toast_error);
-        assert!(channels_are_paired_straight(&preview));
+        assert_eq!(application.source.graph().links.len(), 2);
+        assert!(application.toast_message.contains("created 2 connection"));
+        assert!(!application.toast_error);
+        assert!(channels_are_paired_straight(&application));
     }
 
     #[test]
     fn two_pin_clicks_connect_without_holding_the_pointer() {
-        let mut preview = demo_preview();
-        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        let mut application = demo_application();
+        let output = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = application.view.ids.port(pw_graph_core::PortId(3)).unwrap();
 
-        handle_link_requested(&mut preview, output, output);
-        assert_eq!(preview.pending_connection_pin, Some(output));
+        handle_link_requested(&mut application, output, output);
+        assert_eq!(application.pending_connection_pin, Some(output));
 
-        handle_link_requested(&mut preview, input, input);
+        handle_link_requested(&mut application, input, input);
 
-        assert_eq!(preview.pending_connection_pin, None);
-        assert_eq!(preview.source.graph().links.len(), 1);
-        assert_eq!(preview.toast_message, "Connection created");
-        assert!(!preview.toast_error);
+        assert_eq!(application.pending_connection_pin, None);
+        assert_eq!(application.source.graph().links.len(), 1);
+        assert_eq!(application.toast_message, "Connection created");
+        assert!(!application.toast_error);
     }
 
     #[test]
     fn two_pin_clicks_group_channels_in_easy_mode() {
-        let mut preview = demo_preview();
-        preview.view.connect_mode = ConnectMode::Easy;
-        let output = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let input = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        let mut application = demo_application();
+        application.view.connect_mode = ConnectMode::Easy;
+        let output = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let input = application.view.ids.port(pw_graph_core::PortId(3)).unwrap();
 
-        handle_link_requested(&mut preview, output, output);
-        handle_link_requested(&mut preview, input, input);
+        handle_link_requested(&mut application, output, output);
+        handle_link_requested(&mut application, input, input);
 
-        assert_eq!(preview.pending_connection_pin, None);
-        assert_eq!(preview.source.graph().links.len(), 2);
-        assert!(preview.toast_message.contains("created 2 connection"));
-        assert!(!preview.toast_error);
-        assert!(channels_are_paired_straight(&preview));
+        assert_eq!(application.pending_connection_pin, None);
+        assert_eq!(application.source.graph().links.len(), 2);
+        assert!(application.toast_message.contains("created 2 connection"));
+        assert!(!application.toast_error);
+        assert!(channels_are_paired_straight(&application));
     }
 
     #[test]
     fn connection_feedback_is_transient() {
-        let mut preview = demo_preview();
-        set_connection_feedback(&mut preview, "test connection", false);
-        assert!(toast_visible(&preview));
+        let mut application = demo_application();
+        set_connection_feedback(&mut application, "test connection", false);
+        assert!(toast_visible(&application));
 
-        preview.toast_until = Some(Instant::now() - Duration::from_secs(1));
-        assert!(!toast_visible(&preview));
+        application.toast_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!toast_visible(&application));
     }
 
     #[test]
-    fn shortcut_catalog_matches_the_egui_help_dialog() {
+    fn shortcut_catalog_matches_the_documented_help_dialog() {
         let i18n = I18n::from_language("en");
         assert_eq!(shortcut_rows(&i18n, "").len(), 22);
         let filtered = shortcut_rows(&i18n, "thumbnail");
@@ -574,23 +689,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn slint_audio_state_round_trips_stable_node_keys() {
-        let mut state = PersistedSlintState::default();
-        state.audio_controls.insert(
-            "PipeWire:Audio Capture".into(),
-            PreviewAudioControl {
-                volume_position: 0.42,
-                muted: true,
-            },
-        );
-
-        let encoded = toml::to_string_pretty(&state).unwrap();
-        let decoded: PersistedSlintState = toml::from_str(&encoded).unwrap();
-
-        assert_eq!(decoded, state);
-    }
-
     /// Drives the real window with the real canvas wiring: rows, geometry and
     /// callbacks are produced by the same code the application runs.
     struct CanvasHarness {
@@ -599,7 +697,7 @@ mod tests {
         links: Rc<VecModel<LinkRow>>,
         geometry: Rc<RefCell<CanvasGeometry>>,
         events: Rc<RefCell<Vec<UiEvent>>>,
-        preview: PreviewApp,
+        application: Application,
     }
 
     /// The graph starts at the right edge of the icon rail.
@@ -608,11 +706,11 @@ mod tests {
     impl CanvasHarness {
         fn new(connect_mode: ConnectMode) -> Self {
             i_slint_backend_testing::init_no_event_loop();
-            let mut preview = demo_preview();
-            preview.view.connect_mode = connect_mode;
+            let mut application = demo_application();
+            application.view.connect_mode = connect_mode;
             // Anchor the viewport so world and screen differ only by the rail.
-            preview.view.pan = [0.0, 0.0];
-            preview.view.zoom = 1.0;
+            application.view.pan = [0.0, 0.0];
+            application.view.zoom = 1.0;
 
             let window = MainWindow::new().unwrap();
             window
@@ -632,7 +730,7 @@ mod tests {
                 links,
                 geometry,
                 events,
-                preview,
+                application,
             };
             harness.sync();
             harness
@@ -643,7 +741,7 @@ mod tests {
             let version = Rc::new(Cell::new(0));
             sync_models(
                 &self.window,
-                &mut self.preview,
+                &mut self.application,
                 &self.nodes,
                 &self.links,
                 &minimap,
@@ -719,7 +817,7 @@ mod tests {
         /// First output pin and first input pin of two different cards.
         fn connectable_pair(&self) -> (i32, i32) {
             let output = self
-                .preview
+                .application
                 .snapshot
                 .nodes
                 .iter()
@@ -731,7 +829,7 @@ mod tests {
                 })
                 .expect("the demo graph has an output port");
             let input = self
-                .preview
+                .application
                 .snapshot
                 .nodes
                 .iter()
@@ -827,7 +925,7 @@ mod tests {
     #[test]
     fn advanced_mode_moves_the_card_when_its_body_is_dragged() {
         let mut harness = CanvasHarness::new(ConnectMode::Advanced);
-        let card = harness.node_row(harness.preview.snapshot.nodes[0].id);
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
         let from = harness.body_point(&card);
 
         harness.drag(from, (from.0 + 40.0, from.1 + 25.0));
@@ -847,7 +945,7 @@ mod tests {
         assert!((after.x - card.x - 40.0).abs() < 0.1);
         assert!((after.y - card.y - 25.0).abs() < 0.1);
         // ...and the cached pins moved with it, so the edges stay attached.
-        let pin = harness.preview.snapshot.nodes[0]
+        let pin = harness.application.snapshot.nodes[0]
             .ports
             .first()
             .map(|port| port.pin_id);
@@ -861,8 +959,8 @@ mod tests {
     #[test]
     fn dragging_the_header_moves_the_whole_selection() {
         let harness = CanvasHarness::new(ConnectMode::Advanced);
-        let first = harness.node_row(harness.preview.snapshot.nodes[0].id);
-        let second = harness.node_row(harness.preview.snapshot.nodes[1].id);
+        let first = harness.node_row(harness.application.snapshot.nodes[0].id);
+        let second = harness.node_row(harness.application.snapshot.nodes[1].id);
 
         harness.click((first.x + 60.0, first.y + 12.0));
         harness.dispatch(WindowEvent::PointerPressed {
@@ -885,7 +983,7 @@ mod tests {
     #[test]
     fn clicking_a_card_selects_it_and_clicking_the_background_clears_it() {
         let harness = CanvasHarness::new(ConnectMode::Advanced);
-        let card = harness.node_row(harness.preview.snapshot.nodes[0].id);
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
 
         harness.click((card.x + 60.0, card.y + 12.0));
         assert!(harness.node_row(card.id).selected);
@@ -903,7 +1001,7 @@ mod tests {
     fn the_body_mute_button_keeps_its_own_pointer_gesture() {
         let harness = CanvasHarness::new(ConnectMode::Advanced);
         let card = harness
-            .preview
+            .application
             .snapshot
             .nodes
             .iter()
@@ -927,7 +1025,7 @@ mod tests {
 
         harness.drag(harness.pin(output), harness.pin(input));
         for event in harness.take_events() {
-            process_event(&harness.window, &mut harness.preview, event);
+            process_event(&harness.window, &mut harness.application, event);
         }
         harness.sync();
 
@@ -964,36 +1062,36 @@ mod tests {
 
     #[test]
     fn easy_mode_pin_drag_connects_every_channel_of_the_two_groups() {
-        let mut preview = demo_preview();
-        preview.view.connect_mode = ConnectMode::Easy;
+        let mut application = demo_application();
+        application.view.connect_mode = ConnectMode::Easy;
         // In Easy mode the capture and playback cards each render one grouped
         // pin that stands for both FL and FR.
-        let capture = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let playback = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        let capture = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let playback = application.view.ids.port(pw_graph_core::PortId(3)).unwrap();
 
-        handle_link_requested(&mut preview, capture, playback);
+        handle_link_requested(&mut application, capture, playback);
 
-        assert_eq!(preview.source.graph().links.len(), 2);
-        assert!(channels_are_paired_straight(&preview));
+        assert_eq!(application.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&application));
     }
 
     #[test]
     fn easy_mode_pin_drag_keeps_the_channels_straight_when_dragged_backwards() {
-        let mut preview = demo_preview();
-        preview.view.connect_mode = ConnectMode::Easy;
-        let capture = preview.view.ids.port(pw_graph_core::PortId(1)).unwrap();
-        let playback = preview.view.ids.port(pw_graph_core::PortId(3)).unwrap();
+        let mut application = demo_application();
+        application.view.connect_mode = ConnectMode::Easy;
+        let capture = application.view.ids.port(pw_graph_core::PortId(1)).unwrap();
+        let playback = application.view.ids.port(pw_graph_core::PortId(3)).unwrap();
 
-        handle_link_requested(&mut preview, playback, capture);
+        handle_link_requested(&mut application, playback, capture);
 
-        assert_eq!(preview.source.graph().links.len(), 2);
-        assert!(channels_are_paired_straight(&preview));
+        assert_eq!(application.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&application));
     }
 
     /// Every link joins two ports whose channel suffix is the same, so left
     /// stays left and right stays right.
-    fn channels_are_paired_straight(preview: &PreviewApp) -> bool {
-        let graph = preview.source.graph();
+    fn channels_are_paired_straight(application: &Application) -> bool {
+        let graph = application.source.graph();
         graph.links.values().all(|link| {
             let output = graph.port(link.output_port).map(|port| port.name.clone());
             let input = graph.port(link.input_port).map(|port| port.name.clone());
@@ -1015,13 +1113,13 @@ mod tests {
 
         harness.drag(harness.pin(output), harness.pin(input));
         for event in harness.take_events() {
-            process_event(&harness.window, &mut harness.preview, event);
+            process_event(&harness.window, &mut harness.application, event);
         }
         harness.sync();
 
         // One grouped pin at each end, two channels, two links.
-        assert_eq!(harness.preview.source.graph().links.len(), 2);
-        assert!(channels_are_paired_straight(&harness.preview));
+        assert_eq!(harness.application.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&harness.application));
         assert_eq!(rows_of(&harness.links).len(), 2);
     }
 
@@ -1040,12 +1138,12 @@ mod tests {
 
         harness.drag(harness.body_point(&source), harness.pin(input));
         for event in harness.take_events() {
-            process_event(&harness.window, &mut harness.preview, event);
+            process_event(&harness.window, &mut harness.application, event);
         }
         harness.sync();
 
-        assert_eq!(harness.preview.source.graph().links.len(), 2);
-        assert!(channels_are_paired_straight(&harness.preview));
+        assert_eq!(harness.application.source.graph().links.len(), 2);
+        assert!(channels_are_paired_straight(&harness.application));
     }
 
     #[test]
@@ -1064,7 +1162,11 @@ mod tests {
             .hit_test(body_point.0, body_point.1);
         assert_eq!(hit.kind, HIT_NODE, "advanced mode drags the card");
 
-        handle_action(&harness.window, &mut harness.preview, "toggle-connect-mode");
+        handle_action(
+            &harness.window,
+            &mut harness.application,
+            "toggle-connect-mode",
+        );
         harness.sync();
 
         let hit = harness
@@ -1082,25 +1184,25 @@ mod tests {
         );
         harness.drag(harness.body_point(&source), body);
         for event in harness.take_events() {
-            process_event(&harness.window, &mut harness.preview, event);
+            process_event(&harness.window, &mut harness.application, event);
         }
         harness.sync();
 
         assert_eq!(
-            harness.preview.source.graph().links.len(),
+            harness.application.source.graph().links.len(),
             2,
             "links created after toggling to easy"
         );
-        assert!(channels_are_paired_straight(&harness.preview));
+        assert!(channels_are_paired_straight(&harness.application));
     }
 
     #[test]
     fn pump_path_connects_body_to_body_after_toggling_to_easy() {
         i_slint_backend_testing::init_no_event_loop();
-        let preview = Rc::new(RefCell::new(demo_preview()));
-        preview.borrow_mut().view.connect_mode = ConnectMode::Advanced;
-        preview.borrow_mut().view.pan = [0.0, 0.0];
-        preview.borrow_mut().view.zoom = 1.0;
+        let application = Rc::new(RefCell::new(demo_application()));
+        application.borrow_mut().view.connect_mode = ConnectMode::Advanced;
+        application.borrow_mut().view.pan = [0.0, 0.0];
+        application.borrow_mut().view.zoom = 1.0;
 
         let window = MainWindow::new().unwrap();
         window
@@ -1118,10 +1220,10 @@ mod tests {
         let version = Rc::new(Cell::new(0));
 
         let screen_of = |world: (f32, f32)| -> LogicalPosition {
-            let preview = preview.borrow();
+            let application = application.borrow();
             LogicalPosition::new(
-                RAIL_WIDTH + preview.view.pan[0] + world.0,
-                preview.view.pan[1] + world.1,
+                RAIL_WIDTH + application.view.pan[0] + world.0,
+                application.view.pan[1] + world.1,
             )
         };
         let body_of = |row: &NodeRow| -> (f32, f32) {
@@ -1136,7 +1238,15 @@ mod tests {
 
         // First pump establishes advanced geometry, exactly like app startup.
         pump(
-            &window, &preview, &nodes, &links, &minimap, &shortcuts, &events, &geometry, &version,
+            &window,
+            &application,
+            &nodes,
+            &links,
+            &minimap,
+            &shortcuts,
+            &events,
+            &geometry,
+            &version,
         );
 
         // Toggle to Easy through the same events queue the toolbar uses.
@@ -1144,12 +1254,20 @@ mod tests {
             .borrow_mut()
             .push(UiEvent::Action("toggle-connect-mode".into()));
         pump(
-            &window, &preview, &nodes, &links, &minimap, &shortcuts, &events, &geometry, &version,
+            &window,
+            &application,
+            &nodes,
+            &links,
+            &minimap,
+            &shortcuts,
+            &events,
+            &geometry,
+            &version,
         );
 
         let (output, input) = {
-            let preview = preview.borrow();
-            let output = preview
+            let application = application.borrow();
+            let output = application
                 .snapshot
                 .nodes
                 .iter()
@@ -1160,7 +1278,7 @@ mod tests {
                         .map(|port| port.pin_id)
                 })
                 .expect("the demo graph has an output port");
-            let input = preview
+            let input = application
                 .snapshot
                 .nodes
                 .iter()
@@ -1213,18 +1331,26 @@ mod tests {
             });
         slint::platform::update_timers_and_animations();
         for event in std::mem::take(&mut *events.borrow_mut()) {
-            process_event(&window, &mut preview.borrow_mut(), event);
+            process_event(&window, &mut application.borrow_mut(), event);
         }
         pump(
-            &window, &preview, &nodes, &links, &minimap, &shortcuts, &events, &geometry, &version,
+            &window,
+            &application,
+            &nodes,
+            &links,
+            &minimap,
+            &shortcuts,
+            &events,
+            &geometry,
+            &version,
         );
 
         assert_eq!(
-            preview.borrow().source.graph().links.len(),
+            application.borrow().source.graph().links.len(),
             2,
             "links created"
         );
-        assert!(channels_are_paired_straight(&preview.borrow()));
+        assert!(channels_are_paired_straight(&application.borrow()));
     }
 
     #[test]
@@ -1239,15 +1365,15 @@ mod tests {
         let drop = harness.pin(input);
         harness.drag(harness.body_point(&source), drop);
         for event in harness.take_events() {
-            process_event(&harness.window, &mut harness.preview, event);
+            process_event(&harness.window, &mut harness.application, event);
         }
         harness.sync();
 
         assert_eq!(
-            harness.preview.source.graph().links.len(),
+            harness.application.source.graph().links.len(),
             2,
             "drop on a pin fills the whole group"
         );
-        assert!(channels_are_paired_straight(&harness.preview));
+        assert!(channels_are_paired_straight(&harness.application));
     }
 }

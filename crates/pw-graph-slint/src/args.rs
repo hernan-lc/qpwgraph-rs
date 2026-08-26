@@ -26,7 +26,7 @@ pub(crate) fn parse_args() -> Args {
             }
             "-h" | "--help" => {
                 println!(
-                    "qpwgraph-rs-slint\n\n{}\n  -m, --minimized       {}\n  -d, --debug           {}\n  -n, --no-alsa-midi    {}\n      --lang <LANG>     {}\n      --demo             {}",
+                    "qpwgraph-rs\n\n{}\n  -m, --minimized       {}\n  -d, --debug           {}\n  -n, --no-alsa-midi    {}\n      --lang <LANG>     {}\n      --demo             {}",
                     parser_i18n.text("cli.options"),
                     parser_i18n.text("cli.minimized"),
                     parser_i18n.text("cli.debug"),

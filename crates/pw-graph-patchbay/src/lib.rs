@@ -194,6 +194,18 @@ impl Patchbay {
         original_len != self.connections.len()
     }
 
+    /// Remove every saved rule touching a node whose stable name is no longer
+    /// present. This is used when an effect instance is deliberately removed;
+    /// ordinary graph refreshes must retain unresolved rules for later
+    /// activation.
+    pub fn remove_connections_for_node(&mut self, node_name: &str) -> bool {
+        let original_len = self.connections.len();
+        self.connections.retain(|connection| {
+            connection.output_node != node_name && connection.input_node != node_name
+        });
+        original_len != self.connections.len()
+    }
+
     pub fn snapshot_graph(&mut self, graph: &Graph, pinned: bool) {
         let links: Vec<_> = graph.links.values().cloned().collect();
         self.connections.clear();
@@ -773,5 +785,24 @@ mod tests {
         assert_eq!(connection.input_node_type, None);
         assert_eq!(connection.effective_output_node_type(), NodeType::PipeWire);
         assert_eq!(connection.effective_input_node_type(), NodeType::PipeWire);
+    }
+
+    #[test]
+    fn removing_an_effect_removes_all_rules_touching_that_node() {
+        let graph = graph_with_named_audio_edge(NodeType::PipeWire, NodeType::Effect, 10, 20);
+        let mut patchbay = Patchbay::new("effects");
+        patchbay.add_graph_connection(&graph, PortId(21), PortId(22), true);
+        patchbay.connections.push(PatchConnection {
+            output_node: "Other".into(),
+            output_name: "output".into(),
+            input_node: "Sink".into(),
+            input_name: "input".into(),
+            ..PatchConnection::default()
+        });
+
+        assert!(patchbay.remove_connections_for_node("Noise Gate (gate-1)"));
+        assert_eq!(patchbay.connections.len(), 1);
+        assert_eq!(patchbay.connections[0].output_node, "Other");
+        assert!(!patchbay.remove_connections_for_node("Noise Gate (gate-1)"));
     }
 }

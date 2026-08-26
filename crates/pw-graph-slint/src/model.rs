@@ -1,5 +1,6 @@
 //! Framework-neutral state projected into Slint models.
 
+use pw_graph_backend::GraphDriver;
 use pw_graph_config::AppConfig;
 use pw_graph_core::{
     Direction, Graph, LinkId, Node, NodeAppearance, NodeId, NodeType, Port, PortId, PortType,
@@ -195,6 +196,7 @@ pub(crate) struct PortGroupView {
     pub(crate) label: String,
     pub(crate) direction: Direction,
     pub(crate) port_type: PortType,
+    pub(crate) color: [u8; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -303,8 +305,8 @@ impl UiGraphState {
         self.selected_links
             .retain(|id| graph.links.contains_key(id));
 
-        let positions = configured_positions(graph, config);
         let appearances = configured_appearances(graph, config);
+        let positions = self.effective_positions(graph, config, &appearances);
         let mut pin_groups = HashMap::<PortId, i32>::new();
         let mut nodes = Vec::new();
 
@@ -341,12 +343,7 @@ impl UiGraphState {
                     .clone()
                     .unwrap_or_else(|| node.name.clone()),
                 node_type: node.node_type,
-                position: self
-                    .local_positions
-                    .get(&node.id)
-                    .copied()
-                    .or_else(|| positions.get(&node.id).copied())
-                    .unwrap_or(node.position),
+                position: positions.get(&node.id).copied().unwrap_or(node.position),
                 width: NODE_WIDTH,
                 height,
                 selected: self.selected_nodes.contains(&node.id),
@@ -376,7 +373,7 @@ impl UiGraphState {
                             link_id: link.id,
                             start_pin_id: *pin_groups.get(&link.output_port)?,
                             end_pin_id: *pin_groups.get(&link.input_port)?,
-                            color: port_type_color(output.port_type),
+                            color: link_color(output.port_type, output.direction, &output.name),
                             selected: self.selected_links.contains(&link.id),
                         })
                 })
@@ -440,11 +437,42 @@ impl UiGraphState {
                 self.selected_nodes.insert(node.node_id);
             }
         }
-    }
-
-    pub(crate) fn set_local_position(&mut self, node_id: i32, x: f32, y: f32) {
-        if let Some(node_id) = self.ids.node_id(node_id) {
-            self.local_positions.insert(node_id, [x, y]);
+        for link in &snapshot.links {
+            let endpoint_in_box = |pin_id: i32| {
+                snapshot
+                    .nodes
+                    .iter()
+                    .find_map(|node| {
+                        node.ports
+                            .iter()
+                            .enumerate()
+                            .find(|(_, port)| port.pin_id == pin_id)
+                            .map(|(index, port)| {
+                                if node.collapsed {
+                                    (
+                                        if port.direction == Direction::Source {
+                                            node.position[0] + node.width
+                                        } else {
+                                            node.position[0]
+                                        },
+                                        node.position[1] + NODE_HEADER_HEIGHT / 2.0,
+                                    )
+                                } else {
+                                    let (offset_x, offset_y) = crate::canvas::pin_offset(
+                                        node.width,
+                                        index,
+                                        node.has_audio_controls,
+                                        port.direction != Direction::Sink,
+                                    );
+                                    (node.position[0] + offset_x, node.position[1] + offset_y)
+                                }
+                            })
+                    })
+                    .is_some_and(|point| point_in_box(point, x, y, w, h))
+            };
+            if endpoint_in_box(link.start_pin_id) || endpoint_in_box(link.end_pin_id) {
+                self.selected_links.insert(link.link_id);
+            }
         }
     }
 
@@ -475,6 +503,24 @@ impl UiGraphState {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn set_local_position(&mut self, node_id: i32, x: f32, y: f32) {
+        if let Some(node_id) = self.ids.node_id(node_id) {
+            self.local_positions.insert(node_id, [x, y]);
+        }
+    }
+
+    /// Adopt positions committed to the backend after an undoable command.
+    /// The normal projection starts from persisted positions, but a successful
+    /// move or arrange command makes the backend the new source of truth.
+    pub(crate) fn adopt_backend_positions(&mut self, graph: &Graph) {
+        self.local_positions = graph
+            .nodes
+            .values()
+            .map(|node| (node.id, node.position))
+            .collect();
+    }
+
     pub(crate) fn toggle_local_collapse(&mut self, node_id: i32, snapshot: &GraphSnapshot) {
         let Some(node_id) = self.ids.node_id(node_id) else {
             return;
@@ -487,11 +533,32 @@ impl UiGraphState {
         self.local_appearances.insert(node_id, appearance);
     }
 
+    pub(crate) fn local_appearance(
+        &self,
+        node_id: NodeId,
+        snapshot: &GraphSnapshot,
+    ) -> Option<NodeAppearance> {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .map(|node| {
+                self.local_appearances
+                    .get(&node_id)
+                    .cloned()
+                    .unwrap_or_else(|| node.appearance.clone())
+            })
+    }
+
+    pub(crate) fn set_local_appearance(&mut self, node_id: NodeId, appearance: NodeAppearance) {
+        self.local_appearances.insert(node_id, appearance);
+    }
+
     /// Write the effective Slint layout and node appearance into the shared
-    /// application configuration using the same stable keys as the Egui UI.
+    /// application configuration using the same stable keys as the desktop UI.
     pub(crate) fn write_to_config(&self, graph: &Graph, config: &mut AppConfig) {
-        let configured_positions = configured_positions(graph, config);
         let configured_appearances = configured_appearances(graph, config);
+        let effective_positions = self.effective_positions(graph, config, &configured_appearances);
         let mut key_counts = BTreeMap::<String, usize>::new();
         for node in graph.nodes.values() {
             *key_counts.entry(node_layout_key(node)).or_default() += 1;
@@ -501,11 +568,9 @@ impl UiGraphState {
             .nodes
             .values()
             .map(|node| {
-                let position = self
-                    .local_positions
+                let position = effective_positions
                     .get(&node.id)
                     .copied()
-                    .or_else(|| configured_positions.get(&node.id).copied())
                     .unwrap_or(node.position);
                 (node.id.0.to_string(), position)
             })
@@ -516,11 +581,9 @@ impl UiGraphState {
             .filter_map(|node| {
                 let key = node_layout_key(node);
                 (key_counts.get(&key) == Some(&1)).then(|| {
-                    let position = self
-                        .local_positions
+                    let position = effective_positions
                         .get(&node.id)
                         .copied()
-                        .or_else(|| configured_positions.get(&node.id).copied())
                         .unwrap_or(node.position);
                     (key, position)
                 })
@@ -543,6 +606,25 @@ impl UiGraphState {
                 (appearance != NodeAppearance::default()).then_some((key, appearance))
             })
             .collect();
+    }
+
+    fn effective_positions(
+        &self,
+        graph: &Graph,
+        config: &AppConfig,
+        appearances: &BTreeMap<NodeId, NodeAppearance>,
+    ) -> BTreeMap<NodeId, [f32; 2]> {
+        let mut positions = configured_positions(graph, config);
+        positions.extend(
+            self.local_positions
+                .iter()
+                .map(|(id, position)| (*id, *position)),
+        );
+        if config.repel_overlapping_nodes {
+            repel_positions(graph, positions, appearances, self.thumbnail_mode)
+        } else {
+            positions
+        }
     }
 
     pub(crate) fn visible_counts(&self, snapshot: &GraphSnapshot) -> (usize, usize, usize) {
@@ -730,6 +812,7 @@ impl UiGraphState {
                 label: port.name.clone(),
                 direction: port.direction,
                 port_type: port.port_type,
+                color: port_color(port.port_type, port.direction, &port.name),
             });
             if let Some(key) = key {
                 group_index.insert(key, index);
@@ -785,13 +868,48 @@ pub(crate) fn node_type_color(node_type: NodeType) -> [u8; 4] {
     }
 }
 
-pub(crate) fn port_type_color(port_type: PortType) -> [u8; 4] {
-    match port_type {
-        PortType::Audio => [87, 199, 133, 255],
-        PortType::Video => [78, 157, 230, 255],
-        PortType::MidiJack => [227, 93, 106, 255],
-        PortType::MidiAlsa => [169, 121, 209, 255],
-        PortType::Unknown => [165, 165, 165, 255],
+/// The canvas palette distinguishes input, output, and monitor ports within
+/// each media family. Keeping the role calculation here means Slint and the
+/// hit-tested graph model use the same colors for dots, accents, and links.
+pub(crate) fn port_color(port_type: PortType, direction: Direction, name: &str) -> [u8; 4] {
+    let monitor = name.to_ascii_lowercase().contains("monitor");
+    match (port_type, monitor, direction) {
+        (PortType::Audio, true, _) => [139, 231, 177, 255],
+        (PortType::Audio, false, Direction::Sink) => [44, 151, 96, 255],
+        (PortType::Audio, false, Direction::Source) => [82, 207, 133, 255],
+        (PortType::Video, true, _) => [151, 213, 255, 255],
+        (PortType::Video, false, Direction::Sink) => [43, 125, 202, 255],
+        (PortType::Video, false, Direction::Source) => [91, 181, 244, 255],
+        (PortType::MidiJack, true, _) => [255, 161, 177, 255],
+        (PortType::MidiJack, false, Direction::Sink) => [186, 57, 87, 255],
+        (PortType::MidiJack, false, Direction::Source) => [237, 108, 128, 255],
+        (PortType::MidiAlsa, true, _) => [220, 177, 245, 255],
+        (PortType::MidiAlsa, false, Direction::Sink) => [128, 78, 172, 255],
+        (PortType::MidiAlsa, false, Direction::Source) => [190, 132, 225, 255],
+        (PortType::Unknown, true, _) => [214, 222, 232, 255],
+        (PortType::Unknown, false, Direction::Sink) => [116, 127, 141, 255],
+        (PortType::Unknown, false, Direction::Source) => [177, 188, 202, 255],
+    }
+}
+
+pub(crate) fn link_color(port_type: PortType, direction: Direction, name: &str) -> [u8; 4] {
+    let monitor = name.to_ascii_lowercase().contains("monitor");
+    match (port_type, monitor, direction) {
+        (PortType::Audio, true, _) => [105, 194, 145, 255],
+        (PortType::Audio, false, Direction::Sink) => [38, 126, 80, 255],
+        (PortType::Audio, false, Direction::Source) => [62, 173, 109, 255],
+        (PortType::Video, true, _) => [112, 177, 218, 255],
+        (PortType::Video, false, Direction::Sink) => [37, 105, 170, 255],
+        (PortType::Video, false, Direction::Source) => [69, 147, 204, 255],
+        (PortType::MidiJack, true, _) => [220, 125, 145, 255],
+        (PortType::MidiJack, false, Direction::Sink) => [151, 48, 72, 255],
+        (PortType::MidiJack, false, Direction::Source) => [198, 83, 105, 255],
+        (PortType::MidiAlsa, true, _) => [187, 145, 213, 255],
+        (PortType::MidiAlsa, false, Direction::Sink) => [104, 62, 141, 255],
+        (PortType::MidiAlsa, false, Direction::Source) => [157, 105, 191, 255],
+        (PortType::Unknown, true, _) => [178, 188, 202, 255],
+        (PortType::Unknown, false, Direction::Sink) => [93, 103, 116, 255],
+        (PortType::Unknown, false, Direction::Source) => [143, 155, 171, 255],
     }
 }
 
@@ -822,6 +940,10 @@ fn intersects(position: [f32; 2], size: [f32; 2], x: f32, y: f32, w: f32, h: f32
         && position[0] + size[0] > x
         && position[1] < y + h
         && position[1] + size[1] > y
+}
+
+fn point_in_box(point: (f32, f32), x: f32, y: f32, width: f32, height: f32) -> bool {
+    point.0 >= x && point.0 <= x + width && point.1 >= y && point.1 <= y + height
 }
 
 fn configured_positions(graph: &Graph, config: &AppConfig) -> BTreeMap<NodeId, [f32; 2]> {
@@ -874,6 +996,69 @@ fn configured_appearances(graph: &Graph, config: &AppConfig) -> BTreeMap<NodeId,
         .collect()
 }
 
+/// Produce a stable non-overlapping projection of the configured layout.
+/// User movement remains an explicit `MoveNodesCommand`; this operation only
+/// applies the preference to the rendered/persisted layout.
+fn repel_positions(
+    graph: &Graph,
+    positions: BTreeMap<NodeId, [f32; 2]>,
+    appearances: &BTreeMap<NodeId, NodeAppearance>,
+    thumbnail: bool,
+) -> BTreeMap<NodeId, [f32; 2]> {
+    const GAP: f32 = 18.0;
+    let mut result = BTreeMap::new();
+    let mut placed = Vec::<([f32; 2], [f32; 2])>::new();
+
+    for node in graph.nodes.values() {
+        let mut position = positions.get(&node.id).copied().unwrap_or(node.position);
+        let appearance = appearances.get(&node.id).cloned().unwrap_or_default();
+        let height = node_height(
+            thumbnail,
+            appearance.collapsed,
+            node.ports.iter().any(|port_id| {
+                graph
+                    .port(*port_id)
+                    .is_some_and(|port| port.port_type == PortType::Audio)
+            }),
+            node.ports.len(),
+        );
+        let size = [NODE_WIDTH, height];
+
+        let mut attempts = 0;
+        while placed.iter().any(|(other, other_size)| {
+            intersects(
+                position,
+                size,
+                other[0] - GAP,
+                other[1] - GAP,
+                other_size[0] + GAP * 2.0,
+                other_size[1] + GAP * 2.0,
+            )
+        }) && attempts < graph.nodes.len().saturating_mul(2).max(1)
+        {
+            let rightmost = placed
+                .iter()
+                .filter(|(other, other_size)| {
+                    intersects(
+                        position,
+                        size,
+                        other[0] - GAP,
+                        other[1] - GAP,
+                        other_size[0] + GAP * 2.0,
+                        other_size[1] + GAP * 2.0,
+                    )
+                })
+                .map(|(other, other_size)| other[0] + other_size[0] + GAP)
+                .fold(position[0], f32::max);
+            position[0] = rightmost;
+            attempts += 1;
+        }
+        result.insert(node.id, position);
+        placed.push((position, size));
+    }
+    result
+}
+
 pub(crate) fn node_layout_key(node: &Node) -> String {
     let kind = match node.node_type {
         NodeType::PipeWire => "PipeWire",
@@ -882,6 +1067,15 @@ pub(crate) fn node_layout_key(node: &Node) -> String {
         NodeType::Unknown => "Unknown",
     };
     format!("{kind}:{}", node.name)
+}
+
+/// Apply the same stable layout lookup used by the rendered projection to the
+/// backend, preserving startup position restoration semantics.
+pub(crate) fn restore_node_positions(driver: &mut dyn GraphDriver, config: &AppConfig) {
+    let positions = configured_positions(driver.graph(), config);
+    for (node, position) in positions {
+        let _ = driver.set_node_position(node, position);
+    }
 }
 
 pub(crate) fn is_relay_node(node: &Node) -> bool {
@@ -1071,6 +1265,43 @@ mod tests {
     }
 
     #[test]
+    fn box_selection_includes_links_by_endpoint() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let snapshot = state.snapshot(&graph, &config);
+
+        state.select_box(&snapshot, -1000.0, -1000.0, 5000.0, 5000.0, false);
+
+        assert!(state.selected_nodes.contains(&NodeId(1)));
+        assert!(state.selected_nodes.contains(&NodeId(2)));
+        assert!(state.selected_links.contains(&LinkId(7)));
+    }
+
+    #[test]
+    fn repel_preference_separates_configured_overlapping_cards() {
+        let graph = graph();
+        let mut config = AppConfig::default();
+        config.node_positions.insert("1".into(), [0.0, 0.0]);
+        config.node_positions.insert("2".into(), [0.0, 0.0]);
+        config.repel_overlapping_nodes = true;
+        let mut state = UiGraphState::from_config(&config);
+        let snapshot = state.snapshot(&graph, &config);
+        let first = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(1))
+            .unwrap();
+        let second = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(2))
+            .unwrap();
+
+        assert!(second.position[0] >= first.position[0] + first.width + 18.0);
+    }
+
+    #[test]
     fn local_positions_are_explicitly_written_to_config() {
         let graph = graph();
         let mut config = AppConfig::default();
@@ -1225,8 +1456,10 @@ mod tests {
                     .unwrap();
             }
         }
-        let mut config = AppConfig::default();
-        config.connect_mode = "easy".into();
+        let config = AppConfig {
+            connect_mode: "easy".into(),
+            ..AppConfig::default()
+        };
         let state = UiGraphState::from_config(&config);
 
         for effect in [NodeId(3), NodeId(4)] {
@@ -1270,8 +1503,10 @@ mod tests {
     }
 
     fn easy_state() -> UiGraphState {
-        let mut config = AppConfig::default();
-        config.connect_mode = "easy".into();
+        let config = AppConfig {
+            connect_mode: "easy".into(),
+            ..AppConfig::default()
+        };
         UiGraphState::from_config(&config)
     }
 

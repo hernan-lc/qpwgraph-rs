@@ -41,6 +41,15 @@ pub(crate) fn meter_policy_from_index(index: i32) -> MeterPolicy {
     }
 }
 
+pub(crate) fn localized_meter_policy(i18n: &I18n, policy: MeterPolicy) -> String {
+    let key = match policy {
+        MeterPolicy::Disabled => "meters.off",
+        MeterPolicy::OnDemand => "meters.on_demand",
+        MeterPolicy::Always => "meters.always",
+    };
+    i18n.text(key)
+}
+
 pub(crate) fn language_index(language: &str) -> i32 {
     match language.trim().to_ascii_lowercase().as_str() {
         "es" | "es-es" => 1,

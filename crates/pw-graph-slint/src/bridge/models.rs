@@ -1,7 +1,5 @@
 use crate::canvas::{self, CanvasGeometry, LinkGeometry, NodeGeometry, PinGeometry};
-use crate::model::{
-    node_type_color, port_type_color, ConnectMode, GraphSnapshot, LinkView, MeterState, NodeView,
-};
+use crate::model::{node_type_color, ConnectMode, GraphSnapshot, LinkView, MeterState, NodeView};
 use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::Direction;
 use pw_graph_i18n::I18n;
@@ -12,36 +10,41 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use super::app::{toast_visible, PreviewApp, PreviewAudioControl};
-use super::effects::{effect_options, effect_rows};
+use super::app::{toast_visible, Application, AudioControl};
+use super::effects::{effect_options, effect_rows, effect_setup_rows};
 use super::meters::meter_fallback;
+#[cfg(feature = "relay")]
+use super::relay::relay_qr_payload;
 #[cfg(feature = "relay")]
 use super::relay::{qr_image, relay_host_endpoint};
 use super::relay::{
-    relay_codec_index, relay_frame_index, relay_nodes_visible, relay_qr_payload, relay_role_index,
-    relay_rows, relay_transport_index,
+    relay_codec_index, relay_frame_index, relay_nodes_visible, relay_role_index, relay_rows,
+    relay_transport_index,
 };
 use super::utils::{
     color, language_index, localized_meter_label, localized_node_type, meter_fraction,
     meter_policy_index,
 };
-use super::{LinkRow, MainWindow, MinimapNode, NodeRow, PortRow, RuleRow, ShortcutRow, UiI18n};
+use super::{
+    HistoryRow, LinkRow, MainWindow, MinimapNode, NodeRow, PortRow, RuleRow, ShortcutRow, UiI18n,
+};
+use crate::names::{compact_label, display_node_name, display_port_name};
 
 pub(crate) fn sync_models(
     window: &MainWindow,
-    preview: &mut PreviewApp,
+    application: &mut Application,
     nodes: &Rc<VecModel<NodeRow>>,
     links: &Rc<VecModel<LinkRow>>,
     minimap_nodes: &Rc<VecModel<MinimapNode>>,
     geometry: &Rc<RefCell<CanvasGeometry>>,
     geometry_version: &Rc<Cell<i32>>,
 ) {
-    preview.view.relay_nodes_visible = relay_nodes_visible(preview);
-    let snapshot = preview.view.snapshot_with_meters(
-        preview.source.graph(),
-        &preview.config,
-        &preview.meters,
-        meter_fallback(&preview.source),
+    application.view.relay_nodes_visible = relay_nodes_visible(application);
+    let snapshot = application.view.snapshot_with_meters(
+        application.source.graph(),
+        &application.config,
+        &application.meters,
+        meter_fallback(&application.source),
     );
     let node_rows = snapshot
         .nodes
@@ -49,12 +52,12 @@ pub(crate) fn sync_models(
         .map(|node| {
             node_row(
                 node,
-                preview
+                application
                     .audio_controls
                     .get(&node.node_id)
                     .copied()
                     .unwrap_or_default(),
-                &preview.i18n,
+                &application.i18n,
             )
         })
         .collect::<Vec<_>>();
@@ -82,7 +85,7 @@ pub(crate) fn sync_models(
     // so a gesture in flight can never hit-test against geometry the user
     // cannot see.
     if rows_applied || geometry.borrow().is_empty() {
-        rebuild_geometry(geometry, &snapshot, preview.view.connect_mode);
+        rebuild_geometry(geometry, &snapshot, application.view.connect_mode);
         geometry_version.set(geometry_version.get().wrapping_add(1));
         window.set_geometry_version(geometry_version.get());
         let bounds = graph_bounds(&snapshot);
@@ -91,69 +94,161 @@ pub(crate) fn sync_models(
         window.set_graph_max_x(bounds[2]);
         window.set_graph_max_y(bounds[3]);
     }
-    let (node_count, port_count, link_count) = preview.view.visible_counts(&snapshot);
-    window.set_status(SharedString::from(preview.status.clone()));
-    window.set_toast_message(SharedString::from(preview.toast_message.clone()));
-    window.set_toast_visible(toast_visible(preview));
-    window.set_toast_error(preview.toast_error);
-    window.set_backend(SharedString::from(preview.source.backend_name()));
-    window.set_graph_counts(SharedString::from(format!(
-        "{node_count} nodes · {port_count} ports · {link_count} links"
+    let (node_count, port_count, link_count) = application.view.visible_counts(&snapshot);
+    window.set_status(SharedString::from(application.status.clone()));
+    window.set_toast_message(SharedString::from(application.toast_message.clone()));
+    window.set_toast_visible(toast_visible(application));
+    window.set_toast_error(application.toast_error);
+    let backend = if application.debug {
+        application.i18n.format(
+            "debug.backend",
+            &[
+                ("backend", application.source.backend_name().to_owned()),
+                ("enabled", application.source.has_alsa().to_string()),
+            ],
+        )
+    } else {
+        String::new()
+    };
+    window.set_backend(SharedString::from(backend));
+    window.set_has_selected_link(!application.view.selected_links.is_empty());
+    window.set_has_selected_node(!application.view.selected_nodes.is_empty());
+    window.set_graph_counts(SharedString::from(application.i18n.format(
+        "status.graph_counts",
+        &[
+            ("nodes", node_count.to_string()),
+            ("ports", port_count.to_string()),
+            ("links", link_count.to_string()),
+        ],
     )));
-    window.set_show_minimap(preview.view.minimap_visible);
-    window.set_media_filter(SharedString::from(preview.view.media_filter.as_str()));
-    window.set_connect_mode(SharedString::from(preview.view.connect_mode.as_str()));
-    window.set_thumbnail_view(preview.view.thumbnail_mode);
-    window.set_show_common_actions(preview.config.toolbar);
-    window.set_show_patchbay_toolbar(preview.config.patchbay_toolbar);
-    window.set_repel_overlaps(preview.config.repel_overlapping_nodes);
-    window.set_connect_through(preview.config.connect_through_nodes);
-    window.set_language_index(language_index(&preview.config.language));
+    window.set_show_minimap(application.view.minimap_visible);
+    window.set_sort_type(SharedString::from(if application.view.sort_ports_by_name {
+        "name"
+    } else {
+        "id"
+    }));
+    window.set_sort_order(SharedString::from(
+        if application.view.sort_ports_descending {
+            "descending"
+        } else {
+            "ascending"
+        },
+    ));
+    window.set_media_filter(SharedString::from(application.view.media_filter.as_str()));
+    window.set_connect_mode(SharedString::from(application.view.connect_mode.as_str()));
+    window.set_thumbnail_view(application.view.thumbnail_mode);
+    window.set_show_common_actions(application.config.toolbar);
+    window.set_show_patchbay_toolbar(application.config.patchbay_toolbar);
+    window.set_repel_overlaps(application.config.repel_overlapping_nodes);
+    window.set_connect_through(application.config.connect_through_nodes);
+    window.set_language_index(language_index(&application.config.language));
     window
         .global::<UiI18n>()
-        .set_version(language_index(&preview.config.language));
-    window.set_meter_policy_index(meter_policy_index(preview.source.meter_policy()));
-    window.set_ui_text_scale(preview.config.ui_text_scale);
-    window.set_panel_text_scale(preview.config.panel_text_scale);
-    window.set_node_text_scale(preview.view.node_text_scale);
-    window.set_patchbay_exclusive(preview.config.patchbay_exclusive);
-    window.set_patchbay_auto_disconnect(preview.config.patchbay_auto_disconnect);
-    window.set_patchbay_auto_pin(preview.config.patchbay_auto_pin);
-    window.set_patchbay_activated(preview.config.patchbay_activated);
-    window.set_zoom(preview.view.zoom);
-    window.set_pan_x(preview.view.pan[0]);
-    window.set_pan_y(preview.view.pan[1]);
-    window.set_relay_device_name(SharedString::from(preview.config.relay_device_name.clone()));
-    window.set_relay_host_pin(SharedString::from(preview.config.relay_host_pin.clone()));
+        .set_version(language_index(&application.config.language));
+    window.set_meter_policy_index(meter_policy_index(application.source.meter_policy()));
+    window.set_ui_text_scale(application.config.ui_text_scale);
+    window.set_panel_text_scale(application.config.panel_text_scale);
+    window.set_node_text_scale(application.view.node_text_scale);
+    window
+        .global::<super::UiTheme>()
+        .set_ui_scale(application.config.ui_text_scale);
+    window
+        .global::<super::UiTheme>()
+        .set_panel_scale(application.config.panel_text_scale);
+    window
+        .global::<super::UiTheme>()
+        .set_node_scale(application.view.node_text_scale);
+    window.set_patchbay_exclusive(application.config.patchbay_exclusive);
+    window.set_patchbay_auto_disconnect(application.config.patchbay_auto_disconnect);
+    window.set_patchbay_auto_pin(application.config.patchbay_auto_pin);
+    window.set_patchbay_activated(application.config.patchbay_activated);
+    window.set_profile_name(SharedString::from(
+        application.config.active_patchbay_profile.clone(),
+    ));
+    window.set_profile_options(string_model(profile_options(&application.config)));
+    window.set_profile_index(profile_index(&application.config));
+    window.set_recent_patchbay_paths(string_model(recent_patchbay_paths(&application.config)));
+    window.set_zoom(application.view.zoom);
+    window.set_pan_x(application.view.pan[0]);
+    window.set_pan_y(application.view.pan[1]);
+    window.set_relay_device_name(SharedString::from(
+        application.config.relay_device_name.clone(),
+    ));
+    window.set_relay_host_pin(SharedString::from(
+        application.config.relay_host_pin.clone(),
+    ));
     window.set_relay_host_port_text(SharedString::from(
-        preview.config.relay_host_port.to_string(),
+        application.config.relay_host_port.to_string(),
     ));
     window.set_relay_client_target(SharedString::from(
-        preview.config.relay_client_target.clone(),
+        application.config.relay_client_target.clone(),
     ));
-    window.set_relay_client_pin(SharedString::from(preview.config.relay_client_pin.clone()));
-    window.set_relay_role_index(relay_role_index(&preview.config.relay_role));
-    window.set_relay_codec_index(relay_codec_index(&preview.config.relay_codec));
-    window.set_relay_frame_index(relay_frame_index(preview.config.relay_frame_ms));
-    window.set_relay_transport_index(relay_transport_index(&preview.config.relay_transport));
+    window.set_relay_client_pin(SharedString::from(
+        application.config.relay_client_pin.clone(),
+    ));
+    window.set_relay_role_index(relay_role_index(&application.config.relay_role));
+    window.set_relay_codec_index(relay_codec_index(&application.config.relay_codec));
+    window.set_relay_frame_index(relay_frame_index(application.config.relay_frame_ms));
+    window.set_relay_transport_index(relay_transport_index(&application.config.relay_transport));
+    window.set_relay_codec_options(string_model([
+        application.i18n.text("relay.codec_opus"),
+        application.i18n.text("relay.codec_pcm"),
+    ]));
+    window.set_relay_frame_options(string_model(
+        [5, 10, 20, 40, 60]
+            .into_iter()
+            .map(|frame| {
+                application
+                    .i18n
+                    .format("relay.frame_option", &[("frame", frame.to_string())])
+            })
+            .collect::<Vec<_>>(),
+    ));
+    window.set_relay_transport_options(string_model([
+        application.i18n.text("relay.transport_auto"),
+        application.i18n.text("relay.transport_wifi"),
+        application.i18n.text("relay.transport_bluetooth_pan"),
+        application.i18n.text("relay.transport_lan"),
+    ]));
     window.set_effects(ModelRc::from(Rc::new(VecModel::from(effect_rows(
-        &preview.source,
+        &application.source,
+        &application.i18n,
     )))));
     window.set_effect_options(ModelRc::from(Rc::new(VecModel::from(effect_options(
-        &preview.source,
+        &application.source,
     )))));
-    window.set_effects_available(preview.source.supports_effect_nodes());
-    window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(preview)))));
+    window.set_effect_configuring(application.effect_draft_id.is_some());
+    window.set_effect_setup_enabled(application.effect_draft_enabled);
+    window.set_effect_setup_parameters(ModelRc::from(Rc::new(VecModel::from(effect_setup_rows(
+        &application.source,
+        application.effect_draft_id.as_deref(),
+        &application.effect_draft_parameters,
+    )))));
+    window.set_rules(ModelRc::from(Rc::new(VecModel::from(rule_rows(
+        &application.patchbay,
+    )))));
+    let (undo_history, redo_history) = application.history();
+    window.set_undo_history(ModelRc::from(Rc::new(VecModel::from(history_rows(
+        undo_history,
+    )))));
+    window.set_redo_history(ModelRc::from(Rc::new(VecModel::from(history_rows(
+        redo_history,
+    )))));
+    window.set_effects_available(application.source.supports_effect_nodes());
+    window.set_relay_rows(ModelRc::from(Rc::new(VecModel::from(relay_rows(
+        application,
+        &application.i18n,
+    )))));
     #[cfg(feature = "relay")]
     {
-        let relay_status = preview.source.relay_status();
-        window.set_relay_available(preview.source.relay_available());
+        let relay_status = application.source.relay_status();
+        window.set_relay_available(application.source.relay_available());
         window.set_relay_host_active(relay_status.host_active);
         window.set_relay_host_endpoint(SharedString::from(relay_host_endpoint(
-            preview,
+            application,
             relay_status.host_port,
         )));
-        let payload = relay_qr_payload(preview).unwrap_or_default();
+        let payload = relay_qr_payload(application).unwrap_or_default();
         window.set_relay_qr_payload(SharedString::from(payload.clone()));
         window.set_relay_qr_image(qr_image(&payload));
     }
@@ -165,7 +260,7 @@ pub(crate) fn sync_models(
         window.set_relay_qr_payload(SharedString::new());
         window.set_relay_qr_image(Image::default());
     }
-    preview.snapshot = snapshot;
+    application.snapshot = snapshot;
 }
 
 /// Replacing a Slint model invalidates its repeated component instances. Update
@@ -194,10 +289,10 @@ fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<Node
     }
 }
 
-fn node_row(node: &NodeView, audio: PreviewAudioControl, i18n: &I18n) -> NodeRow {
+fn node_row(node: &NodeView, audio: AudioControl, i18n: &I18n) -> NodeRow {
     NodeRow {
         id: node.id,
-        node_title: SharedString::from(node.title.clone()),
+        node_title: SharedString::from(compact_label(&display_node_name(&node.title, i18n), 22)),
         node_subtitle: SharedString::from(localized_node_type(i18n, node.node_type)),
         x: node.position[0],
         y: node.position[1],
@@ -206,15 +301,13 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl, i18n: &I18n) -> NodeRow
         selected: node.selected,
         collapsed: node.collapsed,
         thumbnail: node.thumbnail,
-        font_scale: node.font_scale,
+        // Typography is applied by the shared Slint theme, not duplicated in
+        // each projected row.
+        font_scale: 1.0,
         accent: color(
             node.appearance
                 .color
-                .or_else(|| {
-                    node.ports
-                        .first()
-                        .map(|port| port_type_color(port.port_type))
-                })
+                .or_else(|| node.ports.first().map(|port| port.color))
                 .unwrap_or_else(|| node_type_color(node.node_type)),
         ),
         has_audio_controls: node.has_audio_controls,
@@ -235,9 +328,9 @@ fn node_row(node: &NodeView, audio: PreviewAudioControl, i18n: &I18n) -> NodeRow
                         canvas::pin_offset(node.width, index, node.has_audio_controls, is_output);
                     PortRow {
                         id: port.pin_id,
-                        label: SharedString::from(port.label.clone()),
+                        label: SharedString::from(display_port_name(&port.label, i18n)),
                         direction: if is_output { 1 } else { 0 },
-                        color: color(port_type_color(port.port_type)),
+                        color: color(port.color),
                         row_y: canvas::port_row_top(index, node.has_audio_controls),
                         pin_x,
                         pin_y,
@@ -355,6 +448,15 @@ pub(crate) fn shortcut_rows(i18n: &I18n, query: &str) -> Vec<ShortcutRow> {
         .collect()
 }
 
+fn history_rows(entries: Vec<String>) -> Vec<HistoryRow> {
+    entries
+        .into_iter()
+        .map(|description| HistoryRow {
+            description: SharedString::from(description),
+        })
+        .collect()
+}
+
 fn link_row(link: &LinkView) -> LinkRow {
     LinkRow {
         id: link.id,
@@ -363,24 +465,22 @@ fn link_row(link: &LinkView) -> LinkRow {
     }
 }
 
-pub(crate) fn rule_rows(config: &AppConfig) -> Vec<RuleRow> {
-    let path = selected_patchbay_path(config);
-    Patchbay::load_from(path)
-        .map(|patchbay| {
-            patchbay
-                .connections
-                .into_iter()
-                .map(|rule| RuleRow {
-                    output: SharedString::from(format!(
-                        "{} · {}",
-                        rule.output_node, rule.output_name
-                    )),
-                    input: SharedString::from(format!("{} · {}", rule.input_node, rule.input_name)),
-                    pinned: rule.pinned,
-                })
-                .collect()
+pub(crate) fn rule_rows(patchbay: &Patchbay) -> Vec<RuleRow> {
+    patchbay
+        .connections
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| RuleRow {
+            index: index as i32,
+            output: SharedString::from(format!("{} · {}", rule.output_node, rule.output_name)),
+            input: SharedString::from(format!("{} · {}", rule.input_node, rule.input_name)),
+            output_node: SharedString::from(rule.output_node.clone()),
+            output_port: SharedString::from(rule.output_name.clone()),
+            input_node: SharedString::from(rule.input_node.clone()),
+            input_port: SharedString::from(rule.input_name.clone()),
+            pinned: rule.pinned,
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 pub(crate) fn selected_patchbay_path(config: &AppConfig) -> std::path::PathBuf {
@@ -391,4 +491,43 @@ pub(crate) fn selected_patchbay_path(config: &AppConfig) -> std::path::PathBuf {
         .cloned()
         .or_else(|| config.patchbay_path.clone())
         .unwrap_or(default_file)
+}
+
+pub(crate) fn profile_options(config: &AppConfig) -> Vec<String> {
+    let mut profiles: Vec<_> = config.patchbay_profiles.keys().cloned().collect();
+    if profiles.is_empty() {
+        profiles.push("default".into());
+    }
+    if !profiles
+        .iter()
+        .any(|profile| profile == &config.active_patchbay_profile)
+    {
+        profiles.push(config.active_patchbay_profile.clone());
+        profiles.sort();
+    }
+    profiles
+}
+
+pub(crate) fn profile_index(config: &AppConfig) -> i32 {
+    profile_options(config)
+        .iter()
+        .position(|profile| profile == &config.active_patchbay_profile)
+        .unwrap_or(0) as i32
+}
+
+pub(crate) fn recent_patchbay_paths(config: &AppConfig) -> Vec<String> {
+    config
+        .recent_patchbay_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+pub(crate) fn string_model(values: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
+    ModelRc::from(Rc::new(VecModel::from(
+        values
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    )))
 }

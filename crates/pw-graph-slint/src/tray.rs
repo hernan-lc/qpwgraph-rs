@@ -1,10 +1,21 @@
+//! Linux StatusNotifier tray integration.
+//!
+//! The tray owns no application state. It only sends show, hide, and quit
+//! intents back to the Slint event loop, where the normal window lifecycle is
+//! responsible for applying them.
+
 #[cfg(all(target_os = "linux", feature = "tray"))]
-pub(crate) mod tray_support {
+pub(crate) mod support {
     use ksni::blocking::TrayMethods;
     use ksni::menu::StandardItem;
+    use slint::ComponentHandle;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::mpsc::{self, Receiver, Sender};
 
-    pub enum Command {
+    use crate::bridge::MainWindow;
+
+    pub(crate) enum Command {
         Show,
         Hide,
         Quit,
@@ -68,12 +79,16 @@ pub(crate) mod tray_support {
         }
     }
 
-    pub struct State {
-        pub receiver: Receiver<Command>,
+    pub(crate) struct State {
+        receiver: Receiver<Command>,
         handle: ksni::blocking::Handle<TrayMenu>,
     }
 
-    pub fn start(show_label: String, hide_label: String, quit_label: String) -> Option<State> {
+    pub(crate) fn start(
+        show_label: String,
+        hide_label: String,
+        quit_label: String,
+    ) -> Option<State> {
         let (sender, receiver) = mpsc::channel();
         let tray = TrayMenu {
             sender,
@@ -85,8 +100,30 @@ pub(crate) mod tray_support {
         Some(State { receiver, handle })
     }
 
+    pub(crate) fn poll(window: &MainWindow, tray: &Rc<RefCell<Option<State>>>) {
+        loop {
+            let command = tray
+                .borrow()
+                .as_ref()
+                .and_then(|state| state.receiver.try_recv().ok());
+            let Some(command) = command else {
+                break;
+            };
+            match command {
+                Command::Show => {
+                    let _ = window.show();
+                    window.window().set_minimized(false);
+                }
+                Command::Hide => window.window().set_minimized(true),
+                Command::Quit => {
+                    let _ = slint::quit_event_loop();
+                }
+            }
+        }
+    }
+
     impl State {
-        pub fn shutdown(&self) {
+        pub(crate) fn shutdown(&self) {
             self.handle.shutdown().wait();
         }
     }
