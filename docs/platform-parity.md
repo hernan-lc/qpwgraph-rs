@@ -184,20 +184,33 @@ above the line has landed; what is left is blocked on something specific.
    | IID `{2a59116d-6c4f-45e0-a74f-707e3fef9258}` (Windows 10) | **S_OK** |
 
    So the interface **is present here**, under the Windows 10 IID. What could
-   not be established is its method layout. Calling vtable slots 0-11 past
-   `IInspectable` with a `(u32 pid, i32 flow, i32 role, out HSTRING)` signature
-   faults on most of them and returns a uniform `E_INVALIDARG` on the two that
-   survive, across every flow and role, with and without a live audio session
-   for the calling process. That points at the parameter list being wrong
-   rather than the values -- the first argument is probably not a bare process
-   id on this interface.
+   not be established is its method layout. Probing vtable slots past
+   `IInspectable`:
 
-   Guessing further is not worth it: a wrong slot is undefined behaviour, not a
-   failed call, and the probe above demonstrated that concretely. The next
-   attempt should start from a known-good implementation's declaration for the
-   `{2a59116d-…}` IID, and gate every call on that exact IID so a build that
-   exposes a different one reports unsupported instead of calling into the
-   wrong slots.
+   | Slot | Behaviour |
+   | --- | --- |
+   | 0, 2, 4, 6, 7, 8, 9 | `STATUS_ACCESS_VIOLATION` |
+   | 1, 3 | S_OK, no output (consistent with event-removal methods) |
+   | 5, 10 | `E_INVALIDARG` |
+   | 11 | `E_NOTIMPL` |
+
+   The two slots that survive return `E_INVALIDARG` for **every** combination
+   tried: both `eRender` and `eCapture`, all three roles, with and without a
+   live audio session for the calling process, and with the first argument as
+   both a bare process id and as an `HSTRING` session instance identifier of
+   the form Windows actually uses --
+   `{0.0.0.…}.{guid}|\Device\…\firefox.exe%b{…}|8%b6528`. Counting the vtable
+   by walking entries that stay inside the implementing module does not
+   terminate usefully, so the method count could not be recovered that way
+   either.
+
+   That is as far as black-box probing goes. A wrong slot is undefined
+   behaviour rather than a failed call -- seven of twelve faulted -- and a
+   wrong *write* would land in the user's persisted audio settings rather than
+   in a crash. The next attempt needs a reference declaration for the
+   `{2a59116d-…}` IID, not another guess, and every call should be gated on
+   that exact IID so a build exposing a different one reports unsupported
+   instead of calling into the wrong slots.
 2. **Relay a single application.** *Blocked on the OS build here.* Metering one
    application no longer needs process loopback (see Metering), but capturing
    its audio still does, and that requires build 20348 or newer; this machine
