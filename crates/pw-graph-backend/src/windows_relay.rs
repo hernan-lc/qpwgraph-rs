@@ -48,6 +48,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// How long `start` waits for each endpoint to report that WASAPI accepted it.
 const ENDPOINT_START_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Which endpoints the relay uses, by Core Audio device id.
+///
+/// `None` means the current default playback endpoint, which is also what a
+/// removed or unplugged device falls back to. Ids come straight from the
+/// driver's endpoint enumeration, so the UI can offer the same list it already
+/// draws as graph nodes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelayEndpoints {
+    /// Endpoint whose loopback is sent to peers.
+    pub capture: Option<String>,
+    /// Endpoint that peer audio is played on.
+    pub playback: Option<String>,
+}
+
 /// The relay engine plus the two WASAPI threads that feed and drain it.
 ///
 /// Dropping this stops both threads and the engine. The struct is deliberately
@@ -56,22 +70,37 @@ pub(crate) struct WindowsRelayDevices {
     engine: RelayEngine,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    endpoints: RelayEndpoints,
 }
 
 impl WindowsRelayDevices {
-    pub(crate) fn start(config: EngineConfig) -> BackendResult<Self> {
+    /// The endpoints this instance was started with. Changing them means
+    /// restarting the devices, because a WASAPI client is bound to its device.
+    pub(crate) fn endpoints(&self) -> &RelayEndpoints {
+        &self.endpoints
+    }
+
+    pub(crate) fn start(config: EngineConfig, endpoints: RelayEndpoints) -> BackendResult<Self> {
         let engine = RelayEngine::start(config)
             .map_err(|error| BackendError::native(format!("relay engine start failed: {error}")))?;
         let stop = Arc::new(AtomicBool::new(false));
 
         let mut threads = Vec::with_capacity(2);
         let mut ready = Vec::with_capacity(2);
-        for (name, direction) in [
-            ("qpwgraph-relay-capture", Direction::Capture),
-            ("qpwgraph-relay-render", Direction::Render),
+        for (name, direction, device) in [
+            (
+                "qpwgraph-relay-capture",
+                Direction::Capture,
+                endpoints.capture.clone(),
+            ),
+            (
+                "qpwgraph-relay-render",
+                Direction::Render,
+                endpoints.playback.clone(),
+            ),
         ] {
             let (thread, started) =
-                spawn_endpoint_thread(name, engine.handle(), Arc::clone(&stop), direction)?;
+                spawn_endpoint_thread(name, engine.handle(), Arc::clone(&stop), direction, device)?;
             threads.push(thread);
             ready.push(started);
         }
@@ -80,6 +109,7 @@ impl WindowsRelayDevices {
             engine,
             stop,
             threads,
+            endpoints,
         };
         // Wait for both endpoints to report that WASAPI accepted them. Without
         // this a failure inside a thread would leave a host that looks started
@@ -137,6 +167,7 @@ fn spawn_endpoint_thread(
     handle: RelayHandle,
     stop: Arc<AtomicBool>,
     direction: Direction,
+    device_id: Option<String>,
 ) -> BackendResult<(JoinHandle<()>, StartResult)> {
     let (started_tx, started_rx) = mpsc::channel();
     let thread = thread::Builder::new()
@@ -151,7 +182,7 @@ fn spawn_endpoint_thread(
                 ))));
                 return;
             }
-            run_endpoint(&handle, &stop, direction, started_tx);
+            run_endpoint(&handle, &stop, direction, device_id.as_deref(), started_tx);
             unsafe { Com::CoUninitialize() };
         })
         .map_err(|error| {
@@ -183,9 +214,10 @@ fn run_endpoint(
     handle: &RelayHandle,
     stop: &Arc<AtomicBool>,
     direction: Direction,
+    device_id: Option<&str>,
     started: Sender<BackendResult<()>>,
 ) {
-    match open_endpoint(direction) {
+    match open_endpoint(direction, device_id) {
         Ok(client) => {
             let _ = started.send(Ok(()));
             let result = match direction {
@@ -201,13 +233,28 @@ fn run_endpoint(
     }
 }
 
-fn open_endpoint(direction: Direction) -> BackendResult<Audio::IAudioClient> {
+fn open_endpoint(
+    direction: Direction,
+    device_id: Option<&str>,
+) -> BackendResult<Audio::IAudioClient> {
     let enumerator: Audio::IMMDeviceEnumerator =
         unsafe { Com::CoCreateInstance(&Audio::MMDeviceEnumerator, None, CLSCTX_ALL) }
             .map_err(|error| native("create MMDeviceEnumerator", error))?;
-    // Both directions target the render endpoint: capture reads its loopback.
-    let device = unsafe { enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole) }
-        .map_err(|error| native("open default playback endpoint", error))?;
+    // Both directions target a render endpoint: capture reads its loopback.
+    // A named device that has since been unplugged falls back to the default
+    // rather than failing the whole relay.
+    let device = match device_id {
+        Some(id) => {
+            let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())) }.ok()
+        }
+        None => None,
+    };
+    let device = match device {
+        Some(device) => device,
+        None => unsafe { enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole) }
+            .map_err(|error| native("open default playback endpoint", error))?,
+    };
     let client: Audio::IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
         .map_err(|error| native("activate audio client", error))?;
 

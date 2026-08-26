@@ -27,6 +27,8 @@ mod windows_relay;
 
 #[cfg(target_os = "windows")]
 pub use windows::WindowsAudioDriver;
+#[cfg(all(target_os = "windows", feature = "relay"))]
+pub use windows_relay::RelayEndpoints;
 
 // The native driver and its focused submodules use these graph types in their
 // internal implementation. Keep the imports at the façade boundary so those
@@ -323,6 +325,64 @@ mod tests {
                 .expect("every relay role is carried by the WASAPI endpoints");
             assert!(driver.relay_devices_active());
         }
+    }
+
+    /// The relay can be pointed at a chosen playback endpoint instead of
+    /// always following the default, and switching it while hosting must not
+    /// silently drop the host -- which it did before the restart was handled.
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    #[test]
+    fn windows_relay_endpoints_are_selectable_and_survive_a_switch() {
+        if std::env::var_os("PW_GRAPH_TEST_RELAY").is_none() {
+            return;
+        }
+        let Ok(mut driver) = WindowsAudioDriver::new() else {
+            return;
+        };
+        if driver.refresh().is_err() {
+            return;
+        }
+        let choices = driver.relay_endpoint_choices();
+        if choices.len() < 2 {
+            // Selection needs somewhere to switch to.
+            return;
+        }
+        assert_eq!(
+            driver.relay_endpoints(),
+            &RelayEndpoints::default(),
+            "the relay follows the default endpoint until told otherwise"
+        );
+
+        let pick = |index: usize| RelayEndpoints {
+            capture: Some(choices[index].0.clone()),
+            playback: Some(choices[index].0.clone()),
+        };
+        driver
+            .set_relay_endpoints(pick(1))
+            .expect("a listed endpoint is selectable");
+        let port = driver
+            .relay_start_host(RelayHostRequest {
+                device_name: "qpwgraph-rs-test".into(),
+                pin: "123456".into(),
+                port: 0,
+                codec: RelayCodecKind::Opus,
+                frame_ms: 10,
+                transport: Default::default(),
+            })
+            .expect("hosting works on a non-default endpoint");
+        assert!(port > 0);
+
+        driver
+            .set_relay_endpoints(pick(0))
+            .expect("switching endpoints while hosting");
+        let status = driver.relay_status();
+        assert!(
+            status.host_active,
+            "the host must survive the endpoint switch"
+        );
+        assert!(status.host_port.is_some());
+
+        driver.relay_stop_host().expect("relay host should stop");
     }
 
     /// Volume changed *outside* this process must reach the cached state

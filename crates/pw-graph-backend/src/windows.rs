@@ -68,6 +68,8 @@ struct WorkerSnapshot {
     /// Nodes that can be metered. Endpoints expose `IAudioMeterInformation`;
     /// application sessions do not.
     meterable: BTreeSet<NodeId>,
+    /// Render endpoints as `(device id, display name)`, for relay selection.
+    playback_endpoints: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -99,6 +101,12 @@ pub struct WindowsAudioDriver {
     /// Relay engine plus its WASAPI endpoints, created on first use.
     #[cfg(feature = "relay")]
     relay: Option<crate::windows_relay::WindowsRelayDevices>,
+    /// Which endpoints the relay should use next time it starts.
+    #[cfg(feature = "relay")]
+    relay_endpoints: crate::windows_relay::RelayEndpoints,
+    /// Playback endpoints the relay can be pointed at, refreshed with the graph.
+    #[cfg(feature = "relay")]
+    relay_endpoint_choices: Vec<(String, String)>,
 }
 
 impl WindowsAudioDriver {
@@ -140,24 +148,111 @@ impl WindowsAudioDriver {
             worker: Some(worker),
             #[cfg(feature = "relay")]
             relay: None,
+            #[cfg(feature = "relay")]
+            relay_endpoints: Default::default(),
+            #[cfg(feature = "relay")]
+            relay_endpoint_choices: snapshot.playback_endpoints,
         })
     }
 
     /// Create the relay engine and its WASAPI endpoints on first use.
+    ///
+    /// A WASAPI client is bound to the device it was opened on, so changing
+    /// the selected endpoints tears the devices down and starts them again.
     #[cfg(feature = "relay")]
     fn ensure_relay(
         &mut self,
         config: pw_graph_relay::EngineConfig,
     ) -> BackendResult<&crate::windows_relay::WindowsRelayDevices> {
+        let wanted = self.relay_endpoints.clone();
+        let restart = self
+            .relay
+            .as_ref()
+            .is_some_and(|devices| devices.endpoints() != &wanted);
+        if restart {
+            self.relay = None;
+        }
         match self.relay.as_ref() {
             Some(devices) => {
                 devices.handle().update_config(config);
             }
             None => {
-                self.relay = Some(crate::windows_relay::WindowsRelayDevices::start(config)?);
+                self.relay = Some(crate::windows_relay::WindowsRelayDevices::start(
+                    config, wanted,
+                )?);
             }
         }
         Ok(self.relay.as_ref().expect("relay was just created"))
+    }
+
+    /// Choose which endpoints the relay taps and plays on.
+    ///
+    /// Ids are Core Audio device ids, the same ones the endpoint nodes are
+    /// built from, so the UI can offer the cards it already draws. `None`
+    /// tracks the default playback endpoint. Takes effect on the next relay
+    /// start; if the relay is already running it is restarted.
+    #[cfg(feature = "relay")]
+    pub fn set_relay_endpoints(
+        &mut self,
+        endpoints: crate::windows_relay::RelayEndpoints,
+    ) -> BackendResult<()> {
+        if self.relay_endpoints == endpoints {
+            return Ok(());
+        }
+        self.relay_endpoints = endpoints;
+        // Only restart something that is already running; otherwise the choice
+        // simply applies when the relay is next started.
+        let Some(devices) = self.relay.as_ref() else {
+            return Ok(());
+        };
+        let mut config = devices.handle().config();
+        let status = devices.handle().status();
+        // A WASAPI client cannot be moved between devices, so the endpoints are
+        // torn down and rebuilt. Keep hosting across that: switching which
+        // speakers are relayed must not silently drop the peers' connection
+        // point, and reusing the port keeps an already-shared address valid.
+        if let Some(port) = status.host_port {
+            config.port = port;
+        }
+        // Stop the listener before dropping, so the control port is released
+        // rather than lingering while the new engine tries to bind it.
+        if status.host_active {
+            let _ = devices.handle().host_stop();
+        }
+        self.relay = None;
+
+        let devices = self.ensure_relay(config.clone())?;
+        if !status.host_active {
+            return Ok(());
+        }
+        match devices.handle().host_start() {
+            Ok(_) => Ok(()),
+            Err(_) if config.port != 0 => {
+                // The old socket has not been released yet. Keeping the host
+                // running matters more than keeping its port, so fall back to
+                // a fresh ephemeral one; callers read the port from status.
+                config.port = 0;
+                devices.handle().update_config(config);
+                devices.handle().host_start().map(|_| ()).map_err(|error| {
+                    BackendError::native(format!("relay host restart failed: {error}"))
+                })
+            }
+            Err(error) => Err(BackendError::native(format!(
+                "relay host restart failed: {error}"
+            ))),
+        }
+    }
+
+    /// Endpoints the relay is configured to use.
+    #[cfg(feature = "relay")]
+    pub fn relay_endpoints(&self) -> &crate::windows_relay::RelayEndpoints {
+        &self.relay_endpoints
+    }
+
+    /// Playback endpoints the relay can be pointed at, as `(id, name)`.
+    #[cfg(feature = "relay")]
+    pub fn relay_endpoint_choices(&self) -> Vec<(String, String)> {
+        self.relay_endpoint_choices.clone()
     }
 
     /// The relay's format, fixed by the WASAPI endpoints that carry it.
@@ -205,6 +300,10 @@ impl WindowsAudioDriver {
         }
         self.graph = graph;
         self.meterable = snapshot.meterable;
+        #[cfg(feature = "relay")]
+        {
+            self.relay_endpoint_choices = snapshot.playback_endpoints;
+        }
         Ok(())
     }
 }
@@ -709,7 +808,24 @@ impl CoreAudioWorker {
             .iter()
             .map(|endpoint| endpoint.node_id)
             .collect();
-        Ok(WorkerSnapshot { graph, meterable })
+        let playback_endpoints = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.flow == Audio::eRender)
+            .map(|endpoint| {
+                let name = graph
+                    .nodes
+                    .get(&endpoint.node_id)
+                    .map(|node| node.name.clone())
+                    .unwrap_or_else(|| endpoint.id.clone());
+                (endpoint.id.clone(), name)
+            })
+            .collect();
+        Ok(WorkerSnapshot {
+            graph,
+            meterable,
+            playback_endpoints,
+        })
     }
 
     /// Subscribe to endpoint volume/mute changes so the hardware keys and the
