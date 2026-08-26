@@ -232,8 +232,13 @@ impl CanvasGeometry {
     }
 
     /// Nearest link within `radius`, or `-1`.
+    ///
+    /// The curve is flattened into short segments and the pointer is measured
+    /// against those segments rather than against the flattening points alone.
+    /// Sampling only the points left blind gaps roughly a segment long between
+    /// them, so clicking a visibly drawn edge frequently missed it.
     pub(crate) fn find_link_at(&self, x: f32, y: f32, radius: f32) -> i32 {
-        const SAMPLES: usize = 24;
+        const SEGMENTS: usize = 32;
         let mut best = (radius * radius, -1);
         for link in &self.links {
             let (Some(start), Some(end)) = (self.pin(link.start_pin), self.pin(link.end_pin))
@@ -243,12 +248,14 @@ impl CanvasGeometry {
             let start = self.anchor(&start, (0.0, 0.0));
             let end = self.anchor(&end, (0.0, 0.0));
             let curve = bezier(start, end);
-            for step in 0..=SAMPLES {
-                let point = cubic_at(&curve, step as f32 / SAMPLES as f32);
-                let distance = (point.0 - x).powi(2) + (point.1 - y).powi(2);
+            let mut previous = cubic_at(&curve, 0.0);
+            for step in 1..=SEGMENTS {
+                let current = cubic_at(&curve, step as f32 / SEGMENTS as f32);
+                let distance = squared_distance_to_segment((x, y), previous, current);
                 if distance <= best.0 {
                     best = (distance, link.id);
                 }
+                previous = current;
             }
         }
         best.1
@@ -397,6 +404,19 @@ fn directed_bezier(
         (end.0 + end_sign * offset, end.1),
         end,
     ]
+}
+
+/// Squared distance from `point` to the nearest position on a line segment.
+fn squared_distance_to_segment(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
+    let (vx, vy) = (end.0 - start.0, end.1 - start.1);
+    let (wx, wy) = (point.0 - start.0, point.1 - start.1);
+    let length_sq = vx * vx + vy * vy;
+    if length_sq <= f32::EPSILON {
+        return wx * wx + wy * wy;
+    }
+    let t = ((wx * vx + wy * vy) / length_sq).clamp(0.0, 1.0);
+    let closest = (start.0 + t * vx, start.1 + t * vy);
+    (point.0 - closest.0).powi(2) + (point.1 - closest.1).powi(2)
 }
 
 fn cubic_at(curve: &Cubic, t: f32) -> (f32, f32) {
@@ -597,6 +617,143 @@ mod tests {
             canvas.find_link_at(midpoint.0, midpoint.1 + 120.0, LINK_HIT_RADIUS),
             -1
         );
+    }
+
+    /// Two cards far enough apart that the drawn edge is long and curved, which
+    /// is exactly where sampled-point hit testing used to leave gaps.
+    fn long_link_geometry() -> CanvasGeometry {
+        let mut canvas = CanvasGeometry::default();
+        canvas.replace(
+            vec![
+                NodeGeometry {
+                    id: 7,
+                    x: 100.0,
+                    y: 100.0,
+                    width: 244.0,
+                    height: 120.0,
+                    selected: false,
+                    pins_visible: true,
+                },
+                NodeGeometry {
+                    id: 8,
+                    x: 1500.0,
+                    y: 700.0,
+                    width: 244.0,
+                    height: 120.0,
+                    selected: false,
+                    pins_visible: true,
+                },
+            ],
+            vec![
+                PinGeometry {
+                    pin_id: 101,
+                    node_id: 7,
+                    is_output: true,
+                    x: 100.0 + 244.0 - PIN_INSET,
+                    y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
+                    visible: true,
+                    node_selected: false,
+                },
+                PinGeometry {
+                    pin_id: 202,
+                    node_id: 8,
+                    is_output: false,
+                    x: 1500.0 + PIN_INSET,
+                    y: 700.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
+                    visible: true,
+                    node_selected: false,
+                },
+            ],
+            vec![LinkGeometry {
+                id: 1,
+                start_pin: 101,
+                end_pin: 202,
+            }],
+            false,
+        );
+        canvas
+    }
+
+    /// The point on the rendered curve at `t`, in world coordinates.
+    fn point_on_link(canvas: &CanvasGeometry, link_id: i32, t: f32) -> (f32, f32) {
+        let link = canvas
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .expect("link is cached");
+        let start = canvas.pin(link.start_pin).expect("start pin is cached");
+        let end = canvas.pin(link.end_pin).expect("end pin is cached");
+        let curve = bezier(
+            canvas.anchor(&start, (0.0, 0.0)),
+            canvas.anchor(&end, (0.0, 0.0)),
+        );
+        cubic_at(&curve, t)
+    }
+
+    #[test]
+    fn link_hit_test_detects_points_between_bezier_samples() {
+        let canvas = long_link_geometry();
+        // 0.37 lands between the old sample stops; so does every other step
+        // here, which is the whole point: the curve is continuous, not dotted.
+        let awkward = point_on_link(&canvas, 1, 0.37);
+        assert_eq!(
+            canvas.find_link_at(awkward.0, awkward.1, LINK_HIT_RADIUS),
+            1
+        );
+
+        for step in 0..=200 {
+            let t = step as f32 / 200.0;
+            let point = point_on_link(&canvas, 1, t);
+            assert_eq!(
+                canvas.find_link_at(point.0, point.1, LINK_HIT_RADIUS),
+                1,
+                "the pointer sits on the drawn curve at t={t}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_hit_test_rejects_points_far_from_curve() {
+        let canvas = long_link_geometry();
+        let point = point_on_link(&canvas, 1, 0.37);
+        assert_eq!(
+            canvas.find_link_at(point.0, point.1 + LINK_HIT_RADIUS * 6.0, LINK_HIT_RADIUS),
+            -1
+        );
+        assert_eq!(canvas.find_link_at(0.0, 0.0, LINK_HIT_RADIUS), -1);
+    }
+
+    #[test]
+    fn pin_wins_over_link_at_endpoint() {
+        let canvas = long_link_geometry();
+        let pin = canvas.pin(202).unwrap();
+        let hit = canvas.hit_test(pin.x, pin.y);
+        assert_eq!(hit.kind, HIT_PIN);
+        assert_eq!(hit.id, 202);
+    }
+
+    #[test]
+    fn node_wins_when_a_link_passes_behind_a_card() {
+        let mut canvas = long_link_geometry();
+        // Park a third card straight over the middle of the curve.
+        let middle = point_on_link(&canvas, 1, 0.5);
+        let mut nodes = canvas.nodes.clone();
+        nodes.push(NodeGeometry {
+            id: 9,
+            x: middle.0 - 122.0,
+            y: middle.1 - 60.0,
+            width: 244.0,
+            height: 120.0,
+            selected: false,
+            pins_visible: true,
+        });
+        let pins: Vec<PinGeometry> = canvas.pins.values().copied().collect();
+        let links = canvas.links.clone();
+        canvas.replace(nodes, pins, links, false);
+
+        let hit = canvas.hit_test(middle.0, middle.1);
+        assert_eq!(hit.kind, HIT_NODE, "cards stay clickable through an edge");
+        assert_eq!(hit.id, 9);
     }
 
     #[test]
