@@ -23,6 +23,7 @@ use pw_graph_core::{
 use std::collections::BTreeMap;
 
 use windows::Win32::Media::Audio;
+use windows::Win32::Media::Multimedia::{DRV_QUERYDEVICEINTERFACE, DRV_QUERYDEVICEINTERFACESIZE};
 
 const WINDOWS_MIDI_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     topology: true,
@@ -40,16 +41,19 @@ const WINDOWS_MIDI_CAPABILITIES: BackendCapabilities = BackendCapabilities {
 const MM_OK: u32 = 0;
 
 /// Local id space: inputs and outputs are numbered separately by WinMM, so the
-/// kind is folded into the id to keep them distinct inside one namespace.
-const INPUT_TAG: u64 = 0x0100_0000;
-const OUTPUT_TAG: u64 = 0x0200_0000;
-const PORT_TAG: u64 = 0x0400_0000;
+/// kind is folded into the id to keep them distinct inside one namespace. The
+/// lower 52 bits hold a hash of the opaque Plug and Play interface name; the
+/// upper four local bits identify the graph resource kind.
+const INPUT_TAG: u64 = 0x0010_0000_0000_0000;
+const OUTPUT_TAG: u64 = 0x0020_0000_0000_0000;
+const PORT_TAG: u64 = 0x0040_0000_0000_0000;
+const IDENTITY_HASH_MASK: u64 = 0x000F_FFFF_FFFF_FFFF;
 
 fn graph_id(local: u64) -> u64 {
     encode_backend_id(BackendNamespace::WindowsMidi, local)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum DeviceKind {
     Input,
     Output,
@@ -92,6 +96,7 @@ pub struct WindowsMidiDriver {
     graph: Graph,
     devices: BTreeMap<PortId, MidiDevice>,
     connections: Vec<OpenConnection>,
+    positions: BTreeMap<NodeId, [f32; 2]>,
     next_link: u64,
 }
 
@@ -114,9 +119,12 @@ impl WindowsMidiDriver {
         Ok(driver)
     }
 
-    /// Devices WinMM currently reports, in index order per direction.
+    /// Devices WinMM currently reports, in index order per direction. The
+    /// device index is retained only for calls into WinMM; graph identity is
+    /// based on the device interface name whenever the system provides one.
     fn enumerate() -> Vec<MidiDevice> {
         let mut devices = Vec::new();
+        let mut identities = BTreeMap::<(DeviceKind, String), u32>::new();
         for index in 0..unsafe { Audio::midiInGetNumDevs() } {
             let mut caps = Audio::MIDIINCAPSW::default();
             let status = unsafe {
@@ -132,7 +140,27 @@ impl WindowsMidiDriver {
             // The caps structs are packed, so the name is copied out before it
             // can be referenced.
             let name = { caps.szPname };
-            devices.push(device_from_caps(index, DeviceKind::Input, wide_name(&name)));
+            let name = wide_name(&name);
+            let manufacturer = { caps.wMid };
+            let product = { caps.wPid };
+            let driver_version = { caps.vDriverVersion };
+            let base_identity =
+                query_device_interface(DeviceKind::Input, index).unwrap_or_else(|| {
+                    fallback_identity(
+                        DeviceKind::Input,
+                        &name,
+                        manufacturer,
+                        product,
+                        driver_version,
+                    )
+                });
+            let identity = unique_identity(DeviceKind::Input, base_identity, &mut identities);
+            devices.push(device_from_identity(
+                index,
+                DeviceKind::Input,
+                name,
+                &identity,
+            ));
         }
         for index in 0..unsafe { Audio::midiOutGetNumDevs() } {
             let mut caps = Audio::MIDIOUTCAPSW::default();
@@ -147,10 +175,26 @@ impl WindowsMidiDriver {
                 continue;
             }
             let name = { caps.szPname };
-            devices.push(device_from_caps(
+            let name = wide_name(&name);
+            let manufacturer = { caps.wMid };
+            let product = { caps.wPid };
+            let driver_version = { caps.vDriverVersion };
+            let base_identity =
+                query_device_interface(DeviceKind::Output, index).unwrap_or_else(|| {
+                    fallback_identity(
+                        DeviceKind::Output,
+                        &name,
+                        manufacturer,
+                        product,
+                        driver_version,
+                    )
+                });
+            let identity = unique_identity(DeviceKind::Output, base_identity, &mut identities);
+            devices.push(device_from_identity(
                 index,
                 DeviceKind::Output,
-                wide_name(&name),
+                name,
+                &identity,
             ));
         }
         devices
@@ -185,19 +229,124 @@ impl WindowsMidiDriver {
     }
 }
 
+#[cfg(test)]
 fn device_from_caps(index: u32, kind: DeviceKind, name: String) -> MidiDevice {
+    let identity = fallback_identity(kind, &name, 0, 0, 0);
+    device_from_identity(index, kind, name, &identity)
+}
+
+fn device_from_identity(index: u32, kind: DeviceKind, name: String, identity: &str) -> MidiDevice {
     let tag = match kind {
         DeviceKind::Input => INPUT_TAG,
         DeviceKind::Output => OUTPUT_TAG,
     };
-    let local = tag | u64::from(index);
+    let hash = stable_identity_hash(kind, identity);
+    let local = tag | hash;
     MidiDevice {
         index,
         kind,
         name,
         node_id: NodeId(graph_id(local)),
-        port_id: PortId(graph_id(PORT_TAG | local)),
+        port_id: PortId(graph_id(PORT_TAG | hash)),
     }
+}
+
+fn fallback_identity(
+    kind: DeviceKind,
+    name: &str,
+    manufacturer: u16,
+    product: u16,
+    driver_version: u32,
+) -> String {
+    format!(
+        "fallback:{}:{manufacturer:04x}:{product:04x}:{driver_version:08x}:{}",
+        kind.as_str(),
+        name.trim()
+    )
+}
+
+fn unique_identity(
+    kind: DeviceKind,
+    base: String,
+    identities: &mut BTreeMap<(DeviceKind, String), u32>,
+) -> String {
+    let occurrence = identities.entry((kind, base.clone())).or_insert(0);
+    let identity = if *occurrence == 0 {
+        base
+    } else {
+        format!("{}#{}", base, *occurrence + 1)
+    };
+    *occurrence += 1;
+    identity
+}
+
+impl DeviceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+}
+
+fn stable_identity_hash(kind: DeviceKind, identity: &str) -> u64 {
+    // FNV-1a is small, deterministic, and sufficient after the opaque system
+    // identity has already made the device distinction. The kind is included
+    // again so a fallback string can never alias across directions.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in format!("winmm-midi:{}:{identity}", kind.as_str()).bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash & IDENTITY_HASH_MASK).max(1)
+}
+
+/// Query the stable Plug and Play interface name without opening the MIDI
+/// device. WinMM requires the numeric device id to be cast to its handle type
+/// for these two system-intercepted messages; the returned string is opaque
+/// and is only used as a stable identity key.
+fn query_device_interface(kind: DeviceKind, index: u32) -> Option<String> {
+    let mut size = 0u32;
+    let device = index as usize as *mut core::ffi::c_void;
+    let status = unsafe {
+        match kind {
+            DeviceKind::Input => Audio::midiInMessage(
+                Some(Audio::HMIDIIN(device)),
+                DRV_QUERYDEVICEINTERFACESIZE,
+                Some((&mut size as *mut u32) as usize),
+                Some(0),
+            ),
+            DeviceKind::Output => Audio::midiOutMessage(
+                Some(Audio::HMIDIOUT(device)),
+                DRV_QUERYDEVICEINTERFACESIZE,
+                Some((&mut size as *mut u32) as usize),
+                Some(0),
+            ),
+        }
+    };
+    if status != MM_OK || size == 0 || size > 1024 * 1024 {
+        return None;
+    }
+    let mut buffer = vec![0u16; (size as usize).div_ceil(std::mem::size_of::<u16>())];
+    let status = unsafe {
+        match kind {
+            DeviceKind::Input => Audio::midiInMessage(
+                Some(Audio::HMIDIIN(device)),
+                DRV_QUERYDEVICEINTERFACE,
+                Some(buffer.as_mut_ptr() as usize),
+                Some(size as usize),
+            ),
+            DeviceKind::Output => Audio::midiOutMessage(
+                Some(Audio::HMIDIOUT(device)),
+                DRV_QUERYDEVICEINTERFACE,
+                Some(buffer.as_mut_ptr() as usize),
+                Some(size as usize),
+            ),
+        }
+    };
+    (status == MM_OK)
+        .then(|| wide_name(&buffer))
+        .filter(|name| !name.is_empty())
 }
 
 /// WinMM device names are a fixed-size, NUL-padded UTF-16 array.
@@ -264,7 +413,7 @@ impl GraphDriver for WindowsMidiDriver {
         self.connections = surviving;
         for (node_id, position) in graph.default_node_positions() {
             if let Some(node) = graph.nodes.get_mut(&node_id) {
-                node.position = position;
+                node.position = self.positions.get(&node_id).copied().unwrap_or(position);
             }
         }
         self.graph = graph;
@@ -357,6 +506,7 @@ impl GraphDriver for WindowsMidiDriver {
             .get_mut(&node)
             .ok_or(GraphError::MissingNode(node))?
             .position = position;
+        self.positions.insert(node, position);
         Ok(())
     }
 
@@ -370,6 +520,10 @@ impl GraphDriver for WindowsMidiDriver {
 
     fn is_port_type(&self, port_type: PortType) -> bool {
         port_type == PortType::MidiJack
+    }
+
+    fn is_link_mutable(&self, link: LinkId) -> bool {
+        self.graph.link(link).is_some()
     }
 }
 
@@ -402,6 +556,61 @@ mod tests {
         assert_ne!(input.port_id, output.port_id);
         // And a node never collides with a port.
         assert_ne!(input.node_id.0, input.port_id.0);
+    }
+
+    #[test]
+    fn device_identity_does_not_change_when_winmm_reorders_indices() {
+        let first = device_from_identity(
+            0,
+            DeviceKind::Input,
+            "keyboard".into(),
+            "\\\\?\\midi#{stable-key}",
+        );
+        let reordered = device_from_identity(
+            7,
+            DeviceKind::Input,
+            "keyboard".into(),
+            "\\\\?\\midi#{stable-key}",
+        );
+        let different = device_from_identity(
+            0,
+            DeviceKind::Input,
+            "keyboard".into(),
+            "\\\\?\\midi#{other-key}",
+        );
+
+        assert_eq!(first.node_id, reordered.node_id);
+        assert_eq!(first.port_id, reordered.port_id);
+        assert_ne!(first.node_id, different.node_id);
+        assert_ne!(first.port_id, different.port_id);
+    }
+
+    #[test]
+    fn fallback_identity_includes_direction_and_device_description() {
+        let input = fallback_identity(DeviceKind::Input, "same", 1, 2, 3);
+        let output = fallback_identity(DeviceKind::Output, "same", 1, 2, 3);
+        assert_ne!(input, output);
+        assert_ne!(
+            input,
+            fallback_identity(DeviceKind::Input, "other", 1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn identity_occurrences_are_scoped_to_each_direction() {
+        let mut identities = BTreeMap::new();
+        assert_eq!(
+            unique_identity(DeviceKind::Input, "same-interface".into(), &mut identities),
+            "same-interface"
+        );
+        assert_eq!(
+            unique_identity(DeviceKind::Output, "same-interface".into(), &mut identities),
+            "same-interface"
+        );
+        assert_eq!(
+            unique_identity(DeviceKind::Input, "same-interface".into(), &mut identities),
+            "same-interface#2"
+        );
     }
 
     #[test]

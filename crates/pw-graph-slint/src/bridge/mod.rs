@@ -845,7 +845,7 @@ mod tests {
         /// the header and below the audio block when the card has one.
         fn body_point(&self, card: &NodeRow) -> (f32, f32) {
             let top = canvas::BODY_TOP
-                + if card.has_audio_controls {
+                + if card.has_audio_panel {
                     canvas::AUDIO_BLOCK_HEIGHT
                 } else {
                     canvas::PORT_LIST_TOP
@@ -1548,7 +1548,7 @@ mod tests {
         };
         let body_of = |row: &NodeRow| -> (f32, f32) {
             let top = canvas::BODY_TOP
-                + if row.has_audio_controls {
+                + if row.has_audio_panel {
                     canvas::AUDIO_BLOCK_HEIGHT
                 } else {
                     canvas::PORT_LIST_TOP

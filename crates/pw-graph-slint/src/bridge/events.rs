@@ -39,7 +39,7 @@ pub(crate) fn pump(
     if application.source.graph_dirty()
         || application.last_refresh.elapsed() >= refresh_interval(&application)
     {
-        if let Err(error) = application.source.refresh() {
+        if let Err(error) = application.source.refresh_if_needed() {
             application.status = application.tf("status.refresh_failed", &[("error", error)]);
         } else {
             application.last_refresh = Instant::now();

@@ -177,8 +177,13 @@ export component NodeAudioControl inherits Rectangle {
     in property <bool> mute-enabled: true;
     in property <float> meter-peak: 0.0;
     in property <float> meter-peak-position: 0.0;
+    in property <float> meter-rms: 0.0;
+    in property <float> meter-rms-position: 0.0;
+    in property <bool> meter-peak-supported: false;
+    in property <bool> meter-rms-supported: false;
     in property <bool> meter-available: false;
     in property <string> meter-label: UiI18n.localized("canvas.unknown");
+    in property <bool> mute-known: false;
     in property <color> accent: #57c785;
     callback volume-changed(float);
     callback mute-toggled();
@@ -217,6 +222,7 @@ export component NodeAudioControl inherits Rectangle {
         // Dimmed while the level is unknown or the node cannot be written, so
         // an un-read fader never looks like a real setting.
         Rectangle { x: 8px; y: 8px; width: (parent.width - 16px) * root.displayed-volume-position; height: 3px; background: #9aa7b2; border-radius: 2px; opacity: root.volume-known && root.volume-enabled ? 1.0 : 0.35; }
+        Rectangle { x: 8px; y: 13px; width: (parent.width - 16px) * root.meter-rms-position; height: 2px; background: #d6e7f2; border-radius: 1px; visible: root.meter-available && root.meter-rms-supported; opacity: 0.9; }
 
         for _[index] in 31: Rectangle {
             property <float> fraction: index / 30;
@@ -224,7 +230,8 @@ export component NodeAudioControl inherits Rectangle {
             y: 18px;
             width: 1px;
             height: 4px;
-            background: root.meter-available && self.fraction <= root.meter-peak-position
+            visible: root.meter-peak-supported;
+            background: root.meter-available && root.meter-peak-supported && self.fraction <= root.meter-peak-position
                 ? self.fraction < 0.72 ? #39a6e0 : self.fraction < 0.90 ? #dca44c : #dd4b48
                 : self.fraction < 0.72 ? #22465b : self.fraction < 0.90 ? #5b482d : #5c292a;
         }
@@ -278,7 +285,12 @@ export component NodeAudioControl inherits Rectangle {
         Image {
             x: 6px; y: 5px; width: 16px; height: 16px;
             source: root.displayed-muted ? @image-url("../../../assets/icons/volume_muted.svg") : @image-url("../../../assets/icons/volume.svg");
-            opacity: root.displayed-muted ? 0.95 : 0.82;
+            opacity: root.mute-known ? (root.displayed-muted ? 0.95 : 0.82) : 0.3;
+        }
+        if !root.mute-known: Text {
+            x: 0px; y: 2px; width: parent.width; height: 22px;
+            text: "?"; color: #f0c36a; font-size: 15px * UiTheme.node-scale;
+            horizontal-alignment: center; vertical-alignment: center;
         }
         mute-touch := TouchArea {
             property <bool> pending: false;
@@ -291,6 +303,43 @@ export component NodeAudioControl inherits Rectangle {
                 root.mute-toggled();
             }
         }
+    }
+}
+
+/// A meter-only panel used by nodes which expose a level but no audio control.
+export component NodeMeter inherits Rectangle {
+    in property <float> rms: 0.0;
+    in property <float> peak: 0.0;
+    in property <float> rms-position: 0.0;
+    in property <float> peak-position: 0.0;
+    in property <bool> peak-supported: false;
+    in property <bool> rms-supported: false;
+    in property <bool> available: false;
+    in property <string> label: UiI18n.localized("canvas.unknown");
+    in property <color> accent: #57c785;
+
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 2px; y: 7px; width: parent.width - 4px; height: 14px;
+        background: #1d232a; border-color: #3f4b58; border-width: 1px; border-radius: 4px;
+        Rectangle {
+            x: 5px; y: 5px; width: (parent.width - 10px) * root.rms-position; height: 3px;
+            background: #d6e7f2; border-radius: 2px;
+            visible: root.available && root.rms-supported;
+        }
+        Rectangle {
+            x: 5px; y: 9px; width: (parent.width - 10px) * root.peak-position; height: 3px;
+            background: root.peak-position < 0.72 ? #39a6e0 : root.peak-position < 0.90 ? #dca44c : #dd4b48;
+            visible: root.available && root.peak-supported;
+        }
+    }
+    Text {
+        x: 7px; y: 7px; width: parent.width - 14px; height: 14px;
+        text: root.available ? "" : root.label;
+        color: #aebdca; font-size: 8px * UiTheme.node-scale;
+        horizontal-alignment: center; vertical-alignment: center; overflow: elide;
     }
 }
 

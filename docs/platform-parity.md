@@ -22,15 +22,15 @@ system that the UI has to present honestly instead of pretending around.
 
 ### Graph and topology
 
-| Feature | Linux (PipeWire) | Windows (Core Audio) | Status |
+| Feature | Linux (PipeWire + ALSA) | Windows (Core Audio + WinMM) | Status |
 | --- | --- | --- | --- |
-| Read graph topology | Yes | Yes, as endpoints and application sessions | Equivalent |
+| Read graph topology | Yes | Yes, as endpoints, sessions, and MIDI devices | Partial: the graph models differ |
 | Node/port naming | Yes | Yes | Equivalent |
-| Create a connection | Yes | MIDI only | Partial |
-| Remove a connection | Yes | MIDI only | Partial |
-| Select an existing connection | Yes | Yes | Equivalent |
-| Drag an edge onto another port | Yes | MIDI only | Partial |
-| Patchbay persistence | Yes | Not applicable | Platform limitation |
+| Create a connection | Audio and ALSA MIDI | WinMM MIDI only | Partial |
+| Remove a connection | Audio and ALSA MIDI | WinMM MIDI only | Partial |
+| Select an existing connection | Yes | Yes, for observed audio and mutable MIDI links | Equivalent |
+| Drag an edge onto another port | Yes | WinMM MIDI only | Partial |
+| Patchbay persistence | Mutable links | Mutable WinMM MIDI links only | Partial |
 
 Windows Core Audio has no arbitrary patchbay. What the driver shows is the
 routing Windows reports — which application session is playing to which
@@ -43,24 +43,38 @@ connection UI light up would produce controls that cannot work. Selection and
 inspection are unaffected: an observed link is still clickable, still
 selectable, and still shown in the graph. Only mutation is refused.
 
+Windows MIDI is a separate native graph. WinMM `midiConnect` and
+`midiDisconnect` provide real mutable input-to-output links, so MIDI pins and
+links remain draggable, reroutable, and disconnectable even when they share a
+canvas with immutable Core Audio relationships. WinMM permits one output per
+input in this backend; a second fan-out request is rejected with an explicit
+error. MIDI device graph IDs use the device-interface identity when WinMM
+provides one and fall back to a direction/name/driver identity when it does
+not. The numeric WinMM index is used only when opening the current device.
+
+Observed Windows Audio links are excluded from patchbay snapshots. Mutable
+WinMM MIDI links are included, and missing devices are simply skipped during
+later activation rather than being attached to a device that reused an index.
+
 ### Audio state and controls
 
 | Feature | Linux (PipeWire) | Windows (Core Audio) | Status |
 | --- | --- | --- | --- |
 | Set volume | Yes | Yes (endpoint and session) | Equivalent |
 | Set mute | Yes | Yes (endpoint and session) | Equivalent |
-| Read volume | Yes, from node Props | Yes | Equivalent |
-| Read mute | Yes, from node Props | Yes | Equivalent |
+| Read volume | Yes, from node Props | Yes, endpoint and session | Equivalent |
+| Read mute | Yes, from node Props | Yes, endpoint and session | Equivalent |
 | Follow external changes | At each rebuild | Yes, event driven | Partial (Linux) |
 | Volume above unity | Yes, to 150% | No, clamped at 100% | Platform limitation, reported per node |
 | Per-node capability reporting | Yes | Yes | Equivalent |
 
 The backend owns audio state. `GraphDriver::node_audio_state` returns a
 `NodeAudioState` whose `volume` and `muted` are `Option`, where `None` means
-"this backend cannot tell you". The UI renders that as an unknown value — a
-dimmed fader — and never substitutes a number of its own. Before this, every
-card claimed 90% and unmuted regardless of the real system state, which was
-visibly wrong on Windows.
+"this backend does not currently know". The UI renders that as an unknown
+value — a dimmed fader and an explicit unknown mute mark — and never
+substitutes a number or boolean of its own. Readability and writability are
+tracked independently, so a control can remain actionable without claiming a
+value was read successfully.
 
 Two gaps remain here:
 
@@ -68,7 +82,9 @@ PipeWire volume and mute are read back from each node's `Props` during a graph
 rebuild, so a level set in pavucontrol or with a media key reaches the cards.
 Windows goes further and follows changes by callback, without waiting for a
 rebuild; doing the same on Linux would mean holding a param subscription per
-node rather than reading on demand.
+node rather than reading on demand. Linux Props subscriptions remain a
+separate roadmap item; the current readback preserves missing fields as
+unknown.
 Windows volume and mute are event driven: `IAudioSessionEvents` and
 `IAudioEndpointVolumeCallback` carry the new values in their payload, so the
 cache follows a change made anywhere on the system without polling and without
@@ -86,29 +102,37 @@ top of a Windows fader is no longer dead travel that silently clamps.
 | --- | --- | --- | --- |
 | Meter a capture source | Yes | Yes | Equivalent |
 | Meter a playback sink | Yes, through its monitor | Yes | Equivalent |
-| Meter an application stream | Yes | Yes, peak only | Equivalent |
+| Meter an application stream | Yes | Yes where the session exposes a native peak meter | Partial: Windows is peak-only |
 | Meter policies (off/on-demand/always) | Yes | Yes | Equivalent |
+| Meter-only / control-only nodes | Yes | Yes | Equivalent |
 
 Playback sinks used to be excluded from metering on Linux: eligibility required
 an audio *source* port, which a sink does not have, so speakers and other output
 devices silently showed nothing even though the meter stream already knew how to
 read a sink through its monitor. Fixed; `api::is_measurable_audio_node` now
-holds the rule for both backends and is unit-tested.
+holds the shared PipeWire eligibility rule and is unit-tested. Windows reports
+meter capability from the native endpoint/session interface instead.
 
-On Windows, endpoints expose `IAudioMeterInformation` and application sessions
-do not, so a session reports no meter capability rather than being given a meter
-it can never fill. `IAudioMeterInformation` is an endpoint facility with a peak
-reading and no RMS, which is why Windows endpoints report `meter_peak: true` and
-`meter_rms: false`, and `audio_meters` reports `rms: 0.0`.
+On Windows, endpoints and sessions are checked independently for
+`IAudioMeterInformation`. A session that does not expose it reports no meter
+capability rather than being given a meter it can never fill. The available
+Core Audio meter is peak-only, which is why Windows meter-capable nodes report
+`meter_peak: true`, `meter_rms: false`, and `audio_meters` leaves `rms` at zero.
+The UI requests meters from per-node meter capability, not from the presence of
+volume controls, and renders peak-only and meter-only nodes without inventing an
+RMS bar. Nodes with no meter capability start in `Unavailable`, not a permanent
+`Waiting` state.
 
-Per-session metering is *not* reachable by extending `IAudioSessionControl`.
-The supported route is **process loopback capture**:
+Capturing a process's actual PCM stream is *not* reachable by extending
+`IAudioSessionControl`. The supported route for that separate feature is
+**process loopback capture**:
 `ActivateAudioInterfaceAsync` with
 `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, which records what one process
 tree renders, on build 20348 and newer. The driver already has the bridge it
 needs -- `IAudioSessionControl2::GetProcessId` is read for every session -- so
-one capture path would serve both per-application meters and relaying a single
-application. It is *Missing*, not a platform limitation.
+one capture path would serve per-application relay, but it is not required for
+the session peak meter described above. It is *Missing*, not a platform
+limitation.
 
 An implementation was attempted and reverted: the activation reproducibly
 brought down the process with `STATUS_HEAP_CORRUPTION` on this machine, and a
@@ -130,11 +154,11 @@ are flagged passive, monitor-only, and non-reconnecting.
 | --- | --- | --- | --- |
 | Effect nodes | Yes | No | Missing |
 | Effect insertion into a link | Yes | No | Platform limitation (needs routing) |
-| Relay: send this machine's audio | Yes | Yes | Equivalent |
-| Relay: play a peer's audio here | Yes | Yes | Equivalent |
+| Relay: send this machine's audio | Yes | Yes, selected render endpoint loopback | Partial |
+| Relay: play a peer's audio here | Yes | Yes, selected render endpoint | Partial |
 | Relay: peer audio as a microphone | Yes | No | Platform limitation |
 | Relay: send one application only | Yes | No | Missing (build 20348+) |
-| Relay: choose which endpoint | n/a | Yes | Equivalent |
+| Relay: choose which endpoint | n/a | Yes, by stable endpoint ID | Partial |
 | MIDI | ALSA | WinMM, with routing | Partial |
 
 Effect *insertion* depends on rewiring an existing link, so it cannot exist on
@@ -151,18 +175,37 @@ On Linux those endpoints are two virtual PipeWire nodes, so *any* application
 can be routed into or out of the relay through the patchbay, in either
 direction.
 
-On Windows they are WASAPI streams on the default playback endpoint: a loopback
-capture supplies what this machine is playing, and a render stream plays what
-peers send. That is enough to use a phone as a speaker, or to play a phone's
-audio here.
+On Windows they are WASAPI streams on the selected render endpoint: a loopback
+capture supplies what that endpoint is playing, and a render stream plays what
+peers send. The relay panel exposes the available endpoint names and persists
+their stable Core Audio IDs independently for capture and playback. `None`
+means the system default; a removed saved endpoint falls back to the default.
+Changing a selection restarts only the relay WASAPI streams when they are
+already active.
 
 What Windows cannot do is present received audio as a **microphone** to other
 applications. That needs a capture endpoint, and Windows has no user-mode API
 for creating one — a selectable device requires a kernel-mode driver, which is
-what tools like VB-Cable install. `relay_connect` therefore refuses an emit
-role outright rather than accepting it and carrying no audio. For the same
-reason, individual applications cannot be routed into the relay on Windows;
+what tools like VB-Cable install. On Windows, the relay `emit` role means
+sending the selected render endpoint's loopback, while `receive` means playing
+peer audio on the selected render endpoint; neither role creates a microphone
+device. Individual applications cannot be routed into the relay on Windows;
 the loopback tap is whole-endpoint.
+
+### Refresh and notification behavior
+
+The composite driver gives each child its own refresh responsibility. PipeWire
+and Core Audio are refreshed immediately when their event-driven dirty flag is
+set, with a five-second safety reconciliation. ALSA MIDI is reconciled on its
+own three-second cadence, and WinMM MIDI on a two-second cadence. A MIDI poll
+therefore does not force Core Audio to enumerate every endpoint and session.
+
+Core Audio session callbacks retain the owning endpoint ID and enqueue an
+endpoint-local session refresh. `OnSessionCreated`, session state changes, and
+session display-name changes rebuild only that endpoint's session subgraph;
+device and endpoint notifications still request a full topology refresh. Pure
+volume and mute callbacks update the shared audio-state cache and do not mark
+the graph topology dirty.
 
 ## Roadmap
 
@@ -217,15 +260,11 @@ above the line has landed; what is left is blocked on something specific.
    is 10.0.19045. An attempt from the API reference alone brought the process
    down with `STATUS_HEAP_CORRUPTION`. Needs a newer machine and Microsoft's
    ApplicationLoopback sample rather than the reference.
-3. **`OnSessionCreated` handling.** Currently coarse; a new session should be
-   folded in without a full re-enumeration. The periodic churn is gone, so this
-   is now the only remaining source of unnecessary re-enumeration.
-4. **Linux param subscriptions.** PipeWire controls are read at each rebuild;
+3. **Linux param subscriptions.** PipeWire controls are read at each rebuild;
    Windows follows them by callback. Holding a `Props` subscription per node
    would close that gap.
-5. **Windows free-standing effect nodes.** Requires a processing host that does
+4. **Windows free-standing effect nodes.** Requires a processing host that does
    not depend on graph routing.
-6. **Relay: send one application only.** Depends on process loopback above.
 
 ## Testing across platforms
 
@@ -240,6 +279,14 @@ Behaviour that genuinely needs a live daemon stays in each driver's own tests
 and is opt-in through environment variables (`PW_GRAPH_TEST_METERS`,
 `PW_GRAPH_TEST_LINKS`, `PW_GRAPH_TEST_RELAY`, `PW_GRAPH_TEST_VOLUME`), so an
 offline or containerised build does not fail for want of an audio server.
+
+The repository workflow in `.github/workflows/ci.yml` separates native Linux
+and Windows checks: formatting, workspace tests, clippy, feature-matrix
+compiles, and locked release builds. Native Linux development packages are
+installed in the Linux job. These checks do not require a live PipeWire daemon,
+physical MIDI hardware, or a Windows endpoint. The manual acceptance checklists
+remain separate live smoke tests and are not represented as passed by unit or
+CI results.
 
 When adding a rule both backends rely on, put the rule in `api` and test it
 there. A shared rule tested only inside one driver is untested on the other

@@ -214,6 +214,8 @@ pub(crate) struct NodeView {
     pub(crate) font_scale: f32,
     pub(crate) appearance: NodeAppearance,
     pub(crate) has_audio_controls: bool,
+    /// Whether the node has any audio panel, including a meter-only panel.
+    pub(crate) has_audio_panel: bool,
     /// Whether this node''s backend can rewire it. Backend-wide `connect` is a
     /// union across children, so it is true on Windows because MIDI can route
     /// even though Core Audio cannot.
@@ -376,15 +378,17 @@ impl UiGraphState {
             // node type: a Windows application session and a Windows endpoint
             // are both "audio nodes" but expose different controls.
             let audio = backend_profiles.get(&node.id).copied().unwrap_or_default();
-            let has_audio_controls = audio.capabilities.has_any_control()
-                && node.ports.iter().any(|id| {
-                    graph
-                        .port(*id)
-                        .is_some_and(|port| port.port_type == PortType::Audio)
-                });
+            let has_audio = node.ports.iter().any(|id| {
+                graph
+                    .port(*id)
+                    .is_some_and(|port| port.port_type == PortType::Audio)
+            });
+            let has_audio_controls = audio.capabilities.has_any_control() && has_audio;
+            let has_meter = audio.capabilities.has_any_meter() && has_audio;
+            let has_audio_panel = has_audio_controls || has_meter;
             let collapsed = appearance.collapsed;
             let thumbnail = self.thumbnail_mode;
-            let height = node_height(thumbnail, collapsed, has_audio_controls, ports.len());
+            let height = node_height(thumbnail, collapsed, has_audio_panel, ports.len());
             nodes.push(NodeView {
                 id: self.ids.node(node.id).unwrap_or_default(),
                 node_id: node.id,
@@ -402,12 +406,20 @@ impl UiGraphState {
                 font_scale: self.node_text_scale,
                 appearance,
                 has_audio_controls,
+                has_audio_panel,
                 connectable: audio.connectable,
                 audio,
-                meter: meters.get(&node.id).copied().unwrap_or(MeterReading {
-                    state: meter_fallback,
-                    ..MeterReading::default()
-                }),
+                meter: meters
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or_else(|| MeterReading {
+                        state: if has_meter {
+                            meter_fallback
+                        } else {
+                            MeterState::Unavailable
+                        },
+                        ..MeterReading::default()
+                    }),
                 ports,
             });
         }
@@ -513,7 +525,7 @@ impl UiGraphState {
                                     let (offset_x, offset_y) = crate::canvas::pin_offset(
                                         node.width,
                                         index,
-                                        node.has_audio_controls,
+                                        node.has_audio_panel,
                                         port.direction != Direction::Sink,
                                     );
                                     (node.position[0] + offset_x, node.position[1] + offset_y)
@@ -968,19 +980,14 @@ pub(crate) fn link_color(port_type: PortType, direction: Direction, name: &str) 
     }
 }
 
-fn node_height(
-    thumbnail: bool,
-    collapsed: bool,
-    has_audio_controls: bool,
-    port_count: usize,
-) -> f32 {
+fn node_height(thumbnail: bool, collapsed: bool, has_audio_panel: bool, port_count: usize) -> f32 {
     if thumbnail {
         62.0
     } else if collapsed {
         COLLAPSED_NODE_HEIGHT
     } else {
         NODE_HEADER_HEIGHT
-            + if has_audio_controls {
+            + if has_audio_panel {
                 AUDIO_CONTROLS_HEIGHT
             } else {
                 0.0
@@ -1447,6 +1454,127 @@ mod tests {
             .iter()
             .filter(|node| node.has_audio_controls)
             .all(|node| node.audio.capabilities.volume_write));
+    }
+
+    #[test]
+    fn unknown_mute_is_not_projected_as_unmuted() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let profiles = graph
+            .nodes
+            .keys()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    NodeBackendProfile {
+                        state: NodeAudioState {
+                            volume: Some(0.5),
+                            volume_readable: true,
+                            volume_writable: true,
+                            mute_writable: true,
+                            ..NodeAudioState::UNSUPPORTED
+                        },
+                        capabilities: NodeCapabilities {
+                            volume_read: true,
+                            volume_write: true,
+                            mute_read: false,
+                            mute_write: true,
+                            ..NodeCapabilities::NONE
+                        },
+                        connectable: true,
+                    },
+                )
+            })
+            .collect();
+
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &BTreeMap::new(),
+            MeterState::Unavailable,
+            &profiles,
+        );
+        assert!(snapshot
+            .nodes
+            .iter()
+            .all(|node| node.audio.state.muted.is_none()));
+        assert!(snapshot
+            .nodes
+            .iter()
+            .all(|node| node.audio.state.muted != Some(true)));
+    }
+
+    #[test]
+    fn known_mute_values_are_distinct_from_unknown() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let mut profiles = fully_capable_backend_profiles(&graph);
+        profiles.get_mut(&NodeId(1)).unwrap().state.muted = Some(false);
+        profiles.get_mut(&NodeId(2)).unwrap().state.muted = Some(true);
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &BTreeMap::new(),
+            MeterState::Unavailable,
+            &profiles,
+        );
+        let source = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(1))
+            .unwrap();
+        let sink = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(2))
+            .unwrap();
+        assert_eq!(source.audio.state.muted, Some(false));
+        assert_eq!(sink.audio.state.muted, Some(true));
+    }
+
+    #[test]
+    fn meter_only_and_peak_only_nodes_get_an_independent_panel() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let profiles = graph
+            .nodes
+            .keys()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    NodeBackendProfile {
+                        state: NodeAudioState::UNSUPPORTED,
+                        capabilities: NodeCapabilities {
+                            meter_peak: true,
+                            ..NodeCapabilities::NONE
+                        },
+                        connectable: false,
+                    },
+                )
+            })
+            .collect();
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &BTreeMap::new(),
+            MeterState::Waiting,
+            &profiles,
+        );
+        assert!(snapshot
+            .nodes
+            .iter()
+            .all(|node| !node.has_audio_controls && node.has_audio_panel));
+        assert!(snapshot
+            .nodes
+            .iter()
+            .all(|node| node.audio.capabilities.meter_peak && !node.audio.capabilities.meter_rms));
+        assert!(snapshot
+            .nodes
+            .iter()
+            .all(|node| node.meter.state == MeterState::Waiting));
     }
 
     #[test]

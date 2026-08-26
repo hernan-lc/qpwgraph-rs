@@ -222,7 +222,13 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
                 application.status = application.t("status.connections_unavailable");
                 return;
             }
-            let count = application.source.graph().links.len();
+            let count = application
+                .source
+                .graph()
+                .links
+                .values()
+                .filter(|link| application.source.is_link_mutable(link.id))
+                .count();
             if count == 0 {
                 application.status = application.t("status.no_links");
                 return;
@@ -232,6 +238,7 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
                 .graph()
                 .links
                 .values()
+                .filter(|link| application.source.is_link_mutable(link.id))
                 .filter_map(|link| {
                     application
                         .source

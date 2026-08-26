@@ -69,12 +69,14 @@ struct WorkerSnapshot {
     /// answered the meter query.
     meterable: BTreeSet<NodeId>,
     /// Render endpoints as `(device id, display name)`, for relay selection.
+    #[cfg(feature = "relay")]
     playback_endpoints: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
 enum WorkerCommand {
     Refresh(Sender<BackendResult<WorkerSnapshot>>),
+    RefreshIfNeeded(Sender<BackendResult<WorkerSnapshot>>),
     SetVolume(NodeId, f32, Sender<BackendResult<()>>),
     SetMute(NodeId, bool, Sender<BackendResult<()>>),
     SetMeterPolicy(MeterPolicy, Sender<BackendResult<()>>),
@@ -114,12 +116,25 @@ impl WindowsAudioDriver {
         let (command_tx, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let dirty = Arc::new(AtomicBool::new(true));
+        let topology_dirty = Arc::new(AtomicBool::new(true));
+        let session_dirty_endpoints = Arc::new(Mutex::new(BTreeSet::new()));
         let worker_dirty = Arc::clone(&dirty);
+        let worker_topology_dirty = Arc::clone(&topology_dirty);
+        let worker_session_dirty_endpoints = Arc::clone(&session_dirty_endpoints);
         let audio_states: AudioStateMap = Arc::new(Mutex::new(BTreeMap::new()));
         let worker_states = Arc::clone(&audio_states);
         let worker = thread::Builder::new()
             .name("qpwgraph-windows-audio".into())
-            .spawn(move || worker_thread(command_rx, ready_tx, worker_dirty, worker_states))
+            .spawn(move || {
+                worker_thread(
+                    command_rx,
+                    ready_tx,
+                    worker_dirty,
+                    worker_topology_dirty,
+                    worker_session_dirty_endpoints,
+                    worker_states,
+                )
+            })
             .map_err(|error| {
                 BackendError::Native(format!("could not start audio worker: {error}"))
             })?;
@@ -286,10 +301,14 @@ impl WindowsAudioDriver {
             .map_err(|_| BackendError::Native("Windows audio worker stopped responding".into()))?
     }
 
-    fn refresh_snapshot(&mut self) -> BackendResult<()> {
+    fn refresh_snapshot(&mut self, only_if_needed: bool) -> BackendResult<()> {
         let (sender, receiver) = mpsc::channel();
         self.command_tx
-            .send(WorkerCommand::Refresh(sender))
+            .send(if only_if_needed {
+                WorkerCommand::RefreshIfNeeded(sender)
+            } else {
+                WorkerCommand::Refresh(sender)
+            })
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
         let snapshot = Self::response(receiver)?;
         let mut graph = snapshot.graph;
@@ -323,7 +342,12 @@ impl GraphDriver for WindowsAudioDriver {
     }
 
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
-        self.refresh_snapshot()?;
+        self.refresh_snapshot(false)?;
+        Ok(self.graph.nodes.values().cloned().collect())
+    }
+
+    fn refresh_if_needed(&mut self) -> BackendResult<Vec<Node>> {
+        self.refresh_snapshot(true)?;
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
@@ -397,6 +421,7 @@ impl GraphDriver for WindowsAudioDriver {
         if let Ok(mut states) = self.audio_states.lock() {
             if let Some(state) = states.get_mut(&node) {
                 state.muted = Some(muted);
+                state.mute_readable = true;
             }
         }
         Ok(())
@@ -413,6 +438,7 @@ impl GraphDriver for WindowsAudioDriver {
         if let Ok(mut states) = self.audio_states.lock() {
             if let Some(state) = states.get_mut(&node) {
                 state.volume = Some(volume.clamp(0.0, 1.0));
+                state.volume_readable = true;
             }
         }
         Ok(())
@@ -616,6 +642,8 @@ fn worker_thread(
     command_rx: Receiver<WorkerCommand>,
     ready_tx: Sender<BackendResult<WorkerSnapshot>>,
     dirty: Arc<AtomicBool>,
+    topology_dirty: Arc<AtomicBool>,
+    session_dirty_endpoints: Arc<Mutex<BTreeSet<String>>>,
     audio_states: AudioStateMap,
 ) {
     let initialized = unsafe { Com::CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -626,7 +654,12 @@ fn worker_thread(
         return;
     }
 
-    let worker = CoreAudioWorker::new(Arc::clone(&dirty), audio_states);
+    let worker = CoreAudioWorker::new(
+        Arc::clone(&dirty),
+        Arc::clone(&topology_dirty),
+        Arc::clone(&session_dirty_endpoints),
+        audio_states,
+    );
     let mut worker = match worker {
         Ok(worker) => worker,
         Err(error) => {
@@ -651,6 +684,9 @@ fn worker_thread(
         match command {
             WorkerCommand::Refresh(sender) => {
                 let _ = sender.send(worker.refresh_graph());
+            }
+            WorkerCommand::RefreshIfNeeded(sender) => {
+                let _ = sender.send(worker.refresh_if_needed());
             }
             WorkerCommand::SetVolume(node, volume, sender) => {
                 let _ = sender.send(worker.set_volume(node, volume));
@@ -681,6 +717,7 @@ fn worker_thread(
     unsafe { Com::CoUninitialize() };
 }
 
+#[derive(Clone)]
 struct EndpointRecord {
     id: String,
     flow: Audio::EDataFlow,
@@ -709,11 +746,19 @@ struct CoreAudioWorker {
     enumerator: Audio::IMMDeviceEnumerator,
     endpoint_notification: Audio::IMMNotificationClient,
     dirty: Arc<AtomicBool>,
+    topology_dirty: Arc<AtomicBool>,
+    session_dirty_endpoints: Arc<Mutex<BTreeSet<String>>>,
+    graph: Graph,
     session_notifications: Vec<(
+        String,
         Audio::IAudioSessionManager2,
         Audio::IAudioSessionNotification,
     )>,
-    session_events: Vec<(Audio::IAudioSessionControl, Audio::IAudioSessionEvents)>,
+    session_events: Vec<(
+        String,
+        Audio::IAudioSessionControl,
+        Audio::IAudioSessionEvents,
+    )>,
     endpoints: Vec<EndpointRecord>,
     sessions: Vec<SessionRecord>,
     meter_policy: MeterPolicy,
@@ -728,12 +773,18 @@ struct CoreAudioWorker {
 }
 
 impl CoreAudioWorker {
-    fn new(dirty: Arc<AtomicBool>, audio_states: AudioStateMap) -> BackendResult<Self> {
+    fn new(
+        dirty: Arc<AtomicBool>,
+        topology_dirty: Arc<AtomicBool>,
+        session_dirty_endpoints: Arc<Mutex<BTreeSet<String>>>,
+        audio_states: AudioStateMap,
+    ) -> BackendResult<Self> {
         let enumerator: Audio::IMMDeviceEnumerator =
             unsafe { Com::CoCreateInstance(&Audio::MMDeviceEnumerator, None, CLSCTX_ALL) }
                 .map_err(|error| native_error("create MMDeviceEnumerator", error))?;
         let endpoint_notification: Audio::IMMNotificationClient = EndpointNotificationClient {
             dirty: Arc::clone(&dirty),
+            topology_dirty: Arc::clone(&topology_dirty),
         }
         .into();
         unsafe {
@@ -745,6 +796,9 @@ impl CoreAudioWorker {
             enumerator,
             endpoint_notification,
             dirty,
+            topology_dirty,
+            session_dirty_endpoints,
+            graph: Graph::default(),
             session_notifications: Vec::new(),
             session_events: Vec::new(),
             audio_states,
@@ -757,6 +811,12 @@ impl CoreAudioWorker {
     }
 
     fn refresh_graph(&mut self) -> BackendResult<WorkerSnapshot> {
+        // Consume the reason for this rebuild before touching COM. A callback
+        // that races the refresh sets the flag again and will be observed by
+        // the next command; clearing it at the end would lose that event.
+        self.dirty.store(false, Ordering::Release);
+        self.topology_dirty.store(false, Ordering::Release);
+        take_session_dirty_endpoints(&self.session_dirty_endpoints);
         self.clear_session_callbacks();
         let mut endpoint_specs = Vec::new();
         for flow in [Audio::eRender, Audio::eCapture] {
@@ -812,13 +872,14 @@ impl CoreAudioWorker {
         }
         self.endpoints = endpoints;
         self.sessions = sessions;
-        self.dirty.store(false, Ordering::Release);
+        self.graph = graph.clone();
         let states = self.read_audio_states();
         if let Ok(mut shared) = self.audio_states.lock() {
             *shared = states;
         }
         self.register_endpoint_volume_callbacks();
         let meterable = self.meterable_nodes();
+        #[cfg(feature = "relay")]
         let playback_endpoints = self
             .endpoints
             .iter()
@@ -835,8 +896,147 @@ impl CoreAudioWorker {
         Ok(WorkerSnapshot {
             graph,
             meterable,
+            #[cfg(feature = "relay")]
             playback_endpoints,
         })
+    }
+
+    /// Apply a session-only notification without enumerating the endpoint
+    /// collection again. The callback never crosses the COM apartment with a
+    /// borrowed `IAudioSessionControl`; it only records the owning endpoint,
+    /// and this worker performs all enumeration and registration here.
+    fn refresh_if_needed(&mut self) -> BackendResult<WorkerSnapshot> {
+        if self.topology_dirty.load(Ordering::Acquire) {
+            return self.refresh_graph();
+        }
+        let dirty_endpoints = take_session_dirty_endpoints(&self.session_dirty_endpoints);
+        if dirty_endpoints.is_empty() {
+            // This is the periodic safety reconciliation for an event-driven
+            // backend. It is intentionally the only path that re-enumerates
+            // every endpoint when nothing more precise was signalled.
+            return self.refresh_graph();
+        }
+        self.refresh_dirty_sessions(&dirty_endpoints)
+    }
+
+    fn refresh_dirty_sessions(
+        &mut self,
+        dirty_endpoints: &BTreeSet<String>,
+    ) -> BackendResult<WorkerSnapshot> {
+        // If an endpoint notification raced the session callback, the set can
+        // mention an endpoint that has already disappeared. A full refresh is
+        // the safe way to discover that topology change.
+        if dirty_endpoints
+            .iter()
+            .any(|id| !self.endpoints.iter().any(|endpoint| &endpoint.id == id))
+        {
+            self.topology_dirty.store(true, Ordering::Release);
+            return self.refresh_graph();
+        }
+
+        self.dirty.store(false, Ordering::Release);
+        let old_session_nodes: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|session| dirty_endpoints.contains(&session.endpoint_id))
+            .map(|session| session.node_id)
+            .collect();
+        self.clear_session_callbacks_for(dirty_endpoints);
+        self.sessions
+            .retain(|session| !dirty_endpoints.contains(&session.endpoint_id));
+
+        // Remove only the old session subgraphs. Endpoint nodes and ports stay
+        // intact, so links belonging to unrelated endpoints and their COM
+        // registrations remain untouched.
+        let old_ports: BTreeSet<_> = old_session_nodes
+            .iter()
+            .filter_map(|node_id| self.graph.node(*node_id))
+            .flat_map(|node| node.ports.iter().copied())
+            .collect();
+        let old_links: Vec<_> = self
+            .graph
+            .links
+            .values()
+            .filter(|link| {
+                old_ports.contains(&link.output_port) || old_ports.contains(&link.input_port)
+            })
+            .map(|link| link.id)
+            .collect();
+        for link_id in old_links {
+            let _ = self.graph.remove_link(link_id);
+        }
+        for node_id in &old_session_nodes {
+            if let Some(node) = self.graph.nodes.remove(node_id) {
+                for port_id in node.ports {
+                    self.graph.ports.remove(&port_id);
+                }
+            }
+        }
+
+        let endpoints: Vec<_> = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| dirty_endpoints.contains(&endpoint.id))
+            .cloned()
+            .collect();
+        let mut graph = std::mem::take(&mut self.graph);
+        let sessions_result = (|| {
+            for endpoint in endpoints {
+                let sessions = self.add_sessions(&endpoint, &mut graph)?;
+                self.sessions.extend(sessions);
+            }
+            Ok::<(), BackendError>(())
+        })();
+        self.graph = graph;
+        sessions_result?;
+
+        // New session controls may have different readability from the old
+        // ones; update only the affected endpoint and leave every other node's
+        // cache untouched.
+        if let Ok(mut shared) = self.audio_states.lock() {
+            for node_id in &old_session_nodes {
+                shared.remove(node_id);
+            }
+            for endpoint in &self.endpoints {
+                if dirty_endpoints.contains(&endpoint.id) {
+                    shared.insert(endpoint.node_id, self.endpoint_audio_state(endpoint));
+                }
+            }
+            for session in &self.sessions {
+                if dirty_endpoints.contains(&session.endpoint_id) {
+                    shared.insert(session.node_id, self.session_audio_state(session));
+                }
+            }
+        }
+
+        for (node_id, position) in self.graph.default_node_positions() {
+            if let Some(node) = self.graph.nodes.get_mut(&node_id) {
+                node.position = position;
+            }
+        }
+        Ok(self.snapshot())
+    }
+
+    fn snapshot(&self) -> WorkerSnapshot {
+        WorkerSnapshot {
+            graph: self.graph.clone(),
+            meterable: self.meterable_nodes(),
+            #[cfg(feature = "relay")]
+            playback_endpoints: self
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.flow == Audio::eRender)
+                .map(|endpoint| {
+                    let name = self
+                        .graph
+                        .nodes
+                        .get(&endpoint.node_id)
+                        .map(|node| node.name.clone())
+                        .unwrap_or_else(|| endpoint.id.clone());
+                    (endpoint.id.clone(), name)
+                })
+                .collect(),
+        }
     }
 
     /// Subscribe to endpoint volume/mute changes so the hardware keys and the
@@ -971,11 +1171,13 @@ impl CoreAudioWorker {
 
         let notification: Audio::IAudioSessionNotification = SessionNotificationClient {
             dirty: Arc::clone(&self.dirty),
+            endpoint_id: endpoint.id.clone(),
+            session_dirty_endpoints: Arc::clone(&self.session_dirty_endpoints),
         }
         .into();
         if unsafe { manager.RegisterSessionNotification(&notification) }.is_ok() {
             self.session_notifications
-                .push((manager.clone(), notification));
+                .push((endpoint.id.clone(), manager.clone(), notification));
         }
 
         let enumerator = match unsafe { manager.GetSessionEnumerator() } {
@@ -1041,12 +1243,15 @@ impl CoreAudioWorker {
             let meter = control.cast::<IAudioMeterInformation>().ok();
             let events: Audio::IAudioSessionEvents = SessionEventsClient {
                 dirty: Arc::clone(&self.dirty),
+                endpoint_id: endpoint.id.clone(),
+                session_dirty_endpoints: Arc::clone(&self.session_dirty_endpoints),
                 node_id,
                 states: Arc::clone(&self.audio_states),
             }
             .into();
             if unsafe { control.RegisterAudioSessionNotification(&events) }.is_ok() {
-                self.session_events.push((control, events));
+                self.session_events
+                    .push((endpoint.id.clone(), control, events));
             }
             result.push(SessionRecord {
                 endpoint_id: endpoint.id.clone(),
@@ -1060,12 +1265,33 @@ impl CoreAudioWorker {
     }
 
     fn clear_session_callbacks(&mut self) {
-        for (control, events) in self.session_events.drain(..) {
+        for (_, control, events) in self.session_events.drain(..) {
             let _ = unsafe { control.UnregisterAudioSessionNotification(&events) };
         }
-        for (manager, notification) in self.session_notifications.drain(..) {
+        for (_, manager, notification) in self.session_notifications.drain(..) {
             let _ = unsafe { manager.UnregisterSessionNotification(&notification) };
         }
+    }
+
+    fn clear_session_callbacks_for(&mut self, endpoint_ids: &BTreeSet<String>) {
+        self.session_events
+            .retain(|(endpoint_id, control, events)| {
+                if endpoint_ids.contains(endpoint_id) {
+                    let _ = unsafe { control.UnregisterAudioSessionNotification(events) };
+                    false
+                } else {
+                    true
+                }
+            });
+        self.session_notifications
+            .retain(|(endpoint_id, manager, notification)| {
+                if endpoint_ids.contains(endpoint_id) {
+                    let _ = unsafe { manager.UnregisterSessionNotification(notification) };
+                    false
+                } else {
+                    true
+                }
+            });
     }
 
     fn set_volume(&self, node: NodeId, volume: f32) -> BackendResult<()> {
@@ -1252,9 +1478,35 @@ impl Drop for CoreAudioWorker {
     }
 }
 
+fn mark_session_endpoint_dirty(
+    dirty: &Arc<AtomicBool>,
+    endpoints: &Arc<Mutex<BTreeSet<String>>>,
+    endpoint_id: &str,
+) {
+    if let Ok(mut endpoints) = endpoints.lock() {
+        endpoints.insert(endpoint_id.to_owned());
+    }
+    dirty.store(true, Ordering::Release);
+}
+
+fn take_session_dirty_endpoints(endpoints: &Arc<Mutex<BTreeSet<String>>>) -> BTreeSet<String> {
+    endpoints
+        .lock()
+        .map(|mut endpoints| std::mem::take(&mut *endpoints))
+        .unwrap_or_default()
+}
+
 #[windows::core::implement(Audio::IMMNotificationClient)]
 struct EndpointNotificationClient {
     dirty: Arc<AtomicBool>,
+    topology_dirty: Arc<AtomicBool>,
+}
+
+impl EndpointNotificationClient {
+    fn mark_topology_dirty(&self) {
+        self.topology_dirty.store(true, Ordering::Release);
+        self.dirty.store(true, Ordering::Release);
+    }
 }
 
 impl Audio::IMMNotificationClient_Impl for EndpointNotificationClient_Impl {
@@ -1263,17 +1515,17 @@ impl Audio::IMMNotificationClient_Impl for EndpointNotificationClient_Impl {
         _device_id: &PCWSTR,
         _new_state: Audio::DEVICE_STATE,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_topology_dirty();
         Ok(())
     }
 
     fn OnDeviceAdded(&self, _device_id: &PCWSTR) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_topology_dirty();
         Ok(())
     }
 
     fn OnDeviceRemoved(&self, _device_id: &PCWSTR) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_topology_dirty();
         Ok(())
     }
 
@@ -1283,7 +1535,7 @@ impl Audio::IMMNotificationClient_Impl for EndpointNotificationClient_Impl {
         _role: Audio::ERole,
         _device_id: &PCWSTR,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_topology_dirty();
         Ok(())
     }
 
@@ -1292,7 +1544,7 @@ impl Audio::IMMNotificationClient_Impl for EndpointNotificationClient_Impl {
         _device_id: &PCWSTR,
         _key: &PROPERTYKEY,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_topology_dirty();
         Ok(())
     }
 }
@@ -1300,6 +1552,8 @@ impl Audio::IMMNotificationClient_Impl for EndpointNotificationClient_Impl {
 #[windows::core::implement(Audio::IAudioSessionNotification)]
 struct SessionNotificationClient {
     dirty: Arc<AtomicBool>,
+    endpoint_id: String,
+    session_dirty_endpoints: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Audio::IAudioSessionNotification_Impl for SessionNotificationClient_Impl {
@@ -1307,7 +1561,11 @@ impl Audio::IAudioSessionNotification_Impl for SessionNotificationClient_Impl {
         &self,
         _new_session: windows::core::Ref<Audio::IAudioSessionControl>,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        mark_session_endpoint_dirty(
+            &self.dirty,
+            &self.session_dirty_endpoints,
+            &self.endpoint_id,
+        );
         Ok(())
     }
 }
@@ -1320,14 +1578,14 @@ fn apply_state_change(states: &AudioStateMap, node_id: NodeId, volume: f32, mute
     let Ok(mut states) = states.lock() else {
         return;
     };
-    if let Some(state) = states.get_mut(&node_id) {
-        if state.volume_readable {
-            state.volume = Some(volume);
-        }
-        if state.mute_readable {
-            state.muted = Some(muted);
-        }
-    }
+    let state = states.entry(node_id).or_default();
+    // A valid callback payload is itself a read. This also promotes a node
+    // whose initial activation/readback failed, so it does not stay unknown
+    // until the next topology rebuild.
+    state.volume = Some(volume.clamp(0.0, 1.0));
+    state.volume_readable = true;
+    state.muted = Some(muted);
+    state.mute_readable = true;
 }
 
 #[windows::core::implement(Audio::Endpoints::IAudioEndpointVolumeCallback)]
@@ -1361,6 +1619,8 @@ impl Audio::Endpoints::IAudioEndpointVolumeCallback_Impl for EndpointVolumeCallb
 #[windows::core::implement(Audio::IAudioSessionEvents)]
 struct SessionEventsClient {
     dirty: Arc<AtomicBool>,
+    endpoint_id: String,
+    session_dirty_endpoints: Arc<Mutex<BTreeSet<String>>>,
     node_id: NodeId,
     states: AudioStateMap,
 }
@@ -1371,7 +1631,7 @@ impl Audio::IAudioSessionEvents_Impl for SessionEventsClient_Impl {
         _new_display_name: &PCWSTR,
         _event_context: *const GUID,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_session_endpoint_dirty();
         Ok(())
     }
 
@@ -1420,7 +1680,7 @@ impl Audio::IAudioSessionEvents_Impl for SessionEventsClient_Impl {
     }
 
     fn OnStateChanged(&self, _new_state: Audio::AudioSessionState) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_session_endpoint_dirty();
         Ok(())
     }
 
@@ -1428,8 +1688,18 @@ impl Audio::IAudioSessionEvents_Impl for SessionEventsClient_Impl {
         &self,
         _disconnect_reason: Audio::AudioSessionDisconnectReason,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        self.mark_session_endpoint_dirty();
         Ok(())
+    }
+}
+
+impl SessionEventsClient {
+    fn mark_session_endpoint_dirty(&self) {
+        mark_session_endpoint_dirty(
+            &self.dirty,
+            &self.session_dirty_endpoints,
+            &self.endpoint_id,
+        );
     }
 }
 
@@ -1628,8 +1898,10 @@ mod tests {
     #[test]
     fn endpoint_notifications_mark_the_graph_dirty() {
         let dirty = Arc::new(AtomicBool::new(false));
+        let topology_dirty = Arc::new(AtomicBool::new(false));
         let callback: Audio::IMMNotificationClient = EndpointNotificationClient {
             dirty: Arc::clone(&dirty),
+            topology_dirty: Arc::clone(&topology_dirty),
         }
         .into();
 
@@ -1639,6 +1911,35 @@ mod tests {
                 .expect("notification callback should accept a device event");
         }
         assert!(dirty.load(Ordering::Acquire));
+        assert!(topology_dirty.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn session_notifications_record_only_the_owning_endpoint() {
+        let dirty = Arc::new(AtomicBool::new(false));
+        let endpoints = Arc::new(Mutex::new(BTreeSet::new()));
+        mark_session_endpoint_dirty(&dirty, &endpoints, "endpoint-a");
+        mark_session_endpoint_dirty(&dirty, &endpoints, "endpoint-a");
+        assert!(dirty.load(Ordering::Acquire));
+        assert_eq!(
+            take_session_dirty_endpoints(&endpoints),
+            BTreeSet::from(["endpoint-a".into()])
+        );
+        assert!(take_session_dirty_endpoints(&endpoints).is_empty());
+    }
+
+    #[test]
+    fn a_valid_volume_callback_promotes_an_initially_unknown_state() {
+        let states: AudioStateMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let node = NodeId(42);
+
+        apply_state_change(&states, node, 0.4, true);
+
+        let state = states.lock().unwrap()[&node];
+        assert_eq!(state.volume, Some(0.4));
+        assert_eq!(state.muted, Some(true));
+        assert!(state.volume_readable);
+        assert!(state.mute_readable);
     }
 
     #[test]

@@ -6,16 +6,17 @@
 //! requires a kernel-mode driver — so the relay is wired to fixed endpoints
 //! instead:
 //!
-//! * **Capture** loopback-records the default playback endpoint, so whatever
-//!   this machine is playing is what peers receive.
-//! * **Render** plays audio received from peers on the default playback
+//! * **Capture** loopback-records the selected playback endpoint, so whatever
+//!   that endpoint is playing is what peers receive.
+//! * **Render** plays audio received from peers on the selected playback
 //!   endpoint.
 //!
 //! That covers "use my phone as a speaker" and "play the phone's audio here".
 //! It cannot cover "use my phone as a microphone for other Windows apps",
 //! because the received audio would have to appear as a capture device, which
-//! is exactly the thing user-mode code cannot create. [`RelayRoles`] is
-//! restricted accordingly in `windows.rs`.
+//! is exactly the thing user-mode code cannot create. The relay protocol can
+//! still receive and render peer audio locally; only microphone emulation is
+//! unavailable.
 //!
 //! Both loops poll rather than waiting on an event handle: loopback capture
 //! does not raise the WASAPI event, so a single polling shape keeps the two
@@ -98,33 +99,46 @@ impl WindowsRelayDevices {
                 endpoints.playback.clone(),
             ),
         ] {
-            let (thread, started) =
-                spawn_endpoint_thread(name, engine.handle(), Arc::clone(&stop), direction, device)?;
+            let (thread, started) = match spawn_endpoint_thread(
+                name,
+                engine.handle(),
+                Arc::clone(&stop),
+                direction,
+                device,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    stop_threads(&stop, &mut threads);
+                    engine.shutdown();
+                    return Err(error);
+                }
+            };
             threads.push(thread);
             ready.push(started);
         }
 
-        let devices = Self {
-            engine,
-            stop,
-            threads,
-            endpoints,
-        };
         // Wait for both endpoints to report that WASAPI accepted them. Without
         // this a failure inside a thread would leave a host that looks started
         // but never carries audio, with nothing to explain why.
         for started in ready {
-            match started.recv_timeout(ENDPOINT_START_TIMEOUT) {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(_) => {
-                    return Err(BackendError::native(
-                        "Windows relay endpoint did not start in time",
-                    ))
-                }
+            let result = match started.recv_timeout(ENDPOINT_START_TIMEOUT) {
+                Ok(result) => result,
+                Err(_) => Err(BackendError::native(
+                    "Windows relay endpoint did not start in time",
+                )),
+            };
+            if let Err(error) = result {
+                stop_threads(&stop, &mut threads);
+                engine.shutdown();
+                return Err(error);
             }
         }
-        Ok(devices)
+        Ok(Self {
+            engine,
+            stop,
+            threads,
+            endpoints,
+        })
     }
 
     pub(crate) fn handle(&self) -> RelayHandle {
@@ -145,7 +159,7 @@ impl Drop for WindowsRelayDevices {
 impl std::fmt::Debug for WindowsRelayDevices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WindowsRelayDevices")
-            .field("endpoints", &self.threads.len())
+            .field("endpoint_threads", &self.threads.len())
             .field("stopping", &self.stop.load(Ordering::Acquire))
             .finish()
     }
@@ -153,9 +167,9 @@ impl std::fmt::Debug for WindowsRelayDevices {
 
 #[derive(Clone, Copy)]
 enum Direction {
-    /// Loopback-record the default playback endpoint into the engine.
+    /// Loopback-record the selected playback endpoint into the engine.
     Capture,
-    /// Play what the engine received on the default playback endpoint.
+    /// Play what the engine received on the selected playback endpoint.
     Render,
 }
 
@@ -188,6 +202,13 @@ fn spawn_endpoint_thread(
             BackendError::native(format!("could not start relay endpoint: {error}"))
         })?;
     Ok((thread, started_rx))
+}
+
+fn stop_threads(stop: &Arc<AtomicBool>, threads: &mut Vec<JoinHandle<()>>) {
+    stop.store(true, Ordering::Release);
+    for thread in threads.drain(..) {
+        let _ = thread.join();
+    }
 }
 
 /// Interleaved 48 kHz stereo float, which is what the engine speaks.
@@ -239,7 +260,9 @@ fn run_endpoint(
                 Service::Capture(capture) => capture_loop(&capture, handle, stop),
                 Service::Render(render) => render_loop(&client, &render, handle, stop),
             }
-            let _ = unsafe { client.Stop() };
+            if let Err(error) = unsafe { client.Stop() } {
+                report_endpoint_error(handle, "stop audio client", error);
+            }
         }
         Err(error) => {
             let _ = started.send(Err(error));
@@ -310,7 +333,13 @@ fn capture_loop(
     let channels = usize::from(RELAY_CHANNELS);
 
     while !stop.load(Ordering::Acquire) {
-        let mut pending = unsafe { capture.GetNextPacketSize() }.unwrap_or(0);
+        let mut pending = match unsafe { capture.GetNextPacketSize() } {
+            Ok(pending) => pending,
+            Err(error) => {
+                report_endpoint_error(handle, "read capture packet size", error);
+                break;
+            }
+        };
         if pending == 0 {
             thread::sleep(POLL_INTERVAL);
             continue;
@@ -319,9 +348,10 @@ fn capture_loop(
             let mut data = std::ptr::null_mut();
             let mut frames = 0u32;
             let mut buffer_flags = 0u32;
-            if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut buffer_flags, None, None) }
-                .is_err()
+            if let Err(error) =
+                unsafe { capture.GetBuffer(&mut data, &mut frames, &mut buffer_flags, None, None) }
             {
+                report_endpoint_error(handle, "read capture buffer", error);
                 break;
             }
             if frames > 0 {
@@ -336,10 +366,22 @@ fn capture_loop(
                         std::slice::from_raw_parts(data.cast::<f32>(), frames as usize * channels)
                     };
                     handle.push_capture(samples);
+                } else {
+                    handle.report_error("Windows relay capture endpoint returned a null buffer");
+                    break;
                 }
             }
-            let _ = unsafe { capture.ReleaseBuffer(frames) };
-            pending = unsafe { capture.GetNextPacketSize() }.unwrap_or(0);
+            if let Err(error) = unsafe { capture.ReleaseBuffer(frames) } {
+                report_endpoint_error(handle, "release capture buffer", error);
+                break;
+            }
+            pending = match unsafe { capture.GetNextPacketSize() } {
+                Ok(pending) => pending,
+                Err(error) => {
+                    report_endpoint_error(handle, "read capture packet size", error);
+                    break;
+                }
+            };
         }
     }
 }
@@ -351,15 +393,28 @@ fn render_loop(
     handle: &RelayHandle,
     stop: &Arc<AtomicBool>,
 ) {
-    let buffer_frames = unsafe { client.GetBufferSize() }.unwrap_or(0);
+    let buffer_frames = match unsafe { client.GetBufferSize() } {
+        Ok(buffer_frames) => buffer_frames,
+        Err(error) => {
+            report_endpoint_error(handle, "read render buffer size", error);
+            return;
+        }
+    };
     if buffer_frames == 0 {
+        handle.report_error("Windows relay render endpoint returned a zero-sized buffer");
         return;
     }
     let channels = usize::from(RELAY_CHANNELS);
     let mut scratch = vec![0.0f32; buffer_frames as usize * channels];
 
     while !stop.load(Ordering::Acquire) {
-        let padding = unsafe { client.GetCurrentPadding() }.unwrap_or(0);
+        let padding = match unsafe { client.GetCurrentPadding() } {
+            Ok(padding) => padding,
+            Err(error) => {
+                report_endpoint_error(handle, "read render padding", error);
+                break;
+            }
+        };
         let available = buffer_frames.saturating_sub(padding);
         if available == 0 {
             thread::sleep(POLL_INTERVAL);
@@ -373,20 +428,30 @@ fn render_loop(
             scratch[filled..wanted].fill(0.0);
         }
 
-        let Ok(data) = (unsafe { render.GetBuffer(available) }) else {
-            thread::sleep(POLL_INTERVAL);
-            continue;
+        let data = match unsafe { render.GetBuffer(available) } {
+            Ok(data) => data,
+            Err(error) => {
+                report_endpoint_error(handle, "acquire render buffer", error);
+                break;
+            }
         };
         if data.is_null() {
-            thread::sleep(POLL_INTERVAL);
-            continue;
+            handle.report_error("Windows relay render endpoint returned a null buffer");
+            break;
         }
         unsafe {
             std::ptr::copy_nonoverlapping(scratch.as_ptr(), data.cast::<f32>(), wanted);
-            let _ = render.ReleaseBuffer(available, 0);
+            if let Err(error) = render.ReleaseBuffer(available, 0) {
+                report_endpoint_error(handle, "release render buffer", error);
+                break;
+            }
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn report_endpoint_error(handle: &RelayHandle, operation: &str, error: windows::core::Error) {
+    handle.report_error(format!("Windows relay {operation} failed: {error}"));
 }
 
 fn native(context: &str, error: windows::core::Error) -> BackendError {

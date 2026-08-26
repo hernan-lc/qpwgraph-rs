@@ -25,10 +25,17 @@ pub(crate) fn refresh_meters(window: &MainWindow, application: &mut Application)
             .snapshot
             .nodes
             .iter()
-            .filter(|node| node.has_audio_controls)
+            .filter(|node| node.audio.capabilities.has_any_meter())
             .map(|node| node.node_id)
             .collect()
     };
+    let meterable_nodes: BTreeSet<_> = application
+        .snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.audio.capabilities.has_any_meter())
+        .map(|node| node.node_id)
+        .collect();
 
     if let Err(error) = application.source.request_meters(&visible_audio_nodes) {
         record_meter_error(application, error);
@@ -44,6 +51,7 @@ pub(crate) fn refresh_meters(window: &MainWindow, application: &mut Application)
             };
             application.meters = readings
                 .into_iter()
+                .filter(|reading| meterable_nodes.contains(&reading.node_id))
                 .map(|reading| {
                     let state = if reading.available && reading.age_ms <= 1_500 {
                         live_state

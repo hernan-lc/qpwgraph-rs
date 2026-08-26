@@ -567,5 +567,10 @@
   "relay.state_unavailable": "indisponible",
   "relay.configured_peer": "Pair configuré",
   "status.rule_endpoint_not_found": "Les extrémités de la règle ne sont pas présentes dans le graphe en direct",
-  "status.rule_endpoint_incompatible": "Les extrémités de la règle utilisent des types multimédias incompatibles"
+  "status.rule_endpoint_incompatible": "Les extrémités de la règle utilisent des types multimédias incompatibles",
+  "relay.capture_endpoint": "Source de capture",
+  "relay.playback_endpoint": "Destination de lecture",
+  "relay.default_endpoint": "Valeur par défaut du système",
+  "relay.endpoint_unavailable": "Point d’accès indisponible ({id})",
+  "relay.windows_endpoint_help": "Sous Windows, le relais utilise la capture loopback et la lecture sur les points choisis ; il ne crée pas de microphone."
 }

@@ -496,6 +496,15 @@ pub trait GraphDriver: EffectDriver {
     }
 
     fn refresh(&mut self) -> BackendResult<Vec<Node>>;
+
+    /// Refresh only when this driver's change-detection policy says it is
+    /// needed. Native drivers with an event-driven registry can keep the
+    /// default, while a composite can use this hook to poll only the child
+    /// whose topology needs reconciliation.
+    fn refresh_if_needed(&mut self) -> BackendResult<Vec<Node>> {
+        self.refresh()
+    }
+
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
 
@@ -619,8 +628,9 @@ pub trait GraphDriver: EffectDriver {
     ///
     /// The default derives the control half from [`Self::node_audio_state`] and
     /// the meter half from the backend-wide meter capability, which is right
-    /// for backends that meter uniformly. Backends whose nodes differ (Windows
-    /// endpoints meter, sessions do not) override this.
+    /// for backends that meter uniformly. Backends whose nodes differ (for
+    /// example Windows endpoints and sessions can expose different native
+    /// meter interfaces) override this.
     fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
         let mut capabilities = self
             .node_audio_state(node)

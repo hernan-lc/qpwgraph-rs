@@ -44,7 +44,9 @@ impl PipewireDriver {
                 pw::spa::pod::Value::Bool(muted),
             )],
         )?;
-        self.audio_controls.entry(node).or_default().muted = muted;
+        let state = self.audio_controls.entry(node).or_default();
+        state.muted = Some(muted);
+        state.mute_readable = true;
         Ok(())
     }
 
@@ -62,7 +64,9 @@ impl PipewireDriver {
                 pw::spa::pod::Value::Float(spa_volume),
             )],
         )?;
-        self.audio_controls.entry(node).or_default().volume = volume;
+        let state = self.audio_controls.entry(node).or_default();
+        state.volume = Some(volume);
+        state.volume_readable = true;
         Ok(())
     }
 }

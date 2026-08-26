@@ -567,5 +567,10 @@
   "relay.state_unavailable": "no disponible",
   "relay.configured_peer": "Par configurado",
   "status.rule_endpoint_not_found": "Los extremos de la regla no están presentes en el gráfico en vivo",
-  "status.rule_endpoint_incompatible": "Los extremos de la regla usan tipos multimedia incompatibles"
+  "status.rule_endpoint_incompatible": "Los extremos de la regla usan tipos multimedia incompatibles",
+  "relay.capture_endpoint": "Fuente de captura",
+  "relay.playback_endpoint": "Destino de reproducción",
+  "relay.default_endpoint": "Predeterminado del sistema",
+  "relay.endpoint_unavailable": "Extremo no disponible ({id})",
+  "relay.windows_endpoint_help": "Los relays de Windows usan captura loopback y reproducción en los extremos elegidos; no crean un dispositivo de micrófono."
 }

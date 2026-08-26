@@ -84,6 +84,12 @@ pub struct AppConfig {
     pub relay_codec: String,
     pub relay_frame_ms: u16,
     pub relay_transport: String,
+    /// Windows relay endpoint selections. `None` follows the current default
+    /// playback endpoint; the values are opaque Core Audio device IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_capture_endpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_playback_endpoint_id: Option<String>,
     /// Preserve fields written by a newer version so opening and saving a
     /// config with this version does not silently erase forward-compatible
     /// settings.
@@ -160,6 +166,8 @@ impl Default for AppConfig {
             // 5–60 ms for links that prefer fewer, larger packets.
             relay_frame_ms: 10,
             relay_transport: "auto".into(),
+            relay_capture_endpoint_id: None,
+            relay_playback_endpoint_id: None,
             extra: BTreeMap::new(),
         }
     }
@@ -215,11 +223,20 @@ mod tests {
             relay_device_name: "studio-pc".into(),
             relay_host_pin: "123456".into(),
             relay_client_target: "192.168.1.20:48123".into(),
+            relay_capture_endpoint_id: Some("capture-endpoint".into()),
+            relay_playback_endpoint_id: Some("playback-endpoint".into()),
             ..AppConfig::default()
         };
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn old_configs_default_relay_endpoint_choices_to_system_default() {
+        let config: AppConfig = toml::from_str("language = 'en'\n").unwrap();
+        assert_eq!(config.relay_capture_endpoint_id, None);
+        assert_eq!(config.relay_playback_endpoint_id, None);
     }
 
     #[test]

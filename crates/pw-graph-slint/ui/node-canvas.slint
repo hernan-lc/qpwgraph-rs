@@ -5,7 +5,7 @@
 // No element measures itself and reports its own geometry, so the drag preview,
 // the pin hit-test and the drawn edges can never disagree.
 
-import { NodeAudioControl, UiI18n, UiTheme } from "parity-components.slint";
+import { NodeAudioControl, NodeMeter, UiI18n, UiTheme } from "parity-components.slint";
 
 export struct PortRow {
     id: int,
@@ -33,14 +33,20 @@ export struct NodeRow {
     font-scale: float,
     accent: color,
     has-audio-controls: bool,
+    has-audio-panel: bool,
+    has-meter: bool,
     meter-rms: float,
     meter-peak: float,
     meter-peak-position: float,
+    meter-rms-position: float,
+    meter-peak-supported: bool,
+    meter-rms-supported: bool,
     meter-available: bool,
     meter-label: string,
     audio-volume-position: float,
     audio-volume-known: bool,
     audio-muted: bool,
+    audio-mute-known: bool,
     audio-volume-enabled: bool,
     audio-mute-enabled: bool,
     ports: [PortRow],
@@ -160,7 +166,7 @@ component GraphNode inherits Rectangle {
         }
     }
 
-    if !data.collapsed && !data.thumbnail: Rectangle {
+    if !data.collapsed && !data.thumbnail && data.has-audio-panel: Rectangle {
         x: 1px;
         y: 41px;
         width: parent.width - 2px;
@@ -179,11 +185,30 @@ component GraphNode inherits Rectangle {
             mute-enabled: data.audio-mute-enabled;
             meter-peak: data.meter-peak;
             meter-peak-position: data.meter-peak-position;
+            meter-rms: data.meter-rms;
+            meter-rms-position: data.meter-rms-position;
+            meter-peak-supported: data.meter-peak-supported;
+            meter-rms-supported: data.meter-rms-supported;
             meter-label: data.meter-label;
             meter-available: data.meter-available;
+            mute-known: data.audio-mute-known;
             accent: data.accent;
             volume-changed(value) => { root.audio-volume-changed(data.id, value); }
             mute-toggled => { root.audio-mute-toggled(data.id); }
+        }
+        if !data.has-audio-controls && data.has-meter: NodeMeter {
+            x: 10px;
+            y: 7px;
+            width: parent.width - 20px;
+            rms: data.meter-rms;
+            peak: data.meter-peak;
+            rms-position: data.meter-rms-position;
+            peak-position: data.meter-peak-position;
+            peak-supported: data.meter-peak-supported;
+            rms-supported: data.meter-rms-supported;
+            available: data.meter-available;
+            label: data.meter-label;
+            accent: data.accent;
         }
     }
 

@@ -114,7 +114,7 @@ pub struct PipewireDriver {
     epoch: Instant,
     graph: Graph,
     positions: BTreeMap<NodeId, [f32; 2]>,
-    audio_controls: BTreeMap<NodeId, NodeAudioControl>,
+    audio_controls: BTreeMap<NodeId, NodeAudioState>,
     effect_host: EffectHost,
     /// Live `pw_filter` owners.  Keeping them in the driver makes their
     /// lifecycle match the PipeWire thread loop and lets graph snapshots map
@@ -1084,13 +1084,13 @@ impl GraphDriver for PipewireDriver {
         if record.node_type == NodeType::Effect {
             return Ok(NodeAudioState::UNSUPPORTED);
         }
-        let known = self.audio_controls.get(&node).copied();
+        let known = self.audio_controls.get(&node).copied().unwrap_or_default();
         Ok(NodeAudioState {
-            volume: known.map(|control| control.volume),
-            muted: known.map(|control| control.muted),
-            volume_readable: known.is_some(),
+            volume: known.volume,
+            muted: known.muted,
+            volume_readable: known.volume_readable,
             volume_writable: true,
-            mute_readable: known.is_some(),
+            mute_readable: known.mute_readable,
             mute_writable: true,
         })
     }
@@ -1102,7 +1102,7 @@ impl GraphDriver for PipewireDriver {
             return NodeCapabilities::NONE;
         };
         let mut capabilities = state.control_capabilities();
-        if state.is_supported() {
+        if self.measurable_nodes().contains(&node) {
             capabilities.volume_max = PIPEWIRE_MAX_VOLUME;
             capabilities.meter_peak = true;
             capabilities.meter_rms = true;

@@ -1,8 +1,8 @@
 # qpwgraph-rs
 
 Slint desktop audio graph and control UI for native PipeWire and Windows Core
-Audio backends, with optional ALSA Sequencer MIDI, effects, metering, patchbay
-persistence, and Linux audio relay support.
+Audio backends, with ALSA Sequencer/WinMM MIDI routing, effects, metering,
+patchbay persistence, and platform-specific audio relay support.
 
 https://github.com/user-attachments/assets/d7a9b1d4-d6d3-4ef2-b0d1-4cfc2de64650
 
@@ -11,10 +11,12 @@ https://github.com/user-attachments/assets/d7a9b1d4-d6d3-4ef2-b0d1-4cfc2de64650
 - PipeWire and ALSA MIDI graphs in one view on Linux, with invalid
   cross-backend links rejected.
 - Windows playback/capture endpoints and active application audio sessions,
-  with endpoint/session volume, mute, and endpoint peak metering.
+  with endpoint/session volume, mute, and native peak metering where exposed.
 - Native Windows Core Audio notifications for endpoint and session changes.
-- Windows graph relationships are informational: arbitrary system-wide audio
-  routing is not exposed as a mutable patchbay.
+- Windows WinMM MIDI devices with stable interface-based identities and real
+  input-to-output routing.
+- Windows Core Audio graph relationships are informational: arbitrary
+  system-wide audio routing is not exposed as a mutable patchbay.
 - Easy grouped-channel and Advanced individual-port connection modes.
 - Multi-selection, box selection, node movement, arrange, minimap, thumbnails,
   search, media filters, overlap avoidance, and connect-through behavior.
@@ -43,7 +45,8 @@ The code is split into focused crates:
 - `pw-graph-core`: graph models, stable endpoint keys, validation, and layout.
 - `pw-graph-effects`: realtime-safe effect processor API and built-in effects.
 - `pw-graph-backend`: driver abstraction, demo backend, native PipeWire graph,
-  Windows Core Audio endpoint/session graph, audio controls, and metering.
+  Windows Core Audio endpoint/session graph, WinMM MIDI, audio controls, and
+  metering.
 - `pw-graph-alsamidi`: ALSA Sequencer enumeration and routing.
 - `pw-graph-command`: undoable graph commands and command history.
 - `pw-graph-patchbay`: qpwgraph-compatible persistence and activation.
@@ -88,7 +91,8 @@ text input owns keyboard focus.
 
 On Linux, the default build enables PipeWire, ALSA MIDI, relay, and tray
 support. On Windows, PipeWire and ALSA are not built or required; the native
-backend uses Windows Core Audio/WASAPI through a dedicated COM worker thread.
+backends use Windows Core Audio/WASAPI through a dedicated COM worker thread
+and WinMM for MIDI.
 
 ```bash
 cargo build --release -p pw-graph-app
@@ -105,9 +109,11 @@ cargo build --release --locked -p pw-graph-app
 ```
 
 Graph IDs use explicit backend namespaces, so each native driver receives only
-resources it owns. Linux PipeWire/ALSA routing remains mutable; Windows
-endpoint/session relationships are observed but connection and disconnection
-requests report unsupported.
+resources it owns. Linux PipeWire/ALSA routing and Windows WinMM MIDI links are
+mutable; Windows Core Audio endpoint/session relationships are observed, so
+their connection, disconnection, and rerouting requests report unsupported.
+WinMM device indices are used only for the current native open; stable device
+interface identities keep graph IDs from following enumeration order changes.
 
 ## Configuration and patchbay files
 
@@ -132,17 +138,23 @@ activates the patchbay when configured, and then restores routed effects.
 
 Audio meters can be **Disabled**, **OnDemand**, or **Always**. On-demand helper
 streams are requested only for visible PipeWire graph nodes and released when
-the window is hidden or minimized. Windows uses Core Audio endpoint peak
-readings where available; its legacy RMS field remains zero because Core Audio
-does not provide an equivalent RMS value. **Reset audio config** releases all
-meter streams.
+the window is hidden or minimized. Meter requests and rendering are driven by
+each node's reported capability, so meter-only and peak-only nodes are valid.
+Windows uses Core Audio peak readings where available; its legacy RMS field
+remains zero because Core Audio does not provide an equivalent RMS value.
+**Reset audio config** releases all meter streams.
 
 ## Audio relay
 
-On Linux, the relay panel supports host start/stop, discovery, peer connection and
+The relay panel supports host start/stop, discovery, peer connection and
 disconnection, configurable role/codec/frame/transport, QR payload generation
 and parsing, local endpoint discovery, level updates, and virtual relay graph
-nodes. It is enabled by the default `relay` feature:
+nodes on Linux. On Windows, the relay uses WASAPI loopback and render streams;
+the panel exposes independent capture and playback endpoint choices by stable
+Core Audio ID, with system-default fallback when a saved device disappears.
+Windows cannot create a microphone endpoint for peer audio, and Windows relay
+capture is whole-endpoint rather than per-application. The relay is enabled by
+the default `relay` feature:
 
 ```bash
 cargo run -p pw-graph-app --features relay
@@ -193,11 +205,11 @@ README, and license.
 | --- | --- | --- |
 | Audio devices | PipeWire | Core Audio |
 | Audio sessions | PipeWire nodes | Core Audio sessions |
-| Arbitrary patch routing | Yes | No / future |
+| Arbitrary patch routing | Yes | No for Core Audio |
 | Volume, mute, and metering | Yes | Yes, peak metering where available |
-| Effects | Yes | Future |
-| ALSA MIDI | Yes | N/A |
-| Relay | Yes | Future |
+| Effects | Yes | No arbitrary insertion; standalone future |
+| MIDI routing | ALSA Sequencer | WinMM, one output per input |
+| Relay | Yes, virtual nodes | Yes, endpoint loopback/render; no microphone emulation |
 
 ## Development checks
 

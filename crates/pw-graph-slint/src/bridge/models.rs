@@ -33,6 +33,8 @@ use super::{
     HistoryRow, LinkRow, MainWindow, MinimapNode, NodeRow, PortRow, RuleRow, ShortcutRow, UiI18n,
 };
 use crate::names::{compact_label, display_node_name, display_port_name};
+#[cfg(all(feature = "relay", target_os = "windows"))]
+use pw_graph_backend::RelayEndpoints;
 
 pub(crate) fn sync_models(
     window: &MainWindow,
@@ -207,6 +209,41 @@ pub(crate) fn sync_models(
         application.i18n.text("relay.transport_bluetooth_pan"),
         application.i18n.text("relay.transport_lan"),
     ]));
+    #[cfg(all(feature = "relay", target_os = "windows"))]
+    {
+        let endpoint_options = windows_relay_endpoint_options(application);
+        let option_names = endpoint_options
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect::<Vec<_>>();
+        window.set_relay_endpoint_options(string_model(option_names));
+        window.set_relay_windows_endpoints(application.source.relay_available());
+        window.set_relay_capture_endpoint_index(relay_endpoint_index(
+            application.config.relay_capture_endpoint_id.as_deref(),
+            &endpoint_options,
+        ));
+        window.set_relay_playback_endpoint_index(relay_endpoint_index(
+            application.config.relay_playback_endpoint_id.as_deref(),
+            &endpoint_options,
+        ));
+
+        let wanted = RelayEndpoints {
+            capture: application.config.relay_capture_endpoint_id.clone(),
+            playback: application.config.relay_playback_endpoint_id.clone(),
+        };
+        if application.source.windows_relay_endpoints() != wanted {
+            if let Err(error) = application.source.set_windows_relay_endpoints(wanted) {
+                application.status = application.tf("relay.error", &[("error", error)]);
+            }
+        }
+    }
+    #[cfg(not(all(feature = "relay", target_os = "windows")))]
+    {
+        window.set_relay_endpoint_options(string_model(Vec::<String>::new()));
+        window.set_relay_windows_endpoints(false);
+        window.set_relay_capture_endpoint_index(0);
+        window.set_relay_playback_endpoint_index(0);
+    }
     window.set_effects(ModelRc::from(Rc::new(VecModel::from(effect_rows(
         &application.source,
         &application.i18n,
@@ -332,9 +369,14 @@ fn node_row(node: &NodeView, i18n: &I18n) -> NodeRow {
                 .unwrap_or_else(|| node_type_color(node.node_type)),
         ),
         has_audio_controls: node.has_audio_controls,
+        has_audio_panel: node.has_audio_panel,
+        has_meter: node.audio.capabilities.has_any_meter(),
         meter_rms: node.meter.rms,
         meter_peak: node.meter.peak,
         meter_peak_position: meter_fraction(node.meter.peak),
+        meter_rms_position: meter_fraction(node.meter.rms),
+        meter_peak_supported: node.audio.capabilities.meter_peak,
+        meter_rms_supported: node.audio.capabilities.meter_rms,
         meter_available: matches!(node.meter.state, MeterState::Live | MeterState::Demo),
         meter_label: SharedString::from(localized_meter_label(i18n, node.meter.state)),
         // Drawn straight from what the backend reported. When it reported
@@ -349,6 +391,7 @@ fn node_row(node: &NodeView, i18n: &I18n) -> NodeRow {
             .unwrap_or(0.0),
         audio_volume_known: node.audio.state.volume.is_some(),
         audio_muted: node.audio.state.muted.unwrap_or(false),
+        audio_mute_known: node.audio.state.muted.is_some(),
         audio_volume_enabled: node.audio.capabilities.volume_write,
         audio_mute_enabled: node.audio.capabilities.mute_write,
         ports: ModelRc::from(Rc::new(VecModel::from(
@@ -358,13 +401,13 @@ fn node_row(node: &NodeView, i18n: &I18n) -> NodeRow {
                 .map(|(index, port)| {
                     let is_output = port.direction != pw_graph_core::Direction::Sink;
                     let (pin_x, pin_y) =
-                        canvas::pin_offset(node.width, index, node.has_audio_controls, is_output);
+                        canvas::pin_offset(node.width, index, node.has_audio_panel, is_output);
                     PortRow {
                         id: port.pin_id,
                         label: SharedString::from(display_port_name(&port.label, i18n)),
                         direction: if is_output { 1 } else { 0 },
                         color: color(port.color),
-                        row_y: canvas::port_row_top(index, node.has_audio_controls),
+                        row_y: canvas::port_row_top(index, node.has_audio_panel),
                         pin_x,
                         pin_y,
                     }
@@ -399,7 +442,7 @@ fn rebuild_geometry(
         for (index, port) in node.ports.iter().enumerate() {
             let is_output = port.direction != Direction::Sink;
             let (offset_x, offset_y) =
-                canvas::pin_offset(node.width, index, node.has_audio_controls, is_output);
+                canvas::pin_offset(node.width, index, node.has_audio_panel, is_output);
             pin_geometry.push(PinGeometry {
                 pin_id: port.pin_id,
                 node_id: node.id,
@@ -567,4 +610,40 @@ pub(crate) fn string_model(values: impl IntoIterator<Item = String>) -> ModelRc<
             .map(SharedString::from)
             .collect::<Vec<_>>(),
     )))
+}
+
+#[cfg(all(feature = "relay", target_os = "windows"))]
+fn windows_relay_endpoint_options(application: &Application) -> Vec<(String, String)> {
+    let mut options = vec![(
+        String::new(),
+        application.i18n.text("relay.default_endpoint"),
+    )];
+    options.extend(application.source.windows_relay_endpoint_choices());
+    let configured_ids = [
+        application.config.relay_capture_endpoint_id.as_deref(),
+        application.config.relay_playback_endpoint_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    for id in configured_ids {
+        if !options.iter().any(|(known, _)| known == &id) {
+            options.push((
+                id.clone(),
+                application
+                    .i18n
+                    .format("relay.endpoint_unavailable", &[("id", id)]),
+            ));
+        }
+    }
+    options
+}
+
+#[cfg(all(feature = "relay", target_os = "windows"))]
+fn relay_endpoint_index(id: Option<&str>, options: &[(String, String)]) -> i32 {
+    options
+        .iter()
+        .position(|(option_id, _)| id == (!option_id.is_empty()).then_some(option_id.as_str()))
+        .unwrap_or(0) as i32
 }

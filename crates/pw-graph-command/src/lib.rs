@@ -52,6 +52,15 @@ fn disconnect_keys(
     removed_keys.clear();
     let mut disconnected = Vec::with_capacity(keys.len());
     for (output, input) in keys {
+        // A composite can expose observed relationships alongside mutable
+        // links (Windows Core Audio sessions are the important example).
+        // Stable-key commands must not turn a broad disconnect action into a
+        // request to delete something the owning backend explicitly protects.
+        if let Some(link) = driver.graph().find_link_by_keys(output, input) {
+            if !driver.is_link_mutable(link.id) {
+                continue;
+            }
+        }
         if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
             disconnected.push(link);
             removed_keys.push((output.clone(), input.clone()));
@@ -414,6 +423,12 @@ impl Command for RerouteLinkCommand {
 
     fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
         driver.refresh()?;
+        if !driver.is_link_mutable(self.link_id) {
+            return Err(BackendError::Unsupported(
+                "this link is observed and cannot be rerouted".into(),
+            )
+            .into());
+        }
         let (old, new) = match (self.old_keys.clone(), self.new_keys.clone()) {
             // A redo replays the endpoints captured the first time round.
             (Some(old), Some(new)) => (old, new),
@@ -561,6 +576,7 @@ impl Command for DisconnectAllCommand {
             .graph()
             .links
             .values()
+            .filter(|link| driver.is_link_mutable(link.id))
             .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
             .collect();
         self.links = disconnect_keys(driver, &self.keys, &mut self.removed_keys)?;
@@ -614,6 +630,11 @@ impl Command for DisconnectCommand {
         let Some((output, input)) = self.keys.as_ref() else {
             return Ok(());
         };
+        if let Some(link) = driver.graph().find_link_by_keys(output, input) {
+            if !driver.is_link_mutable(link.id) {
+                return Ok(());
+            }
+        }
         if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
             self.link_id = link.id;
             self.link = Some(link);
@@ -750,6 +771,26 @@ mod tests {
         assert_eq!(driver.graph().links.len(), 2);
         commands.redo(&mut driver).unwrap();
         assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn disconnect_commands_leave_observed_links_in_place() {
+        let mut driver = InMemoryDriver::demo();
+        let link = driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.mark_link_observed(link.id);
+        let mut commands = CommandStack::new();
+
+        commands
+            .execute(Box::new(DisconnectAllCommand::new()), &mut driver)
+            .unwrap();
+        assert!(driver.graph().link(link.id).is_some());
+        commands.undo(&mut driver).unwrap();
+        assert!(driver.graph().link(link.id).is_some());
+
+        commands
+            .execute(Box::new(DisconnectCommand::new(link.id)), &mut driver)
+            .unwrap();
+        assert!(driver.graph().link(link.id).is_some());
     }
 
     #[test]

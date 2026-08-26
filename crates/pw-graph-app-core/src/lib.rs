@@ -14,6 +14,7 @@ use pw_graph_core::{
     LinkId, Node, NodeId, NodeType, PortId, PortType,
 };
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 /// Legacy public compatibility constant. New routing code uses the shared
 /// backend namespace helpers in `pw-graph-core`; the high bit remains
@@ -110,6 +111,32 @@ pub struct CompositeDriver {
     #[cfg(target_os = "windows")]
     pub windows_midi: Option<WindowsMidiDriver>,
     graph: Graph,
+    refresh_schedule: RefreshSchedule,
+}
+
+/// The merged graph has one refresh clock per child. Event-driven children
+/// still get an infrequent safety reconciliation, while polling-only children
+/// are checked on their own cadence instead of forcing every native backend to
+/// rebuild on every UI tick.
+#[derive(Default)]
+struct RefreshSchedule {
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    pipewire_deadline: Option<Instant>,
+    #[cfg(all(target_os = "linux", feature = "alsa"))]
+    alsa_deadline: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    windows_audio_deadline: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    windows_midi_deadline: Option<Instant>,
+}
+
+const EVENT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+const ALSA_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const WINDOWS_MIDI_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+fn refresh_due(deadline: Option<Instant>, dirty: bool, now: Instant) -> bool {
+    dirty || deadline.is_none_or(|deadline| now >= deadline)
 }
 
 impl CompositeDriver {
@@ -176,6 +203,7 @@ impl CompositeDriver {
             alsa: None,
             #[cfg(target_os = "windows")]
             windows_audio: None,
+            refresh_schedule: RefreshSchedule::default(),
             graph: Graph::default(),
         }
     }
@@ -185,8 +213,51 @@ impl CompositeDriver {
         Self {
             windows_audio: Some(driver),
             windows_midi: None,
+            refresh_schedule: RefreshSchedule::default(),
             graph: Graph::default(),
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn with_windows_midi(driver: WindowsMidiDriver) -> Self {
+        Self {
+            windows_audio: None,
+            windows_midi: Some(driver),
+            refresh_schedule: RefreshSchedule::default(),
+            graph: Graph::default(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn has_windows_midi(&self) -> bool {
+        self.windows_midi.is_some()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    pub fn windows_relay_endpoint_choices(&self) -> Vec<(String, String)> {
+        self.windows_audio
+            .as_ref()
+            .map(|driver| driver.relay_endpoint_choices())
+            .unwrap_or_default()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    pub fn windows_relay_endpoints(&self) -> pw_graph_backend::RelayEndpoints {
+        self.windows_audio
+            .as_ref()
+            .map(|driver| driver.relay_endpoints().clone())
+            .unwrap_or_default()
+    }
+
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    pub fn set_windows_relay_endpoints(
+        &mut self,
+        endpoints: pw_graph_backend::RelayEndpoints,
+    ) -> BackendResult<()> {
+        self.windows_audio
+            .as_mut()
+            .ok_or_else(|| Self::unsupported("Windows audio backend is unavailable"))?
+            .set_relay_endpoints(endpoints)
     }
 
     #[allow(dead_code)]
@@ -385,23 +456,88 @@ impl GraphDriver for CompositeDriver {
     }
 
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
+        let now = Instant::now();
         #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_mut() {
             driver.refresh()?;
+            self.refresh_schedule.pipewire_deadline = Some(now + EVENT_REFRESH_INTERVAL);
         }
         #[cfg(all(target_os = "linux", feature = "alsa"))]
         if let Some(driver) = self.alsa.as_mut() {
             driver.refresh()?;
+            self.refresh_schedule.alsa_deadline = Some(now + ALSA_REFRESH_INTERVAL);
         }
         #[cfg(target_os = "windows")]
         if let Some(driver) = self.windows_audio.as_mut() {
             driver.refresh()?;
+            self.refresh_schedule.windows_audio_deadline = Some(now + EVENT_REFRESH_INTERVAL);
         }
         #[cfg(target_os = "windows")]
         if let Some(driver) = self.windows_midi.as_mut() {
             driver.refresh()?;
+            self.refresh_schedule.windows_midi_deadline = Some(now + WINDOWS_MIDI_REFRESH_INTERVAL);
         }
         self.rebuild_merged_graph()?;
+        Ok(self.graph.nodes.values().cloned().collect())
+    }
+
+    fn refresh_if_needed(&mut self) -> BackendResult<Vec<Node>> {
+        let now = Instant::now();
+        let mut changed = false;
+
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
+        if let Some(driver) = self.pipewire.as_mut() {
+            if refresh_due(
+                self.refresh_schedule.pipewire_deadline,
+                driver.graph_dirty(),
+                now,
+            ) {
+                driver.refresh_if_needed()?;
+                self.refresh_schedule.pipewire_deadline = Some(now + EVENT_REFRESH_INTERVAL);
+                changed = true;
+            }
+        }
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
+        if let Some(driver) = self.alsa.as_mut() {
+            if refresh_due(
+                self.refresh_schedule.alsa_deadline,
+                driver.graph_dirty(),
+                now,
+            ) {
+                driver.refresh_if_needed()?;
+                self.refresh_schedule.alsa_deadline = Some(now + ALSA_REFRESH_INTERVAL);
+                changed = true;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_mut() {
+            if refresh_due(
+                self.refresh_schedule.windows_audio_deadline,
+                driver.graph_dirty(),
+                now,
+            ) {
+                driver.refresh_if_needed()?;
+                self.refresh_schedule.windows_audio_deadline = Some(now + EVENT_REFRESH_INTERVAL);
+                changed = true;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_mut() {
+            if refresh_due(
+                self.refresh_schedule.windows_midi_deadline,
+                driver.graph_dirty(),
+                now,
+            ) {
+                driver.refresh_if_needed()?;
+                self.refresh_schedule.windows_midi_deadline =
+                    Some(now + WINDOWS_MIDI_REFRESH_INTERVAL);
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.rebuild_merged_graph()?;
+        }
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
@@ -540,7 +676,16 @@ impl GraphDriver for CompositeDriver {
                         .is_some_and(|driver| driver.is_link_mutable(link));
                 }
             }
-            Some(CompositeRoute::WindowsMidi | CompositeRoute::Demo) | None => {}
+            Some(CompositeRoute::WindowsMidi) => {
+                #[cfg(target_os = "windows")]
+                {
+                    return self
+                        .windows_midi
+                        .as_ref()
+                        .is_some_and(|driver| driver.is_link_mutable(link));
+                }
+            }
+            Some(CompositeRoute::Demo) | None => {}
         }
         false
     }
@@ -589,9 +734,23 @@ impl GraphDriver for CompositeDriver {
                     Err(Self::unsupported("Windows audio backend is unavailable"))
                 }
             }
-            Some(BackendKind::WindowsMidi) => Err(Self::unsupported(
-                "Windows MIDI layout is managed by the application",
-            )),
+            Some(BackendKind::WindowsMidi) => {
+                #[cfg(target_os = "windows")]
+                {
+                    self.windows_midi
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows MIDI backend is unavailable"))?
+                        .set_node_position(node, position)?;
+                    if let Some(node_data) = self.graph.nodes.get_mut(&node) {
+                        node_data.position = position;
+                    }
+                    Ok(())
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err(Self::unsupported("Windows MIDI backend is unavailable"))
+                }
+            }
             Some(BackendKind::Demo) => Err(Self::unsupported(
                 "demo resources are not part of the live composite",
             )),
@@ -781,6 +940,11 @@ impl GraphDriver for CompositeDriver {
             children += 1;
             reporting += usize::from(driver.reports_graph_changes());
         }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
         children > 0 && children == reporting
     }
 
@@ -808,6 +972,14 @@ impl GraphDriver for CompositeDriver {
         #[cfg(target_os = "windows")]
         if self
             .windows_audio
+            .as_ref()
+            .is_some_and(|driver| driver.graph_dirty())
+        {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if self
+            .windows_midi
             .as_ref()
             .is_some_and(|driver| driver.graph_dirty())
         {
@@ -842,6 +1014,14 @@ impl GraphDriver for CompositeDriver {
         {
             return true;
         }
+        #[cfg(target_os = "windows")]
+        if self
+            .windows_midi
+            .as_ref()
+            .is_some_and(|driver| driver.is_node_type(node_type))
+        {
+            return true;
+        }
         false
     }
 
@@ -866,6 +1046,14 @@ impl GraphDriver for CompositeDriver {
         #[cfg(target_os = "windows")]
         if self
             .windows_audio
+            .as_ref()
+            .is_some_and(|driver| driver.is_port_type(port_type))
+        {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if self
+            .windows_midi
             .as_ref()
             .is_some_and(|driver| driver.is_port_type(port_type))
         {
@@ -1319,5 +1507,37 @@ mod tests {
             ))
             .unwrap();
         assert!(graph.port(PortId(1)).is_some());
+    }
+
+    #[test]
+    fn refresh_schedule_polls_when_a_child_has_no_deadline_yet() {
+        let now = Instant::now();
+        assert!(refresh_due(None, false, now));
+    }
+
+    #[test]
+    fn refresh_schedule_prioritizes_dirty_children() {
+        let now = Instant::now();
+        assert!(refresh_due(Some(now + Duration::from_secs(30)), true, now));
+        assert!(!refresh_due(
+            Some(now + Duration::from_secs(30)),
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn refresh_schedule_expires_at_the_child_deadline() {
+        let now = Instant::now();
+        assert!(!refresh_due(
+            Some(now + Duration::from_secs(30)),
+            false,
+            now
+        ));
+        assert!(refresh_due(
+            Some(now - Duration::from_millis(1)),
+            false,
+            now
+        ));
     }
 }

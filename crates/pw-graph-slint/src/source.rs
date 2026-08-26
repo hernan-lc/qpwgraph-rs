@@ -7,6 +7,8 @@
 
 use crate::args::Args;
 use pw_graph_app_core::{BackendAvailability, CompositeDriver};
+#[cfg(all(feature = "relay", target_os = "windows"))]
+use pw_graph_backend::RelayEndpoints;
 use pw_graph_backend::{
     AudioMeter, BackendCapabilities, DemoDriver, EffectDriver, EffectInsertRequest, EffectInstance,
     EffectNodeRequest, GraphDriver, MeterPolicy,
@@ -116,6 +118,35 @@ impl ApplicationDriver {
             }
     }
 
+    #[cfg(all(feature = "relay", target_os = "windows"))]
+    pub(crate) fn windows_relay_endpoint_choices(&self) -> Vec<(String, String)> {
+        match &self.backend {
+            BackendKind::Demo(_) => Vec::new(),
+            BackendKind::Live(driver) => driver.windows_relay_endpoint_choices(),
+        }
+    }
+
+    #[cfg(all(feature = "relay", target_os = "windows"))]
+    pub(crate) fn windows_relay_endpoints(&self) -> RelayEndpoints {
+        match &self.backend {
+            BackendKind::Demo(_) => RelayEndpoints::default(),
+            BackendKind::Live(driver) => driver.windows_relay_endpoints(),
+        }
+    }
+
+    #[cfg(all(feature = "relay", target_os = "windows"))]
+    pub(crate) fn set_windows_relay_endpoints(
+        &mut self,
+        endpoints: RelayEndpoints,
+    ) -> Result<(), String> {
+        match &mut self.backend {
+            BackendKind::Demo(_) => Err("Windows relay is unavailable in demo mode".into()),
+            BackendKind::Live(driver) => driver
+                .set_windows_relay_endpoints(endpoints)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
     pub(crate) fn capabilities(&self) -> BackendCapabilities {
         GraphDriver::capabilities(self)
     }
@@ -137,6 +168,12 @@ impl ApplicationDriver {
 
     pub(crate) fn refresh(&mut self) -> Result<(), String> {
         GraphDriver::refresh(self)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn refresh_if_needed(&mut self) -> Result<(), String> {
+        GraphDriver::refresh_if_needed(self)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -322,14 +359,22 @@ impl ApplicationDriver {
 
 fn backend_name(availability: &BackendAvailability) -> String {
     #[cfg(target_os = "windows")]
-    if availability.windows_audio {
-        return "windows-core-audio".to_owned();
+    {
+        match (availability.windows_audio, availability.windows_midi) {
+            (true, true) => "windows-core-audio+winmm-midi".to_owned(),
+            (true, false) => "windows-core-audio".to_owned(),
+            (false, true) => "winmm-midi".to_owned(),
+            (false, false) => "none".to_owned(),
+        }
     }
-    match (availability.pipewire, availability.alsa) {
-        (true, true) => "pipewire+alsa".to_owned(),
-        (true, false) => "pipewire".to_owned(),
-        (false, true) => "alsa".to_owned(),
-        (false, false) => "none".to_owned(),
+    #[cfg(not(target_os = "windows"))]
+    {
+        match (availability.pipewire, availability.alsa) {
+            (true, true) => "pipewire+alsa".to_owned(),
+            (true, false) => "pipewire".to_owned(),
+            (false, true) => "alsa".to_owned(),
+            (false, false) => "none".to_owned(),
+        }
     }
 }
 
@@ -349,6 +394,13 @@ impl GraphDriver for ApplicationDriver {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.refresh(),
             BackendKind::Live(driver) => driver.refresh(),
+        }
+    }
+
+    fn refresh_if_needed(&mut self) -> pw_graph_backend::BackendResult<Vec<Node>> {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => driver.refresh_if_needed(),
+            BackendKind::Live(driver) => driver.refresh_if_needed(),
         }
     }
 

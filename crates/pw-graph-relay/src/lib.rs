@@ -492,6 +492,17 @@ impl RelayHandle {
         self.inner.drain_events()
     }
 
+    /// Publish a non-fatal error from an embedding audio endpoint or worker.
+    ///
+    /// Relay transports already surface their background failures through the
+    /// event queue; platform adapters use the same path so a stopped capture
+    /// or render thread cannot look like a healthy, silent session.
+    pub fn report_error(&self, message: impl Into<String>) {
+        self.inner.emit(RelayEvent::Error {
+            message: message.into(),
+        });
+    }
+
     /// Feed audio to transmit (e.g. the virtual relay sink tap). Oldest
     /// samples are dropped when the queue overflows.
     pub fn push_capture(&self, samples: &[f32]) {

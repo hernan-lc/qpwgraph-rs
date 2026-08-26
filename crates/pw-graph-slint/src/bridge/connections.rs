@@ -2,7 +2,7 @@ use crate::model::ConnectMode;
 use pw_graph_command::{
     ConnectCommand, ConnectManyCommand, DisconnectManyCommand, RerouteLinkCommand,
 };
-use pw_graph_core::{Direction, PortKey};
+use pw_graph_core::{Direction, PortId, PortKey};
 use std::time::Instant;
 
 use super::app::{set_connection_feedback, Application};
@@ -30,6 +30,19 @@ pub(crate) fn handle_link_rerouted(application: &mut Application, link_id: i32, 
     };
     if !application.source.is_link_mutable(link) {
         // An observed relationship is not ours to move.
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
+    let target_connectable = application
+        .source
+        .graph()
+        .port(port)
+        .is_some_and(|port| application.source.node_connectable(port.node_id));
+    if !target_connectable {
         set_connection_feedback(
             application,
             application.t("status.connections_unavailable"),
@@ -123,7 +136,7 @@ pub(crate) fn connect_pin_pair(application: &mut Application, start_id: i32, end
         return;
     };
 
-    let (output, input) = {
+    let (output_port, input_port) = {
         let graph = application.source.graph();
         let Some(start) = graph.port(start_port) else {
             let message = application.t("status.connection_pin_missing");
@@ -146,9 +159,15 @@ pub(crate) fn connect_pin_pair(application: &mut Application, start_id: i32, end
         }
     };
 
+    if !pair_is_connectable(application, output_port, input_port) {
+        let message = application.t("status.connections_unavailable");
+        set_connection_feedback(application, message, true);
+        return;
+    }
+
     let Some((output, input)) = ({
         let graph = application.source.graph();
-        graph.port_key(output).zip(graph.port_key(input))
+        graph.port_key(output_port).zip(graph.port_key(input_port))
     }) else {
         let message = application.t("status.connection_identity");
         set_connection_feedback(application, message, true);
@@ -409,6 +428,25 @@ fn easy_connect_node_pair(
 /// Create every pair an Easy-mode gesture resolved to, then report what
 /// happened as a single message.
 fn apply_easy_pairs(application: &mut Application, port_keys: Vec<(PortKey, PortKey)>) {
+    let port_keys: Vec<_> = port_keys
+        .into_iter()
+        .filter(|(output, input)| {
+            let Some((output_id, input_id)) = application
+                .source
+                .graph()
+                .resolve_port_key(output)
+                .zip(application.source.graph().resolve_port_key(input))
+            else {
+                return false;
+            };
+            pair_is_connectable(application, output_id, input_id)
+        })
+        .collect();
+    if port_keys.is_empty() {
+        let message = application.t("status.connections_unavailable");
+        set_connection_feedback(application, message, true);
+        return;
+    }
     let already_connected = port_keys
         .iter()
         .filter(|(output, input)| {
@@ -469,6 +507,17 @@ fn apply_easy_pairs(application: &mut Application, port_keys: Vec<(PortKey, Port
     }
 }
 
+fn pair_is_connectable(application: &Application, output: PortId, input: PortId) -> bool {
+    let graph = application.source.graph();
+    graph
+        .port(output)
+        .zip(graph.port(input))
+        .is_some_and(|(output, input)| {
+            application.source.node_connectable(output.node_id)
+                && application.source.node_connectable(input.node_id)
+        })
+}
+
 pub(crate) fn delete_selected_connections(application: &mut Application) {
     if !application.source.capabilities().disconnect {
         set_connection_feedback(
@@ -486,6 +535,9 @@ pub(crate) fn delete_selected_connections(application: &mut Application) {
             .iter()
             .filter_map(|id| {
                 let link = graph.link(*id)?;
+                if !application.source.is_link_mutable(link.id) {
+                    return None;
+                }
                 Some((
                     graph.port_key(link.output_port)?,
                     graph.port_key(link.input_port)?,
@@ -505,14 +557,15 @@ pub(crate) fn delete_selected_connections(application: &mut Application) {
         .links
         .values()
         .filter(|link| {
-            keys.iter().any(|(output, input)| {
-                application
-                    .source
-                    .graph()
-                    .port_key(link.output_port)
-                    .zip(application.source.graph().port_key(link.input_port))
-                    .is_some_and(|pair| pair == (output.clone(), input.clone()))
-            })
+            application.source.is_link_mutable(link.id)
+                && keys.iter().any(|(output, input)| {
+                    application
+                        .source
+                        .graph()
+                        .port_key(link.output_port)
+                        .zip(application.source.graph().port_key(link.input_port))
+                        .is_some_and(|pair| pair == (output.clone(), input.clone()))
+                })
         })
         .cloned()
         .collect();
@@ -574,14 +627,15 @@ pub(crate) fn disconnect_selected_node(application: &mut Application) {
         .links
         .values()
         .filter(|link| {
-            application
-                .source
-                .graph()
-                .port(link.output_port)
-                .zip(application.source.graph().port(link.input_port))
-                .is_some_and(|(output, input)| {
-                    output.node_id == node_id || input.node_id == node_id
-                })
+            application.source.is_link_mutable(link.id)
+                && application
+                    .source
+                    .graph()
+                    .port(link.output_port)
+                    .zip(application.source.graph().port(link.input_port))
+                    .is_some_and(|(output, input)| {
+                        output.node_id == node_id || input.node_id == node_id
+                    })
         })
         .cloned()
         .collect::<Vec<_>>();

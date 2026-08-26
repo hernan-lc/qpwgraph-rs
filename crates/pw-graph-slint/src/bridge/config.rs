@@ -53,6 +53,22 @@ pub(crate) fn read_window_state(window: &MainWindow, application: &mut Applicati
     application.config.relay_frame_ms = relay_frame_from_index(window.get_relay_frame_index());
     application.config.relay_transport =
         relay_transport_from_index(window.get_relay_transport_index()).into();
+    #[cfg(all(feature = "relay", target_os = "windows"))]
+    {
+        let choices = application.source.windows_relay_endpoint_choices();
+        if !choices.is_empty() {
+            application.config.relay_capture_endpoint_id = relay_endpoint_id(
+                window.get_relay_capture_endpoint_index(),
+                &choices,
+                application.config.relay_capture_endpoint_id.as_deref(),
+            );
+            application.config.relay_playback_endpoint_id = relay_endpoint_id(
+                window.get_relay_playback_endpoint_index(),
+                &choices,
+                application.config.relay_playback_endpoint_id.as_deref(),
+            );
+        }
+    }
 
     let meter_policy = meter_policy_from_index(window.get_meter_policy_index());
     if meter_policy != application.source.meter_policy() {
@@ -74,6 +90,22 @@ pub(crate) fn read_window_state(window: &MainWindow, application: &mut Applicati
     if !patchbay_was_activated && application.config.patchbay_activated {
         activate_patchbay(application);
     }
+}
+
+#[cfg(all(feature = "relay", target_os = "windows"))]
+fn relay_endpoint_id(
+    index: i32,
+    choices: &[(String, String)],
+    current: Option<&str>,
+) -> Option<String> {
+    if index <= 0 {
+        return None;
+    }
+    choices
+        .get((index - 1) as usize)
+        .map(|(id, _)| id.clone())
+        .filter(|id| !id.is_empty())
+        .or_else(|| current.map(str::to_owned))
 }
 
 fn sync_config(application: &mut Application) {
@@ -133,5 +165,36 @@ pub(crate) fn save_config(application: &mut Application, report_success: bool) {
                 application.tf("status.config_save_failed", &[("error", error.to_string())]);
             application.config_dirty_since = Some(Instant::now());
         }
+    }
+}
+
+#[cfg(all(test, feature = "relay", target_os = "windows"))]
+mod tests {
+    use super::relay_endpoint_id;
+
+    #[test]
+    fn relay_endpoint_indices_round_trip_stable_ids() {
+        let choices = vec![
+            ("endpoint-a".into(), "Speakers".into()),
+            ("endpoint-b".into(), "Headphones".into()),
+        ];
+        assert_eq!(relay_endpoint_id(0, &choices, Some("endpoint-a")), None);
+        assert_eq!(
+            relay_endpoint_id(1, &choices, None),
+            Some("endpoint-a".into())
+        );
+        assert_eq!(
+            relay_endpoint_id(2, &choices, None),
+            Some("endpoint-b".into())
+        );
+    }
+
+    #[test]
+    fn missing_relay_endpoint_keeps_its_saved_id_until_the_user_changes_it() {
+        let choices = vec![("endpoint-a".into(), "Speakers".into())];
+        assert_eq!(
+            relay_endpoint_id(99, &choices, Some("removed-endpoint")),
+            Some("removed-endpoint".into())
+        );
     }
 }

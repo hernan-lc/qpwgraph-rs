@@ -27,6 +27,20 @@ impl PropsReading {
     }
 }
 
+/// Merge only the properties the daemon actually returned. A Props object is
+/// allowed to omit either field, and omission is not evidence for a default
+/// volume or mute value.
+fn apply_props_reading(state: &mut NodeAudioState, reading: PropsReading) {
+    if let Some(volume) = reading.volume {
+        state.volume = Some(volume.clamp(0.0, PIPEWIRE_MAX_VOLUME));
+        state.volume_readable = true;
+    }
+    if let Some(muted) = reading.muted {
+        state.muted = Some(muted);
+        state.mute_readable = true;
+    }
+}
+
 /// Pull `volume`, `channelVolumes` and `mute` out of a `Props` object pod.
 ///
 /// `channelVolumes` wins when present: a device with per-channel gain leaves
@@ -132,13 +146,8 @@ impl PipewireDriver {
         drop(proxies);
 
         for (node_id, reading) in readings.borrow().iter() {
-            let control = self.audio_controls.entry(*node_id).or_default();
-            if let Some(volume) = reading.volume {
-                control.volume = volume.clamp(0.0, PIPEWIRE_MAX_VOLUME);
-            }
-            if let Some(muted) = reading.muted {
-                control.muted = muted;
-            }
+            let state = self.audio_controls.entry(*node_id).or_default();
+            apply_props_reading(state, *reading);
         }
     }
 }
@@ -146,6 +155,60 @@ impl PipewireDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_only_props_keep_mute_unknown() {
+        let mut state = NodeAudioState::UNSUPPORTED;
+        apply_props_reading(
+            &mut state,
+            PropsReading {
+                volume: Some(0.5),
+                muted: None,
+            },
+        );
+        assert_eq!(state.volume, Some(0.5));
+        assert!(state.volume_readable);
+        assert_eq!(state.muted, None);
+        assert!(!state.mute_readable);
+    }
+
+    #[test]
+    fn mute_only_props_keep_volume_unknown() {
+        let mut state = NodeAudioState::UNSUPPORTED;
+        apply_props_reading(
+            &mut state,
+            PropsReading {
+                volume: None,
+                muted: Some(true),
+            },
+        );
+        assert_eq!(state.muted, Some(true));
+        assert!(state.mute_readable);
+        assert_eq!(state.volume, None);
+        assert!(!state.volume_readable);
+    }
+
+    #[test]
+    fn both_props_are_applied_independently() {
+        let mut state = NodeAudioState::UNSUPPORTED;
+        apply_props_reading(
+            &mut state,
+            PropsReading {
+                volume: Some(0.75),
+                muted: Some(false),
+            },
+        );
+        assert_eq!(state.volume, Some(0.75));
+        assert_eq!(state.muted, Some(false));
+        assert!(state.volume_readable && state.mute_readable);
+    }
+
+    #[test]
+    fn missing_props_do_not_change_existing_state() {
+        let mut state = NodeAudioState::readable(0.8, true);
+        apply_props_reading(&mut state, PropsReading::default());
+        assert_eq!(state, NodeAudioState::readable(0.8, true));
+    }
 
     #[test]
     fn a_pod_that_is_not_a_props_object_reads_as_nothing() {
