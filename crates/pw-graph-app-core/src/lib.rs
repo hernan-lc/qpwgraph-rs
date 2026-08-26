@@ -302,11 +302,10 @@ impl CompositeDriver {
             BackendKind::PipeWire => {
                 #[cfg(all(target_os = "linux", feature = "pipewire"))]
                 {
-                    return self
-                        .pipewire
+                    self.pipewire
                         .as_ref()
                         .map(GraphDriver::capabilities)
-                        .unwrap_or_default();
+                        .unwrap_or_default()
                 }
                 #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
                 {
@@ -316,11 +315,10 @@ impl CompositeDriver {
             BackendKind::AlsaMidi => {
                 #[cfg(all(target_os = "linux", feature = "alsa"))]
                 {
-                    return self
-                        .alsa
+                    self.alsa
                         .as_ref()
                         .map(GraphDriver::capabilities)
-                        .unwrap_or_default();
+                        .unwrap_or_default()
                 }
                 #[cfg(not(all(target_os = "linux", feature = "alsa")))]
                 {
