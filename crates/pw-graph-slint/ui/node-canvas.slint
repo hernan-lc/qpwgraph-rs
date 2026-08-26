@@ -510,6 +510,11 @@ export component NodeCanvas inherits Rectangle {
                 root.gesture = 0;
                 return;
             }
+            // NOTE: kind 2 covers the header as well as any body the geometry
+            // declined to mark as kind 4, so while Easy mode is on a header
+            // drag connects instead of moving the card -- there is currently no
+            // header move handle in Easy mode. Covered by
+            // `easy_mode_header_drag_connects_rather_than_moving`.
             root.gesture = root.connections-enabled
                 && (root.easy-connect || (root.connect-through && root.pending-pin != 0)) ? 5 : 3;
             root.active-id = hit.id;

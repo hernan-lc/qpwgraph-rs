@@ -751,7 +751,18 @@ mod tests {
         }
 
         fn screen_of(&self, world: (f32, f32)) -> LogicalPosition {
-            LogicalPosition::new(RAIL_WIDTH + world.0, world.1)
+            let zoom = self.application.view.zoom;
+            let pan = self.application.view.pan;
+            LogicalPosition::new(
+                RAIL_WIDTH + pan[0] + world.0 * zoom,
+                pan[1] + world.1 * zoom,
+            )
+        }
+
+        /// Zoom the viewport the way the toolbar does, then push it to the UI.
+        fn set_zoom(&mut self, zoom: f32) {
+            self.application.view.zoom = zoom;
+            self.sync();
         }
 
         fn dispatch(&self, event: WindowEvent) {
@@ -805,6 +816,56 @@ mod tests {
                     canvas::PORT_LIST_TOP
                 };
             (card.x + card.width / 2.0, card.y + top + 8.0)
+        }
+
+        /// A point on the curve the canvas actually draws for `link_id`, read
+        /// back out of the rendered SVG commands rather than recomputed, so the
+        /// test aims at the same pixels the user sees.
+        fn point_on_rendered_link(&self, link_id: i32, t: f32) -> (f32, f32) {
+            let commands = self.window.invoke_graph_link_path(
+                link_id,
+                self.window.get_geometry_version(),
+                0.0,
+                0.0,
+            );
+            let numbers: Vec<f32> = commands
+                .as_str()
+                .split_whitespace()
+                .filter_map(|token| token.parse::<f32>().ok())
+                .collect();
+            assert_eq!(numbers.len(), 8, "a cubic path: {commands}");
+            let curve = [
+                (numbers[0], numbers[1]),
+                (numbers[2], numbers[3]),
+                (numbers[4], numbers[5]),
+                (numbers[6], numbers[7]),
+            ];
+            let u = 1.0 - t;
+            let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            (
+                a * curve[0].0 + b * curve[1].0 + c * curve[2].0 + d * curve[3].0,
+                a * curve[0].1 + b * curve[1].1 + c * curve[2].1 + d * curve[3].1,
+            )
+        }
+
+        /// Create one link through the real pin-drag gesture and render it.
+        fn create_link(&mut self) -> i32 {
+            let (output, input) = self.connectable_pair();
+            self.drag(self.pin(output), self.pin(input));
+            for event in self.take_events() {
+                process_event(&self.window, &mut self.application, event);
+            }
+            self.sync();
+            let rendered = rows_of(&self.links);
+            assert_eq!(rendered.len(), 1, "the new link reaches the render model");
+            rendered[0].id
+        }
+
+        fn link_row(&self, link_id: i32) -> LinkRow {
+            rows_of(&self.links)
+                .into_iter()
+                .find(|link| link.id == link_id)
+                .expect("link is rendered")
         }
 
         fn node_row(&self, node_id: i32) -> NodeRow {
@@ -1046,6 +1107,138 @@ mod tests {
         assert!(
             commands.ends_with(&format!(" {:.2} {:.2}", end.0, end.1)),
             "the curve ends on the input pin: {commands}"
+        );
+    }
+
+    #[test]
+    fn clicking_between_curve_samples_selects_the_connection() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        // 0.37 sits between the stops the old sampled hit test measured, which
+        // is where a press used to fall through to the background.
+        let on_curve = harness.point_on_rendered_link(link, 0.37);
+
+        harness.click(on_curve);
+
+        let selected = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::SelectLink(id, extend) => Some((id, extend)),
+                _ => None,
+            });
+        assert_eq!(selected, Some((link, false)));
+        assert!(
+            harness.link_row(link).selected,
+            "the rendered edge shows as selected"
+        );
+    }
+
+    #[test]
+    fn clicking_a_connection_at_half_zoom_selects_it() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        harness.set_zoom(0.5);
+        let on_curve = harness.point_on_rendered_link(link, 0.37);
+
+        harness.click(on_curve);
+
+        assert!(
+            harness
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, UiEvent::SelectLink(id, _) if *id == link)),
+            "a connection stays clickable when the canvas is zoomed out"
+        );
+        assert!(harness.link_row(link).selected);
+    }
+
+    /// Pins down what Easy mode does today, which is not what the geometry
+    /// alone suggests: `hit_test()` reports the header as `HIT_NODE` (a move),
+    /// but the canvas turns *every* `HIT_NODE` into a connect gesture while
+    /// Easy mode is on. So the header connects too, and a card cannot be moved
+    /// by its header at all in Easy mode. See the note in node-canvas.slint.
+    #[test]
+    fn easy_mode_header_drag_connects_rather_than_moving() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
+        let header = (card.x + 60.0, card.y + 12.0);
+
+        harness.drag(header, (header.0 + 40.0, header.1 + 25.0));
+
+        let events = harness.take_events();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, UiEvent::NodeConnectDropped(id, ..) if *id == card.id)
+            ),
+            "easy mode claims the header for connecting"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, UiEvent::DragCommitted(..))),
+            "which leaves no way to move the card by its header"
+        );
+        harness.sync();
+    }
+
+    #[test]
+    fn advanced_mode_header_drag_moves_the_card() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
+        let header = (card.x + 60.0, card.y + 12.0);
+
+        harness.drag(header, (header.0 + 40.0, header.1 + 25.0));
+
+        let moved = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::DragCommitted(id, dx, dy) => Some((id, dx, dy)),
+                _ => None,
+            });
+        let (id, dx, dy) = moved.expect("the header is a move handle in advanced mode");
+        assert_eq!(id, card.id);
+        assert!((dx - 40.0).abs() < 0.1 && (dy - 25.0).abs() < 0.1);
+        harness.sync();
+    }
+
+    #[test]
+    fn no_connect_backend_still_allows_link_selection() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        let (output, input) = harness.connectable_pair();
+        // What the UI does for a backend whose capabilities report connect and
+        // disconnect as unsupported, such as Windows Core Audio.
+        harness.window.set_connections_available(false);
+
+        harness.click(harness.point_on_rendered_link(link, 0.37));
+        assert!(
+            harness
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, UiEvent::SelectLink(id, _) if *id == link)),
+            "observed links stay selectable when routing is unsupported"
+        );
+        assert!(harness.link_row(link).selected);
+
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
+        harness.click((card.x + 60.0, card.y + 12.0));
+        assert!(
+            harness
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, UiEvent::SelectNode(id, _) if *id == card.id)),
+            "cards stay selectable too"
+        );
+
+        harness.drag(harness.pin(output), harness.pin(input));
+        let events = harness.take_events();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, UiEvent::LinkRequested(..))),
+            "no routing is attempted"
         );
     }
 
