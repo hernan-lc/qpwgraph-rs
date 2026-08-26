@@ -20,7 +20,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use windows::core::{Interface, GUID, PCWSTR, PWSTR};
@@ -46,15 +46,25 @@ const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     mute: true,
     meters: true,
     effects: false,
-    relay: false,
+    // Kept in step with `RelayDriver::relay_available` below: the WASAPI relay
+    // endpoints exist whenever the feature is compiled in.
+    relay: cfg!(feature = "relay"),
 };
 
-/// One refresh answer: the graph plus the audio state read for every node in
-/// it. Reading state during the refresh keeps Core Audio calls on the COM
-/// worker and off the UI's per-frame path.
+/// Audio state shared between the COM worker, the Core Audio change callbacks,
+/// and the public driver.
+///
+/// Volume and mute arrive on notification threads with the new values already
+/// in the payload, so they are written straight in. Nothing about the graph's
+/// shape changes when a fader moves, which is why these events deliberately do
+/// not mark the topology dirty: a volume change used to force a full endpoint
+/// and session re-enumeration.
+type AudioStateMap = Arc<Mutex<BTreeMap<NodeId, NodeAudioState>>>;
+
+/// One refresh answer. Audio state is not carried here -- it lives in the
+/// shared map, which the refresh fills and the callbacks keep current.
 struct WorkerSnapshot {
     graph: Graph,
-    audio_states: BTreeMap<NodeId, NodeAudioState>,
     /// Nodes that can be metered. Endpoints expose `IAudioMeterInformation`;
     /// application sessions do not.
     meterable: BTreeSet<NodeId>,
@@ -77,9 +87,9 @@ enum WorkerCommand {
 #[derive(Debug)]
 pub struct WindowsAudioDriver {
     graph: Graph,
-    /// Audio state as last read from Core Audio. The backend owns these
-    /// values; nothing upstream is allowed to keep its own copy.
-    audio_states: BTreeMap<NodeId, NodeAudioState>,
+    /// Audio state as Core Audio last reported it, kept current by change
+    /// callbacks. The backend owns these values; nothing upstream keeps a copy.
+    audio_states: AudioStateMap,
     /// Nodes Core Audio can meter. Endpoints can; sessions cannot.
     meterable: BTreeSet<NodeId>,
     positions: BTreeMap<NodeId, [f32; 2]>,
@@ -97,9 +107,11 @@ impl WindowsAudioDriver {
         let (ready_tx, ready_rx) = mpsc::channel();
         let dirty = Arc::new(AtomicBool::new(true));
         let worker_dirty = Arc::clone(&dirty);
+        let audio_states: AudioStateMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let worker_states = Arc::clone(&audio_states);
         let worker = thread::Builder::new()
             .name("qpwgraph-windows-audio".into())
-            .spawn(move || worker_thread(command_rx, ready_tx, worker_dirty))
+            .spawn(move || worker_thread(command_rx, ready_tx, worker_dirty, worker_states))
             .map_err(|error| {
                 BackendError::Native(format!("could not start audio worker: {error}"))
             })?;
@@ -120,7 +132,7 @@ impl WindowsAudioDriver {
 
         Ok(Self {
             graph: snapshot.graph,
-            audio_states: snapshot.audio_states,
+            audio_states,
             meterable: snapshot.meterable,
             positions: BTreeMap::new(),
             command_tx,
@@ -157,6 +169,7 @@ impl WindowsAudioDriver {
         codec: super::api::RelayCodecKind,
         frame_ms: u16,
         transport: super::api::RelayTransportPreference,
+        roles: super::api::RelayRoles,
     ) -> pw_graph_relay::EngineConfig {
         pw_graph_relay::EngineConfig {
             device_name,
@@ -167,10 +180,7 @@ impl WindowsAudioDriver {
             frame_ms,
             sample_rate: crate::windows_relay::RELAY_SAMPLE_RATE,
             channels: crate::windows_relay::RELAY_CHANNELS,
-            // Windows can send its own output and play what it receives, but it
-            // cannot present received audio as a capture device, so it never
-            // offers the emit-only microphone role.
-            client_roles: super::api::RelayRoles::receive_only(),
+            client_roles: roles,
             transport,
         }
     }
@@ -194,7 +204,6 @@ impl WindowsAudioDriver {
             }
         }
         self.graph = graph;
-        self.audio_states = snapshot.audio_states;
         self.meterable = snapshot.meterable;
         Ok(())
     }
@@ -254,8 +263,9 @@ impl GraphDriver for WindowsAudioDriver {
         }
         Ok(self
             .audio_states
-            .get(&node)
-            .copied()
+            .lock()
+            .ok()
+            .and_then(|states| states.get(&node).copied())
             .unwrap_or(NodeAudioState::UNSUPPORTED))
     }
 
@@ -267,8 +277,12 @@ impl GraphDriver for WindowsAudioDriver {
         };
         let mut capabilities = state.control_capabilities();
         if self.meterable.contains(&node) {
+            // `IAudioMeterInformation` is an endpoint *peak* meter. It has no
+            // RMS reading, and `audio_meters` reports rms: 0.0 accordingly, so
+            // claiming RMS here would make the UI draw a permanently silent
+            // RMS bar next to a working peak one.
             capabilities.meter_peak = true;
-            capabilities.meter_rms = true;
+            capabilities.meter_rms = false;
         }
         capabilities
     }
@@ -280,9 +294,11 @@ impl GraphDriver for WindowsAudioDriver {
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
         Self::response(receiver)?;
         // Reflect the write straight away so the card does not flick back to
-        // the previous value while waiting for the next refresh.
-        if let Some(state) = self.audio_states.get_mut(&node) {
-            state.muted = Some(muted);
+        // the previous value while waiting for the change callback.
+        if let Ok(mut states) = self.audio_states.lock() {
+            if let Some(state) = states.get_mut(&node) {
+                state.muted = Some(muted);
+            }
         }
         Ok(())
     }
@@ -295,8 +311,10 @@ impl GraphDriver for WindowsAudioDriver {
         Self::response(receiver)?;
         // The worker clamps to the endpoint's 0..=1 range, so record what
         // Windows will actually hold rather than what was asked for.
-        if let Some(state) = self.audio_states.get_mut(&node) {
-            state.volume = Some(volume.clamp(0.0, 1.0));
+        if let Ok(mut states) = self.audio_states.lock() {
+            if let Some(state) = states.get_mut(&node) {
+                state.volume = Some(volume.clamp(0.0, 1.0));
+            }
         }
         Ok(())
     }
@@ -384,6 +402,9 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             request.codec,
             request.frame_ms,
             request.transport,
+            // A host serves whatever a peer asks for; the client's own roles
+            // only matter when this machine is the one connecting out.
+            super::api::RelayRoles::both(),
         );
         let devices = self.ensure_relay(config)?;
         devices
@@ -407,16 +428,12 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         pin: &str,
         roles: super::api::RelayRoles,
     ) -> BackendResult<()> {
-        // Windows can only receive: presenting peer audio as a microphone to
-        // other applications needs a capture endpoint, which user-mode code
-        // cannot create. Asking to emit would advertise a role that can never
-        // carry audio, so it is refused rather than silently downgraded.
-        if roles.emit {
-            return Err(BackendError::unsupported(
-                "Windows cannot send this machine's microphone to a relay peer; \
-                 receiving a peer's audio is supported",
-            ));
-        }
+        // Both roles work here. `emit` means "send what this machine's relay
+        // capture endpoint supplies", which on Windows is the playback
+        // loopback, and `receive` means "play what the peer sends", which is
+        // the render stream. What Windows cannot do is expose the received
+        // audio to *other applications* as a microphone -- a routing limit, not
+        // a role limit -- so neither role is refused here.
         let device_name = self
             .relay
             .as_ref()
@@ -429,6 +446,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             super::api::RelayCodecKind::Opus,
             10,
             super::api::RelayTransportPreference::Auto,
+            roles,
         );
         let devices = self.ensure_relay(config)?;
         devices.handle().connect(target, pin, roles);
@@ -462,6 +480,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             super::api::RelayCodecKind::Opus,
             10,
             super::api::RelayTransportPreference::Auto,
+            super::api::RelayRoles::both(),
         );
         let devices = self.ensure_relay(config)?;
         devices
@@ -492,6 +511,7 @@ fn worker_thread(
     command_rx: Receiver<WorkerCommand>,
     ready_tx: Sender<BackendResult<WorkerSnapshot>>,
     dirty: Arc<AtomicBool>,
+    audio_states: AudioStateMap,
 ) {
     let initialized = unsafe { Com::CoInitializeEx(None, COINIT_MULTITHREADED) };
     if initialized.is_err() {
@@ -501,7 +521,7 @@ fn worker_thread(
         return;
     }
 
-    let worker = CoreAudioWorker::new(Arc::clone(&dirty));
+    let worker = CoreAudioWorker::new(Arc::clone(&dirty), audio_states);
     let mut worker = match worker {
         Ok(worker) => worker,
         Err(error) => {
@@ -584,10 +604,17 @@ struct CoreAudioWorker {
     sessions: Vec<SessionRecord>,
     meter_policy: MeterPolicy,
     requested_meters: BTreeSet<NodeId>,
+    /// Shared with the public driver and every change callback.
+    audio_states: AudioStateMap,
+    /// Endpoint volume callbacks, kept registered for the endpoint's lifetime.
+    endpoint_volume_events: Vec<(
+        IAudioEndpointVolume,
+        Audio::Endpoints::IAudioEndpointVolumeCallback,
+    )>,
 }
 
 impl CoreAudioWorker {
-    fn new(dirty: Arc<AtomicBool>) -> BackendResult<Self> {
+    fn new(dirty: Arc<AtomicBool>, audio_states: AudioStateMap) -> BackendResult<Self> {
         let enumerator: Audio::IMMDeviceEnumerator =
             unsafe { Com::CoCreateInstance(&Audio::MMDeviceEnumerator, None, CLSCTX_ALL) }
                 .map_err(|error| native_error("create MMDeviceEnumerator", error))?;
@@ -606,6 +633,8 @@ impl CoreAudioWorker {
             dirty,
             session_notifications: Vec::new(),
             session_events: Vec::new(),
+            audio_states,
+            endpoint_volume_events: Vec::new(),
             endpoints: Vec::new(),
             sessions: Vec::new(),
             meter_policy: MeterPolicy::OnDemand,
@@ -670,17 +699,46 @@ impl CoreAudioWorker {
         self.endpoints = endpoints;
         self.sessions = sessions;
         self.dirty.store(false, Ordering::Release);
-        let audio_states = self.read_audio_states();
+        let states = self.read_audio_states();
+        if let Ok(mut shared) = self.audio_states.lock() {
+            *shared = states;
+        }
+        self.register_endpoint_volume_callbacks();
         let meterable = self
             .endpoints
             .iter()
             .map(|endpoint| endpoint.node_id)
             .collect();
-        Ok(WorkerSnapshot {
-            graph,
-            audio_states,
-            meterable,
-        })
+        Ok(WorkerSnapshot { graph, meterable })
+    }
+
+    /// Subscribe to endpoint volume/mute changes so the hardware keys and the
+    /// system mixer are reflected without polling or a topology rebuild.
+    fn register_endpoint_volume_callbacks(&mut self) {
+        self.clear_endpoint_volume_callbacks();
+        for endpoint in &self.endpoints {
+            let Ok(control) = (unsafe {
+                endpoint
+                    .device
+                    .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            }) else {
+                continue;
+            };
+            let callback: Audio::Endpoints::IAudioEndpointVolumeCallback = EndpointVolumeCallback {
+                node_id: endpoint.node_id,
+                states: Arc::clone(&self.audio_states),
+            }
+            .into();
+            if unsafe { control.RegisterControlChangeNotify(&callback) }.is_ok() {
+                self.endpoint_volume_events.push((control, callback));
+            }
+        }
+    }
+
+    fn clear_endpoint_volume_callbacks(&mut self) {
+        for (control, callback) in self.endpoint_volume_events.drain(..) {
+            let _ = unsafe { control.UnregisterControlChangeNotify(&callback) };
+        }
     }
 
     /// Read volume and mute for every endpoint and session Core Audio knows
@@ -853,6 +911,8 @@ impl CoreAudioWorker {
 
             let events: Audio::IAudioSessionEvents = SessionEventsClient {
                 dirty: Arc::clone(&self.dirty),
+                node_id,
+                states: Arc::clone(&self.audio_states),
             }
             .into();
             if unsafe { control.RegisterAudioSessionNotification(&events) }.is_ok() {
@@ -1078,9 +1138,57 @@ impl Audio::IAudioSessionNotification_Impl for SessionNotificationClient_Impl {
     }
 }
 
+/// Applies a volume/mute change to the shared state map.
+///
+/// Both callbacks receive the new values in the payload, so nothing has to be
+/// read back over COM and the graph never needs rebuilding for a fader move.
+fn apply_state_change(states: &AudioStateMap, node_id: NodeId, volume: f32, muted: bool) {
+    let Ok(mut states) = states.lock() else {
+        return;
+    };
+    if let Some(state) = states.get_mut(&node_id) {
+        if state.volume_readable {
+            state.volume = Some(volume);
+        }
+        if state.mute_readable {
+            state.muted = Some(muted);
+        }
+    }
+}
+
+#[windows::core::implement(Audio::Endpoints::IAudioEndpointVolumeCallback)]
+struct EndpointVolumeCallback {
+    node_id: NodeId,
+    states: AudioStateMap,
+}
+
+impl Audio::Endpoints::IAudioEndpointVolumeCallback_Impl for EndpointVolumeCallback_Impl {
+    fn OnNotify(
+        &self,
+        notify: *mut Audio::AUDIO_VOLUME_NOTIFICATION_DATA,
+    ) -> windows::core::Result<()> {
+        if notify.is_null() {
+            return Ok(());
+        }
+        // Fields are read through the raw pointer: the struct is variable
+        // length (a trailing channel-volume array) so it is never referenced
+        // as a whole value.
+        let (volume, muted) = unsafe {
+            (
+                std::ptr::addr_of!((*notify).fMasterVolume).read_unaligned(),
+                std::ptr::addr_of!((*notify).bMuted).read_unaligned(),
+            )
+        };
+        apply_state_change(&self.states, self.node_id, volume, muted.as_bool());
+        Ok(())
+    }
+}
+
 #[windows::core::implement(Audio::IAudioSessionEvents)]
 struct SessionEventsClient {
     dirty: Arc<AtomicBool>,
+    node_id: NodeId,
+    states: AudioStateMap,
 }
 
 impl Audio::IAudioSessionEvents_Impl for SessionEventsClient_Impl {
@@ -1101,16 +1209,24 @@ impl Audio::IAudioSessionEvents_Impl for SessionEventsClient_Impl {
         Ok(())
     }
 
+    /// The payload already carries the new values, so this updates the shared
+    /// state directly. It deliberately does not mark the topology dirty: a
+    /// session''s volume changing does not change the graph, and forcing a full
+    /// endpoint and session re-enumeration for every fader tick was the bulk of
+    /// the refresh churn.
     fn OnSimpleVolumeChanged(
         &self,
-        _new_volume: f32,
-        _new_mute: BOOL,
+        new_volume: f32,
+        new_mute: BOOL,
         _event_context: *const GUID,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
+        apply_state_change(&self.states, self.node_id, new_volume, new_mute.as_bool());
         Ok(())
     }
 
+    /// Per-channel volume does not change the master scalar this driver
+    /// reports, and it never changes the graph, so it is ignored rather than
+    /// triggering a rebuild.
     fn OnChannelVolumeChanged(
         &self,
         _channel_count: u32,
@@ -1118,7 +1234,6 @@ impl Audio::IAudioSessionEvents_Impl for SessionEventsClient_Impl {
         _changed_channel: u32,
         _event_context: *const GUID,
     ) -> windows::core::Result<()> {
-        self.dirty.store(true, Ordering::Release);
         Ok(())
     }
 

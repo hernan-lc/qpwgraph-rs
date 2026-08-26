@@ -290,24 +290,144 @@ mod tests {
         assert!(!driver.relay_status().host_active);
     }
 
-    /// Windows can play a peer's audio but cannot present it as a microphone,
-    /// so an emit role is refused rather than accepted and silently ignored.
+    /// Regression: `relay_connect` used to refuse any role containing `emit`,
+    /// reasoning that Windows cannot create a virtual microphone. That confuses
+    /// two different things. In this protocol `emit` means "send what the local
+    /// relay capture endpoint supplies", and on Windows that endpoint is the
+    /// playback loopback, which works. The default relay role in config is
+    /// `both`, so the refusal broke the ordinary client connection outright.
+    ///
+    /// What Windows genuinely cannot do is expose received audio to *other*
+    /// applications as a microphone. That is a routing limit, not a role limit.
     #[cfg(all(target_os = "windows", feature = "relay"))]
     #[test]
-    fn windows_relay_refuses_the_microphone_role() {
+    fn windows_relay_accepts_every_role_including_emit() {
+        if std::env::var_os("PW_GRAPH_TEST_RELAY").is_none() {
+            return;
+        }
         let Ok(mut driver) = WindowsAudioDriver::new() else {
             return;
         };
+        // Port 9 (discard) never completes a pairing, which is fine: the
+        // assertion is that the role is accepted and the endpoints come up, not
+        // that a peer answers.
         let target = "127.0.0.1:9".parse().expect("a valid address");
 
-        let error = driver
-            .relay_connect(target, "123456", RelayRoles::emit_only())
-            .expect_err("emitting requires a capture device Windows cannot create");
+        for roles in [
+            RelayRoles::emit_only(),
+            RelayRoles::receive_only(),
+            RelayRoles::both(),
+        ] {
+            driver
+                .relay_connect(target, "123456", roles)
+                .expect("every relay role is carried by the WASAPI endpoints");
+            assert!(driver.relay_devices_active());
+        }
+    }
 
-        assert!(matches!(error, BackendError::Unsupported(_)), "{error}");
+    /// Volume changed *outside* this process must reach the cached state
+    /// through the Core Audio change callback, without a graph refresh.
+    ///
+    /// Opt-in: it moves the real system volume (and puts it back). The write
+    /// goes through a separate `IAudioEndpointVolume` instance so the driver's
+    /// own optimistic update cannot mask a broken callback.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_follows_external_volume_changes_without_a_refresh() {
+        use ::windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use ::windows::Win32::Media::Audio::{
+            eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        };
+        use ::windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        if std::env::var_os("PW_GRAPH_TEST_VOLUME").is_none() {
+            return;
+        }
+        let Ok(mut driver) = WindowsAudioDriver::new() else {
+            return;
+        };
+        if driver.refresh().is_err() {
+            return;
+        }
+        // The default playback endpoint is the one the raw control below moves.
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let control = (|| -> Option<IAudioEndpointVolume> {
+            let enumerator: IMMDeviceEnumerator =
+                unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.ok()?;
+            let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }.ok()?;
+            unsafe { device.Activate(CLSCTX_ALL, None) }.ok()
+        })();
+        let Some(control) = control else {
+            unsafe { CoUninitialize() };
+            return;
+        };
+
+        let original = unsafe { control.GetMasterVolumeLevelScalar() }.unwrap_or(1.0);
+        let target = if original > 0.5 { 0.25 } else { 0.75 };
+        let node = driver.graph().nodes.keys().copied().find(|node| {
+            driver
+                .node_audio_state(*node)
+                .is_ok_and(|state| (state.volume.unwrap_or(-1.0) - original).abs() < 0.01)
+                && driver.node_capabilities(*node).volume_write
+        });
+        let Some(node) = node else {
+            unsafe { CoUninitialize() };
+            return;
+        };
+
+        unsafe { control.SetMasterVolumeLevelScalar(target, std::ptr::null()) }
+            .expect("the external write should succeed");
+        // The callback lands on a Core Audio notification thread.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut followed = false;
+        while std::time::Instant::now() < deadline {
+            let state = driver.node_audio_state(node).expect("state stays readable");
+            if (state.volume.unwrap_or(-1.0) - target).abs() < 0.01 {
+                followed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        let _ = unsafe { control.SetMasterVolumeLevelScalar(original, std::ptr::null()) };
+        let dirty = driver.graph_dirty();
+        unsafe { CoUninitialize() };
+
+        assert!(followed, "an external volume change must reach the cache");
         assert!(
-            !driver.relay_devices_active(),
-            "a refused role must not leave endpoints running"
+            !dirty,
+            "a volume change must not mark the topology dirty: the graph did not change"
+        );
+    }
+
+    /// `IAudioMeterInformation` is an endpoint peak meter with no RMS reading,
+    /// and `audio_meters` reports `rms: 0.0`. Claiming RMS capability would
+    /// make the UI draw a permanently silent RMS bar beside a working peak one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_endpoints_report_peak_metering_but_not_rms() {
+        let Ok(mut driver) = WindowsAudioDriver::new() else {
+            return;
+        };
+        if driver.refresh().is_err() {
+            return;
+        }
+        let metered = driver
+            .graph()
+            .nodes
+            .keys()
+            .map(|node_id| driver.node_capabilities(*node_id))
+            .filter(|capabilities| capabilities.has_any_meter())
+            .collect::<Vec<_>>();
+        if metered.is_empty() {
+            return;
+        }
+        assert!(metered.iter().all(|capabilities| capabilities.meter_peak));
+        assert!(
+            metered.iter().all(|capabilities| !capabilities.meter_rms),
+            "Core Audio exposes no endpoint RMS"
         );
     }
 

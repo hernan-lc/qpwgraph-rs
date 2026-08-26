@@ -344,7 +344,7 @@ fn node_row(node: &NodeView, i18n: &I18n) -> NodeRow {
             .audio
             .state
             .volume
-            .map(track_position_from_volume)
+            .map(|volume| track_position_from_volume(volume, node.audio.capabilities.volume_max))
             .unwrap_or(0.0),
         audio_volume_known: node.audio.state.volume.is_some(),
         audio_muted: node.audio.state.muted.unwrap_or(false),

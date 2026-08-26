@@ -347,14 +347,30 @@ impl Default for NodeAudioControl {
 /// volume and mute while an observed application session may expose neither,
 /// and a PipeWire effect node has no audio controls even though the PipeWire
 /// backend does. The UI decides which controls to draw from this.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodeCapabilities {
     pub volume_read: bool,
     pub volume_write: bool,
     pub mute_read: bool,
     pub mute_write: bool,
+    /// Highest volume this node accepts, as a linear scalar where 1.0 is unity.
+    ///
+    /// Maximum gain is a property of the node, not of its current state, which
+    /// is why it lives here. PipeWire allows boost to 1.5; a Windows endpoint
+    /// clamps at unity. The fader's top of scale is driven from this, so a
+    /// backend that cannot boost never offers a range it would silently clamp.
+    pub volume_max: f32,
     pub meter_peak: bool,
     pub meter_rms: bool,
+}
+
+/// Unity with no boost headroom. The right answer when nothing is writable.
+pub const UNITY_VOLUME: f32 = 1.0;
+
+impl Default for NodeCapabilities {
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 impl NodeCapabilities {
@@ -365,16 +381,18 @@ impl NodeCapabilities {
         volume_write: false,
         mute_read: false,
         mute_write: false,
+        volume_max: UNITY_VOLUME,
         meter_peak: false,
         meter_rms: false,
     };
 
-    /// Full read/write control plus both meter kinds.
+    /// Full read/write control plus both meter kinds, with boost headroom.
     pub const FULL: Self = Self {
         volume_read: true,
         volume_write: true,
         mute_read: true,
         mute_write: true,
+        volume_max: 1.5,
         meter_peak: true,
         meter_rms: true,
     };
@@ -439,12 +457,16 @@ impl NodeAudioState {
     /// The control half of this node's capabilities. Meter capability is not
     /// derivable from audio state, so it is left off here and merged by the
     /// backend's `node_capabilities`.
+    ///
+    /// `volume_max` describes the node, not its state, so the backend supplies
+    /// it here and overrides the unity default when it allows boost.
     pub const fn control_capabilities(&self) -> NodeCapabilities {
         NodeCapabilities {
             volume_read: self.volume_readable,
             volume_write: self.volume_writable,
             mute_read: self.mute_readable,
             mute_write: self.mute_writable,
+            volume_max: UNITY_VOLUME,
             meter_peak: false,
             meter_rms: false,
         }

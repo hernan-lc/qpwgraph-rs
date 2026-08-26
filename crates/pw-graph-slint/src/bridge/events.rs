@@ -155,7 +155,10 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
         UiEvent::SetAudioVolume(id, position) => {
             if let Some(node_id) = application.view.ids.node_id(id) {
                 let position = position.clamp(0.0, 1.0);
-                let volume = volume_from_track_position(position);
+                // The fader's top of scale is whatever this node accepts, so a
+                // backend clamped at unity never reports a boost it discarded.
+                let max_volume = application.source.node_capabilities(node_id).volume_max;
+                let volume = volume_from_track_position(position, max_volume);
                 // The backend owns the value; the next sync reads back whatever
                 // it actually applied, so nothing is cached here.
                 match application.source.set_node_volume(node_id, volume) {

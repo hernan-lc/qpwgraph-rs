@@ -648,9 +648,36 @@ mod tests {
 
     #[test]
     fn node_volume_track_preserves_unity_and_boost_range() {
-        assert!((volume_from_track_position(0.9) - 1.0).abs() < f32::EPSILON);
-        assert!((volume_from_track_position(1.0) - 1.5).abs() < f32::EPSILON);
-        assert!((volume_from_track_position(0.45) - 0.5).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.9, 1.5) - 1.0).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(1.0, 1.5) - 1.5).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.45, 1.5) - 0.5).abs() < f32::EPSILON);
+    }
+
+    /// A backend clamped at unity must not offer boost travel. The Windows
+    /// endpoints clamp at 1.0, so the whole track has to map into 0..=1 --
+    /// otherwise the top tenth of the fader silently does nothing and the card
+    /// claims a level Core Audio discarded.
+    #[test]
+    fn a_node_clamped_at_unity_uses_the_whole_track_for_zero_to_one() {
+        assert!((volume_from_track_position(1.0, 1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.5, 1.0) - 0.5).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.0, 1.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn track_position_round_trips_through_volume_for_either_ceiling() {
+        for max_volume in [1.0, 1.5] {
+            for step in 0..=20 {
+                let position = step as f32 / 20.0;
+                let volume = volume_from_track_position(position, max_volume);
+                let back = track_position_from_volume(volume, max_volume);
+                assert!(
+                    (back - position).abs() < 0.001,
+                    "max {max_volume} position {position} came back as {back}"
+                );
+                assert!(volume <= max_volume + f32::EPSILON);
+            }
+        }
     }
 
     #[test]

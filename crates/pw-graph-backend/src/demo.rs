@@ -13,6 +13,9 @@ use pw_graph_core::{
 use pw_graph_effects::{AudioSpec, EffectHost, EffectInstanceConfig, EffectProcessor};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Boost headroom, matching PipeWire so demo mode behaves like the real thing.
+const DEMO_MAX_VOLUME: f32 = 1.5;
+
 /// A deterministic demo backend that behaves like a PipeWire registry from
 /// the perspective of the application. It is useful for `--demo`, examples,
 /// and integration tests where a live PipeWire session is not available.
@@ -313,7 +316,7 @@ impl GraphDriver for DemoDriver {
         if !self.graph.nodes.contains_key(&node) {
             return Err(GraphError::MissingNode(node).into());
         }
-        self.audio_controls.entry(node).or_default().volume = volume.clamp(0.0, 1.5);
+        self.audio_controls.entry(node).or_default().volume = volume.clamp(0.0, DEMO_MAX_VOLUME);
         Ok(())
     }
 
@@ -341,6 +344,7 @@ impl GraphDriver for DemoDriver {
         // Effect nodes are pass-through DSP: nothing to meter and nothing to
         // control, so they must not be given a meter either.
         if state.is_supported() {
+            capabilities.volume_max = DEMO_MAX_VOLUME;
             capabilities.meter_peak = true;
             capabilities.meter_rms = true;
         }

@@ -73,6 +73,9 @@ const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
 /// down and rebuild every visible stream.
 const METER_LINGER: Duration = Duration::from_secs(5);
 
+/// Boost ceiling applied by `set_node_volume_locked`; the fader matches it.
+pub(super) const PIPEWIRE_MAX_VOLUME: f32 = 1.5;
+
 fn graph_id(native_id: u64) -> u64 {
     encode_backend_id(BackendNamespace::PipeWire, native_id)
 }
@@ -1089,6 +1092,21 @@ impl GraphDriver for PipewireDriver {
             mute_readable: known.is_some(),
             mute_writable: true,
         })
+    }
+
+    /// PipeWire accepts gain above unity, which `set_node_volume_locked`
+    /// clamps at 1.5, so the fader is allowed the same boost range.
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        let Ok(state) = self.node_audio_state(node) else {
+            return NodeCapabilities::NONE;
+        };
+        let mut capabilities = state.control_capabilities();
+        if state.is_supported() {
+            capabilities.volume_max = PIPEWIRE_MAX_VOLUME;
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+        }
+        capabilities
     }
 
     fn graph(&self) -> &Graph {
