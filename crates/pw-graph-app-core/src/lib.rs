@@ -6,7 +6,8 @@
 //! resource through PipeWire.
 
 use pw_graph_backend::{
-    BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
+    BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy, NodeAudioState,
+    NodeCapabilities,
 };
 use pw_graph_core::{
     backend_for_link, backend_for_node, backend_for_port, BackendKind, Graph, GraphError, Link,
@@ -543,6 +544,88 @@ impl GraphDriver for CompositeDriver {
         }
     }
 
+    /// Forwarded to the backend that owns the node.
+    ///
+    /// This must stay in sync with `set_node_volume`/`set_node_mute`: the trait
+    /// default answers `UNSUPPORTED`, so a composite that forgets to delegate
+    /// silently strips every audio control off every live card instead of
+    /// failing loudly. Covered by `composite_forwards_audio_state_to_the_owning_backend`.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        match backend_for_node(node) {
+            // Real nodes with nothing to control, not errors.
+            Some(BackendKind::AlsaMidi) | Some(BackendKind::WindowsMidi) => {
+                Ok(NodeAudioState::UNSUPPORTED)
+            }
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    match self.pipewire.as_ref() {
+                        Some(driver) => driver.node_audio_state(node),
+                        None => Ok(NodeAudioState::UNSUPPORTED),
+                    }
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    let _ = node;
+                    Ok(NodeAudioState::UNSUPPORTED)
+                }
+            }
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    match self.windows_audio.as_ref() {
+                        Some(driver) => driver.node_audio_state(node),
+                        None => Ok(NodeAudioState::UNSUPPORTED),
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = node;
+                    Ok(NodeAudioState::UNSUPPORTED)
+                }
+            }
+            Some(BackendKind::Demo) => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
+            None => Err(Self::unsupported("node has an unknown backend namespace")),
+        }
+    }
+
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        match backend_for_node(node) {
+            Some(BackendKind::AlsaMidi) | Some(BackendKind::WindowsMidi) => NodeCapabilities::NONE,
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    match self.pipewire.as_ref() {
+                        Some(driver) => driver.node_capabilities(node),
+                        None => NodeCapabilities::NONE,
+                    }
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    let _ = node;
+                    NodeCapabilities::NONE
+                }
+            }
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    match self.windows_audio.as_ref() {
+                        Some(driver) => driver.node_capabilities(node),
+                        None => NodeCapabilities::NONE,
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = node;
+                    NodeCapabilities::NONE
+                }
+            }
+            Some(BackendKind::Demo) | None => NodeCapabilities::NONE,
+        }
+    }
+
     fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
         match backend_for_node(node) {
             Some(BackendKind::AlsaMidi) => Err(Self::unsupported(
@@ -962,6 +1045,80 @@ mod tests {
     use super::*;
     use pw_graph_backend::InMemoryDriver;
     use pw_graph_core::{encode_backend_id, BackendNamespace, Direction, Node, Port};
+
+    /// Regression: the composite implemented `set_node_volume`/`set_node_mute`
+    /// but not `node_audio_state`/`node_capabilities`, so the trait default
+    /// answered `UNSUPPORTED` for every live node. The UI drives its controls
+    /// off that, so every card on a real backend lost its volume and mute
+    /// controls even though the driver underneath reported both.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn composite_forwards_audio_state_to_the_owning_backend() {
+        let Ok(mut driver) = pw_graph_backend::WindowsAudioDriver::new() else {
+            // No Core Audio in this environment.
+            return;
+        };
+        if driver.refresh().is_err() || driver.graph().nodes.is_empty() {
+            return;
+        }
+        let expected: Vec<_> = driver
+            .graph()
+            .nodes
+            .keys()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    driver.node_audio_state(*node_id).ok(),
+                    driver.node_capabilities(*node_id),
+                )
+            })
+            .collect();
+        assert!(
+            expected
+                .iter()
+                .any(|(_, _, capabilities)| capabilities.has_any_control()),
+            "an endpoint should report controls, or this proves nothing"
+        );
+
+        let mut composite = CompositeDriver::with_windows_audio(driver);
+        composite.refresh().expect("composite refresh");
+
+        for (node_id, state, capabilities) in expected {
+            assert_eq!(
+                composite.node_audio_state(node_id).ok(),
+                state,
+                "composite must not swallow the backend's reading"
+            );
+            assert_eq!(composite.node_capabilities(node_id), capabilities);
+        }
+    }
+
+    /// The other half of the same failure: a merged graph must list each port
+    /// on its node exactly once, or the card grows a second row and a phantom
+    /// pin that captures the link belonging to the real one.
+    #[test]
+    fn merging_a_graph_lists_every_port_once() {
+        let mut source = Graph::default();
+        let node_id = NodeId(encode_backend_id(BackendNamespace::PipeWire, 7));
+        let port_id = PortId(encode_backend_id(BackendNamespace::PipeWire, 8));
+        source
+            .add_node(Node::new(node_id, "Speakers", NodeType::PipeWire))
+            .unwrap();
+        source
+            .add_port(Port::new(
+                port_id,
+                node_id,
+                "audio",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+
+        let mut merged = Graph::default();
+        CompositeDriver::merge_graph(&mut merged, &source).expect("merge succeeds");
+
+        assert_eq!(merged.nodes[&node_id].ports, vec![port_id]);
+    }
 
     #[test]
     fn composite_reports_cross_backend_connections_before_mutation() {
