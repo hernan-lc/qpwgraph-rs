@@ -121,7 +121,14 @@ impl ApplicationDriver {
     }
 
     pub(crate) fn is_link_mutable(&self, link: pw_graph_core::LinkId) -> bool {
-        GraphDriver::is_link_mutable(self, link)
+        self.delegated_is_link_mutable(link)
+    }
+
+    fn delegated_is_link_mutable(&self, link: pw_graph_core::LinkId) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.is_link_mutable(link),
+            BackendKind::Live(driver) => driver.is_link_mutable(link),
+        }
     }
 
     pub(crate) fn meter_policy(&self) -> MeterPolicy {
@@ -302,6 +309,10 @@ impl GraphDriver for ApplicationDriver {
             BackendKind::Demo(driver) => driver.capabilities(),
             BackendKind::Live(driver) => driver.capabilities(),
         }
+    }
+
+    fn is_link_mutable(&self, link: pw_graph_core::LinkId) -> bool {
+        self.delegated_is_link_mutable(link)
     }
 
     fn refresh(&mut self) -> pw_graph_backend::BackendResult<Vec<Node>> {
@@ -618,4 +629,34 @@ fn demo_meters(graph: &Graph, elapsed: std::time::Duration) -> Vec<AudioMeter> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pw_graph_backend::GraphDriver;
+    use pw_graph_patchbay::Patchbay;
+
+    #[test]
+    fn observed_link_stays_immutable_through_application_driver() {
+        let mut backend = DemoDriver::demo();
+        let link = backend
+            .connect(pw_graph_core::PortId(1), pw_graph_core::PortId(3))
+            .unwrap();
+        backend.mark_link_observed(link.id);
+
+        let application = ApplicationDriver {
+            backend: BackendKind::Demo(backend),
+            backend_name: "test".into(),
+            meter_policy: MeterPolicy::Disabled,
+            meter_epoch: Instant::now(),
+        };
+
+        assert!(!application.is_link_mutable(link.id));
+        assert!(!GraphDriver::is_link_mutable(&application, link.id));
+
+        let mut patchbay = Patchbay::new("observed");
+        patchbay.snapshot_driver(&application, true);
+        assert!(patchbay.connections.is_empty());
+    }
 }

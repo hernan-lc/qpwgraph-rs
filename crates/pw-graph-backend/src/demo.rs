@@ -10,7 +10,7 @@ use pw_graph_core::{
     Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
 };
 use pw_graph_effects::{AudioSpec, EffectHost, EffectInstanceConfig, EffectProcessor};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A deterministic demo backend that behaves like a PipeWire registry from
 /// the perspective of the application. It is useful for `--demo`, examples,
@@ -20,6 +20,7 @@ pub struct DemoDriver {
     graph: Graph,
     next_link_id: u64,
     audio_controls: BTreeMap<NodeId, NodeAudioControl>,
+    observed_links: BTreeSet<LinkId>,
     effects: BTreeMap<String, EffectInstance>,
     effect_host: EffectHost,
     effect_processors: BTreeMap<String, Box<dyn EffectProcessor>>,
@@ -33,6 +34,7 @@ impl DemoDriver {
             graph,
             next_link_id,
             audio_controls: BTreeMap::new(),
+            observed_links: BTreeSet::new(),
             effects: BTreeMap::new(),
             effect_host: EffectHost::new(),
             effect_processors: BTreeMap::new(),
@@ -106,6 +108,15 @@ impl DemoDriver {
 
     pub fn into_graph(self) -> Graph {
         self.graph
+    }
+
+    /// Mark a graph relationship as observed rather than user-mutable.
+    ///
+    /// Demo mode normally models a mutable PipeWire graph. This hook also
+    /// lets deterministic tests model backends that expose informational
+    /// links, such as Windows audio-session relationships.
+    pub fn mark_link_observed(&mut self, link: LinkId) {
+        self.observed_links.insert(link);
     }
 
     fn allocate_link_id(&mut self) -> LinkId {
@@ -274,6 +285,10 @@ impl GraphDriver for DemoDriver {
 
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
         Ok(self.graph.remove_link(link)?)
+    }
+
+    fn is_link_mutable(&self, link: LinkId) -> bool {
+        self.graph.link(link).is_some() && !self.observed_links.contains(&link)
     }
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
