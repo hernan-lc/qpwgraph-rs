@@ -4,6 +4,7 @@ pub use pw_graph_core::NodeAppearance;
 use pw_graph_core::PortKey;
 use pw_graph_effects::EffectInstanceConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -83,6 +84,11 @@ pub struct AppConfig {
     pub relay_codec: String,
     pub relay_frame_ms: u16,
     pub relay_transport: String,
+    /// Preserve fields written by a newer version so opening and saving a
+    /// config with this version does not silently erase forward-compatible
+    /// settings.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -154,6 +160,7 @@ impl Default for AppConfig {
             // 5–60 ms for links that prefer fewer, larger packets.
             relay_frame_ms: 10,
             relay_transport: "auto".into(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -289,5 +296,34 @@ effects = [{ instance = { instance_id = "legacy-effect", effect_id = "builtin.no
         assert_eq!(effect.source, None);
         assert_eq!(effect.destination, None);
         assert_eq!(effect.position, [260.0, 180.0]);
+    }
+
+    #[test]
+    fn unknown_fields_survive_a_config_round_trip() {
+        let directory =
+            std::env::temp_dir().join(format!("pw-graph-config-extra-{}", std::process::id()));
+        let path = directory.join("config.toml");
+        let original = r#"
+language = "es"
+future_setting = "keep me"
+[future_table]
+enabled = true
+"#;
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, original).unwrap();
+
+        let config = AppConfig::load_from(&path).unwrap();
+        assert_eq!(
+            config.extra.get("future_setting"),
+            Some(&toml::Value::String("keep me".into()))
+        );
+        config.save_to(&path).unwrap();
+        let restored = AppConfig::load_from(&path).unwrap();
+        assert_eq!(restored.extra, config.extra);
+        assert_eq!(
+            restored.extra.get("future_table"),
+            config.extra.get("future_table")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
