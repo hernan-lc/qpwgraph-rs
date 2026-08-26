@@ -22,10 +22,19 @@ pub(crate) const PORT_ROW_PITCH: f32 = 25.0;
 pub(crate) const PORT_ROW_HEIGHT: f32 = 22.0;
 /// Horizontal distance from the node edge to the centre of a pin.
 pub(crate) const PIN_INSET: f32 = 10.0;
-/// Pointer slack around a pin, in world units.
-pub(crate) const PIN_HIT_RADIUS: f32 = 11.0;
-/// Pointer slack around a link, in world units.
-pub(crate) const LINK_HIT_RADIUS: f32 = 7.0;
+/// Pointer slack around a pin, in logical screen pixels.
+///
+/// Hit tolerances are screen-space on purpose: they describe how precisely a
+/// person can aim, which does not change when the canvas is zoomed out. They
+/// are divided by the zoom just before they are used against world geometry.
+pub(crate) const PIN_SCREEN_HIT_RADIUS: f32 = 11.0;
+/// Pointer slack around a link, in logical screen pixels.
+pub(crate) const LINK_SCREEN_HIT_RADIUS: f32 = 9.0;
+/// Snap distance for resolving a finished drop onto a pin, in world units.
+///
+/// Unlike the pointer tolerances above this one is about card geometry -- how
+/// close to a port a drop counts as landing on it -- so it stays world-space.
+pub(crate) const PIN_DROP_RADIUS: f32 = 11.0;
 
 /// Nothing was hit.
 pub(crate) const HIT_NONE: i32 = 0;
@@ -232,8 +241,13 @@ impl CanvasGeometry {
     }
 
     /// Nearest link within `radius`, or `-1`.
+    ///
+    /// The curve is flattened into short segments and the pointer is measured
+    /// against those segments rather than against the flattening points alone.
+    /// Sampling only the points left blind gaps roughly a segment long between
+    /// them, so clicking a visibly drawn edge frequently missed it.
     pub(crate) fn find_link_at(&self, x: f32, y: f32, radius: f32) -> i32 {
-        const SAMPLES: usize = 24;
+        const SEGMENTS: usize = 32;
         let mut best = (radius * radius, -1);
         for link in &self.links {
             let (Some(start), Some(end)) = (self.pin(link.start_pin), self.pin(link.end_pin))
@@ -243,20 +257,31 @@ impl CanvasGeometry {
             let start = self.anchor(&start, (0.0, 0.0));
             let end = self.anchor(&end, (0.0, 0.0));
             let curve = bezier(start, end);
-            for step in 0..=SAMPLES {
-                let point = cubic_at(&curve, step as f32 / SAMPLES as f32);
-                let distance = (point.0 - x).powi(2) + (point.1 - y).powi(2);
+            let mut previous = cubic_at(&curve, 0.0);
+            for step in 1..=SEGMENTS {
+                let current = cubic_at(&curve, step as f32 / SEGMENTS as f32);
+                let distance = squared_distance_to_segment((x, y), previous, current);
                 if distance <= best.0 {
                     best = (distance, link.id);
                 }
+                previous = current;
             }
         }
         best.1
     }
 
     /// Resolve a pointer press into the gesture it should start.
-    pub(crate) fn hit_test(&self, x: f32, y: f32) -> Hit {
-        let pin = self.find_pin_at(x, y, PIN_HIT_RADIUS);
+    ///
+    /// `zoom` converts the screen-space pointer tolerances into the world units
+    /// the cached geometry is expressed in, so an edge stays just as easy to
+    /// click when the canvas is zoomed out as it is at 1:1.
+    pub(crate) fn hit_test(&self, x: f32, y: f32, zoom: f32) -> Hit {
+        let zoom = if zoom.is_finite() && zoom > 0.01 {
+            zoom
+        } else {
+            1.0
+        };
+        let pin = self.find_pin_at(x, y, PIN_SCREEN_HIT_RADIUS / zoom);
         if pin != 0 {
             if let Some(pin) = self.pin(pin) {
                 return Hit {
@@ -268,8 +293,12 @@ impl CanvasGeometry {
             }
         }
         if let Some(node) = self.find_node_at(x, y) {
+            // The header is the drag handle in both modes; in Easy mode
+            // everything below it connects the whole card. Cards that draw no
+            // pins (collapsed, thumbnail) are included: they have no pin to
+            // start a connection from, so their body is the only surface left.
             let on_header = y - node.y <= HEADER_HEIGHT;
-            let kind = if self.easy_mode && !on_header && node.pins_visible {
+            let kind = if self.easy_mode && !on_header {
                 HIT_NODE_BODY
             } else {
                 HIT_NODE
@@ -281,7 +310,7 @@ impl CanvasGeometry {
                 y,
             };
         }
-        let link = self.find_link_at(x, y, LINK_HIT_RADIUS);
+        let link = self.find_link_at(x, y, LINK_SCREEN_HIT_RADIUS / zoom);
         if link >= 0 {
             return Hit {
                 kind: HIT_LINK,
@@ -397,6 +426,19 @@ fn directed_bezier(
         (end.0 + end_sign * offset, end.1),
         end,
     ]
+}
+
+/// Squared distance from `point` to the nearest position on a line segment.
+fn squared_distance_to_segment(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
+    let (vx, vy) = (end.0 - start.0, end.1 - start.1);
+    let (wx, wy) = (point.0 - start.0, point.1 - start.1);
+    let length_sq = vx * vx + vy * vy;
+    if length_sq <= f32::EPSILON {
+        return wx * wx + wy * wy;
+    }
+    let t = ((wx * vx + wy * vy) / length_sq).clamp(0.0, 1.0);
+    let closest = (start.0 + t * vx, start.1 + t * vy);
+    (point.0 - closest.0).powi(2) + (point.1 - closest.1).powi(2)
 }
 
 fn cubic_at(curve: &Cubic, t: f32) -> (f32, f32) {
@@ -548,7 +590,7 @@ mod tests {
     fn pins_win_over_the_node_under_the_pointer() {
         let canvas = geometry();
         let pin = canvas.pin(101).unwrap();
-        let hit = canvas.hit_test(pin.x, pin.y);
+        let hit = canvas.hit_test(pin.x, pin.y, 1.0);
         assert_eq!(hit.kind, HIT_PIN);
         assert_eq!(hit.id, 101);
         assert_eq!((hit.x, hit.y), (pin.x, pin.y));
@@ -559,19 +601,22 @@ mod tests {
         let canvas = geometry();
         let pin = canvas.pin(202).unwrap();
         assert_eq!(
-            canvas.find_pin_at(pin.x + 8.0, pin.y + 4.0, PIN_HIT_RADIUS),
+            canvas.find_pin_at(pin.x + 8.0, pin.y + 4.0, PIN_SCREEN_HIT_RADIUS),
             202
         );
-        assert_eq!(canvas.find_pin_at(pin.x + 40.0, pin.y, PIN_HIT_RADIUS), 0);
+        assert_eq!(
+            canvas.find_pin_at(pin.x + 40.0, pin.y, PIN_SCREEN_HIT_RADIUS),
+            0
+        );
     }
 
     #[test]
     fn node_press_reports_a_move_gesture_in_advanced_mode() {
         let canvas = geometry();
-        let hit = canvas.hit_test(200.0, 110.0);
+        let hit = canvas.hit_test(200.0, 110.0, 1.0);
         assert_eq!(hit.kind, HIT_NODE);
         assert_eq!(hit.id, 7);
-        let body = canvas.hit_test(200.0, 190.0);
+        let body = canvas.hit_test(200.0, 190.0, 1.0);
         assert_eq!(body.kind, HIT_NODE);
     }
 
@@ -579,8 +624,43 @@ mod tests {
     fn easy_mode_turns_the_node_body_into_a_connection_gesture() {
         let mut canvas = geometry();
         canvas.easy_mode = true;
-        assert_eq!(canvas.hit_test(200.0, 110.0).kind, HIT_NODE);
-        assert_eq!(canvas.hit_test(200.0, 190.0).kind, HIT_NODE_BODY);
+        assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
+        assert_eq!(canvas.hit_test(200.0, 190.0, 1.0).kind, HIT_NODE_BODY);
+    }
+
+    #[test]
+    fn easy_mode_keeps_the_header_as_a_move_handle() {
+        let mut canvas = geometry();
+        canvas.easy_mode = true;
+        // The header is a move surface at the very top and at its last pixel.
+        assert_eq!(canvas.hit_test(200.0, 101.0, 1.0).kind, HIT_NODE);
+        assert_eq!(
+            canvas.hit_test(200.0, 100.0 + HEADER_HEIGHT, 1.0).kind,
+            HIT_NODE
+        );
+        // Just below it the card becomes a connect surface.
+        assert_eq!(
+            canvas
+                .hit_test(200.0, 100.0 + HEADER_HEIGHT + 1.0, 1.0)
+                .kind,
+            HIT_NODE_BODY
+        );
+    }
+
+    #[test]
+    fn easy_mode_connects_from_the_body_of_a_pinless_card() {
+        let mut canvas = geometry();
+        canvas.easy_mode = true;
+        let mut nodes = canvas.nodes.clone();
+        nodes[0].pins_visible = false;
+        let mut pins: Vec<PinGeometry> = canvas.pins.values().copied().collect();
+        pins[0].visible = false;
+        let links = canvas.links.clone();
+        canvas.replace(nodes, pins, links, true);
+
+        // A collapsed card has no pin to drag from, so its body has to connect.
+        assert_eq!(canvas.hit_test(200.0, 190.0, 1.0).kind, HIT_NODE_BODY);
+        assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
     }
 
     #[test]
@@ -590,13 +670,195 @@ mod tests {
         let end = canvas.pin(202).unwrap();
         let midpoint = ((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
         assert_eq!(
-            canvas.find_link_at(midpoint.0, midpoint.1, LINK_HIT_RADIUS),
+            canvas.find_link_at(midpoint.0, midpoint.1, LINK_SCREEN_HIT_RADIUS),
             1
         );
         assert_eq!(
-            canvas.find_link_at(midpoint.0, midpoint.1 + 120.0, LINK_HIT_RADIUS),
+            canvas.find_link_at(midpoint.0, midpoint.1 + 120.0, LINK_SCREEN_HIT_RADIUS),
             -1
         );
+    }
+
+    /// Two cards far enough apart that the drawn edge is long and curved, which
+    /// is exactly where sampled-point hit testing used to leave gaps.
+    fn long_link_geometry() -> CanvasGeometry {
+        let mut canvas = CanvasGeometry::default();
+        canvas.replace(
+            vec![
+                NodeGeometry {
+                    id: 7,
+                    x: 100.0,
+                    y: 100.0,
+                    width: 244.0,
+                    height: 120.0,
+                    selected: false,
+                    pins_visible: true,
+                },
+                NodeGeometry {
+                    id: 8,
+                    x: 1500.0,
+                    y: 700.0,
+                    width: 244.0,
+                    height: 120.0,
+                    selected: false,
+                    pins_visible: true,
+                },
+            ],
+            vec![
+                PinGeometry {
+                    pin_id: 101,
+                    node_id: 7,
+                    is_output: true,
+                    x: 100.0 + 244.0 - PIN_INSET,
+                    y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
+                    visible: true,
+                    node_selected: false,
+                },
+                PinGeometry {
+                    pin_id: 202,
+                    node_id: 8,
+                    is_output: false,
+                    x: 1500.0 + PIN_INSET,
+                    y: 700.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
+                    visible: true,
+                    node_selected: false,
+                },
+            ],
+            vec![LinkGeometry {
+                id: 1,
+                start_pin: 101,
+                end_pin: 202,
+            }],
+            false,
+        );
+        canvas
+    }
+
+    /// The point on the rendered curve at `t`, in world coordinates.
+    fn point_on_link(canvas: &CanvasGeometry, link_id: i32, t: f32) -> (f32, f32) {
+        let link = canvas
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .expect("link is cached");
+        let start = canvas.pin(link.start_pin).expect("start pin is cached");
+        let end = canvas.pin(link.end_pin).expect("end pin is cached");
+        let curve = bezier(
+            canvas.anchor(&start, (0.0, 0.0)),
+            canvas.anchor(&end, (0.0, 0.0)),
+        );
+        cubic_at(&curve, t)
+    }
+
+    #[test]
+    fn link_hit_test_detects_points_between_bezier_samples() {
+        let canvas = long_link_geometry();
+        // 0.37 lands between the old sample stops; so does every other step
+        // here, which is the whole point: the curve is continuous, not dotted.
+        let awkward = point_on_link(&canvas, 1, 0.37);
+        assert_eq!(
+            canvas.find_link_at(awkward.0, awkward.1, LINK_SCREEN_HIT_RADIUS),
+            1
+        );
+
+        for step in 0..=200 {
+            let t = step as f32 / 200.0;
+            let point = point_on_link(&canvas, 1, t);
+            assert_eq!(
+                canvas.find_link_at(point.0, point.1, LINK_SCREEN_HIT_RADIUS),
+                1,
+                "the pointer sits on the drawn curve at t={t}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_hit_test_rejects_points_far_from_curve() {
+        let canvas = long_link_geometry();
+        let point = point_on_link(&canvas, 1, 0.37);
+        assert_eq!(
+            canvas.find_link_at(
+                point.0,
+                point.1 + LINK_SCREEN_HIT_RADIUS * 6.0,
+                LINK_SCREEN_HIT_RADIUS
+            ),
+            -1
+        );
+        assert_eq!(canvas.find_link_at(0.0, 0.0, LINK_SCREEN_HIT_RADIUS), -1);
+    }
+
+    #[test]
+    fn hit_tolerance_is_measured_in_screen_pixels_not_world_units() {
+        let canvas = long_link_geometry();
+        let point = point_on_link(&canvas, 1, 0.37);
+        // 16 world units off the curve: further than the 9px tolerance at 1:1,
+        // but well inside it once the canvas is halved, because the pointer is
+        // then only 8 screen pixels away from the drawn line.
+        let near_miss = (point.0, point.1 + 16.0);
+
+        assert_eq!(
+            canvas.hit_test(near_miss.0, near_miss.1, 1.0).kind,
+            HIT_NONE
+        );
+        let zoomed = canvas.hit_test(near_miss.0, near_miss.1, 0.5);
+        assert_eq!(zoomed.kind, HIT_LINK);
+        assert_eq!(zoomed.id, 1);
+
+        // Zooming in tightens the world tolerance by the same rule.
+        let pin = canvas.pin(202).unwrap();
+        assert_eq!(
+            canvas.hit_test(pin.x, pin.y + 8.0, 1.0).kind,
+            HIT_PIN,
+            "8 world units is inside the 11px pin tolerance at 1:1"
+        );
+        assert_ne!(
+            canvas.hit_test(pin.x - 8.0, pin.y - 8.0, 2.5).kind,
+            HIT_PIN,
+            "the same offset is far outside the pin once magnified"
+        );
+    }
+
+    #[test]
+    fn hit_test_survives_a_degenerate_zoom() {
+        let canvas = long_link_geometry();
+        let point = point_on_link(&canvas, 1, 0.37);
+        for zoom in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let hit = canvas.hit_test(point.0, point.1, zoom);
+            assert_eq!(hit.kind, HIT_LINK, "zoom {zoom} falls back to 1:1");
+        }
+    }
+
+    #[test]
+    fn pin_wins_over_link_at_endpoint() {
+        let canvas = long_link_geometry();
+        let pin = canvas.pin(202).unwrap();
+        let hit = canvas.hit_test(pin.x, pin.y, 1.0);
+        assert_eq!(hit.kind, HIT_PIN);
+        assert_eq!(hit.id, 202);
+    }
+
+    #[test]
+    fn node_wins_when_a_link_passes_behind_a_card() {
+        let mut canvas = long_link_geometry();
+        // Park a third card straight over the middle of the curve.
+        let middle = point_on_link(&canvas, 1, 0.5);
+        let mut nodes = canvas.nodes.clone();
+        nodes.push(NodeGeometry {
+            id: 9,
+            x: middle.0 - 122.0,
+            y: middle.1 - 60.0,
+            width: 244.0,
+            height: 120.0,
+            selected: false,
+            pins_visible: true,
+        });
+        let pins: Vec<PinGeometry> = canvas.pins.values().copied().collect();
+        let links = canvas.links.clone();
+        canvas.replace(nodes, pins, links, false);
+
+        let hit = canvas.hit_test(middle.0, middle.1, 1.0);
+        assert_eq!(hit.kind, HIT_NODE, "cards stay clickable through an edge");
+        assert_eq!(hit.id, 9);
     }
 
     #[test]
@@ -635,7 +897,7 @@ mod tests {
         assert!(canvas
             .link_path(1, (0.0, 0.0))
             .starts_with("M 344.00 120.00"));
-        assert_eq!(canvas.find_pin_at(344.0, 120.0, PIN_HIT_RADIUS), 0);
+        assert_eq!(canvas.find_pin_at(344.0, 120.0, PIN_SCREEN_HIT_RADIUS), 0);
     }
 
     #[test]

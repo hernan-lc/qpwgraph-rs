@@ -253,6 +253,7 @@ export component MainWindow inherits Window {
     in-out property <string> node-editor-color: "";
     in-out property <string> media-filter: "all";
     in-out property <string> connect-mode: "advanced";
+    in property <bool> connections-available: true;
     in-out property <length> pan-x: 24px;
     in-out property <length> pan-y: 24px;
     in-out property <float> zoom: 1.0;
@@ -286,7 +287,7 @@ export component MainWindow inherits Window {
     callback graph-audio-mute-toggled(int);
     callback graph-node-collapse-toggled(int);
     // Geometry lives in Rust; these are the only questions the canvas asks.
-    pure callback graph-hit-test(float, float) -> HitResult;
+    pure callback graph-hit-test(/* world-x */ float, /* world-y */ float, /* zoom */ float) -> HitResult;
     pure callback graph-link-path(int, int, float, float) -> string;
     pure callback graph-pin-preview-path(int, float, float) -> string;
     pure callback graph-node-preview-path(int, float, float) -> string;
@@ -355,13 +356,13 @@ export component MainWindow inherits Window {
                 undo_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } }
                 redo_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } }
                 history_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } }
-                connect_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
+                connect_button := RailButton { visible: root.show-common-actions; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
                 arrange_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } }
                 sort_type_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } }
                 sort_order_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } }
-                disconnect_selected_button := RailButton { visible: root.show-common-actions && root.has-selected-link; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } }
-                disconnect_all_button := RailButton { visible: root.show-common-actions && root.links.length > 0; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } }
-                disconnect_node_button := RailButton { visible: root.show-common-actions && root.has-selected-node; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } }
+                disconnect_selected_button := RailButton { visible: root.show-common-actions && root.has-selected-link; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } }
+                disconnect_all_button := RailButton { visible: root.show-common-actions && root.links.length > 0; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } }
+                disconnect_node_button := RailButton { visible: root.show-common-actions && root.has-selected-node; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } }
                 effects_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } }
                 save_button := RailButton { visible: root.show-patchbay-toolbar; width: 42px; icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } }
                 load_button := RailButton { visible: root.show-patchbay-toolbar; width: 42px; icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } }
@@ -468,6 +469,7 @@ export component MainWindow inherits Window {
                 minimap-nodes: root.minimap-nodes;
                 easy-connect: root.connect-mode == "easy";
                 connect-through: root.connect-through;
+                connections-enabled: root.connections-available;
                 geometry-version: root.geometry-version;
                 grid-commands: root.grid-commands;
                 graph-min-x: root.graph-min-x;
@@ -477,7 +479,7 @@ export component MainWindow inherits Window {
                 min-zoom: 0.35;
                 max-zoom: 2.5;
 
-                hit-test(x, y) => { root.graph-hit-test(x, y) }
+                hit-test(x, y, zoom) => { root.graph-hit-test(x, y, zoom) }
                 link-path(id, version, dx, dy) => { root.graph-link-path(id, version, dx, dy) }
                 pin-preview-path(pin, x, y) => { root.graph-pin-preview-path(pin, x, y) }
                 node-preview-path(node, x, y) => { root.graph-node-preview-path(node, x, y) }

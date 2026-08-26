@@ -219,6 +219,39 @@ fn unsupported_node_op(operation: &str) -> BackendError {
     BackendError::unsupported(format!("node {operation} is not supported by this backend"))
 }
 
+/// Operations a backend can perform on the resources it exposes.
+///
+/// Capabilities are advisory for presentation and command routing. Every
+/// mutating method still validates the operation and returns
+/// [`BackendError::Unsupported`] when a caller reaches an unavailable feature.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BackendCapabilities {
+    pub topology: bool,
+    pub connect: bool,
+    pub disconnect: bool,
+    pub volume: bool,
+    pub mute: bool,
+    pub meters: bool,
+    pub effects: bool,
+    pub relay: bool,
+}
+
+impl BackendCapabilities {
+    /// Combine capabilities when a composite exposes multiple child drivers.
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            topology: self.topology || other.topology,
+            connect: self.connect || other.connect,
+            disconnect: self.disconnect || other.disconnect,
+            volume: self.volume || other.volume,
+            mute: self.mute || other.mute,
+            meters: self.meters || other.meters,
+            effects: self.effects || other.effects,
+            relay: self.relay || other.relay,
+        }
+    }
+}
+
 /// A normalized, node-level audio reading supplied by a backend.
 ///
 /// PipeWire exposes graph topology separately from audio buffers, so meters
@@ -257,9 +290,25 @@ impl Default for NodeAudioControl {
 
 /// Common operations needed by commands, patchbay activation, and the UI.
 pub trait GraphDriver: EffectDriver {
+    /// Capabilities shared by the resources of this driver.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::default()
+    }
+
     fn refresh(&mut self) -> BackendResult<Vec<Node>>;
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link>;
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link>;
+
+    /// Whether a link is a user-mutable native connection.
+    ///
+    /// Most graph backends expose only mutable links, so the default is true
+    /// for links present in the driver's graph. Backends that project an
+    /// observed relationship (for example a Windows application session's
+    /// current endpoint) can override this and keep the relationship visible
+    /// without allowing it into patchbay mutation or persistence flows.
+    fn is_link_mutable(&self, link: LinkId) -> bool {
+        self.graph().link(link).is_some()
+    }
 
     /// Connect a stable pair, returning `None` when it is already present.
     /// The refresh is deliberately part of this helper: a UI action can be
@@ -481,7 +530,7 @@ pub trait GraphDriver: EffectDriver {
 /// `Relay Microphone` (a Source fed by peer audio) and `Relay Speaker` (a
 /// Sink whose input is transmitted to peers) — plus the [`pw_graph_relay`]
 /// engine for transport.
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 pub use pw_graph_relay::{
     pairing::{
         build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
@@ -494,7 +543,7 @@ pub use pw_graph_relay::{
 };
 
 /// Parameters for starting the relay host.
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 #[derive(Clone, Debug)]
 pub struct RelayHostRequest {
     pub device_name: String,
@@ -508,7 +557,7 @@ pub struct RelayHostRequest {
     pub transport: RelayTransportPreference,
 }
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 pub trait RelayDriver {
     /// Whether this backend can relay audio at all.
     fn relay_available(&self) -> bool {

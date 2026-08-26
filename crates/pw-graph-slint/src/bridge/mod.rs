@@ -121,9 +121,9 @@ impl UiBridge {
             meters: BTreeMap::new(),
             meter_error: None,
             audio_controls: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_levels: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_connecting: None,
         }));
 
@@ -368,7 +368,7 @@ impl UiBridge {
             application.autosave_patchbay();
             save_config(&mut application, false);
             application.source.reset_meters();
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             {
                 if application.source.relay_status().host_active {
                     let _ = application.source.relay_stop_host();
@@ -452,9 +452,9 @@ mod tests {
             meters: BTreeMap::new(),
             meter_error: None,
             audio_controls: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_levels: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_connecting: None,
         }
     }
@@ -751,7 +751,28 @@ mod tests {
         }
 
         fn screen_of(&self, world: (f32, f32)) -> LogicalPosition {
-            LogicalPosition::new(RAIL_WIDTH + world.0, world.1)
+            let zoom = self.application.view.zoom;
+            let pan = self.application.view.pan;
+            LogicalPosition::new(
+                RAIL_WIDTH + pan[0] + world.0 * zoom,
+                pan[1] + world.1 * zoom,
+            )
+        }
+
+        /// Collapse a card through the same event the card's chevron sends.
+        fn collapse(&mut self, node_id: i32) {
+            process_event(
+                &self.window,
+                &mut self.application,
+                UiEvent::ToggleCollapse(node_id),
+            );
+            self.sync();
+        }
+
+        /// Zoom the viewport the way the toolbar does, then push it to the UI.
+        fn set_zoom(&mut self, zoom: f32) {
+            self.application.view.zoom = zoom;
+            self.sync();
         }
 
         fn dispatch(&self, event: WindowEvent) {
@@ -805,6 +826,56 @@ mod tests {
                     canvas::PORT_LIST_TOP
                 };
             (card.x + card.width / 2.0, card.y + top + 8.0)
+        }
+
+        /// A point on the curve the canvas actually draws for `link_id`, read
+        /// back out of the rendered SVG commands rather than recomputed, so the
+        /// test aims at the same pixels the user sees.
+        fn point_on_rendered_link(&self, link_id: i32, t: f32) -> (f32, f32) {
+            let commands = self.window.invoke_graph_link_path(
+                link_id,
+                self.window.get_geometry_version(),
+                0.0,
+                0.0,
+            );
+            let numbers: Vec<f32> = commands
+                .as_str()
+                .split_whitespace()
+                .filter_map(|token| token.parse::<f32>().ok())
+                .collect();
+            assert_eq!(numbers.len(), 8, "a cubic path: {commands}");
+            let curve = [
+                (numbers[0], numbers[1]),
+                (numbers[2], numbers[3]),
+                (numbers[4], numbers[5]),
+                (numbers[6], numbers[7]),
+            ];
+            let u = 1.0 - t;
+            let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            (
+                a * curve[0].0 + b * curve[1].0 + c * curve[2].0 + d * curve[3].0,
+                a * curve[0].1 + b * curve[1].1 + c * curve[2].1 + d * curve[3].1,
+            )
+        }
+
+        /// Create one link through the real pin-drag gesture and render it.
+        fn create_link(&mut self) -> i32 {
+            let (output, input) = self.connectable_pair();
+            self.drag(self.pin(output), self.pin(input));
+            for event in self.take_events() {
+                process_event(&self.window, &mut self.application, event);
+            }
+            self.sync();
+            let rendered = rows_of(&self.links);
+            assert_eq!(rendered.len(), 1, "the new link reaches the render model");
+            rendered[0].id
+        }
+
+        fn link_row(&self, link_id: i32) -> LinkRow {
+            rows_of(&self.links)
+                .into_iter()
+                .find(|link| link.id == link_id)
+                .expect("link is rendered")
         }
 
         fn node_row(&self, node_id: i32) -> NodeRow {
@@ -1050,6 +1121,162 @@ mod tests {
     }
 
     #[test]
+    fn clicking_between_curve_samples_selects_the_connection() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        // 0.37 sits between the stops the old sampled hit test measured, which
+        // is where a press used to fall through to the background.
+        let on_curve = harness.point_on_rendered_link(link, 0.37);
+
+        harness.click(on_curve);
+
+        let selected = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::SelectLink(id, extend) => Some((id, extend)),
+                _ => None,
+            });
+        assert_eq!(selected, Some((link, false)));
+        assert!(
+            harness.link_row(link).selected,
+            "the rendered edge shows as selected"
+        );
+    }
+
+    #[test]
+    fn clicking_a_connection_at_half_zoom_selects_it() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        harness.set_zoom(0.5);
+        let on_curve = harness.point_on_rendered_link(link, 0.37);
+
+        harness.click(on_curve);
+
+        assert!(
+            harness
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, UiEvent::SelectLink(id, _) if *id == link)),
+            "a connection stays clickable when the canvas is zoomed out"
+        );
+        assert!(harness.link_row(link).selected);
+    }
+
+    /// The header is the move handle in both connect modes; only the blank
+    /// card body is an Easy-mode connect surface.
+    #[test]
+    fn easy_mode_header_drag_still_moves_the_card() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
+        let header = (card.x + 60.0, card.y + 12.0);
+
+        harness.drag(header, (header.0 + 40.0, header.1 + 25.0));
+
+        let events = harness.take_events();
+        let moved = events.iter().find_map(|event| match event {
+            UiEvent::DragCommitted(id, dx, dy) => Some((*id, *dx, *dy)),
+            _ => None,
+        });
+        let (id, dx, dy) = moved.expect("the header stays a move handle in easy mode");
+        assert_eq!(id, card.id);
+        assert!((dx - 40.0).abs() < 0.1 && (dy - 25.0).abs() < 0.1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, UiEvent::NodeConnectDropped(..))),
+            "the header never starts an easy-connect gesture"
+        );
+        harness.sync();
+    }
+
+    /// A collapsed card draws no pins, so its whole body used to land in the
+    /// `HIT_NODE` branch and connected only because Easy mode claimed every
+    /// `HIT_NODE`. Now that the header is a move handle again, the geometry has
+    /// to mark the body of a pinless card as a connect surface on its own.
+    #[test]
+    fn easy_mode_connects_a_collapsed_card_from_its_body() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+        let source_node = harness.geometry.borrow().pin(output).unwrap().node_id;
+        harness.collapse(source_node);
+        let card = harness.node_row(source_node);
+        assert!(card.collapsed, "the card is collapsed");
+        // Below the header, in the collapsed card's remaining strip.
+        let body = (card.x + card.width / 2.0, card.y + card.height - 3.0);
+
+        harness.drag(body, harness.pin(input));
+
+        let events = harness.take_events();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, UiEvent::NodeConnectDropped(id, ..) if *id == source_node)
+            ),
+            "a collapsed card still connects from its body in easy mode"
+        );
+    }
+
+    #[test]
+    fn advanced_mode_header_drag_moves_the_card() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
+        let header = (card.x + 60.0, card.y + 12.0);
+
+        harness.drag(header, (header.0 + 40.0, header.1 + 25.0));
+
+        let moved = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::DragCommitted(id, dx, dy) => Some((id, dx, dy)),
+                _ => None,
+            });
+        let (id, dx, dy) = moved.expect("the header is a move handle in advanced mode");
+        assert_eq!(id, card.id);
+        assert!((dx - 40.0).abs() < 0.1 && (dy - 25.0).abs() < 0.1);
+        harness.sync();
+    }
+
+    #[test]
+    fn no_connect_backend_still_allows_link_selection() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        let (output, input) = harness.connectable_pair();
+        // What the UI does for a backend whose capabilities report connect and
+        // disconnect as unsupported, such as Windows Core Audio.
+        harness.window.set_connections_available(false);
+
+        harness.click(harness.point_on_rendered_link(link, 0.37));
+        assert!(
+            harness
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, UiEvent::SelectLink(id, _) if *id == link)),
+            "observed links stay selectable when routing is unsupported"
+        );
+        assert!(harness.link_row(link).selected);
+
+        let card = harness.node_row(harness.application.snapshot.nodes[0].id);
+        harness.click((card.x + 60.0, card.y + 12.0));
+        assert!(
+            harness
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, UiEvent::SelectNode(id, _) if *id == card.id)),
+            "cards stay selectable too"
+        );
+
+        harness.drag(harness.pin(output), harness.pin(input));
+        let events = harness.take_events();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, UiEvent::LinkRequested(..))),
+            "no routing is attempted"
+        );
+    }
+
+    #[test]
     fn the_background_grid_is_generated_for_the_visible_canvas() {
         let harness = CanvasHarness::new(ConnectMode::Advanced);
 
@@ -1159,7 +1386,7 @@ mod tests {
         let hit = harness
             .geometry
             .borrow()
-            .hit_test(body_point.0, body_point.1);
+            .hit_test(body_point.0, body_point.1, 1.0);
         assert_eq!(hit.kind, HIT_NODE, "advanced mode drags the card");
 
         handle_action(
@@ -1172,7 +1399,7 @@ mod tests {
         let hit = harness
             .geometry
             .borrow()
-            .hit_test(body_point.0, body_point.1);
+            .hit_test(body_point.0, body_point.1, 1.0);
         assert_eq!(
             hit.kind, HIT_NODE_BODY,
             "easy mode turns the body into a connect gesture"

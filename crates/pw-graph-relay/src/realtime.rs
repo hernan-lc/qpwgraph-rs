@@ -28,6 +28,7 @@ const RECV_BUFFER_BYTES: usize = 256 * 1024;
 /// Apply audio quality-of-service to a relay UDP socket.
 pub(crate) fn tune_audio_socket(socket: &UdpSocket) {
     let socket = SockRef::from(socket);
+    #[cfg(unix)]
     match socket.local_addr().map(|addr| addr.is_ipv4()) {
         Ok(true) | Err(_) => {
             let _ = socket.set_tos(DSCP_EF);
@@ -35,6 +36,13 @@ pub(crate) fn tune_audio_socket(socket: &UdpSocket) {
         Ok(false) => {
             let _ = socket.set_tclass_v6(DSCP_EF);
         }
+    }
+    #[cfg(not(unix))]
+    {
+        // socket2 exposes IPv4 TOS on Windows, while the Unix-only IPv6
+        // tclass helper is not available on that target. The IPv4 setting is
+        // still useful for the normal relay path and remains best effort.
+        let _ = socket.set_tos(DSCP_EF);
     }
     let _ = socket.set_send_buffer_size(SEND_BUFFER_BYTES);
     let _ = socket.set_recv_buffer_size(RECV_BUFFER_BYTES);

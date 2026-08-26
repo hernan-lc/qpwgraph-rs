@@ -8,10 +8,10 @@
 use crate::args::Args;
 use pw_graph_app_core::{BackendAvailability, CompositeDriver};
 use pw_graph_backend::{
-    AudioMeter, DemoDriver, EffectDriver, EffectInsertRequest, EffectInstance, EffectNodeRequest,
-    GraphDriver, MeterPolicy,
+    AudioMeter, BackendCapabilities, DemoDriver, EffectDriver, EffectInsertRequest, EffectInstance,
+    EffectNodeRequest, GraphDriver, MeterPolicy,
 };
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 use pw_graph_backend::{
     RelayDriver, RelayEngineStatus, RelayEvent, RelayHostRequest, RelayLocalLink, RelayPeerInfo,
     RelayRoles, RelaySessionId,
@@ -48,7 +48,7 @@ impl ApplicationDriver {
             return (source, i18n.text("status.demo_ready"));
         }
 
-        let (live, availability) = CompositeDriver::open(args.no_alsa_midi);
+        let (live, availability) = CompositeDriver::open(args.no_midi);
         let backend_name = backend_name(&availability);
         let mut source = Self {
             backend: BackendKind::Live(Box::new(live)),
@@ -111,9 +111,24 @@ impl ApplicationDriver {
     pub(crate) fn has_meter_backend(&self) -> bool {
         self.is_demo()
             || match &self.backend {
-                BackendKind::Live(driver) => driver.has_pipewire(),
+                BackendKind::Live(driver) => driver.has_pipewire() || driver.has_windows_audio(),
                 BackendKind::Demo(_) => true,
             }
+    }
+
+    pub(crate) fn capabilities(&self) -> BackendCapabilities {
+        GraphDriver::capabilities(self)
+    }
+
+    pub(crate) fn is_link_mutable(&self, link: pw_graph_core::LinkId) -> bool {
+        self.delegated_is_link_mutable(link)
+    }
+
+    fn delegated_is_link_mutable(&self, link: pw_graph_core::LinkId) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.is_link_mutable(link),
+            BackendKind::Live(driver) => driver.is_link_mutable(link),
+        }
     }
 
     pub(crate) fn meter_policy(&self) -> MeterPolicy {
@@ -214,27 +229,27 @@ impl ApplicationDriver {
         EffectDriver::remove_effect(self, instance_id).map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_available(&self) -> bool {
         RelayDriver::relay_available(self)
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_status(&self) -> RelayEngineStatus {
         RelayDriver::relay_status(self)
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_start_host(&mut self, request: RelayHostRequest) -> Result<u16, String> {
         RelayDriver::relay_start_host(self, request).map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_stop_host(&mut self) -> Result<(), String> {
         RelayDriver::relay_stop_host(self).map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_connect(
         &mut self,
         target: std::net::SocketAddr,
@@ -244,38 +259,42 @@ impl ApplicationDriver {
         RelayDriver::relay_connect(self, target, pin, roles).map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_disconnect(&mut self, session: RelaySessionId) -> Result<(), String> {
         RelayDriver::relay_disconnect(self, session).map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_events(&mut self) -> Vec<RelayEvent> {
         RelayDriver::relay_events(self)
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_discovery_start(&mut self) -> Result<(), String> {
         RelayDriver::relay_discovery_start(self).map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_discovery_stop(&mut self) {
         RelayDriver::relay_discovery_stop(self)
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_peers(&self) -> Vec<RelayPeerInfo> {
         RelayDriver::relay_peers(self)
     }
 
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) fn relay_local_links(&self) -> Vec<RelayLocalLink> {
         RelayDriver::relay_local_links(self)
     }
 }
 
 fn backend_name(availability: &BackendAvailability) -> String {
+    #[cfg(target_os = "windows")]
+    if availability.windows_audio {
+        return "windows-core-audio".to_owned();
+    }
     match (availability.pipewire, availability.alsa) {
         (true, true) => "pipewire+alsa".to_owned(),
         (true, false) => "pipewire".to_owned(),
@@ -285,6 +304,17 @@ fn backend_name(availability: &BackendAvailability) -> String {
 }
 
 impl GraphDriver for ApplicationDriver {
+    fn capabilities(&self) -> BackendCapabilities {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.capabilities(),
+            BackendKind::Live(driver) => driver.capabilities(),
+        }
+    }
+
+    fn is_link_mutable(&self, link: pw_graph_core::LinkId) -> bool {
+        self.delegated_is_link_mutable(link)
+    }
+
     fn refresh(&mut self) -> pw_graph_backend::BackendResult<Vec<Node>> {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.refresh(),
@@ -478,7 +508,7 @@ impl EffectDriver for ApplicationDriver {
     }
 }
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 impl RelayDriver for ApplicationDriver {
     fn relay_available(&self) -> bool {
         match &self.backend {
@@ -599,4 +629,34 @@ fn demo_meters(graph: &Graph, elapsed: std::time::Duration) -> Vec<AudioMeter> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pw_graph_backend::GraphDriver;
+    use pw_graph_patchbay::Patchbay;
+
+    #[test]
+    fn observed_link_stays_immutable_through_application_driver() {
+        let mut backend = DemoDriver::demo();
+        let link = backend
+            .connect(pw_graph_core::PortId(1), pw_graph_core::PortId(3))
+            .unwrap();
+        backend.mark_link_observed(link.id);
+
+        let application = ApplicationDriver {
+            backend: BackendKind::Demo(backend),
+            backend_name: "test".into(),
+            meter_policy: MeterPolicy::Disabled,
+            meter_epoch: Instant::now(),
+        };
+
+        assert!(!application.is_link_mutable(link.id));
+        assert!(!GraphDriver::is_link_mutable(&application, link.id));
+
+        let mut patchbay = Patchbay::new("observed");
+        patchbay.snapshot_driver(&application, true);
+        assert!(patchbay.connections.is_empty());
+    }
 }

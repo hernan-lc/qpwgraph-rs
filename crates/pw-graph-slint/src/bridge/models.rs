@@ -4,7 +4,7 @@ use pw_graph_config::{config_path, AppConfig};
 use pw_graph_core::Direction;
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-#[cfg(not(feature = "relay"))]
+#[cfg(not(all(target_os = "linux", feature = "relay")))]
 use slint::Image;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -13,9 +13,9 @@ use std::rc::Rc;
 use super::app::{toast_visible, Application, AudioControl};
 use super::effects::{effect_options, effect_rows, effect_setup_rows};
 use super::meters::meter_fallback;
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 use super::relay::relay_qr_payload;
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 use super::relay::{qr_image, relay_host_endpoint};
 use super::relay::{
     relay_codec_index, relay_frame_index, relay_nodes_visible, relay_role_index, relay_rows,
@@ -113,6 +113,7 @@ pub(crate) fn sync_models(
     window.set_backend(SharedString::from(backend));
     window.set_has_selected_link(!application.view.selected_links.is_empty());
     window.set_has_selected_node(!application.view.selected_nodes.is_empty());
+    window.set_connections_available(application.source.capabilities().connect);
     window.set_graph_counts(SharedString::from(application.i18n.format(
         "status.graph_counts",
         &[
@@ -239,7 +240,7 @@ pub(crate) fn sync_models(
         application,
         &application.i18n,
     )))));
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     {
         let relay_status = application.source.relay_status();
         window.set_relay_available(application.source.relay_available());
@@ -252,7 +253,7 @@ pub(crate) fn sync_models(
         window.set_relay_qr_payload(SharedString::from(payload.clone()));
         window.set_relay_qr_image(qr_image(&payload));
     }
-    #[cfg(not(feature = "relay"))]
+    #[cfg(not(all(target_os = "linux", feature = "relay")))]
     {
         window.set_relay_available(false);
         window.set_relay_host_active(false);

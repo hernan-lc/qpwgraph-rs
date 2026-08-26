@@ -139,7 +139,7 @@ impl<T> FilterRuntime<T> {
     /// The node id PipeWire assigned to the filter, once it exists.
     pub(super) fn node_id(&self) -> Option<NodeId> {
         let id = unsafe { pw::sys::pw_filter_get_node_id(self.filter.as_ptr()) };
-        (id != u32::MAX).then_some(NodeId(id as u64))
+        (id != u32::MAX).then_some(NodeId(graph_id(id as u64)))
     }
 
     /// Access to the callback state owned by the runtime. Callers use this to

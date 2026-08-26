@@ -1,4 +1,4 @@
-use crate::canvas::{self, CanvasGeometry, HIT_NODE, HIT_NODE_BODY, PIN_HIT_RADIUS};
+use crate::canvas::{self, CanvasGeometry, HIT_NODE, HIT_NODE_BODY, PIN_DROP_RADIUS};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -94,7 +94,7 @@ pub(crate) fn install_canvas_callbacks(
     let events = events_source.clone();
     let geometry = geometry_source.clone();
     window.on_graph_node_connect_dropped(move |id, x, y| {
-        let target_pin = geometry.borrow().find_pin_at(x, y, PIN_HIT_RADIUS);
+        let target_pin = geometry.borrow().find_pin_at(x, y, PIN_DROP_RADIUS);
         events
             .borrow_mut()
             .push(UiEvent::NodeConnectDropped(id, x, y, target_pin));
@@ -108,9 +108,9 @@ pub(crate) fn install_canvas_callbacks(
         events.borrow_mut().push(UiEvent::ToggleAudioMute(id));
     });
     let geometry = geometry_source.clone();
-    window.on_graph_hit_test(move |x, y| {
+    window.on_graph_hit_test(move |x, y, zoom| {
         let geometry = geometry.borrow();
-        let hit = geometry.hit_test(x, y);
+        let hit = geometry.hit_test(x, y, zoom);
         HitResult {
             kind: hit.kind,
             id: hit.id,

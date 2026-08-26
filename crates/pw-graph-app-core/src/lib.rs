@@ -5,18 +5,26 @@
 //! cannot accidentally create a second graph namespace or route an ALSA
 //! resource through PipeWire.
 
-use pw_graph_backend::{BackendError, BackendResult, GraphDriver, MeterPolicy};
-use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, PortId, PortType};
+use pw_graph_backend::{
+    BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
+};
+use pw_graph_core::{
+    backend_for_link, backend_for_node, backend_for_port, BackendKind, Graph, GraphError, Link,
+    LinkId, Node, NodeId, NodeType, PortId, PortType,
+};
 use std::collections::BTreeSet;
 
-#[cfg(feature = "alsa")]
-use pw_graph_alsamidi::AlsaMidiDriver;
-#[cfg(feature = "pipewire")]
-use pw_graph_backend::PipewireDriver;
-
-/// The high bit is reserved by the ALSA backend.  Keeping the rule here makes
-/// the routing decision explicit and gives every UI the same semantics.
+/// Legacy public compatibility constant. New routing code uses the shared
+/// backend namespace helpers in `pw-graph-core`; the high bit remains
+/// recognized only for IDs written by older ALSA builds.
 pub const ALSA_ID_FLAG: u64 = 1_u64 << 63;
+
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+use pw_graph_alsamidi::AlsaMidiDriver;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+use pw_graph_backend::PipewireDriver;
+#[cfg(target_os = "windows")]
+use pw_graph_backend::WindowsAudioDriver;
 
 /// The native driver that owns a pair of graph ports.  This classification is
 /// kept independent of the UI and is used before a mutation is forwarded to a
@@ -25,35 +33,56 @@ pub const ALSA_ID_FLAG: u64 = 1_u64 << 63;
 pub enum CompositeRoute {
     PipeWire,
     AlsaMidi,
+    WindowsAudio,
+    WindowsMidi,
+    Demo,
+}
+
+impl CompositeRoute {
+    fn from_backend(backend: BackendKind) -> Self {
+        match backend {
+            BackendKind::PipeWire => Self::PipeWire,
+            BackendKind::AlsaMidi => Self::AlsaMidi,
+            BackendKind::WindowsAudio => Self::WindowsAudio,
+            BackendKind::WindowsMidi => Self::WindowsMidi,
+            BackendKind::Demo => Self::Demo,
+        }
+    }
 }
 
 /// Classify a connection without touching either native backend.
 ///
-/// The high-bit namespace is the stable discriminator assigned to ALSA MIDI
-/// IDs.  A mixed pair is intentionally rejected instead of being allowed to
-/// fall through to PipeWire.
+/// Backend ownership is read from the shared ID namespace. A mixed pair is
+/// intentionally rejected instead of being allowed to fall through to a
+/// default native backend.
 pub fn route_for_ports(src: PortId, dst: PortId) -> Result<CompositeRoute, &'static str> {
-    let source_is_alsa = src.0 & ALSA_ID_FLAG != 0;
-    let destination_is_alsa = dst.0 & ALSA_ID_FLAG != 0;
-    match (source_is_alsa, destination_is_alsa) {
-        (false, false) => Ok(CompositeRoute::PipeWire),
-        (true, true) => Ok(CompositeRoute::AlsaMidi),
-        _ => Err("connections cannot cross PipeWire and ALSA MIDI backends"),
+    let source = backend_for_port(src).ok_or("source port has an unknown backend namespace")?;
+    let destination =
+        backend_for_port(dst).ok_or("destination port has an unknown backend namespace")?;
+    if source != destination {
+        return Err(match (source, destination) {
+            (BackendKind::PipeWire, BackendKind::AlsaMidi)
+            | (BackendKind::AlsaMidi, BackendKind::PipeWire) => {
+                "connections cannot cross PipeWire and ALSA MIDI backends"
+            }
+            _ => "connections cannot cross native backends",
+        });
     }
+    Ok(CompositeRoute::from_backend(source))
 }
 
 /// A backend that can be used by the application layer.  Relay is an optional
 /// extension of the same object rather than a second UI-owned driver.
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 pub trait ApplicationDriver: GraphDriver + pw_graph_backend::RelayDriver {}
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 impl<T> ApplicationDriver for T where T: GraphDriver + pw_graph_backend::RelayDriver {}
 
-#[cfg(not(feature = "relay"))]
+#[cfg(not(all(target_os = "linux", feature = "relay")))]
 pub trait ApplicationDriver: GraphDriver {}
 
-#[cfg(not(feature = "relay"))]
+#[cfg(not(all(target_os = "linux", feature = "relay")))]
 impl<T> ApplicationDriver for T where T: GraphDriver {}
 
 /// Result of attempting to open the optional native backends.  A missing
@@ -63,16 +92,19 @@ impl<T> ApplicationDriver for T where T: GraphDriver {}
 pub struct BackendAvailability {
     pub pipewire: bool,
     pub alsa: bool,
+    pub windows_audio: bool,
     pub failures: Vec<String>,
 }
 
 /// PipeWire + ALSA MIDI graph with disjoint ID namespaces.
 #[derive(Default)]
 pub struct CompositeDriver {
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     pub pipewire: Option<PipewireDriver>,
-    #[cfg(feature = "alsa")]
+    #[cfg(all(target_os = "linux", feature = "alsa"))]
     pub alsa: Option<AlsaMidiDriver>,
+    #[cfg(target_os = "windows")]
+    pub windows_audio: Option<WindowsAudioDriver>,
     graph: Graph,
 }
 
@@ -81,12 +113,12 @@ impl CompositeDriver {
     /// This is intentionally the only place where the two native drivers are
     /// opened for the desktop application.
     #[allow(unused_mut)]
-    pub fn open(no_alsa_midi: bool) -> (Self, BackendAvailability) {
-        let _ = no_alsa_midi;
+    pub fn open(no_midi: bool) -> (Self, BackendAvailability) {
+        let _ = no_midi;
         let mut composite = Self::default();
         let mut availability = BackendAvailability::default();
 
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         match PipewireDriver::new() {
             Ok(driver) => {
                 composite.pipewire = Some(driver);
@@ -95,8 +127,8 @@ impl CompositeDriver {
             Err(error) => availability.failures.push(error.to_string()),
         }
 
-        #[cfg(feature = "alsa")]
-        if !no_alsa_midi {
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
+        if !no_midi {
             match AlsaMidiDriver::new() {
                 Ok(driver) => {
                     composite.alsa = Some(driver);
@@ -106,18 +138,37 @@ impl CompositeDriver {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        match WindowsAudioDriver::new() {
+            Ok(driver) => {
+                composite.windows_audio = Some(driver);
+                availability.windows_audio = true;
+            }
+            Err(error) => availability.failures.push(error.to_string()),
+        }
+
         (composite, availability)
     }
 
     /// Build a composite from already-created children.  This is useful for
     /// deterministic integration tests and keeps construction independent of
     /// the windowing toolkit.
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     pub fn with_pipewire(driver: PipewireDriver) -> Self {
         Self {
             pipewire: Some(driver),
-            #[cfg(feature = "alsa")]
+            #[cfg(all(target_os = "linux", feature = "alsa"))]
             alsa: None,
+            #[cfg(target_os = "windows")]
+            windows_audio: None,
+            graph: Graph::default(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn with_windows_audio(driver: WindowsAudioDriver) -> Self {
+        Self {
+            windows_audio: Some(driver),
             graph: Graph::default(),
         }
     }
@@ -139,12 +190,16 @@ impl CompositeDriver {
     #[allow(unused_mut)]
     fn rebuild_merged_graph(&mut self) -> Result<(), GraphError> {
         let mut graph = Graph::default();
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_ref() {
             Self::merge_graph(&mut graph, driver.graph())?;
         }
-        #[cfg(feature = "alsa")]
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
         if let Some(driver) = self.alsa.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_ref() {
             Self::merge_graph(&mut graph, driver.graph())?;
         }
         self.graph = graph;
@@ -155,14 +210,14 @@ impl CompositeDriver {
         BackendError::Unsupported(message.into())
     }
 
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     fn pipewire_mut(&mut self) -> BackendResult<&mut PipewireDriver> {
         self.pipewire
             .as_mut()
             .ok_or_else(|| Self::unsupported("PipeWire backend is unavailable"))
     }
 
-    #[cfg(feature = "alsa")]
+    #[cfg(all(target_os = "linux", feature = "alsa"))]
     fn alsa_mut(&mut self) -> BackendResult<&mut AlsaMidiDriver> {
         self.alsa
             .as_mut()
@@ -178,7 +233,7 @@ impl CompositeDriver {
         }
     }
 
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     fn mutate_pipewire<T>(
         &mut self,
         operation: impl FnOnce(&mut PipewireDriver) -> BackendResult<T>,
@@ -189,36 +244,127 @@ impl CompositeDriver {
     }
 
     pub fn has_pipewire(&self) -> bool {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.pipewire.is_some()
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             false
         }
     }
 
     pub fn has_alsa(&self) -> bool {
-        #[cfg(feature = "alsa")]
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
         {
             self.alsa.is_some()
         }
-        #[cfg(not(feature = "alsa"))]
+        #[cfg(not(all(target_os = "linux", feature = "alsa")))]
         {
             false
         }
     }
+
+    pub fn has_windows_audio(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.windows_audio.is_some()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
+    /// Capabilities for one backend namespace in this composite.
+    pub fn capabilities_for_backend(&self, backend: BackendKind) -> BackendCapabilities {
+        match backend {
+            BackendKind::PipeWire => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    return self
+                        .pipewire
+                        .as_ref()
+                        .map(GraphDriver::capabilities)
+                        .unwrap_or_default();
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    BackendCapabilities::default()
+                }
+            }
+            BackendKind::AlsaMidi => {
+                #[cfg(all(target_os = "linux", feature = "alsa"))]
+                {
+                    return self
+                        .alsa
+                        .as_ref()
+                        .map(GraphDriver::capabilities)
+                        .unwrap_or_default();
+                }
+                #[cfg(not(all(target_os = "linux", feature = "alsa")))]
+                {
+                    BackendCapabilities::default()
+                }
+            }
+            BackendKind::WindowsAudio | BackendKind::WindowsMidi | BackendKind::Demo => {
+                #[cfg(target_os = "windows")]
+                if backend == BackendKind::WindowsAudio {
+                    return self
+                        .windows_audio
+                        .as_ref()
+                        .map(GraphDriver::capabilities)
+                        .unwrap_or_default();
+                }
+                BackendCapabilities::default()
+            }
+        }
+    }
+
+    /// Capabilities for the backend that owns a graph node.
+    pub fn capabilities_for_node(&self, node: NodeId) -> BackendCapabilities {
+        backend_for_node(node)
+            .map(|backend| self.capabilities_for_backend(backend))
+            .unwrap_or_default()
+    }
+
+    /// Return whether a projected link can be persisted and mutated by the
+    /// native child backend.
+    pub fn is_link_mutable(&self, link: LinkId) -> bool {
+        GraphDriver::is_link_mutable(self, link)
+    }
 }
 
 impl GraphDriver for CompositeDriver {
+    #[allow(unused_mut)]
+    fn capabilities(&self) -> BackendCapabilities {
+        let mut capabilities = BackendCapabilities::default();
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
+        if let Some(driver) = self.pipewire.as_ref() {
+            capabilities = capabilities.union(driver.capabilities());
+        }
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
+        if let Some(driver) = self.alsa.as_ref() {
+            capabilities = capabilities.union(driver.capabilities());
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_ref() {
+            capabilities = capabilities.union(driver.capabilities());
+        }
+        capabilities
+    }
+
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_mut() {
             driver.refresh()?;
         }
-        #[cfg(feature = "alsa")]
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
         if let Some(driver) = self.alsa.as_mut() {
+            driver.refresh()?;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_mut() {
             driver.refresh()?;
         }
         self.rebuild_merged_graph()?;
@@ -228,115 +374,252 @@ impl GraphDriver for CompositeDriver {
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
         match route_for_ports(src, dst) {
             Ok(CompositeRoute::AlsaMidi) => {
-                #[cfg(feature = "alsa")]
+                #[cfg(all(target_os = "linux", feature = "alsa"))]
                 {
                     let link = self.alsa_mut()?.connect(src, dst)?;
                     self.refresh()?;
                     Ok(link)
                 }
-                #[cfg(not(feature = "alsa"))]
+                #[cfg(not(all(target_os = "linux", feature = "alsa")))]
                 Err(Self::unsupported("ALSA MIDI backend is disabled"))
             }
             Ok(CompositeRoute::PipeWire) => {
-                #[cfg(feature = "pipewire")]
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
                 {
                     let link = self.pipewire_mut()?.connect(src, dst)?;
                     self.refresh()?;
                     Ok(link)
                 }
-                #[cfg(not(feature = "pipewire"))]
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
                 Err(Self::unsupported("PipeWire backend is disabled"))
             }
+            Ok(CompositeRoute::WindowsAudio) => {
+                Err(Self::unsupported("Windows audio routing is not supported"))
+            }
+            Ok(CompositeRoute::WindowsMidi) => {
+                Err(Self::unsupported("Windows MIDI routing is not supported"))
+            }
+            Ok(CompositeRoute::Demo) => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
             Err(error) => Err(Self::unsupported(error)),
         }
     }
 
-    #[allow(unused_variables)]
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
         let existing = self
             .graph
             .link(link)
             .cloned()
             .ok_or(GraphError::MissingLink(link))?;
-        if link.0 & ALSA_ID_FLAG != 0 {
-            #[cfg(feature = "alsa")]
-            {
-                self.alsa_mut()?.disconnect(link)?;
-                self.refresh()?;
-                Ok(existing)
+        let route = backend_for_link(link)
+            .map(CompositeRoute::from_backend)
+            .or_else(|| route_for_ports(existing.output_port, existing.input_port).ok())
+            .ok_or_else(|| Self::unsupported("link has an unknown backend namespace"))?;
+        match route {
+            CompositeRoute::AlsaMidi => {
+                #[cfg(all(target_os = "linux", feature = "alsa"))]
+                {
+                    self.alsa_mut()?.disconnect(link)?;
+                    self.refresh()?;
+                    Ok(existing)
+                }
+                #[cfg(not(all(target_os = "linux", feature = "alsa")))]
+                Err(Self::unsupported("ALSA MIDI backend is disabled"))
             }
-            #[cfg(not(feature = "alsa"))]
-            return Err(Self::unsupported("ALSA MIDI backend is disabled"));
-        } else {
-            #[cfg(feature = "pipewire")]
-            {
-                self.pipewire_mut()?.disconnect(link)?;
-                self.refresh()?;
-                Ok(existing)
+            CompositeRoute::PipeWire => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    self.pipewire_mut()?.disconnect(link)?;
+                    self.refresh()?;
+                    Ok(existing)
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                Err(Self::unsupported("PipeWire backend is disabled"))
             }
-            #[cfg(not(feature = "pipewire"))]
-            return Err(Self::unsupported("PipeWire backend is disabled"));
+            CompositeRoute::WindowsAudio => {
+                Err(Self::unsupported("Windows audio routing is not supported"))
+            }
+            CompositeRoute::WindowsMidi => {
+                Err(Self::unsupported("Windows MIDI routing is not supported"))
+            }
+            CompositeRoute::Demo => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
         }
     }
 
-    #[allow(unused_variables)]
+    fn is_link_mutable(&self, link: LinkId) -> bool {
+        let Some(existing) = self.graph.link(link) else {
+            return false;
+        };
+        let route = backend_for_link(link)
+            .map(CompositeRoute::from_backend)
+            .or_else(|| route_for_ports(existing.output_port, existing.input_port).ok());
+        match route {
+            Some(CompositeRoute::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    return self
+                        .pipewire
+                        .as_ref()
+                        .is_some_and(|driver| driver.is_link_mutable(link));
+                }
+            }
+            Some(CompositeRoute::AlsaMidi) => {
+                #[cfg(all(target_os = "linux", feature = "alsa"))]
+                {
+                    return self
+                        .alsa
+                        .as_ref()
+                        .is_some_and(|driver| driver.is_link_mutable(link));
+                }
+            }
+            Some(CompositeRoute::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    return self
+                        .windows_audio
+                        .as_ref()
+                        .is_some_and(|driver| driver.is_link_mutable(link));
+                }
+            }
+            Some(CompositeRoute::WindowsMidi | CompositeRoute::Demo) | None => {}
+        }
+        false
+    }
+
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
-        if node.0 & ALSA_ID_FLAG != 0 {
-            #[cfg(feature = "alsa")]
-            {
-                self.alsa_mut()?.set_node_position(node, position)?;
-                if let Some(node_data) = self.graph.nodes.get_mut(&node) {
-                    node_data.position = position;
+        let _ = position;
+        match backend_for_node(node) {
+            Some(BackendKind::AlsaMidi) => {
+                #[cfg(all(target_os = "linux", feature = "alsa"))]
+                {
+                    self.alsa_mut()?.set_node_position(node, position)?;
+                    if let Some(node_data) = self.graph.nodes.get_mut(&node) {
+                        node_data.position = position;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                #[cfg(not(all(target_os = "linux", feature = "alsa")))]
+                Err(Self::unsupported("ALSA MIDI backend is disabled"))
             }
-            #[cfg(not(feature = "alsa"))]
-            return Err(Self::unsupported("ALSA MIDI backend is disabled"));
-        } else {
-            #[cfg(feature = "pipewire")]
-            {
-                self.pipewire_mut()?.set_node_position(node, position)?;
-                if let Some(node_data) = self.graph.nodes.get_mut(&node) {
-                    node_data.position = position;
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    self.pipewire_mut()?.set_node_position(node, position)?;
+                    if let Some(node_data) = self.graph.nodes.get_mut(&node) {
+                        node_data.position = position;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                Err(Self::unsupported("PipeWire backend is disabled"))
             }
-            #[cfg(not(feature = "pipewire"))]
-            return Err(Self::unsupported("PipeWire backend is disabled"));
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    self.windows_audio
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows audio backend is unavailable"))?
+                        .set_node_position(node, position)?;
+                    if let Some(node_data) = self.graph.nodes.get_mut(&node) {
+                        node_data.position = position;
+                    }
+                    Ok(())
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err(Self::unsupported("Windows audio backend is unavailable"))
+                }
+            }
+            Some(BackendKind::WindowsMidi) => Err(Self::unsupported(
+                "Windows MIDI layout is managed by the application",
+            )),
+            Some(BackendKind::Demo) => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
+            None => Err(Self::unsupported("node has an unknown backend namespace")),
         }
     }
 
     fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
-        if node.0 & ALSA_ID_FLAG != 0 {
-            return Err(Self::unsupported(
+        match backend_for_node(node) {
+            Some(BackendKind::AlsaMidi) => Err(Self::unsupported(
                 "ALSA MIDI nodes do not expose audio mute",
-            ));
-        }
-        #[cfg(feature = "pipewire")]
-        {
-            self.pipewire_mut()?.set_node_mute(node, muted)
-        }
-        #[cfg(not(feature = "pipewire"))]
-        {
-            let _ = (node, muted);
-            Err(Self::unsupported("PipeWire backend is disabled"))
+            )),
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    self.pipewire_mut()?.set_node_mute(node, muted)
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    let _ = (node, muted);
+                    Err(Self::unsupported("PipeWire backend is disabled"))
+                }
+            }
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    self.windows_audio
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows audio backend is unavailable"))?
+                        .set_node_mute(node, muted)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = (node, muted);
+                    Err(Self::unsupported("Windows audio backend is unavailable"))
+                }
+            }
+            Some(BackendKind::WindowsMidi) => Err(Self::unsupported(
+                "Windows MIDI nodes do not expose audio mute",
+            )),
+            Some(BackendKind::Demo) => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
+            None => Err(Self::unsupported("node has an unknown backend namespace")),
         }
     }
 
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
-        if node.0 & ALSA_ID_FLAG != 0 {
-            return Err(Self::unsupported(
+        match backend_for_node(node) {
+            Some(BackendKind::AlsaMidi) => Err(Self::unsupported(
                 "ALSA MIDI nodes do not expose audio volume",
-            ));
-        }
-        #[cfg(feature = "pipewire")]
-        {
-            self.pipewire_mut()?.set_node_volume(node, volume)
-        }
-        #[cfg(not(feature = "pipewire"))]
-        {
-            let _ = (node, volume);
-            Err(Self::unsupported("PipeWire backend is disabled"))
+            )),
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    self.pipewire_mut()?.set_node_volume(node, volume)
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    let _ = (node, volume);
+                    Err(Self::unsupported("PipeWire backend is disabled"))
+                }
+            }
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    self.windows_audio
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows audio backend is unavailable"))?
+                        .set_node_volume(node, volume)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = (node, volume);
+                    Err(Self::unsupported("Windows audio backend is unavailable"))
+                }
+            }
+            Some(BackendKind::WindowsMidi) => Err(Self::unsupported(
+                "Windows MIDI nodes do not expose audio volume",
+            )),
+            Some(BackendKind::Demo) => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
+            None => Err(Self::unsupported("node has an unknown backend namespace")),
         }
     }
 
@@ -345,7 +628,7 @@ impl GraphDriver for CompositeDriver {
     }
 
     fn graph_dirty(&self) -> bool {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if self
             .pipewire
             .as_ref()
@@ -353,9 +636,17 @@ impl GraphDriver for CompositeDriver {
         {
             return true;
         }
-        #[cfg(feature = "alsa")]
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
         if self
             .alsa
+            .as_ref()
+            .is_some_and(|driver| driver.graph_dirty())
+        {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if self
+            .windows_audio
             .as_ref()
             .is_some_and(|driver| driver.graph_dirty())
         {
@@ -366,7 +657,7 @@ impl GraphDriver for CompositeDriver {
 
     fn is_node_type(&self, node_type: NodeType) -> bool {
         let _ = node_type;
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if self
             .pipewire
             .as_ref()
@@ -374,9 +665,17 @@ impl GraphDriver for CompositeDriver {
         {
             return true;
         }
-        #[cfg(feature = "alsa")]
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
         if self
             .alsa
+            .as_ref()
+            .is_some_and(|driver| driver.is_node_type(node_type))
+        {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if self
+            .windows_audio
             .as_ref()
             .is_some_and(|driver| driver.is_node_type(node_type))
         {
@@ -387,7 +686,7 @@ impl GraphDriver for CompositeDriver {
 
     fn is_port_type(&self, port_type: PortType) -> bool {
         let _ = port_type;
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if self
             .pipewire
             .as_ref()
@@ -395,9 +694,17 @@ impl GraphDriver for CompositeDriver {
         {
             return true;
         }
-        #[cfg(feature = "alsa")]
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
         if self
             .alsa
+            .as_ref()
+            .is_some_and(|driver| driver.is_port_type(port_type))
+        {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if self
+            .windows_audio
             .as_ref()
             .is_some_and(|driver| driver.is_port_type(port_type))
         {
@@ -407,16 +714,24 @@ impl GraphDriver for CompositeDriver {
     }
 
     fn audio_meters(&mut self) -> BackendResult<Vec<pw_graph_backend::AudioMeter>> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_mut() {
+            return driver.audio_meters();
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_mut() {
             return driver.audio_meters();
         }
         Ok(Vec::new())
     }
 
     fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_mut() {
+            return driver.set_meter_policy(policy);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_mut() {
             return driver.set_meter_policy(policy);
         }
         let _ = policy;
@@ -424,8 +739,12 @@ impl GraphDriver for CompositeDriver {
     }
 
     fn request_meters(&mut self, nodes: &BTreeSet<NodeId>) -> BackendResult<()> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_mut() {
+            return driver.request_meters(nodes);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_mut() {
             return driver.request_meters(nodes);
         }
         let _ = nodes;
@@ -433,8 +752,12 @@ impl GraphDriver for CompositeDriver {
     }
 
     fn reset_audio_config(&mut self) -> BackendResult<()> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         if let Some(driver) = self.pipewire.as_mut() {
+            return driver.reset_audio_config();
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_mut() {
             return driver.reset_audio_config();
         }
         Ok(())
@@ -443,41 +766,41 @@ impl GraphDriver for CompositeDriver {
 
 impl pw_graph_backend::EffectDriver for CompositeDriver {
     fn effect_descriptors(&self) -> Vec<pw_graph_effects::EffectDescriptor> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.pipewire
                 .as_ref()
                 .map(|driver| driver.effect_descriptors())
                 .unwrap_or_default()
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             Vec::new()
         }
     }
 
     fn effect_instances(&self) -> Vec<pw_graph_backend::EffectInstance> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.pipewire
                 .as_ref()
                 .map(|driver| driver.effect_instances())
                 .unwrap_or_default()
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             Vec::new()
         }
     }
 
     fn supports_effect_nodes(&self) -> bool {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.pipewire
                 .as_ref()
                 .is_some_and(|driver| driver.supports_effect_nodes())
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             false
         }
@@ -487,11 +810,11 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
         &mut self,
         request: pw_graph_backend::EffectNodeRequest,
     ) -> BackendResult<pw_graph_backend::EffectInstance> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.mutate_pipewire(|driver| driver.create_effect_node(request))
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             let _ = request;
             Err(Self::unsupported("effect processing is unavailable"))
@@ -502,11 +825,11 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
         &mut self,
         request: pw_graph_backend::EffectInsertRequest,
     ) -> BackendResult<pw_graph_backend::EffectInstance> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.mutate_pipewire(|driver| driver.insert_effect(request))
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             let _ = request;
             Err(Self::unsupported("effect processing is unavailable"))
@@ -514,12 +837,12 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
     }
 
     fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.pipewire_mut()?
                 .set_effect_enabled(instance_id, enabled)
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             let _ = (instance_id, enabled);
             Err(Self::unsupported("effect processing is unavailable"))
@@ -532,12 +855,12 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
         parameter: &str,
         value: f32,
     ) -> BackendResult<()> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.pipewire_mut()?
                 .set_effect_parameter(instance_id, parameter, value)
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             let _ = (instance_id, parameter, value);
             Err(Self::unsupported("effect processing is unavailable"))
@@ -545,11 +868,11 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
     }
 
     fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
-        #[cfg(feature = "pipewire")]
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
         {
             self.mutate_pipewire(|driver| driver.remove_effect(instance_id))
         }
-        #[cfg(not(feature = "pipewire"))]
+        #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
         {
             let _ = instance_id;
             Err(Self::unsupported("effect processing is unavailable"))
@@ -557,7 +880,7 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
     }
 }
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 impl pw_graph_backend::RelayDriver for CompositeDriver {
     fn relay_available(&self) -> bool {
         self.pipewire
@@ -638,28 +961,48 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
 mod tests {
     use super::*;
     use pw_graph_backend::InMemoryDriver;
-    use pw_graph_core::{Direction, Node, Port};
+    use pw_graph_core::{encode_backend_id, BackendNamespace, Direction, Node, Port};
 
     #[test]
     fn composite_reports_cross_backend_connections_before_mutation() {
-        let pipewire_output = PortId(42);
-        let alsa_output = PortId(ALSA_ID_FLAG | 42);
+        let pipewire_output = PortId(encode_backend_id(BackendNamespace::PipeWire, 42));
+        let alsa_output = PortId(encode_backend_id(BackendNamespace::AlsaMidi, 42));
+        let windows_output = PortId(encode_backend_id(BackendNamespace::WindowsAudio, 42));
 
         assert_eq!(
-            route_for_ports(pipewire_output, PortId(43)),
+            route_for_ports(
+                pipewire_output,
+                PortId(encode_backend_id(BackendNamespace::PipeWire, 43))
+            ),
             Ok(CompositeRoute::PipeWire)
         );
         assert_eq!(
-            route_for_ports(alsa_output, PortId(ALSA_ID_FLAG | 43)),
+            route_for_ports(
+                alsa_output,
+                PortId(encode_backend_id(BackendNamespace::AlsaMidi, 43))
+            ),
             Ok(CompositeRoute::AlsaMidi)
         );
         assert_eq!(
-            route_for_ports(pipewire_output, PortId(ALSA_ID_FLAG | 43)),
+            route_for_ports(
+                pipewire_output,
+                PortId(encode_backend_id(BackendNamespace::AlsaMidi, 43))
+            ),
             Err("connections cannot cross PipeWire and ALSA MIDI backends")
         );
         assert_eq!(
-            route_for_ports(alsa_output, PortId(43)),
+            route_for_ports(
+                alsa_output,
+                PortId(encode_backend_id(BackendNamespace::PipeWire, 43))
+            ),
             Err("connections cannot cross PipeWire and ALSA MIDI backends")
+        );
+        assert_eq!(
+            route_for_ports(
+                windows_output,
+                PortId(encode_backend_id(BackendNamespace::WindowsAudio, 43))
+            ),
+            Ok(CompositeRoute::WindowsAudio)
         );
     }
 

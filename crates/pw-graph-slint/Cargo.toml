@@ -20,7 +20,6 @@ tray = ["dep:ksni"]
 [dependencies]
 slint.workspace = true
 pw-graph-app-core = { path = "../pw-graph-app-core", default-features = false }
-pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false, optional = true }
 pw-graph-backend = { path = "../pw-graph-backend", default-features = false }
 pw-graph-command = { path = "../pw-graph-command" }
 pw-graph-config = { path = "../pw-graph-config" }
@@ -34,6 +33,7 @@ toml.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"], optional = true }
+pw-graph-alsamidi = { path = "../pw-graph-alsamidi", default-features = false, optional = true }
 
 [build-dependencies]
 slint-build.workspace = true

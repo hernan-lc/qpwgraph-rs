@@ -1,27 +1,29 @@
 //! Optional ALSA Sequencer MIDI backend.
 //!
-//! ALSA identifiers are namespaced in the high bit so this graph can be
-//! merged with PipeWire without colliding with PipeWire global IDs.
+//! ALSA identifiers use the shared backend namespace so this graph can be
+//! merged with other native backends without colliding with their IDs.
 
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+use pw_graph_backend::BackendCapabilities;
 use pw_graph_backend::{BackendError, BackendResult, GraphDriver};
-#[cfg(feature = "alsa")]
-use pw_graph_core::NodeId;
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+use pw_graph_core::{decode_backend_local_id, encode_backend_id, BackendNamespace, NodeId};
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 use pw_graph_core::{Direction, GraphError, Port};
 use pw_graph_core::{Graph, Link, LinkId, Node, NodeType, PortId, PortType};
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 use std::collections::BTreeMap;
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 use std::ffi::{c_void, CStr};
 
-#[cfg(feature = "alsa")]
-const NAMESPACE: u64 = 1 << 63;
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+const NAMESPACE: BackendNamespace = BackendNamespace::AlsaMidi;
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 const MAX_NODES: usize = 256;
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 const MAX_PORTS: usize = 4096;
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 mod native {
     use super::*;
 
@@ -61,19 +63,46 @@ mod native {
     }
 }
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 fn native_error(operation: &str, code: i32) -> BackendError {
     BackendError::Native(format!("{operation} failed with code {code}"))
 }
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 fn raw_text(value: &[std::ffi::c_char]) -> String {
     unsafe { CStr::from_ptr(value.as_ptr()) }
         .to_string_lossy()
         .into_owned()
 }
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+fn graph_id(native_id: u64) -> u64 {
+    encode_backend_id(NAMESPACE, native_id)
+}
+
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+fn link_local_id(output_port: u32, input_port: u32) -> u64 {
+    // The ALSA shim exposes the two endpoint IDs but not a native link ID.
+    // Hash the pair into the 56-bit local-ID space instead of packing two
+    // u32s into the full u64, which would overwrite the namespace byte.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in output_port
+        .to_le_bytes()
+        .into_iter()
+        .chain(input_port.to_le_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash & pw_graph_core::LOCAL_ID_MASK
+}
+
+#[cfg(all(target_os = "linux", feature = "alsa"))]
+fn graph_link_id(output_port: u32, input_port: u32) -> LinkId {
+    LinkId(graph_id(link_local_id(output_port, input_port)))
+}
+
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 #[derive(Debug)]
 pub struct AlsaMidiDriver {
     native: *mut c_void,
@@ -81,7 +110,7 @@ pub struct AlsaMidiDriver {
     positions: BTreeMap<NodeId, [f32; 2]>,
 }
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 impl AlsaMidiDriver {
     pub fn new() -> BackendResult<Self> {
         let native = unsafe { native::alsa_shim_new() };
@@ -106,17 +135,17 @@ impl AlsaMidiDriver {
         let snapshot = unsafe { snapshot.assume_init() };
         let mut graph = Graph::default();
         for raw in snapshot.nodes[..(snapshot.node_count as usize).min(MAX_NODES)].iter() {
-            let id = NodeId(NAMESPACE | raw.id as u64);
+            let id = NodeId(graph_id(raw.id as u64));
             let node = Node::new(id, raw_text(&raw.name), NodeType::AlsaMidi);
             graph.add_node(node)?;
         }
         for raw in snapshot.ports[..(snapshot.port_count as usize).min(MAX_PORTS)].iter() {
-            let node_id = NodeId(NAMESPACE | raw.node_id as u64);
+            let node_id = NodeId(graph_id(raw.node_id as u64));
             if graph.node(node_id).is_none() {
                 continue;
             }
             graph.add_port(Port::new(
-                PortId(NAMESPACE | raw.id as u64),
+                PortId(graph_id(raw.id as u64)),
                 node_id,
                 raw_text(&raw.name),
                 if raw.direction == 1 {
@@ -134,9 +163,9 @@ impl AlsaMidiDriver {
             }
         }
         for raw in snapshot.links[..(snapshot.link_count as usize).min(MAX_PORTS)].iter() {
-            let output = NAMESPACE | raw.output_port as u64;
-            let input = NAMESPACE | raw.input_port as u64;
-            let id = LinkId(NAMESPACE | ((raw.output_port as u64) << 32) | raw.input_port as u64);
+            let output = graph_id(raw.output_port as u64);
+            let input = graph_id(raw.input_port as u64);
+            let id = graph_link_id(raw.output_port, raw.input_port);
             let _ = graph.insert_existing_link(Link {
                 id,
                 output_port: PortId(output),
@@ -148,7 +177,7 @@ impl AlsaMidiDriver {
     }
 }
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 impl Drop for AlsaMidiDriver {
     fn drop(&mut self) {
         if !self.native.is_null() {
@@ -158,8 +187,17 @@ impl Drop for AlsaMidiDriver {
     }
 }
 
-#[cfg(feature = "alsa")]
+#[cfg(all(target_os = "linux", feature = "alsa"))]
 impl GraphDriver for AlsaMidiDriver {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            topology: true,
+            connect: true,
+            disconnect: true,
+            ..BackendCapabilities::default()
+        }
+    }
+
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         self.snapshot()?;
         Ok(self.graph.nodes.values().cloned().collect())
@@ -174,14 +212,14 @@ impl GraphDriver for AlsaMidiDriver {
         if !input.direction.is_sink() {
             return Err(GraphError::NotSink(dst).into());
         }
-        let raw_src = (src.0 & !NAMESPACE) as u32;
-        let raw_dst = (dst.0 & !NAMESPACE) as u32;
+        let raw_src = decode_backend_local_id(src.0) as u32;
+        let raw_dst = decode_backend_local_id(dst.0) as u32;
         let result = unsafe { native::alsa_shim_connect(self.native, raw_src, raw_dst) };
         if result < 0 {
             return Err(native_error("ALSA Sequencer connection", result));
         }
         let link = Link {
-            id: LinkId(NAMESPACE | ((raw_src as u64) << 32) | raw_dst as u64),
+            id: graph_link_id(raw_src, raw_dst),
             output_port: src,
             input_port: dst,
         };
@@ -195,8 +233,8 @@ impl GraphDriver for AlsaMidiDriver {
             .link(link)
             .cloned()
             .ok_or(GraphError::MissingLink(link))?;
-        let raw_src = (existing.output_port.0 & !NAMESPACE) as u32;
-        let raw_dst = (existing.input_port.0 & !NAMESPACE) as u32;
+        let raw_src = decode_backend_local_id(existing.output_port.0) as u32;
+        let raw_dst = decode_backend_local_id(existing.input_port.0) as u32;
         let result = unsafe { native::alsa_shim_disconnect(self.native, raw_src, raw_dst) };
         if result < 0 {
             return Err(native_error("ALSA Sequencer disconnection", result));
@@ -228,7 +266,7 @@ impl GraphDriver for AlsaMidiDriver {
 
 impl pw_graph_backend::EffectDriver for AlsaMidiDriver {}
 
-#[cfg(all(test, feature = "alsa"))]
+#[cfg(all(test, target_os = "linux", feature = "alsa"))]
 mod tests {
     use super::*;
 
@@ -285,13 +323,13 @@ mod tests {
     }
 }
 
-#[cfg(not(feature = "alsa"))]
+#[cfg(not(all(target_os = "linux", feature = "alsa")))]
 #[derive(Debug, Default)]
 pub struct AlsaMidiDriver {
     graph: Graph,
 }
 
-#[cfg(not(feature = "alsa"))]
+#[cfg(not(all(target_os = "linux", feature = "alsa")))]
 impl AlsaMidiDriver {
     pub fn new() -> BackendResult<Self> {
         Err(BackendError::Unsupported(
@@ -300,7 +338,7 @@ impl AlsaMidiDriver {
     }
 }
 
-#[cfg(not(feature = "alsa"))]
+#[cfg(not(all(target_os = "linux", feature = "alsa")))]
 impl GraphDriver for AlsaMidiDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         Err(BackendError::Unsupported("ALSA feature is disabled".into()))

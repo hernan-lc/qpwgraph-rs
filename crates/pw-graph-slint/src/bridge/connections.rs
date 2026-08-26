@@ -6,6 +6,14 @@ use std::time::Instant;
 use super::app::{set_connection_feedback, Application};
 
 pub(crate) fn handle_link_requested(application: &mut Application, start_id: i32, end_id: i32) {
+    if !application.source.capabilities().connect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
     if start_id != end_id {
         application.pending_connection_pin = None;
         if application.view.connect_mode == ConnectMode::Easy {
@@ -36,6 +44,14 @@ pub(crate) fn handle_link_requested(application: &mut Application, start_id: i32
 }
 
 pub(crate) fn connect_pin_pair(application: &mut Application, start_id: i32, end_id: i32) {
+    if !application.source.capabilities().connect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
     if start_id == end_id {
         let message = application.t("status.connection_cancelled");
         set_connection_feedback(application, message, false);
@@ -141,6 +157,14 @@ pub(crate) fn easy_connect_nodes(
     y: f32,
     target_pin_id: i32,
 ) {
+    if !application.source.capabilities().connect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
     let Some(source_node) = application.view.ids.node_id(source_id) else {
         let message = application.t("status.connection_pin_missing");
         set_connection_feedback(application, message, true);
@@ -200,6 +224,14 @@ pub(crate) fn easy_connect_from_pin(
     x: f32,
     y: f32,
 ) {
+    if !application.source.capabilities().connect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
     let Some(source_node) = application
         .view
         .ids
@@ -390,6 +422,14 @@ fn apply_easy_pairs(application: &mut Application, port_keys: Vec<(PortKey, Port
 }
 
 pub(crate) fn delete_selected_connections(application: &mut Application) {
+    if !application.source.capabilities().disconnect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
     let keys = {
         let graph = application.source.graph();
         application
@@ -467,6 +507,14 @@ pub(crate) fn delete_selected_connections(application: &mut Application) {
 /// Disconnect every live link touching the currently selected node. This is
 /// the framework-neutral equivalent of the old node context-menu command.
 pub(crate) fn disconnect_selected_node(application: &mut Application) {
+    if !application.source.capabilities().disconnect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
     let Some(node_id) = application.view.selected_nodes.iter().next().copied() else {
         let message = application.t("status.select_node_before_disconnect");
         set_connection_feedback(application, message, true);

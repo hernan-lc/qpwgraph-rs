@@ -214,6 +214,23 @@ impl Patchbay {
         }
     }
 
+    /// Snapshot only links that the driver can mutate. Observed relationships
+    /// may still be displayed in the live graph, but persisting them as
+    /// reconnectable rules would make a later activation appear corrupted.
+    pub fn snapshot_driver(&mut self, driver: &dyn GraphDriver, pinned: bool) {
+        let graph = driver.graph();
+        let links: Vec<_> = graph
+            .links
+            .values()
+            .filter(|link| driver.is_link_mutable(link.id))
+            .cloned()
+            .collect();
+        self.connections.clear();
+        for link in links {
+            self.add_graph_connection(graph, link.output_port, link.input_port, pinned);
+        }
+    }
+
     /// Return only rules that touch an effect endpoint. Effect routing is part
     /// of the persisted effect-node state and can be restored independently of
     /// the user's optional full patchbay-on-startup setting.
@@ -274,6 +291,19 @@ impl Patchbay {
     ) -> Result<ActivationReport, PatchbayError> {
         driver.refresh()?;
         let mut report = ActivationReport::default();
+        let capabilities = driver.capabilities();
+        if !self.connections.is_empty() && !capabilities.connect {
+            report
+                .failed
+                .push("connection activation is not supported by this backend".into());
+            return Ok(report);
+        }
+        if (exclusive || auto_disconnect) && !capabilities.disconnect {
+            report
+                .failed
+                .push("connection removal is not supported by this backend".into());
+            return Ok(report);
+        }
         let resolved: Vec<(PortKey, PortKey)> = self
             .connections
             .iter()
@@ -458,8 +488,41 @@ fn find_named_port(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pw_graph_backend::{EffectDriver, EffectNodeRequest, InMemoryDriver};
+    use pw_graph_backend::{
+        BackendResult, EffectDriver, EffectNodeRequest, GraphDriver, InMemoryDriver,
+    };
     use std::collections::BTreeMap;
+
+    struct ObservedDemo {
+        inner: InMemoryDriver,
+    }
+
+    impl EffectDriver for ObservedDemo {}
+
+    impl GraphDriver for ObservedDemo {
+        fn refresh(&mut self) -> BackendResult<Vec<pw_graph_core::Node>> {
+            self.inner.refresh()
+        }
+
+        fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<pw_graph_core::Link> {
+            self.inner.connect(src, dst)
+        }
+
+        fn disconnect(
+            &mut self,
+            link: pw_graph_core::LinkId,
+        ) -> BackendResult<pw_graph_core::Link> {
+            self.inner.disconnect(link)
+        }
+
+        fn is_link_mutable(&self, _link: pw_graph_core::LinkId) -> bool {
+            false
+        }
+
+        fn graph(&self) -> &Graph {
+            self.inner.graph()
+        }
+    }
 
     fn graph_with_named_audio_edge(
         output_node_type: NodeType,
@@ -522,6 +585,19 @@ mod tests {
                 .already_present,
             1
         );
+    }
+
+    #[test]
+    fn snapshot_driver_omits_observed_links() {
+        let mut driver = ObservedDemo {
+            inner: InMemoryDriver::demo(),
+        };
+        driver.connect(PortId(1), PortId(3)).unwrap();
+
+        let mut patchbay = Patchbay::new("observed");
+        patchbay.snapshot_driver(&driver, true);
+
+        assert!(patchbay.connections.is_empty());
     }
 
     #[test]
