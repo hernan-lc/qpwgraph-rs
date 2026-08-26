@@ -293,8 +293,12 @@ impl CanvasGeometry {
             }
         }
         if let Some(node) = self.find_node_at(x, y) {
+            // The header is the drag handle in both modes; in Easy mode
+            // everything below it connects the whole card. Cards that draw no
+            // pins (collapsed, thumbnail) are included: they have no pin to
+            // start a connection from, so their body is the only surface left.
             let on_header = y - node.y <= HEADER_HEIGHT;
-            let kind = if self.easy_mode && !on_header && node.pins_visible {
+            let kind = if self.easy_mode && !on_header {
                 HIT_NODE_BODY
             } else {
                 HIT_NODE
@@ -622,6 +626,41 @@ mod tests {
         canvas.easy_mode = true;
         assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
         assert_eq!(canvas.hit_test(200.0, 190.0, 1.0).kind, HIT_NODE_BODY);
+    }
+
+    #[test]
+    fn easy_mode_keeps_the_header_as_a_move_handle() {
+        let mut canvas = geometry();
+        canvas.easy_mode = true;
+        // The header is a move surface at the very top and at its last pixel.
+        assert_eq!(canvas.hit_test(200.0, 101.0, 1.0).kind, HIT_NODE);
+        assert_eq!(
+            canvas.hit_test(200.0, 100.0 + HEADER_HEIGHT, 1.0).kind,
+            HIT_NODE
+        );
+        // Just below it the card becomes a connect surface.
+        assert_eq!(
+            canvas
+                .hit_test(200.0, 100.0 + HEADER_HEIGHT + 1.0, 1.0)
+                .kind,
+            HIT_NODE_BODY
+        );
+    }
+
+    #[test]
+    fn easy_mode_connects_from_the_body_of_a_pinless_card() {
+        let mut canvas = geometry();
+        canvas.easy_mode = true;
+        let mut nodes = canvas.nodes.clone();
+        nodes[0].pins_visible = false;
+        let mut pins: Vec<PinGeometry> = canvas.pins.values().copied().collect();
+        pins[0].visible = false;
+        let links = canvas.links.clone();
+        canvas.replace(nodes, pins, links, true);
+
+        // A collapsed card has no pin to drag from, so its body has to connect.
+        assert_eq!(canvas.hit_test(200.0, 190.0, 1.0).kind, HIT_NODE_BODY);
+        assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
     }
 
     #[test]

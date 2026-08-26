@@ -759,6 +759,16 @@ mod tests {
             )
         }
 
+        /// Collapse a card through the same event the card's chevron sends.
+        fn collapse(&mut self, node_id: i32) {
+            process_event(
+                &self.window,
+                &mut self.application,
+                UiEvent::ToggleCollapse(node_id),
+            );
+            self.sync();
+        }
+
         /// Zoom the viewport the way the toolbar does, then push it to the UI.
         fn set_zoom(&mut self, zoom: f32) {
             self.application.view.zoom = zoom;
@@ -1153,13 +1163,10 @@ mod tests {
         assert!(harness.link_row(link).selected);
     }
 
-    /// Pins down what Easy mode does today, which is not what the geometry
-    /// alone suggests: `hit_test()` reports the header as `HIT_NODE` (a move),
-    /// but the canvas turns *every* `HIT_NODE` into a connect gesture while
-    /// Easy mode is on. So the header connects too, and a card cannot be moved
-    /// by its header at all in Easy mode. See the note in node-canvas.slint.
+    /// The header is the move handle in both connect modes; only the blank
+    /// card body is an Easy-mode connect surface.
     #[test]
-    fn easy_mode_header_drag_connects_rather_than_moving() {
+    fn easy_mode_header_drag_still_moves_the_card() {
         let mut harness = CanvasHarness::new(ConnectMode::Easy);
         let card = harness.node_row(harness.application.snapshot.nodes[0].id);
         let header = (card.x + 60.0, card.y + 12.0);
@@ -1167,19 +1174,46 @@ mod tests {
         harness.drag(header, (header.0 + 40.0, header.1 + 25.0));
 
         let events = harness.take_events();
-        assert!(
-            events.iter().any(
-                |event| matches!(event, UiEvent::NodeConnectDropped(id, ..) if *id == card.id)
-            ),
-            "easy mode claims the header for connecting"
-        );
+        let moved = events.iter().find_map(|event| match event {
+            UiEvent::DragCommitted(id, dx, dy) => Some((*id, *dx, *dy)),
+            _ => None,
+        });
+        let (id, dx, dy) = moved.expect("the header stays a move handle in easy mode");
+        assert_eq!(id, card.id);
+        assert!((dx - 40.0).abs() < 0.1 && (dy - 25.0).abs() < 0.1);
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, UiEvent::DragCommitted(..))),
-            "which leaves no way to move the card by its header"
+                .any(|event| matches!(event, UiEvent::NodeConnectDropped(..))),
+            "the header never starts an easy-connect gesture"
         );
         harness.sync();
+    }
+
+    /// A collapsed card draws no pins, so its whole body used to land in the
+    /// `HIT_NODE` branch and connected only because Easy mode claimed every
+    /// `HIT_NODE`. Now that the header is a move handle again, the geometry has
+    /// to mark the body of a pinless card as a connect surface on its own.
+    #[test]
+    fn easy_mode_connects_a_collapsed_card_from_its_body() {
+        let mut harness = CanvasHarness::new(ConnectMode::Easy);
+        let (output, input) = harness.connectable_pair();
+        let source_node = harness.geometry.borrow().pin(output).unwrap().node_id;
+        harness.collapse(source_node);
+        let card = harness.node_row(source_node);
+        assert!(card.collapsed, "the card is collapsed");
+        // Below the header, in the collapsed card's remaining strip.
+        let body = (card.x + card.width / 2.0, card.y + card.height - 3.0);
+
+        harness.drag(body, harness.pin(input));
+
+        let events = harness.take_events();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, UiEvent::NodeConnectDropped(id, ..) if *id == source_node)
+            ),
+            "a collapsed card still connects from its body in easy mode"
+        );
     }
 
     #[test]
