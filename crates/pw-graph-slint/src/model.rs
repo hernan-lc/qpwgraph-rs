@@ -1371,6 +1371,73 @@ mod tests {
         );
     }
 
+    /// The UI must not draw a control the node's backend cannot provide. A
+    /// Windows application session that exposes no volume, or an effect node
+    /// with no controls at all, has to come out of the projection without an
+    /// audio block rather than with a dead fader.
+    #[test]
+    fn cards_hide_controls_the_backend_does_not_support() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let uncontrollable = graph
+            .nodes
+            .keys()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    NodeAudioProfile {
+                        state: NodeAudioState::UNSUPPORTED,
+                        capabilities: NodeCapabilities::NONE,
+                    },
+                )
+            })
+            .collect();
+
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &BTreeMap::new(),
+            MeterState::Unavailable,
+            &uncontrollable,
+        );
+
+        assert!(
+            snapshot.nodes.iter().all(|node| !node.has_audio_controls),
+            "no card claims controls the backend cannot serve"
+        );
+        assert!(
+            snapshot
+                .nodes
+                .iter()
+                .all(|node| node.audio.state.volume.is_none()),
+            "and none of them carries an invented level"
+        );
+    }
+
+    /// The same graph with a capable backend keeps its controls, so the gate
+    /// above is really reading capability and not just switching everything off.
+    #[test]
+    fn cards_show_controls_a_capable_backend_reports() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+
+        let snapshot = state.snapshot(&graph, &config);
+
+        let audio_cards = snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.has_audio_controls)
+            .count();
+        assert!(audio_cards > 0, "a capable backend still gets audio cards");
+        assert!(snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.has_audio_controls)
+            .all(|node| node.audio.capabilities.volume_write));
+    }
+
     #[test]
     fn thumbnail_projection_matches_the_compact_canvas_mode() {
         let graph = graph();

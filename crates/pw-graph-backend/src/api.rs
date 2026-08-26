@@ -305,6 +305,24 @@ pub fn is_measurable_audio_node(
     media_class_is_playback_sink(media_class) && has_audio_sink_port
 }
 
+/// Which nodes should own a meter right now, given a policy.
+///
+/// Shared by every backend so the three policies mean the same thing
+/// everywhere: `Disabled` meters nothing, `Always` meters everything eligible,
+/// and `OnDemand` meters only what the UI asked for and is eligible. A request
+/// for a node that cannot be measured is ignored rather than honoured.
+pub fn nodes_to_meter(
+    policy: MeterPolicy,
+    measurable: &BTreeSet<NodeId>,
+    requested: &BTreeSet<NodeId>,
+) -> BTreeSet<NodeId> {
+    match policy {
+        MeterPolicy::Disabled => BTreeSet::new(),
+        MeterPolicy::Always => measurable.clone(),
+        MeterPolicy::OnDemand => requested.intersection(measurable).copied().collect(),
+    }
+}
+
 /// Audio controls exposed by a graph node when its backend supports them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodeAudioControl {

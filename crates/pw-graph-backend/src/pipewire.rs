@@ -623,17 +623,8 @@ impl PipewireDriver {
     /// asked for, so a minimized window releases streams after the linger
     /// period and stops nudging the daemon's audio devices.
     fn wanted_meter_nodes(&self) -> BTreeSet<NodeId> {
-        let measurable = self.measurable_nodes();
-        match self.meter_policy {
-            MeterPolicy::Disabled => BTreeSet::new(),
-            MeterPolicy::Always => measurable,
-            MeterPolicy::OnDemand => self
-                .meter_requests
-                .keys()
-                .copied()
-                .filter(|node_id| measurable.contains(node_id))
-                .collect(),
-        }
+        let requested: BTreeSet<NodeId> = self.meter_requests.keys().copied().collect();
+        nodes_to_meter(self.meter_policy, &self.measurable_nodes(), &requested)
     }
 
     /// Number of live metering streams. Tests use this to prove that a plain
