@@ -50,8 +50,8 @@ selectable, and still shown in the graph. Only mutation is refused.
 | Set mute | Yes | Yes (endpoint and session) | Equivalent |
 | Read volume | Only after this app writes it | Yes | Partial (Linux) |
 | Read mute | Only after this app writes it | Yes | Partial (Linux) |
-| Follow external changes | No | Only at refresh | Partial (both) |
-| Volume above unity | Yes, to 150% | No, clamped at 100% | Platform limitation |
+| Follow external changes | No | Yes, event driven | Partial (Linux) |
+| Volume above unity | Yes, to 150% | No, clamped at 100% | Platform limitation, reported per node |
 | Per-node capability reporting | Yes | Yes | Equivalent |
 
 The backend owns audio state. `GraphDriver::node_audio_state` returns a
@@ -68,12 +68,16 @@ Two gaps remain here:
   set up yet. Until it does, `node_audio_state` reports a value only for nodes
   this process has written, and `volume_readable`/`mute_readable` stay false
   otherwise. The write path is unaffected.
-- **Windows volume range** — *Bug*. The UI track runs to 150% while Core Audio
-  clamps a scalar at 100%. The driver now records the clamped value, so the
-  card no longer shows a boost the system did not apply, but the track itself
-  should be limited per backend rather than showing a range that cannot be
-  reached. `NodeAudioState` has no maximum-volume field yet; adding one is the
-  natural fix.
+Windows volume and mute are event driven: `IAudioSessionEvents` and
+`IAudioEndpointVolumeCallback` carry the new values in their payload, so the
+cache follows a change made anywhere on the system without polling and without
+marking the topology dirty. A fader move no longer forces a full endpoint and
+session re-enumeration.
+
+Maximum volume is a *node* capability, not audio state: `NodeCapabilities`
+carries `volume_max`, PipeWire and demo report 1.5, and Windows reports unity.
+The fader maps its whole travel into 0..=1 for a node that cannot boost, so the
+top of a Windows fader is no longer dead travel that silently clamps.
 
 ### Metering
 
@@ -81,7 +85,7 @@ Two gaps remain here:
 | --- | --- | --- | --- |
 | Meter a capture source | Yes | Yes | Equivalent |
 | Meter a playback sink | Yes, through its monitor | Yes | Equivalent |
-| Meter an application stream | Yes | No | Missing (Windows) |
+| Meter an application stream | Yes | No | Missing (build 20348+) |
 | Meter policies (off/on-demand/always) | Yes | Yes | Equivalent |
 
 Playback sinks used to be excluded from metering on Linux: eligibility required
@@ -92,8 +96,26 @@ holds the rule for both backends and is unit-tested.
 
 On Windows, endpoints expose `IAudioMeterInformation` and application sessions
 do not, so a session reports no meter capability rather than being given a meter
-it can never fill. `IAudioSessionControl` can be extended to per-session
-metering; that is *Missing*, not a platform limitation.
+it can never fill. `IAudioMeterInformation` is an endpoint facility with a peak
+reading and no RMS, which is why Windows endpoints report `meter_peak: true` and
+`meter_rms: false`, and `audio_meters` reports `rms: 0.0`.
+
+Per-session metering is *not* reachable by extending `IAudioSessionControl`.
+The supported route is **process loopback capture**:
+`ActivateAudioInterfaceAsync` with
+`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, which records what one process
+tree renders, on build 20348 and newer. The driver already has the bridge it
+needs -- `IAudioSessionControl2::GetProcessId` is read for every session -- so
+one capture path would serve both per-application meters and relaying a single
+application. It is *Missing*, not a platform limitation.
+
+An implementation was attempted and reverted: the activation reproducibly
+brought down the process with `STATUS_HEAP_CORRUPTION` on this machine, and a
+memory-safety fault is not something to ship behind a feature flag. The likely
+suspects are the `VT_BLOB` `PROPVARIANT` carrying
+`AUDIOCLIENT_ACTIVATION_PARAMS` and the lifetime of that blob across the
+asynchronous activation. Worth another attempt against Microsoft's
+ApplicationLoopback sample rather than from the API reference alone.
 
 Metering is intentionally conservative on PipeWire. Measuring a node means
 attaching a real capture stream, which the session manager links like any other
@@ -110,7 +132,8 @@ are flagged passive, monitor-only, and non-reconnecting.
 | Relay: send this machine's audio | Yes | Yes | Equivalent |
 | Relay: play a peer's audio here | Yes | Yes | Equivalent |
 | Relay: peer audio as a microphone | Yes | No | Platform limitation |
-| Relay: route any app into the relay | Yes | No | Platform limitation |
+| Relay: send one application only | Yes | No | Missing (build 20348+) |
+| Relay: choose which endpoint | n/a | Yes | Equivalent |
 | ALSA MIDI | Yes | No | Missing |
 
 Effect *insertion* depends on rewiring an existing link, so it cannot exist on
@@ -147,22 +170,24 @@ Ordered by how much each one improves what a user actually sees.
 1. **PipeWire native volume/mute readback.** Closes the last place where a card
    can show an unknown value on Linux. Needs a `Props` param listener per node
    proxy and a cache invalidated by param-changed events.
-2. **Backend-aware volume range.** Add a maximum to `NodeAudioState` and drive
-   the fader's top of scale from it, so the Windows track stops offering a
-   boost that cannot be applied.
-3. **Windows session metering.** Extend `IAudioSessionControl` handling so
-   per-application meters work, and flip session `meter_peak`/`meter_rms` on.
-4. **Refresh churn.** The app refreshes roughly every 500 ms even when the
-   Windows topology is not dirty. `graph_dirty` already exists; the refresh loop
-   should consult it.
-5. **`OnSessionCreated` handling.** Currently coarse; a new session should be
+2. **Windows process loopback.** One capture path unlocks two features:
+   per-application meters, and relaying a single application instead of the
+   whole endpoint. See the note under Metering for the crash that stopped the
+   first attempt.
+3. **Refresh churn.** Volume events no longer force a rebuild, but the app still
+   refreshes roughly every 500 ms even when the Windows topology is not dirty.
+   `graph_dirty` already exists; the refresh loop should consult it.
+4. **`OnSessionCreated` handling.** Currently coarse; a new session should be
    folded in without a full re-enumeration.
+5. **Windows MIDI.** WinMM exposes `midiInOpen`/`midiOutOpen` and, importantly,
+   `midiConnect`/`midiDisconnect`, so a `WindowsMidiDriver` could present a
+   genuinely connectable MIDI graph -- unlike audio, this one has real routing.
+   The `BackendNamespace::WindowsMidi` namespace is already reserved. One
+   limitation to model honestly: a MIDI input can generally be connected to one
+   output at a time unless a MIDI-thru driver is involved, so it would not be
+   topologically equivalent to ALSA MIDI.
 6. **Windows free-standing effect nodes.** Requires a processing host that does
    not depend on graph routing.
-7. **Relay endpoint selection on Windows.** The loopback tap and the playback
-   stream are both pinned to the default playback endpoint. Letting the user
-   pick which endpoint to relay is a UI and config change, not a platform
-   constraint.
 
 ## Testing across platforms
 

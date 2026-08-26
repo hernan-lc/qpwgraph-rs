@@ -29,7 +29,6 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use windows::core::Interface;
 use windows::Win32::Media::Audio;
 use windows::Win32::System::Com::{self, CLSCTX_ALL, COINIT_MULTITHREADED};
 
@@ -217,20 +216,40 @@ fn run_endpoint(
     device_id: Option<&str>,
     started: Sender<BackendResult<()>>,
 ) {
-    match open_endpoint(direction, device_id) {
-        Ok(client) => {
+    // The service is acquired here, before the endpoint reports success.
+    // Doing it inside the loop hid a real failure: `GetService` was being
+    // called as `cast`, which returns E_NOINTERFACE, so both loops exited
+    // immediately and the relay carried no audio while still looking started.
+    let opened = open_endpoint(direction, device_id).and_then(|client| match direction {
+        Direction::Capture => unsafe { client.GetService::<Audio::IAudioCaptureClient>() }
+            .map(|service| (client, Service::Capture(service)))
+            .map_err(|error| native("get capture service", error)),
+        Direction::Render => unsafe { client.GetService::<Audio::IAudioRenderClient>() }
+            .map(|service| (client, Service::Render(service)))
+            .map_err(|error| native("get render service", error)),
+    });
+    match opened {
+        Ok((client, service)) => {
+            if let Err(error) = unsafe { client.Start() } {
+                let _ = started.send(Err(native("start audio client", error)));
+                return;
+            }
             let _ = started.send(Ok(()));
-            let result = match direction {
-                Direction::Capture => capture_loop(&client, handle, stop),
-                Direction::Render => render_loop(&client, handle, stop),
-            };
+            match service {
+                Service::Capture(capture) => capture_loop(&capture, handle, stop),
+                Service::Render(render) => render_loop(&client, &render, handle, stop),
+            }
             let _ = unsafe { client.Stop() };
-            let _ = result;
         }
         Err(error) => {
             let _ = started.send(Err(error));
         }
     }
+}
+
+enum Service {
+    Capture(Audio::IAudioCaptureClient),
+    Render(Audio::IAudioRenderClient),
 }
 
 fn open_endpoint(
@@ -279,19 +298,15 @@ fn open_endpoint(
     }
     .map_err(|error| native("initialize audio client", error))?;
 
-    unsafe { client.Start() }.map_err(|error| native("start audio client", error))?;
     Ok(client)
 }
 
 /// Loopback-record the playback endpoint and hand every frame to the engine.
 fn capture_loop(
-    client: &Audio::IAudioClient,
+    capture: &Audio::IAudioCaptureClient,
     handle: &RelayHandle,
     stop: &Arc<AtomicBool>,
-) -> BackendResult<()> {
-    let capture: Audio::IAudioCaptureClient = client
-        .cast()
-        .map_err(|error| native("get capture service", error))?;
+) {
     let channels = usize::from(RELAY_CHANNELS);
 
     while !stop.load(Ordering::Acquire) {
@@ -327,20 +342,19 @@ fn capture_loop(
             pending = unsafe { capture.GetNextPacketSize() }.unwrap_or(0);
         }
     }
-    Ok(())
 }
 
 /// Drain audio received from peers onto the playback endpoint.
 fn render_loop(
     client: &Audio::IAudioClient,
+    render: &Audio::IAudioRenderClient,
     handle: &RelayHandle,
     stop: &Arc<AtomicBool>,
-) -> BackendResult<()> {
-    let render: Audio::IAudioRenderClient = client
-        .cast()
-        .map_err(|error| native("get render service", error))?;
-    let buffer_frames =
-        unsafe { client.GetBufferSize() }.map_err(|error| native("read buffer size", error))?;
+) {
+    let buffer_frames = unsafe { client.GetBufferSize() }.unwrap_or(0);
+    if buffer_frames == 0 {
+        return;
+    }
     let channels = usize::from(RELAY_CHANNELS);
     let mut scratch = vec![0.0f32; buffer_frames as usize * channels];
 
@@ -373,7 +387,6 @@ fn render_loop(
         }
         thread::sleep(POLL_INTERVAL);
     }
-    Ok(())
 }
 
 fn native(context: &str, error: windows::core::Error) -> BackendError {
