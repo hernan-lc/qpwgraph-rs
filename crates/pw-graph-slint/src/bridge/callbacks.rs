@@ -129,6 +129,8 @@ pub(crate) fn install_canvas_callbacks(
         events.borrow_mut().push(UiEvent::LinkRerouted(link, pin));
     });
     let geometry = geometry_source.clone();
+    window.on_graph_pin_connectable(move |pin| geometry.borrow().pin_connectable(pin));
+    let geometry = geometry_source.clone();
     window.on_graph_link_drag_anchor(move |link, x, y| {
         geometry.borrow().link_drag_anchor(link, x, y)
     });

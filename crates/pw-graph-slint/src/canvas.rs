@@ -98,6 +98,10 @@ pub(crate) struct PinGeometry {
     pub(crate) y: f32,
     pub(crate) visible: bool,
     pub(crate) node_selected: bool,
+    /// Whether this pin''s backend can actually make a connection. Backend-wide
+    /// capability is a union across children, so a Windows audio pin and a
+    /// Windows MIDI pin disagree even though the composite says `connect`.
+    pub(crate) connectable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -216,6 +220,11 @@ impl CanvasGeometry {
             y += drag.1;
         }
         (x, y)
+    }
+
+    /// Whether a pin belongs to a backend that can rewire it.
+    pub(crate) fn pin_connectable(&self, pin_id: i32) -> bool {
+        self.pin(pin_id).is_some_and(|pin| pin.connectable)
     }
 
     /// Nearest visible pin within `radius`, or `0` when the pointer is clear of
@@ -589,6 +598,7 @@ mod tests {
                     y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
                 PinGeometry {
                     pin_id: 202,
@@ -598,6 +608,7 @@ mod tests {
                     y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
             ],
             vec![LinkGeometry {
@@ -709,6 +720,25 @@ mod tests {
         );
     }
 
+    /// Backend-wide `connect` is a union across children, so on Windows it is
+    /// true because MIDI can route while Core Audio cannot. Offering a connect
+    /// gesture on a pin that can never accept one is the failure this prevents.
+    #[test]
+    fn a_pin_whose_backend_cannot_rewire_is_not_connectable() {
+        let mut canvas = geometry();
+        let mut pins: Vec<PinGeometry> = canvas.pins.values().copied().collect();
+        pins[0].connectable = false;
+        let nodes = canvas.nodes.clone();
+        let links = canvas.links.clone();
+        canvas.replace(nodes, pins, links, false);
+
+        assert!(!canvas.pin_connectable(101));
+        assert!(canvas.pin_connectable(202));
+        // An unknown pin is never connectable.
+        assert!(!canvas.pin_connectable(0));
+        assert!(!canvas.pin_connectable(9999));
+    }
+
     #[test]
     fn an_unknown_link_has_no_drag_anchor() {
         let canvas = geometry();
@@ -765,6 +795,7 @@ mod tests {
                     y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
                 PinGeometry {
                     pin_id: 202,
@@ -774,6 +805,7 @@ mod tests {
                     y: 700.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
             ],
             vec![LinkGeometry {

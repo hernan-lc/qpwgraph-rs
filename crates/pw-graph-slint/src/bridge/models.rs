@@ -1,6 +1,6 @@
 use crate::canvas::{self, CanvasGeometry, LinkGeometry, NodeGeometry, PinGeometry};
 use crate::model::{
-    node_type_color, ConnectMode, GraphSnapshot, LinkView, MeterState, NodeAudioProfile, NodeView,
+    node_type_color, ConnectMode, GraphSnapshot, LinkView, MeterState, NodeBackendProfile, NodeView,
 };
 use crate::source::ApplicationDriver;
 use pw_graph_config::{config_path, AppConfig};
@@ -44,13 +44,13 @@ pub(crate) fn sync_models(
     geometry_version: &Rc<Cell<i32>>,
 ) {
     application.view.relay_nodes_visible = relay_nodes_visible(application);
-    let audio_profiles = read_audio_profiles(&application.source);
+    let backend_profiles = read_backend_profiles(&application.source);
     let snapshot = application.view.snapshot_with_meters(
         application.source.graph(),
         &application.config,
         &application.meters,
         meter_fallback(&application.source),
-        &audio_profiles,
+        &backend_profiles,
     );
     let node_rows = snapshot
         .nodes
@@ -290,7 +290,7 @@ fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<Node
 ///
 /// This runs once per sync rather than per node per frame; native drivers
 /// answer from a snapshot they refreshed on their own worker.
-fn read_audio_profiles(source: &ApplicationDriver) -> BTreeMap<NodeId, NodeAudioProfile> {
+fn read_backend_profiles(source: &ApplicationDriver) -> BTreeMap<NodeId, NodeBackendProfile> {
     source
         .graph()
         .nodes
@@ -300,9 +300,10 @@ fn read_audio_profiles(source: &ApplicationDriver) -> BTreeMap<NodeId, NodeAudio
             let capabilities = source.node_capabilities(*node_id);
             (
                 *node_id,
-                NodeAudioProfile {
+                NodeBackendProfile {
                     state,
                     capabilities,
+                    connectable: source.node_connectable(*node_id),
                 },
             )
         })
@@ -383,6 +384,9 @@ fn rebuild_geometry(
     let mut pin_geometry = Vec::new();
     for node in &snapshot.nodes {
         let pins_visible = !node.collapsed && !node.thumbnail;
+        // Asked once per node rather than per pin: every port of a node is
+        // owned by the same backend.
+        let connectable = node.connectable;
         node_geometry.push(NodeGeometry {
             id: node.id,
             x: node.position[0],
@@ -404,6 +408,7 @@ fn rebuild_geometry(
                 y: node.position[1] + offset_y,
                 visible: pins_visible,
                 node_selected: node.selected,
+                connectable,
             });
         }
     }

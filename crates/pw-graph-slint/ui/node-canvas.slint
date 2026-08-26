@@ -344,6 +344,10 @@ export component NodeCanvas inherits Rectangle {
     callback link-rerouted(/* link-id */ int, /* new-pin */ int);
     /// Which pin stays put when this edge is dragged from a world point.
     pure callback link-drag-anchor(/* link-id */ int, /* world-x */ float, /* world-y */ float) -> int;
+    /// Whether this pin''s backend can rewire it. `connections-enabled` is a
+    /// union across backends, so on Windows it is true because MIDI can route
+    /// while Core Audio cannot -- the gesture has to ask per pin.
+    pure callback pin-connectable(/* pin-id */ int) -> bool;
     callback link-dropped(/* start-pin */ int, /* world-x */ float, /* world-y */ float);
     callback link-cancelled();
     callback node-connect-dropped(/* node-id */ int, /* world-x */ float, /* world-y */ float);
@@ -511,7 +515,7 @@ export component NodeCanvas inherits Rectangle {
             if (!shift) { root.selection-cleared(); }
             return;
         }
-        if (hit.kind == 1 && root.connections-enabled) {
+        if (hit.kind == 1 && root.connections-enabled && root.pin-connectable(hit.id)) {
             root.gesture = 4;
             root.active-id = hit.id;
         } else if (hit.kind == 4 && root.connections-enabled) {
@@ -546,6 +550,10 @@ export component NodeCanvas inherits Rectangle {
             root.reroute-anchor = root.connections-enabled
                 ? root.link-drag-anchor(hit.id, hit.x, hit.y)
                 : 0;
+            if (root.reroute-anchor != 0 && !root.pin-connectable(root.reroute-anchor)) {
+                // An observed relationship is not ours to move.
+                root.reroute-anchor = 0;
+            }
             root.gesture = root.reroute-anchor != 0 ? 6 : 0;
             root.active-id = hit.id;
         } else {

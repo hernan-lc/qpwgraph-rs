@@ -214,34 +214,43 @@ pub(crate) struct NodeView {
     pub(crate) font_scale: f32,
     pub(crate) appearance: NodeAppearance,
     pub(crate) has_audio_controls: bool,
+    /// Whether this node''s backend can rewire it. Backend-wide `connect` is a
+    /// union across children, so it is true on Windows because MIDI can route
+    /// even though Core Audio cannot.
+    pub(crate) connectable: bool,
     /// Audio state and per-node capability, both read from the backend. The
     /// UI keeps no copy of its own: whatever is here is what the backend last
     /// reported, and an unknown value stays unknown.
-    pub(crate) audio: NodeAudioProfile,
+    pub(crate) audio: NodeBackendProfile,
     pub(crate) meter: MeterReading,
     pub(crate) ports: Vec<PortGroupView>,
 }
 
-/// What one backend says about a node's audio controls.
+/// What the owning backend says about one node.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct NodeAudioProfile {
+pub(crate) struct NodeBackendProfile {
     pub(crate) state: NodeAudioState,
     pub(crate) capabilities: NodeCapabilities,
+    /// Whether this node''s backend can rewire it.
+    pub(crate) connectable: bool,
 }
 
 /// Stand-in for a backend that supports everything, used where a test cares
 /// about projection rather than about capability gating.
 #[cfg(test)]
-pub(crate) fn fully_capable_audio_profiles(graph: &Graph) -> BTreeMap<NodeId, NodeAudioProfile> {
+pub(crate) fn fully_capable_backend_profiles(
+    graph: &Graph,
+) -> BTreeMap<NodeId, NodeBackendProfile> {
     graph
         .nodes
         .keys()
         .map(|node_id| {
             (
                 *node_id,
-                NodeAudioProfile {
+                NodeBackendProfile {
                     state: NodeAudioState::readable(1.0, false),
                     capabilities: NodeCapabilities::FULL,
+                    connectable: true,
                 },
             )
         })
@@ -312,7 +321,7 @@ impl UiGraphState {
             config,
             &BTreeMap::new(),
             MeterState::Unavailable,
-            &fully_capable_audio_profiles(graph),
+            &fully_capable_backend_profiles(graph),
         )
     }
 
@@ -322,7 +331,7 @@ impl UiGraphState {
         config: &AppConfig,
         meters: &BTreeMap<NodeId, MeterReading>,
         meter_fallback: MeterState,
-        audio_profiles: &BTreeMap<NodeId, NodeAudioProfile>,
+        backend_profiles: &BTreeMap<NodeId, NodeBackendProfile>,
     ) -> GraphSnapshot {
         self.ids.rebuild(graph);
         self.local_positions
@@ -366,7 +375,7 @@ impl UiGraphState {
             // Which controls exist is the backend's call, not a guess from the
             // node type: a Windows application session and a Windows endpoint
             // are both "audio nodes" but expose different controls.
-            let audio = audio_profiles.get(&node.id).copied().unwrap_or_default();
+            let audio = backend_profiles.get(&node.id).copied().unwrap_or_default();
             let has_audio_controls = audio.capabilities.has_any_control()
                 && node.ports.iter().any(|id| {
                     graph
@@ -393,6 +402,7 @@ impl UiGraphState {
                 font_scale: self.node_text_scale,
                 appearance,
                 has_audio_controls,
+                connectable: audio.connectable,
                 audio,
                 meter: meters.get(&node.id).copied().unwrap_or(MeterReading {
                     state: meter_fallback,
@@ -1386,9 +1396,10 @@ mod tests {
             .map(|node_id| {
                 (
                     *node_id,
-                    NodeAudioProfile {
+                    NodeBackendProfile {
                         state: NodeAudioState::UNSUPPORTED,
                         capabilities: NodeCapabilities::NONE,
+                        connectable: false,
                     },
                 )
             })
@@ -1491,7 +1502,7 @@ mod tests {
             &config,
             &meters,
             MeterState::Waiting,
-            &fully_capable_audio_profiles(&graph),
+            &fully_capable_backend_profiles(&graph),
         );
         let source = snapshot
             .nodes

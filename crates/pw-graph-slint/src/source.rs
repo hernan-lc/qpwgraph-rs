@@ -187,6 +187,19 @@ impl ApplicationDriver {
         GraphDriver::node_capabilities(self, node)
     }
 
+    /// Whether the backend that owns this node can rewire it.
+    ///
+    /// Backend-wide `connect` is a union across children, so on Windows it is
+    /// true because MIDI can route even though Core Audio cannot. Asking per
+    /// node is what lets the canvas offer a connect gesture only where one can
+    /// actually succeed.
+    pub(crate) fn node_connectable(&self, node: NodeId) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.capabilities().connect,
+            BackendKind::Live(driver) => driver.capabilities_for_node(node).connect,
+        }
+    }
+
     pub(crate) fn connect_by_key_if_missing(
         &mut self,
         output: &PortKey,
