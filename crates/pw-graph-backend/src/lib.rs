@@ -6,18 +6,24 @@
 
 mod api;
 mod demo;
-#[cfg(feature = "pipewire")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
-#[cfg(not(feature = "pipewire"))]
+#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 mod pipewire_stub;
 
 pub use api::*;
 pub use demo::{DemoDriver, InMemoryDriver};
 
-#[cfg(feature = "pipewire")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub use pipewire::PipewireDriver;
-#[cfg(not(feature = "pipewire"))]
+#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 pub use pipewire_stub::PipewireDriver;
+
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "windows")]
+pub use windows::WindowsAudioDriver;
 
 // The native driver and its focused submodules use these graph types in their
 // internal implementation. Keep the imports at the façade boundary so those
@@ -25,8 +31,8 @@ pub use pipewire_stub::PipewireDriver;
 // details.
 #[allow(unused_imports)]
 pub(crate) use pw_graph_core::{
-    Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortKey,
-    PortType,
+    decode_backend_local_id, encode_backend_id, BackendNamespace, Direction, Graph, GraphError,
+    Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortKey, PortType,
 };
 
 use std::collections::BTreeSet;
@@ -44,11 +50,11 @@ pub fn existing_connections(driver: &dyn GraphDriver) -> BTreeSet<(PortId, PortI
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     use pw_graph_core::PortType;
     use pw_graph_core::{NodeType, PortId};
     use std::collections::BTreeMap;
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     use std::collections::BTreeSet;
 
     #[test]
@@ -115,7 +121,7 @@ mod tests {
         assert_eq!(driver.graph().nodes.len(), 4);
     }
 
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     #[test]
     fn native_backend_refreshes_running_pipewire_registry() {
         let Ok(mut driver) = PipewireDriver::new() else {
@@ -135,7 +141,7 @@ mod tests {
     /// driver used to open a capture stream against every audio node as soon
     /// as the graph was first read, which resumed suspended devices and made
     /// the daemon renegotiate their format.
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     #[test]
     fn native_backend_meters_nothing_until_it_is_asked_to() {
         let Ok(mut driver) = PipewireDriver::new() else {
@@ -148,7 +154,7 @@ mod tests {
 
     /// Opt-in: this one attaches a real (passive, monitor-flagged) stream to a
     /// node in the user's live session, so it is not part of a default run.
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     #[test]
     fn native_backend_attaches_and_releases_a_requested_meter() {
         if std::env::var_os("PW_GRAPH_TEST_METERS").is_none() {
@@ -198,7 +204,7 @@ mod tests {
         assert!(driver.audio_meters().unwrap().is_empty());
     }
 
-    #[cfg(all(feature = "pipewire", feature = "relay"))]
+    #[cfg(all(target_os = "linux", feature = "pipewire", feature = "relay"))]
     #[test]
     fn native_backend_creates_and_removes_relay_devices_when_enabled() {
         if std::env::var_os("PW_GRAPH_TEST_RELAY").is_none() {
@@ -242,7 +248,7 @@ mod tests {
         assert!(!driver.relay_status().host_active);
     }
 
-    #[cfg(feature = "pipewire")]
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
     #[test]
     fn native_backend_can_create_and_destroy_a_link_when_enabled() {
         if std::env::var_os("PW_GRAPH_TEST_LINKS").is_none() {

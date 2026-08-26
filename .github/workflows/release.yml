@@ -174,9 +174,68 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  windows:
+    name: Windows portable ZIP
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Run Windows checks
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          cargo check -p pw-graph-app --locked
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build Windows release binary
+        run: cargo build --release --locked -p pw-graph-app
+
+      - name: Package Windows portable ZIP
+        shell: pwsh
+        run: |
+          $tagVersion = $env:RELEASE_TAG.Substring(1)
+          $target = "x86_64-pc-windows-msvc"
+          $packageName = "qpwgraph-rs-$tagVersion-$target"
+          $staging = Join-Path $env:RUNNER_TEMP "qpwgraph-rs-windows-release"
+          $packageRoot = Join-Path $staging $packageName
+          $assetDir = Join-Path $env:GITHUB_WORKSPACE "dist"
+          $archive = Join-Path $assetDir "$packageName.zip"
+
+          if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
+          }
+          if (Test-Path -LiteralPath $assetDir) {
+            Remove-Item -LiteralPath $assetDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          New-Item -ItemType Directory -Path $assetDir -Force | Out-Null
+          Copy-Item -LiteralPath "target\release\qpwgraph-rs.exe" -Destination $packageRoot
+          Copy-Item -LiteralPath "README.md" -Destination $packageRoot
+          Copy-Item -LiteralPath "LICENSE" -Destination $packageRoot
+          Compress-Archive -Path (Join-Path $packageRoot '*') -DestinationPath $archive
+
+      - name: Upload Windows release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: dist/
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
-    needs: [native, flatpak]
+    needs: [native, flatpak, windows]
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}

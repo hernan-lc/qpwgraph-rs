@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 fn main() {
     if std::env::var_os("CARGO_FEATURE_ALSA").is_none() {
         return;
@@ -16,3 +17,6 @@ fn main() {
     build.compile("pw_graph_alsa_shim");
     println!("cargo:rerun-if-changed=native/alsa_shim.c");
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

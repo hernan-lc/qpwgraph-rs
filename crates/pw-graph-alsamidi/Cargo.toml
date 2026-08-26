@@ -14,6 +14,6 @@ alsa = []
 pw-graph-backend = { path = "../pw-graph-backend" }
 pw-graph-core = { path = "../pw-graph-core" }
 
-[build-dependencies]
+[target.'cfg(target_os = "linux")'.build-dependencies]
 cc = "1.2"
 pkg-config = "0.3"

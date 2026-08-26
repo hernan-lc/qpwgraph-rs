@@ -9,6 +9,10 @@ pub(crate) fn localized_node_type(i18n: &I18n, node_type: NodeType) -> String {
         NodeType::PipeWire => "canvas.node_type_pipewire",
         NodeType::Effect => "canvas.node_type_effect",
         NodeType::AlsaMidi => "canvas.node_type_alsa_midi",
+        NodeType::WindowsAudioEndpoint | NodeType::WindowsAudioSession => {
+            "canvas.node_type_windows_audio"
+        }
+        NodeType::WindowsMidi => "canvas.node_type_windows_midi",
         NodeType::Unknown => "canvas.node_type_unknown",
     };
     i18n.text(key)

@@ -301,6 +301,7 @@ export component NodeCanvas inherits Rectangle {
     in property <bool> easy-connect: false;
     /// In precise mode, a body drag can connect the first compatible pair.
     in property <bool> connect-through: false;
+    in property <bool> connections-enabled: true;
     /// Bumped by the bridge whenever cached geometry changes.
     in property <int> geometry-version: 0;
     in property <string> grid-commands: "";
@@ -496,20 +497,21 @@ export component NodeCanvas inherits Rectangle {
             if (!shift) { root.selection-cleared(); }
             return;
         }
-        if (hit.kind == 1) {
+        if (hit.kind == 1 && root.connections-enabled) {
             root.gesture = 4;
             root.active-id = hit.id;
-        } else if (hit.kind == 4) {
+        } else if (hit.kind == 4 && root.connections-enabled) {
             root.gesture = 5;
             root.active-id = hit.id;
         } else if (hit.kind == 2) {
-            if (root.pending-pin != 0 && !root.connect-through) {
+            if (root.connections-enabled && root.pending-pin != 0 && !root.connect-through) {
                 root.link-cancelled();
                 root.pending-pin = 0;
                 root.gesture = 0;
                 return;
             }
-            root.gesture = root.easy-connect || (root.connect-through && root.pending-pin != 0) ? 5 : 3;
+            root.gesture = root.connections-enabled
+                && (root.easy-connect || (root.connect-through && root.pending-pin != 0)) ? 5 : 3;
             root.active-id = hit.id;
             root.drag-dx = 0;
             root.drag-dy = 0;

@@ -166,7 +166,12 @@ fn attributes(
 
 fn node_type_text(node_type: NodeType) -> &'static str {
     match node_type {
-        NodeType::PipeWire | NodeType::Effect | NodeType::Unknown => "pipewire",
+        NodeType::PipeWire
+        | NodeType::Effect
+        | NodeType::WindowsAudioEndpoint
+        | NodeType::WindowsAudioSession
+        | NodeType::WindowsMidi
+        | NodeType::Unknown => "pipewire",
         NodeType::AlsaMidi => "alsa",
     }
 }
@@ -186,6 +191,9 @@ fn node_type_from_text(value: Option<&String>) -> NodeType {
         Some("alsa") => NodeType::AlsaMidi,
         Some("pipewire") => NodeType::PipeWire,
         Some("effect") => NodeType::Effect,
+        Some("windows-audio-endpoint") => NodeType::WindowsAudioEndpoint,
+        Some("windows-audio-session") => NodeType::WindowsAudioSession,
+        Some("windows-midi") => NodeType::WindowsMidi,
         Some("unknown") => NodeType::Unknown,
         _ => NodeType::Unknown,
     }
@@ -196,6 +204,9 @@ fn endpoint_node_type_text(node_type: NodeType) -> &'static str {
         NodeType::PipeWire => "pipewire",
         NodeType::Effect => "effect",
         NodeType::AlsaMidi => "alsa",
+        NodeType::WindowsAudioEndpoint => "windows-audio-endpoint",
+        NodeType::WindowsAudioSession => "windows-audio-session",
+        NodeType::WindowsMidi => "windows-midi",
         NodeType::Unknown => "unknown",
     }
 }
@@ -205,6 +216,9 @@ fn endpoint_node_type_from_text(value: Option<&String>) -> Option<NodeType> {
         Some("pipewire") => Some(NodeType::PipeWire),
         Some("effect") => Some(NodeType::Effect),
         Some("alsa") => Some(NodeType::AlsaMidi),
+        Some("windows-audio-endpoint") => Some(NodeType::WindowsAudioEndpoint),
+        Some("windows-audio-session") => Some(NodeType::WindowsAudioSession),
+        Some("windows-midi") => Some(NodeType::WindowsMidi),
         Some("unknown") => Some(NodeType::Unknown),
         _ => None,
     }

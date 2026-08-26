@@ -236,10 +236,9 @@ pub(crate) fn restore_effect_connections(
 }
 
 pub(crate) fn snapshot_patchbay(application: &mut Application) {
-    application.patchbay.snapshot_graph(
-        application.source.graph(),
-        application.config.patchbay_auto_pin,
-    );
+    application
+        .patchbay
+        .snapshot_driver(&application.source, application.config.patchbay_auto_pin);
     application.autosave_patchbay();
     application.status = application.tf(
         "status.snapshot",
@@ -253,8 +252,13 @@ pub(crate) fn add_rule_from_selection(window: &MainWindow, application: &mut App
         .selected_links
         .iter()
         .filter_map(|id| application.source.graph().link(*id).cloned())
+        .filter(|link| application.source.is_link_mutable(link.id))
         .collect();
     if selected.is_empty() {
+        if !application.view.selected_links.is_empty() {
+            application.status = application.t("status.connections_unavailable");
+            return;
+        }
         application.patchbay.connections.push(Default::default());
         let index = application.patchbay.connections.len() - 1;
         begin_rule_edit(window, application, index);

@@ -1,10 +1,10 @@
 //! Deterministic in-memory backend used by demo mode and tests.
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 use super::api::RelayDriver;
 use super::api::{
-    BackendError, BackendResult, EffectDriver, EffectInsertRequest, EffectInstance,
-    EffectNodeRequest, GraphDriver, NodeAudioControl,
+    BackendCapabilities, BackendError, BackendResult, EffectDriver, EffectInsertRequest,
+    EffectInstance, EffectNodeRequest, GraphDriver, NodeAudioControl,
 };
 use pw_graph_core::{
     Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
@@ -249,6 +249,19 @@ fn add_demo_port(
 }
 
 impl GraphDriver for DemoDriver {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            topology: true,
+            connect: true,
+            disconnect: true,
+            volume: true,
+            mute: true,
+            meters: true,
+            effects: true,
+            relay: false,
+        }
+    }
+
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         Ok(self.graph.nodes.values().cloned().collect())
     }
@@ -293,7 +306,7 @@ impl GraphDriver for DemoDriver {
     }
 }
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 impl RelayDriver for DemoDriver {}
 
 impl EffectDriver for DemoDriver {

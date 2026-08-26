@@ -121,9 +121,9 @@ impl UiBridge {
             meters: BTreeMap::new(),
             meter_error: None,
             audio_controls: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_levels: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_connecting: None,
         }));
 
@@ -368,7 +368,7 @@ impl UiBridge {
             application.autosave_patchbay();
             save_config(&mut application, false);
             application.source.reset_meters();
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             {
                 if application.source.relay_status().host_active {
                     let _ = application.source.relay_stop_host();
@@ -452,9 +452,9 @@ mod tests {
             meters: BTreeMap::new(),
             meter_error: None,
             audio_controls: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_levels: BTreeMap::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_connecting: None,
         }
     }

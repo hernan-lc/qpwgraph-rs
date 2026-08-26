@@ -71,9 +71,9 @@ pub(crate) struct Application {
     /// Audio controls are live UI state only. They are intentionally not
     /// restored from a second Slint-specific file on startup.
     pub(crate) audio_controls: BTreeMap<pw_graph_core::NodeId, AudioControl>,
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) relay_levels: BTreeMap<u64, f32>,
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     pub(crate) relay_connecting: Option<String>,
 }
 
@@ -106,6 +106,7 @@ impl Application {
             .graph()
             .links
             .values()
+            .filter(|link| self.source.is_link_mutable(link.id))
             .filter_map(|link| {
                 self.source
                     .graph()

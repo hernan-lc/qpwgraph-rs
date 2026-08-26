@@ -864,6 +864,9 @@ pub(crate) fn node_type_color(node_type: NodeType) -> [u8; 4] {
         NodeType::PipeWire => [63, 82, 101, 255],
         NodeType::Effect => [82, 117, 176, 255],
         NodeType::AlsaMidi => [138, 93, 159, 255],
+        NodeType::WindowsAudioEndpoint => [49, 129, 143, 255],
+        NodeType::WindowsAudioSession => [64, 157, 168, 255],
+        NodeType::WindowsMidi => [155, 105, 174, 255],
         NodeType::Unknown => [112, 112, 112, 255],
     }
 }
@@ -1064,6 +1067,9 @@ pub(crate) fn node_layout_key(node: &Node) -> String {
         NodeType::PipeWire => "PipeWire",
         NodeType::Effect => "Effect",
         NodeType::AlsaMidi => "AlsaMidi",
+        NodeType::WindowsAudioEndpoint => "WindowsAudioEndpoint",
+        NodeType::WindowsAudioSession => "WindowsAudioSession",
+        NodeType::WindowsMidi => "WindowsMidi",
         NodeType::Unknown => "Unknown",
     };
     format!("{kind}:{}", node.name)

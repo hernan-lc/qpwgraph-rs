@@ -7,7 +7,7 @@ impl PipewireDriver {
         properties: Vec<pw::spa::pod::Property>,
     ) -> BackendResult<()> {
         let object = pw::registry::GlobalObject {
-            id: node.0 as u32,
+            id: native_node_id(node),
             permissions: pw::permissions::PermissionFlags::empty(),
             type_: pw::types::ObjectType::Node,
             // pipewire-rs keeps ObjectType::client_version private; version 3

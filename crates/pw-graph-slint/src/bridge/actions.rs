@@ -72,6 +72,10 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
             );
         }
         "toggle-connect-mode" => {
+            if !application.source.capabilities().connect {
+                application.status = application.t("status.connections_unavailable");
+                return;
+            }
             application.view.connect_mode = match application.view.connect_mode {
                 ConnectMode::Advanced => ConnectMode::Easy,
                 ConnectMode::Easy => ConnectMode::Advanced,
@@ -214,6 +218,10 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
         "delete-selection" => delete_selection(application),
         "disconnect-node" => disconnect_selected_node(application),
         "disconnect-all" => {
+            if !application.source.capabilities().disconnect {
+                application.status = application.t("status.connections_unavailable");
+                return;
+            }
             let count = application.source.graph().links.len();
             if count == 0 {
                 application.status = application.t("status.no_links");

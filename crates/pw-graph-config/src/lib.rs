@@ -182,6 +182,11 @@ impl AppConfig {
 }
 
 pub fn config_dir(app_name: &str) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    if let Some(path) = std::env::var_os("APPDATA") {
+        return PathBuf::from(path).join(app_name);
+    }
+
     if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(path).join(app_name);
     }

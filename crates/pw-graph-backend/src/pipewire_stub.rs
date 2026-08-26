@@ -1,4 +1,4 @@
-//! Compile-time fallback when the PipeWire feature is disabled.
+//! Compile-time fallback when PipeWire is unavailable on this target.
 
 use super::api::{BackendError, BackendResult, EffectDriver, GraphDriver};
 use pw_graph_core::{Graph, GraphError, Link, LinkId, Node, NodeId, PortId};

@@ -27,7 +27,7 @@ mod links;
 mod metering;
 mod properties;
 mod registry;
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 mod relay;
 
 use effects::NativeEffect;
@@ -73,6 +73,26 @@ const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
 /// down and rebuild every visible stream.
 const METER_LINGER: Duration = Duration::from_secs(5);
 
+fn graph_id(native_id: u64) -> u64 {
+    encode_backend_id(BackendNamespace::PipeWire, native_id)
+}
+
+fn native_id(graph_id: u64) -> u32 {
+    decode_backend_local_id(graph_id) as u32
+}
+
+fn native_node_id(node_id: NodeId) -> u32 {
+    native_id(node_id.0)
+}
+
+fn native_port_id(port_id: PortId) -> u32 {
+    native_id(port_id.0)
+}
+
+fn native_link_id(link_id: LinkId) -> u32 {
+    native_id(link_id.0)
+}
+
 pub struct PipewireDriver {
     thread_loop: pw::thread_loop::ThreadLoop,
     context: Option<pw::context::Context>,
@@ -102,7 +122,7 @@ pub struct PipewireDriver {
     blocked_connections: Vec<(PortKey, PortKey)>,
     /// Relay engine plus the two virtual devices. Created on first relay use
     /// and kept until the driver drops so reconnects stay cheap.
-    #[cfg(feature = "relay")]
+    #[cfg(all(target_os = "linux", feature = "relay"))]
     relay: Option<relay::RelayRuntimeSet>,
 }
 
@@ -230,7 +250,7 @@ impl PipewireDriver {
             effect_host: EffectHost::new(),
             effects: BTreeMap::new(),
             blocked_connections: Vec::new(),
-            #[cfg(feature = "relay")]
+            #[cfg(all(target_os = "linux", feature = "relay"))]
             relay: None,
         };
 
@@ -348,7 +368,7 @@ impl PipewireDriver {
                 let raw_node = effect.runtime_node_id().filter(|node_id| {
                     state
                         .nodes
-                        .get(&(node_id.0 as u32))
+                        .get(&native_node_id(*node_id))
                         .is_some_and(|record| record.name == effect.node_name())
                 });
                 let node_id = raw_node.or_else(|| {
@@ -356,26 +376,26 @@ impl PipewireDriver {
                         .nodes
                         .iter()
                         .find(|(_, record)| record.name == effect.node_name())
-                        .map(|(id, _)| NodeId(*id as u64))
+                        .map(|(id, _)| NodeId(graph_id(*id as u64)))
                 })?;
                 let input_port = state
                     .ports
                     .iter()
                     .find(|(_, port)| {
-                        port.node_id == node_id.0 as u32
+                        port.node_id == native_node_id(node_id)
                             && port.direction.is_sink()
                             && port.name == "input_FL"
                     })
-                    .map(|(id, _)| PortId(*id as u64))?;
+                    .map(|(id, _)| PortId(graph_id(*id as u64)))?;
                 let output_port = state
                     .ports
                     .iter()
                     .find(|(_, port)| {
-                        port.node_id == node_id.0 as u32
+                        port.node_id == native_node_id(node_id)
                             && port.direction.is_source()
                             && port.name == "output_FL"
                     })
-                    .map(|(id, _)| PortId(*id as u64))?;
+                    .map(|(id, _)| PortId(graph_id(*id as u64)))?;
                 Some((instance_id.clone(), node_id, input_port, output_port))
             })
             .collect();
@@ -415,7 +435,7 @@ impl PipewireDriver {
             .collect();
 
         for (id, record) in state.nodes.iter() {
-            let node_id = NodeId(*id as u64);
+            let node_id = NodeId(graph_id(*id as u64));
             if record.name.starts_with(METER_NODE_PREFIX) {
                 continue;
             }
@@ -441,7 +461,7 @@ impl PipewireDriver {
         }
 
         for (id, record) in state.ports {
-            let node_id = NodeId(record.node_id as u64);
+            let node_id = NodeId(graph_id(record.node_id as u64));
             if graph.node(node_id).is_none() {
                 continue;
             }
@@ -450,7 +470,7 @@ impl PipewireDriver {
                 node_media_classes.get(&node_id).map(String::as_str),
             );
             let port = Port::new(
-                PortId(id as u64),
+                PortId(graph_id(id as u64)),
                 node_id,
                 record.name,
                 record.direction,
@@ -475,9 +495,9 @@ impl PipewireDriver {
 
         for (id, record) in state.links {
             let _ = graph.insert_existing_link(Link {
-                id: LinkId(id as u64),
-                output_port: PortId(record.output_port as u64),
-                input_port: PortId(record.input_port as u64),
+                id: LinkId(graph_id(id as u64)),
+                output_port: PortId(graph_id(record.output_port as u64)),
+                input_port: PortId(graph_id(record.input_port as u64)),
             });
         }
 
@@ -505,7 +525,7 @@ impl PipewireDriver {
             }
             for link_id in suppressed {
                 self.registry()?
-                    .destroy_global(link_id.0 as u32)
+                    .destroy_global(native_link_id(link_id))
                     .into_result()
                     .map_err(|error| native_error("PipeWire suppressed link destruction", error))?;
             }
@@ -628,7 +648,7 @@ impl PipewireDriver {
                 .filter_map(|node_id| {
                     state
                         .nodes
-                        .get(&(node_id.0 as u32))
+                        .get(&native_node_id(*node_id))
                         .map(|record| (node_id, record.clone()))
                 })
                 .collect()
@@ -934,7 +954,7 @@ impl Drop for PipewireDriver {
         self.meters.clear();
         // Each raw `pw_filter` owns callbacks on this loop, so destroy them
         // before releasing the registry/core that created their globals.
-        #[cfg(feature = "relay")]
+        #[cfg(all(target_os = "linux", feature = "relay"))]
         self.relay.take();
         self.effects.clear();
         self.registry_listener.take();
@@ -947,6 +967,19 @@ impl Drop for PipewireDriver {
 }
 
 impl GraphDriver for PipewireDriver {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            topology: true,
+            connect: true,
+            disconnect: true,
+            volume: true,
+            mute: true,
+            meters: true,
+            effects: true,
+            relay: cfg!(feature = "relay"),
+        }
+    }
+
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         self.with_loop(|driver| {
             driver.sync()?;
@@ -1180,7 +1213,7 @@ impl EffectDriver for PipewireDriver {
     }
 }
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 impl RelayDriver for PipewireDriver {
     fn relay_available(&self) -> bool {
         true
@@ -1288,7 +1321,7 @@ impl RelayDriver for PipewireDriver {
     }
 }
 
-#[cfg(feature = "relay")]
+#[cfg(all(target_os = "linux", feature = "relay"))]
 impl PipewireDriver {
     /// Create the relay engine and virtual devices on first use. The caller
     /// must hold the ThreadLoop lock.

@@ -39,10 +39,10 @@ impl PipewireDriver {
         }
 
         let properties = pw::properties::properties! {
-            "link.output.node" => output.node_id.0.to_string(),
-            "link.output.port" => src.0.to_string(),
-            "link.input.node" => input.node_id.0.to_string(),
-            "link.input.port" => dst.0.to_string(),
+            "link.output.node" => native_node_id(output.node_id).to_string(),
+            "link.output.port" => native_port_id(src).to_string(),
+            "link.input.node" => native_node_id(input.node_id).to_string(),
+            "link.input.port" => native_port_id(dst).to_string(),
             "object.linger" => "1",
         };
         let proxy = self
@@ -58,16 +58,18 @@ impl PipewireDriver {
             .borrow()
             .links
             .iter()
-            .find(|(_, link)| link.output_port == src.0 as u32 && link.input_port == dst.0 as u32)
+            .find(|(_, link)| {
+                link.output_port == native_port_id(src) && link.input_port == native_port_id(dst)
+            })
             .map(|(id, _)| *id)
             .unwrap_or(proxy_id);
         self.rebuild_graph_locked()?;
         Ok(self
             .graph
-            .link(LinkId(link_id as u64))
+            .link(LinkId(graph_id(link_id as u64)))
             .cloned()
             .unwrap_or(Link {
-                id: LinkId(link_id as u64),
+                id: LinkId(graph_id(link_id as u64)),
                 output_port: src,
                 input_port: dst,
             }))
@@ -81,7 +83,7 @@ impl PipewireDriver {
             .ok_or(GraphError::MissingLink(link))?;
         self.block_connection(&existing);
         self.registry()?
-            .destroy_global(link.0 as u32)
+            .destroy_global(native_link_id(link))
             .into_result()
             .map_err(|error| native_error("PipeWire link destruction", error))?;
         self.roundtrip_locked()?;
