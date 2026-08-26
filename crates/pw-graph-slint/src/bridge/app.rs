@@ -23,6 +23,8 @@ pub(crate) enum UiEvent {
     LinkDropped(i32, f32, f32),
     ToggleCollapse(i32),
     DragCommitted(i32, f32, f32),
+    /// An existing link was dragged onto a different pin.
+    LinkRerouted(/* link */ i32, /* new pin */ i32),
     SetAudioVolume(i32, f32),
     ToggleAudioMute(i32),
 }

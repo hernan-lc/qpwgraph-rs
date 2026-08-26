@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use super::actions::handle_action;
 use super::app::{set_connection_feedback, Application, UiEvent};
 use super::config::{autosave_config, read_window_state};
-use super::connections::{easy_connect_from_pin, easy_connect_nodes, handle_link_requested};
+use super::connections::{
+    easy_connect_from_pin, easy_connect_nodes, handle_link_requested, handle_link_rerouted,
+};
 use super::meters::refresh_meters;
 use super::models::{shortcut_rows, sync_models};
 use super::relay::poll_relay_events;
@@ -91,6 +93,7 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
                 .select_box(&application.snapshot, x, y, width, height, shift)
         }
         UiEvent::LinkRequested(start, end) => handle_link_requested(application, start, end),
+        UiEvent::LinkRerouted(link, pin) => handle_link_rerouted(application, link, pin),
         UiEvent::LinkCancelled => {
             application.pending_connection_pin = None;
             set_connection_feedback(

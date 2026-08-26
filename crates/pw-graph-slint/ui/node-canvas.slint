@@ -340,6 +340,10 @@ export component NodeCanvas inherits Rectangle {
     callback box-selected(float, float, float, float, /* extend */ bool);
     callback drag-committed(/* id */ int, /* dx */ float, /* dy */ float);
     callback link-requested(/* start-pin */ int, /* end-pin */ int);
+    /// An existing edge was dragged onto a different pin.
+    callback link-rerouted(/* link-id */ int, /* new-pin */ int);
+    /// Which pin stays put when this edge is dragged from a world point.
+    pure callback link-drag-anchor(/* link-id */ int, /* world-x */ float, /* world-y */ float) -> int;
     callback link-dropped(/* start-pin */ int, /* world-x */ float, /* world-y */ float);
     callback link-cancelled();
     callback node-connect-dropped(/* node-id */ int, /* world-x */ float, /* world-y */ float);
@@ -350,7 +354,10 @@ export component NodeCanvas inherits Rectangle {
 
     // === Gesture state ===
     // 0 idle · 1 pan · 2 marquee · 3 node move · 4 link from pin · 5 easy card
+    // · 6 re-route an existing edge
     property <int> gesture: 0;
+    /// While gesture 6 runs: the end of the dragged edge that stays put.
+    property <int> reroute-anchor: 0;
     property <bool> passed-threshold: false;
     property <length> press-x: 0px;
     property <length> press-y: 0px;
@@ -377,6 +384,7 @@ export component NodeCanvas inherits Rectangle {
         }
         root.gesture = 0;
         root.pending-pin = 0;
+        root.reroute-anchor = 0;
         root.drag-dx = 0;
         root.drag-dy = 0;
     }
@@ -531,8 +539,15 @@ export component NodeCanvas inherits Rectangle {
                 root.node-selected(hit.id, shift);
             }
         } else if (hit.kind == 3) {
-            root.gesture = 0;
+            // A press on an edge is still a select. It only becomes a re-route
+            // once the pointer actually moves, so clicking to select is
+            // unchanged and dragging gains a meaning it never had.
             root.link-selected(hit.id, shift);
+            root.reroute-anchor = root.connections-enabled
+                ? root.link-drag-anchor(hit.id, hit.x, hit.y)
+                : 0;
+            root.gesture = root.reroute-anchor != 0 ? 6 : 0;
+            root.active-id = hit.id;
         } else {
             if (root.pending-pin != 0) {
                 root.link-cancelled();
@@ -544,6 +559,19 @@ export component NodeCanvas inherits Rectangle {
     }
 
     function finish-gesture() {
+        if (root.gesture == 6) {
+            // Without movement this was a plain click, and the selection the
+            // press already made is the whole result.
+            if (root.passed-threshold) {
+                let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y), root.zoom);
+                if (target.kind == 1 && target.id != root.reroute-anchor) {
+                    root.link-rerouted(root.active-id, target.id);
+                }
+            }
+            root.gesture = 0;
+            root.reroute-anchor = 0;
+            return;
+        }
         if (root.gesture == 2) {
             if (root.passed-threshold) {
                 root.box-selected(
@@ -644,12 +672,17 @@ export component NodeCanvas inherits Rectangle {
             viewbox-height: max(self.height / 1px, 1);
         }
 
-        // Rubber band for a link being created.
-        if root.gesture == 4 || root.gesture == 5: Path {
+        // Rubber band for a link being created, or an edge being re-routed.
+        // A re-route draws from the end that stays put, so the anchored side
+        // of the edge is visibly the pivot.
+        if (root.gesture == 4 || root.gesture == 5)
+            || (root.gesture == 6 && root.passed-threshold): Path {
             width: 100%;
             height: 100%;
             commands: root.gesture == 4
                 ? root.pin-preview-path(root.active-id, root.to-world-x(root.current-x), root.to-world-y(root.current-y))
+                : root.gesture == 6
+                ? root.pin-preview-path(root.reroute-anchor, root.to-world-x(root.current-x), root.to-world-y(root.current-y))
                 : root.node-preview-path(root.active-id, root.to-world-x(root.current-x), root.to-world-y(root.current-y));
             stroke: #cfe4ff;
             stroke-width: 2px;

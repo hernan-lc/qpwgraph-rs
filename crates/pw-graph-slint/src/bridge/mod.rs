@@ -1169,6 +1169,74 @@ mod tests {
         );
     }
 
+    /// Dragging an existing edge onto a different pin re-routes it. Before
+    /// this the canvas had no link drag at all: a press on an edge only ever
+    /// selected it, so changing a connection meant deleting and redrawing.
+    #[test]
+    fn dragging_an_edge_onto_another_pin_reroutes_it() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        let (output, input) = harness.connectable_pair();
+        // A second sink on a different card to drop the input end onto.
+        let other_input = harness
+            .application
+            .snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.ports
+                    .iter()
+                    .all(|port| port.pin_id != input && port.pin_id != output)
+            })
+            .find_map(|node| {
+                node.ports
+                    .iter()
+                    .find(|port| port.direction == Direction::Sink)
+                    .map(|port| port.pin_id)
+            });
+        let other_input = other_input.expect("the demo graph has a third card with an input");
+
+        // Grab the edge near its input end so that end is the one that moves.
+        let grab = harness.point_on_rendered_link(link, 0.92);
+        harness.drag(grab, harness.pin(other_input));
+
+        let rerouted = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::LinkRerouted(id, pin) => Some((id, pin)),
+                _ => None,
+            });
+        assert_eq!(rerouted, Some((link, other_input)));
+
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.application, event);
+        }
+        harness.sync();
+    }
+
+    /// A press without movement stays a selection, so the new gesture does not
+    /// cost the old one.
+    #[test]
+    fn clicking_an_edge_still_only_selects_it() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+
+        harness.click(harness.point_on_rendered_link(link, 0.5));
+
+        let events = harness.take_events();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, UiEvent::SelectLink(id, _) if *id == link)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, UiEvent::LinkRerouted(..))),
+            "a click is not a re-route"
+        );
+        assert!(harness.link_row(link).selected);
+    }
+
     #[test]
     fn clicking_a_connection_at_half_zoom_selects_it() {
         let mut harness = CanvasHarness::new(ConnectMode::Advanced);

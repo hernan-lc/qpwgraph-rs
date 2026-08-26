@@ -363,6 +363,30 @@ impl CanvasGeometry {
         curve_commands(self.anchor(&start, drag), self.anchor(&end, drag))
     }
 
+    /// Which end of a link stays put when it is dragged from `(x, y)`.
+    ///
+    /// Grabbing an edge near one endpoint moves that endpoint and pivots around
+    /// the other, which is how every patchbay behaves. Returns the pin that
+    /// stays anchored, or `0` when the link or its pins are not cached.
+    pub(crate) fn link_drag_anchor(&self, link_id: i32, x: f32, y: f32) -> i32 {
+        let Some(link) = self.links.iter().find(|link| link.id == link_id) else {
+            return 0;
+        };
+        let (Some(start), Some(end)) = (self.pin(link.start_pin), self.pin(link.end_pin)) else {
+            return 0;
+        };
+        let start_point = self.anchor(&start, (0.0, 0.0));
+        let end_point = self.anchor(&end, (0.0, 0.0));
+        let to_start = (start_point.0 - x).powi(2) + (start_point.1 - y).powi(2);
+        let to_end = (end_point.0 - x).powi(2) + (end_point.1 - y).powi(2);
+        // The nearer endpoint is the one being moved, so the far one anchors.
+        if to_start <= to_end {
+            link.end_pin
+        } else {
+            link.start_pin
+        }
+    }
+
     /// SVG commands for the rubber-band curve drawn while creating a link.
     pub(crate) fn preview_path(&self, start_pin: i32, to_x: f32, to_y: f32) -> String {
         let Some(pin) = self.pin(start_pin) else {
@@ -661,6 +685,34 @@ mod tests {
         // A collapsed card has no pin to drag from, so its body has to connect.
         assert_eq!(canvas.hit_test(200.0, 190.0, 1.0).kind, HIT_NODE_BODY);
         assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
+    }
+
+    /// Dragging an edge pivots around the far end, so grabbing near the output
+    /// anchors the input and the other way round.
+    #[test]
+    fn dragging_an_edge_anchors_its_far_end() {
+        let canvas = geometry();
+        let start = canvas.pin(101).unwrap();
+        let end = canvas.pin(202).unwrap();
+
+        assert_eq!(canvas.link_drag_anchor(1, start.x, start.y), 202);
+        assert_eq!(canvas.link_drag_anchor(1, end.x, end.y), 101);
+        // A grab just past the midpoint leans to the nearer endpoint.
+        let midpoint = ((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+        assert_eq!(
+            canvas.link_drag_anchor(1, midpoint.0 + 40.0, midpoint.1),
+            101
+        );
+        assert_eq!(
+            canvas.link_drag_anchor(1, midpoint.0 - 40.0, midpoint.1),
+            202
+        );
+    }
+
+    #[test]
+    fn an_unknown_link_has_no_drag_anchor() {
+        let canvas = geometry();
+        assert_eq!(canvas.link_drag_anchor(999, 0.0, 0.0), 0);
     }
 
     #[test]

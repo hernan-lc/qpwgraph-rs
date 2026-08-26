@@ -12,7 +12,10 @@ pub enum CommandError {
     MissingUndoLink,
 }
 
-fn stable_pair(graph: &Graph, output: PortId, input: PortId) -> Option<(PortKey, PortKey)> {
+/// A link's two endpoints, identified by stable name rather than by id.
+type EndpointPair = (PortKey, PortKey);
+
+fn stable_pair(graph: &Graph, output: PortId, input: PortId) -> Option<EndpointPair> {
     Some((graph.port_key(output)?, graph.port_key(input)?))
 }
 
@@ -337,6 +340,118 @@ impl Command for ConnectCommand {
         let (output, input) = self.keys.as_ref().ok_or(CommandError::MissingUndoLink)?;
         let _ = driver.disconnect_by_key_if_present(output, input)?;
         self.link = None;
+        Ok(())
+    }
+}
+
+/// Move one end of an existing link to a different port.
+///
+/// Dragging an edge is a single user action, so it is a single undoable one:
+/// disconnecting and reconnecting as two commands would put a broken
+/// intermediate state on the undo stack, and undoing once would leave the
+/// graph disconnected rather than back where it started.
+pub struct RerouteLinkCommand {
+    link_id: LinkId,
+    /// Port the dragged end was dropped on. Its direction decides which end of
+    /// the link it replaces, so the caller does not have to say.
+    new_port: PortId,
+    /// The link's endpoints before and after, captured while executing so an
+    /// undo survives the backend renumbering its ports.
+    old_keys: Option<EndpointPair>,
+    new_keys: Option<EndpointPair>,
+    applied: bool,
+}
+
+impl RerouteLinkCommand {
+    pub fn new(link_id: LinkId, new_port: PortId) -> Self {
+        Self {
+            link_id,
+            new_port,
+            old_keys: None,
+            new_keys: None,
+            applied: false,
+        }
+    }
+
+    /// Resolve which end moves, and what the link becomes.
+    fn resolve(
+        &self,
+        driver: &dyn GraphDriver,
+    ) -> Result<(EndpointPair, EndpointPair), CommandError> {
+        let graph = driver.graph();
+        let link = graph
+            .link(self.link_id)
+            .ok_or(CommandError::MissingUndoLink)?;
+        let target = graph
+            .port(self.new_port)
+            .ok_or(CommandError::MissingUndoLink)?;
+        let old = stable_pair(graph, link.output_port, link.input_port)
+            .ok_or(CommandError::MissingUndoLink)?;
+        // A source replaces the source end, a sink replaces the sink end. That
+        // keeps the link's direction intact whichever end was dragged.
+        let (output, input) = if target.direction.is_source() {
+            (self.new_port, link.input_port)
+        } else {
+            (link.output_port, self.new_port)
+        };
+        if output == link.output_port && input == link.input_port {
+            // Dropped back where it started.
+            return Err(CommandError::MissingUndoLink);
+        }
+        let new = stable_pair(graph, output, input).ok_or(CommandError::MissingUndoLink)?;
+        Ok((old, new))
+    }
+}
+
+impl Command for RerouteLinkCommand {
+    fn name(&self) -> &'static str {
+        "Reroute"
+    }
+
+    fn description(&self) -> String {
+        pair_description(self.name(), &self.new_keys)
+    }
+
+    fn execute(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        driver.refresh()?;
+        let (old, new) = match (self.old_keys.clone(), self.new_keys.clone()) {
+            // A redo replays the endpoints captured the first time round.
+            (Some(old), Some(new)) => (old, new),
+            _ => self.resolve(driver)?,
+        };
+        // Connect first would briefly leave the source feeding two inputs, and
+        // some backends refuse a second link from the same port, so the old one
+        // goes first and is restored if the new connection cannot be made.
+        driver.disconnect_by_key_if_present(&old.0, &old.1)?;
+        match driver.connect_by_key_if_missing(&new.0, &new.1) {
+            Ok(_) => {
+                self.old_keys = Some(old);
+                self.new_keys = Some(new);
+                self.applied = true;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = driver.connect_by_key_if_missing(&old.0, &old.1);
+                Err(error.into())
+            }
+        }
+    }
+
+    fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
+        if !self.applied {
+            return Ok(());
+        }
+        let new = self
+            .new_keys
+            .as_ref()
+            .ok_or(CommandError::MissingUndoLink)?;
+        let old = self
+            .old_keys
+            .as_ref()
+            .ok_or(CommandError::MissingUndoLink)?;
+        driver.disconnect_by_key_if_present(&new.0, &new.1)?;
+        driver.connect_by_key_if_missing(&old.0, &old.1)?;
+        self.applied = false;
         Ok(())
     }
 }
