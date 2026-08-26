@@ -169,22 +169,31 @@ the loopback tap is whole-endpoint.
 Ordered by how much each one improves what a user actually sees. Everything
 above the line has landed; what is left is blocked on something specific.
 
-1. **Windows per-app output routing.** *Blocked on an undocumented ABI.* The
-   edge the graph draws between an application session and an endpoint is the
-   one relationship Windows lets a user change -- Settings calls it "App volume
-   and device preferences". The object behind it,
-   `Windows.Media.Internal.AudioPolicyConfig`, **does activate on this machine**
-   (verified: `RoGetActivationFactory` returns S_OK on 10.0.19045). What is
-   missing is a trustworthy vtable layout for `IAudioPolicyConfigFactory`: it is
-   undocumented, differs between Windows 10 and 11, and calling the wrong slot
-   is undefined behaviour rather than an error. Needs the layout confirmed
-   against a known-good implementation before anything calls it.
-2. **Windows process loopback.** *Blocked on the OS build here.* One capture
-   path unlocks per-application meters and relaying a single application. It
-   requires build 20348 or newer; this machine is 10.0.19045, so it cannot be
-   exercised at all, and the first attempt from the API reference alone brought
-   the process down with `STATUS_HEAP_CORRUPTION`. Needs a newer machine and
-   Microsoft's ApplicationLoopback sample rather than the reference.
+1. **Windows per-app output routing.** *Blocked: the interface is not reachable
+   here.* The edge the graph draws between an application session and an
+   endpoint is the one relationship Windows lets a user change -- Settings
+   calls it "App volume and device preferences". Two things were probed on
+   10.0.19045:
+
+   * `Windows.Media.Internal.AudioPolicyConfig` **does activate**
+     (`RoGetActivationFactory` returns S_OK) and is a valid `IActivationFactory`
+     and `IInspectable`.
+   * Querying it for `IAudioPolicyConfigFactory`
+     (`{ab3d4648-e242-459f-b02f-541c70306324}`) returns **E_NOINTERFACE**.
+
+   So there is no vtable to target on this build and nothing to verify against.
+   The IID matters because it *is* the layout contract: writing against a
+   guessed layout is undefined behaviour, not a failed call. The next step is
+   finding which IID this build actually exposes, on a machine where a
+   known-good implementation is confirmed working, and gating the call on that
+   exact IID so an unexpected build reports unsupported rather than calling
+   into the wrong slots.
+2. **Relay a single application.** *Blocked on the OS build here.* Metering one
+   application no longer needs process loopback (see Metering), but capturing
+   its audio still does, and that requires build 20348 or newer; this machine
+   is 10.0.19045. An attempt from the API reference alone brought the process
+   down with `STATUS_HEAP_CORRUPTION`. Needs a newer machine and Microsoft's
+   ApplicationLoopback sample rather than the reference.
 3. **`OnSessionCreated` handling.** Currently coarse; a new session should be
    folded in without a full re-enumeration. The periodic churn is gone, so this
    is now the only remaining source of unnecessary re-enumeration.
