@@ -1,21 +1,25 @@
 use crate::canvas::{self, CanvasGeometry, LinkGeometry, NodeGeometry, PinGeometry};
-use crate::model::{node_type_color, ConnectMode, GraphSnapshot, LinkView, MeterState, NodeView};
+use crate::model::{
+    node_type_color, ConnectMode, GraphSnapshot, LinkView, MeterState, NodeBackendProfile, NodeView,
+};
+use crate::source::ApplicationDriver;
 use pw_graph_config::{config_path, AppConfig};
-use pw_graph_core::Direction;
+use pw_graph_core::{Direction, NodeId};
 use pw_graph_i18n::I18n;
 use pw_graph_patchbay::Patchbay;
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 use slint::Image;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use super::app::{toast_visible, Application, AudioControl};
+use super::app::{toast_visible, Application};
 use super::effects::{effect_options, effect_rows, effect_setup_rows};
 use super::meters::meter_fallback;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use super::relay::relay_qr_payload;
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use super::relay::{qr_image, relay_host_endpoint};
 use super::relay::{
     relay_codec_index, relay_frame_index, relay_nodes_visible, relay_role_index, relay_rows,
@@ -23,7 +27,7 @@ use super::relay::{
 };
 use super::utils::{
     color, language_index, localized_meter_label, localized_node_type, meter_fraction,
-    meter_policy_index,
+    meter_policy_index, track_position_from_volume,
 };
 use super::{
     HistoryRow, LinkRow, MainWindow, MinimapNode, NodeRow, PortRow, RuleRow, ShortcutRow, UiI18n,
@@ -40,26 +44,18 @@ pub(crate) fn sync_models(
     geometry_version: &Rc<Cell<i32>>,
 ) {
     application.view.relay_nodes_visible = relay_nodes_visible(application);
+    let backend_profiles = read_backend_profiles(&application.source);
     let snapshot = application.view.snapshot_with_meters(
         application.source.graph(),
         &application.config,
         &application.meters,
         meter_fallback(&application.source),
+        &backend_profiles,
     );
     let node_rows = snapshot
         .nodes
         .iter()
-        .map(|node| {
-            node_row(
-                node,
-                application
-                    .audio_controls
-                    .get(&node.node_id)
-                    .copied()
-                    .unwrap_or_default(),
-                &application.i18n,
-            )
-        })
+        .map(|node| node_row(node, &application.i18n))
         .collect::<Vec<_>>();
     let rows_applied = sync_node_rows(window, nodes, node_rows);
     links.set_vec(snapshot.links.iter().map(link_row).collect::<Vec<_>>());
@@ -240,7 +236,7 @@ pub(crate) fn sync_models(
         application,
         &application.i18n,
     )))));
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     {
         let relay_status = application.source.relay_status();
         window.set_relay_available(application.source.relay_available());
@@ -253,7 +249,7 @@ pub(crate) fn sync_models(
         window.set_relay_qr_payload(SharedString::from(payload.clone()));
         window.set_relay_qr_image(qr_image(&payload));
     }
-    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    #[cfg(not(feature = "relay"))]
     {
         window.set_relay_available(false);
         window.set_relay_host_active(false);
@@ -290,7 +286,31 @@ fn sync_node_rows(window: &MainWindow, nodes: &VecModel<NodeRow>, rows: Vec<Node
     }
 }
 
-fn node_row(node: &NodeView, audio: AudioControl, i18n: &I18n) -> NodeRow {
+/// Ask the backend for the audio state and capability of every node it owns.
+///
+/// This runs once per sync rather than per node per frame; native drivers
+/// answer from a snapshot they refreshed on their own worker.
+fn read_backend_profiles(source: &ApplicationDriver) -> BTreeMap<NodeId, NodeBackendProfile> {
+    source
+        .graph()
+        .nodes
+        .keys()
+        .map(|node_id| {
+            let state = source.node_audio_state(*node_id).unwrap_or_default();
+            let capabilities = source.node_capabilities(*node_id);
+            (
+                *node_id,
+                NodeBackendProfile {
+                    state,
+                    capabilities,
+                    connectable: source.node_connectable(*node_id),
+                },
+            )
+        })
+        .collect()
+}
+
+fn node_row(node: &NodeView, i18n: &I18n) -> NodeRow {
     NodeRow {
         id: node.id,
         node_title: SharedString::from(compact_label(&display_node_name(&node.title, i18n), 22)),
@@ -317,8 +337,20 @@ fn node_row(node: &NodeView, audio: AudioControl, i18n: &I18n) -> NodeRow {
         meter_peak_position: meter_fraction(node.meter.peak),
         meter_available: matches!(node.meter.state, MeterState::Live | MeterState::Demo),
         meter_label: SharedString::from(localized_meter_label(i18n, node.meter.state)),
-        audio_volume_position: audio.volume_position,
-        audio_muted: audio.muted,
+        // Drawn straight from what the backend reported. When it reported
+        // nothing the track sits at zero and `audio_volume_known` is false, so
+        // the card can show that it has not read a level rather than implying
+        // one the system does not actually have.
+        audio_volume_position: node
+            .audio
+            .state
+            .volume
+            .map(|volume| track_position_from_volume(volume, node.audio.capabilities.volume_max))
+            .unwrap_or(0.0),
+        audio_volume_known: node.audio.state.volume.is_some(),
+        audio_muted: node.audio.state.muted.unwrap_or(false),
+        audio_volume_enabled: node.audio.capabilities.volume_write,
+        audio_mute_enabled: node.audio.capabilities.mute_write,
         ports: ModelRc::from(Rc::new(VecModel::from(
             node.ports
                 .iter()
@@ -352,6 +384,9 @@ fn rebuild_geometry(
     let mut pin_geometry = Vec::new();
     for node in &snapshot.nodes {
         let pins_visible = !node.collapsed && !node.thumbnail;
+        // Asked once per node rather than per pin: every port of a node is
+        // owned by the same backend.
+        let connectable = node.connectable;
         node_geometry.push(NodeGeometry {
             id: node.id,
             x: node.position[0],
@@ -373,6 +408,7 @@ fn rebuild_geometry(
                 y: node.position[1] + offset_y,
                 visible: pins_visible,
                 node_selected: node.selected,
+                connectable,
             });
         }
     }

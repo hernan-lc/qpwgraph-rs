@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use super::actions::handle_action;
 use super::app::{set_connection_feedback, Application, UiEvent};
 use super::config::{autosave_config, read_window_state};
-use super::connections::{easy_connect_from_pin, easy_connect_nodes, handle_link_requested};
+use super::connections::{
+    easy_connect_from_pin, easy_connect_nodes, handle_link_requested, handle_link_rerouted,
+};
 use super::meters::refresh_meters;
 use super::models::{shortcut_rows, sync_models};
 use super::relay::poll_relay_events;
@@ -35,7 +37,7 @@ pub(crate) fn pump(
     }
     poll_relay_events(&mut application);
     if application.source.graph_dirty()
-        || application.last_refresh.elapsed() >= Duration::from_millis(500)
+        || application.last_refresh.elapsed() >= refresh_interval(&application)
     {
         if let Err(error) = application.source.refresh() {
             application.status = application.tf("status.refresh_failed", &[("error", error)]);
@@ -58,6 +60,23 @@ pub(crate) fn pump(
         geometry,
         geometry_version,
     );
+}
+
+/// How often to re-read the graph when nothing has reported a change.
+///
+/// A backend that watches its own registry tells us when the topology moves,
+/// so the timer is only a safety net against a missed notification. Polling it
+/// twice a second re-enumerated every endpoint and session continuously for no
+/// reason. A backend that cannot report changes still has to be polled.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn refresh_interval(application: &Application) -> Duration {
+    if application.source.reports_graph_changes() {
+        RECONCILE_INTERVAL
+    } else {
+        POLL_INTERVAL
+    }
 }
 
 pub(crate) fn coalesce_audio_volume_events(pending: Vec<UiEvent>) -> Vec<UiEvent> {
@@ -91,6 +110,7 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
                 .select_box(&application.snapshot, x, y, width, height, shift)
         }
         UiEvent::LinkRequested(start, end) => handle_link_requested(application, start, end),
+        UiEvent::LinkRerouted(link, pin) => handle_link_rerouted(application, link, pin),
         UiEvent::LinkCancelled => {
             application.pending_connection_pin = None;
             set_connection_feedback(
@@ -155,14 +175,14 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
         UiEvent::SetAudioVolume(id, position) => {
             if let Some(node_id) = application.view.ids.node_id(id) {
                 let position = position.clamp(0.0, 1.0);
-                let volume = volume_from_track_position(position);
+                // The fader's top of scale is whatever this node accepts, so a
+                // backend clamped at unity never reports a boost it discarded.
+                let max_volume = application.source.node_capabilities(node_id).volume_max;
+                let volume = volume_from_track_position(position, max_volume);
+                // The backend owns the value; the next sync reads back whatever
+                // it actually applied, so nothing is cached here.
                 match application.source.set_node_volume(node_id, volume) {
                     Ok(()) => {
-                        application
-                            .audio_controls
-                            .entry(node_id)
-                            .or_default()
-                            .volume_position = position;
                         application.status = application.tf(
                             "status.node_volume_changed",
                             &[("volume", format!("{:.0}%", volume * 100.0))],
@@ -177,15 +197,17 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
         }
         UiEvent::ToggleAudioMute(id) => {
             if let Some(node_id) = application.view.ids.node_id(id) {
+                // Toggle against the backend's own reading. A node whose mute
+                // state has never been read is treated as unmuted, so the first
+                // toggle mutes it -- the same thing the user just asked for.
                 let muted = !application
-                    .audio_controls
-                    .get(&node_id)
-                    .copied()
-                    .unwrap_or_default()
-                    .muted;
+                    .source
+                    .node_audio_state(node_id)
+                    .ok()
+                    .and_then(|state| state.muted)
+                    .unwrap_or(false);
                 match application.source.set_node_mute(node_id, muted) {
                     Ok(()) => {
-                        application.audio_controls.entry(node_id).or_default().muted = muted;
                         application.status = application.tf(
                             "status.node_mute_changed",
                             &[(

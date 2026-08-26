@@ -120,10 +120,9 @@ impl UiBridge {
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
             meter_error: None,
-            audio_controls: BTreeMap::new(),
-            #[cfg(all(target_os = "linux", feature = "relay"))]
+            #[cfg(feature = "relay")]
             relay_levels: BTreeMap::new(),
-            #[cfg(all(target_os = "linux", feature = "relay"))]
+            #[cfg(feature = "relay")]
             relay_connecting: None,
         }));
 
@@ -368,7 +367,7 @@ impl UiBridge {
             application.autosave_patchbay();
             save_config(&mut application, false);
             application.source.reset_meters();
-            #[cfg(all(target_os = "linux", feature = "relay"))]
+            #[cfg(feature = "relay")]
             {
                 if application.source.relay_status().host_active {
                     let _ = application.source.relay_stop_host();
@@ -451,10 +450,9 @@ mod tests {
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
             meter_error: None,
-            audio_controls: BTreeMap::new(),
-            #[cfg(all(target_os = "linux", feature = "relay"))]
+            #[cfg(feature = "relay")]
             relay_levels: BTreeMap::new(),
-            #[cfg(all(target_os = "linux", feature = "relay"))]
+            #[cfg(feature = "relay")]
             relay_connecting: None,
         }
     }
@@ -650,9 +648,36 @@ mod tests {
 
     #[test]
     fn node_volume_track_preserves_unity_and_boost_range() {
-        assert!((volume_from_track_position(0.9) - 1.0).abs() < f32::EPSILON);
-        assert!((volume_from_track_position(1.0) - 1.5).abs() < f32::EPSILON);
-        assert!((volume_from_track_position(0.45) - 0.5).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.9, 1.5) - 1.0).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(1.0, 1.5) - 1.5).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.45, 1.5) - 0.5).abs() < f32::EPSILON);
+    }
+
+    /// A backend clamped at unity must not offer boost travel. The Windows
+    /// endpoints clamp at 1.0, so the whole track has to map into 0..=1 --
+    /// otherwise the top tenth of the fader silently does nothing and the card
+    /// claims a level Core Audio discarded.
+    #[test]
+    fn a_node_clamped_at_unity_uses_the_whole_track_for_zero_to_one() {
+        assert!((volume_from_track_position(1.0, 1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.5, 1.0) - 0.5).abs() < f32::EPSILON);
+        assert!((volume_from_track_position(0.0, 1.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn track_position_round_trips_through_volume_for_either_ceiling() {
+        for max_volume in [1.0, 1.5] {
+            for step in 0..=20 {
+                let position = step as f32 / 20.0;
+                let volume = volume_from_track_position(position, max_volume);
+                let back = track_position_from_volume(volume, max_volume);
+                assert!(
+                    (back - position).abs() < 0.001,
+                    "max {max_volume} position {position} came back as {back}"
+                );
+                assert!(volume <= max_volume + f32::EPSILON);
+            }
+        }
     }
 
     #[test]
@@ -1142,6 +1167,74 @@ mod tests {
             harness.link_row(link).selected,
             "the rendered edge shows as selected"
         );
+    }
+
+    /// Dragging an existing edge onto a different pin re-routes it. Before
+    /// this the canvas had no link drag at all: a press on an edge only ever
+    /// selected it, so changing a connection meant deleting and redrawing.
+    #[test]
+    fn dragging_an_edge_onto_another_pin_reroutes_it() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+        let (output, input) = harness.connectable_pair();
+        // A second sink on a different card to drop the input end onto.
+        let other_input = harness
+            .application
+            .snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.ports
+                    .iter()
+                    .all(|port| port.pin_id != input && port.pin_id != output)
+            })
+            .find_map(|node| {
+                node.ports
+                    .iter()
+                    .find(|port| port.direction == Direction::Sink)
+                    .map(|port| port.pin_id)
+            });
+        let other_input = other_input.expect("the demo graph has a third card with an input");
+
+        // Grab the edge near its input end so that end is the one that moves.
+        let grab = harness.point_on_rendered_link(link, 0.92);
+        harness.drag(grab, harness.pin(other_input));
+
+        let rerouted = harness
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                UiEvent::LinkRerouted(id, pin) => Some((id, pin)),
+                _ => None,
+            });
+        assert_eq!(rerouted, Some((link, other_input)));
+
+        for event in harness.take_events() {
+            process_event(&harness.window, &mut harness.application, event);
+        }
+        harness.sync();
+    }
+
+    /// A press without movement stays a selection, so the new gesture does not
+    /// cost the old one.
+    #[test]
+    fn clicking_an_edge_still_only_selects_it() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let link = harness.create_link();
+
+        harness.click(harness.point_on_rendered_link(link, 0.5));
+
+        let events = harness.take_events();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, UiEvent::SelectLink(id, _) if *id == link)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, UiEvent::LinkRerouted(..))),
+            "a click is not a re-route"
+        );
+        assert!(harness.link_row(link).selected);
     }
 
     #[test]

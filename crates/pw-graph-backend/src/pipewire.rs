@@ -26,6 +26,7 @@ mod filter_runtime;
 mod links;
 mod metering;
 mod properties;
+mod readback;
 mod registry;
 #[cfg(all(target_os = "linux", feature = "relay"))]
 mod relay;
@@ -72,6 +73,9 @@ const METER_NODE_PREFIX: &str = "qpwgraph-rs meter";
 /// grace period, minimizing and immediately restoring the window would tear
 /// down and rebuild every visible stream.
 const METER_LINGER: Duration = Duration::from_secs(5);
+
+/// Boost ceiling applied by `set_node_volume_locked`; the fader matches it.
+pub(super) const PIPEWIRE_MAX_VOLUME: f32 = 1.5;
 
 fn graph_id(native_id: u64) -> u64 {
     encode_backend_id(BackendNamespace::PipeWire, native_id)
@@ -520,6 +524,9 @@ impl PipewireDriver {
                 .map(|link| link.id)
                 .collect();
             if suppressed.is_empty() || pass == 2 {
+                // Volume and mute are read back here so a change made in
+                // pavucontrol or with a media key reaches the cards.
+                self.read_node_controls_locked();
                 self.ensure_meters_locked();
                 return Ok(());
             }
@@ -582,17 +589,36 @@ impl PipewireDriver {
         }
     }
 
-    /// Nodes that can be measured: they expose at least one audio source port.
+    /// Nodes that can be measured.
+    ///
+    /// Audio source ports are read directly; playback sinks are read through
+    /// their monitor, which `create_meter_locked` already arranges with
+    /// `stream.capture.sink`. The rule itself lives in [`crate::api`] so it can
+    /// be unit-tested without a PipeWire daemon.
     fn measurable_nodes(&self) -> BTreeSet<NodeId> {
+        let state = self.state.borrow();
         self.graph
             .nodes
             .values()
             .filter(|node| {
-                node.ports.iter().any(|port_id| {
-                    self.graph.port(*port_id).is_some_and(|port| {
-                        port.direction.is_source() && port.port_type == PortType::Audio
-                    })
-                })
+                let mut has_source = false;
+                let mut has_sink = false;
+                for port_id in &node.ports {
+                    let Some(port) = self.graph.port(*port_id) else {
+                        continue;
+                    };
+                    if port.port_type != PortType::Audio {
+                        continue;
+                    }
+                    has_source |= port.direction.is_source();
+                    has_sink |= port.direction.is_sink();
+                }
+                let media_class = state
+                    .nodes
+                    .get(&native_node_id(node.id))
+                    .map(|record| record.media_class.as_str())
+                    .unwrap_or_default();
+                is_measurable_audio_node(media_class, has_source, has_sink)
             })
             .map(|node| node.id)
             .collect()
@@ -604,17 +630,8 @@ impl PipewireDriver {
     /// asked for, so a minimized window releases streams after the linger
     /// period and stops nudging the daemon's audio devices.
     fn wanted_meter_nodes(&self) -> BTreeSet<NodeId> {
-        let measurable = self.measurable_nodes();
-        match self.meter_policy {
-            MeterPolicy::Disabled => BTreeSet::new(),
-            MeterPolicy::Always => measurable,
-            MeterPolicy::OnDemand => self
-                .meter_requests
-                .keys()
-                .copied()
-                .filter(|node_id| measurable.contains(node_id))
-                .collect(),
-        }
+        let requested: BTreeSet<NodeId> = self.meter_requests.keys().copied().collect();
+        nodes_to_meter(self.meter_policy, &self.measurable_nodes(), &requested)
     }
 
     /// Number of live metering streams. Tests use this to prove that a plain
@@ -1053,12 +1070,58 @@ impl GraphDriver for PipewireDriver {
         })
     }
 
+    /// Audio state for one node.
+    ///
+    /// Both controls are writable, and both are read back from the node''s
+    /// `Props` during each graph rebuild. A node that has never answered stays
+    /// `None`, so the UI shows "not read" rather than inventing a level.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        let record = self
+            .graph
+            .nodes
+            .get(&node)
+            .ok_or(GraphError::MissingNode(node))?;
+        if record.node_type == NodeType::Effect {
+            return Ok(NodeAudioState::UNSUPPORTED);
+        }
+        let known = self.audio_controls.get(&node).copied();
+        Ok(NodeAudioState {
+            volume: known.map(|control| control.volume),
+            muted: known.map(|control| control.muted),
+            volume_readable: known.is_some(),
+            volume_writable: true,
+            mute_readable: known.is_some(),
+            mute_writable: true,
+        })
+    }
+
+    /// PipeWire accepts gain above unity, which `set_node_volume_locked`
+    /// clamps at 1.5, so the fader is allowed the same boost range.
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        let Ok(state) = self.node_audio_state(node) else {
+            return NodeCapabilities::NONE;
+        };
+        let mut capabilities = state.control_capabilities();
+        if state.is_supported() {
+            capabilities.volume_max = PIPEWIRE_MAX_VOLUME;
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+        }
+        capabilities
+    }
+
     fn graph(&self) -> &Graph {
         &self.graph
     }
 
     fn graph_dirty(&self) -> bool {
         self.registry_dirty.get()
+    }
+
+    /// The registry listener fires for every global added or removed, so the
+    /// dirty flag covers every topology change.
+    fn reports_graph_changes(&self) -> bool {
+        true
     }
 
     fn is_port_type(&self, port_type: PortType) -> bool {
@@ -1382,8 +1445,9 @@ fn audio_format_pod() -> BackendResult<Vec<u8>> {
 /// PipeWire's conventional UI volume curve is cubic: a displayed 50% is sent
 /// as 0.5³, which corresponds to roughly −18 dB. Sending the UI percentage
 /// directly made the control much louder than its displayed value implied.
+/// The driver''s own wrapper so call sites do not repeat the boost ceiling.
 fn ui_volume_to_spa_volume(volume: f32) -> f32 {
-    volume.clamp(0.0, 1.5).powi(3)
+    crate::api::ui_volume_to_spa_volume(volume, PIPEWIRE_MAX_VOLUME)
 }
 
 #[cfg(test)]

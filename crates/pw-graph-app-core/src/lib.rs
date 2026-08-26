@@ -6,7 +6,8 @@
 //! resource through PipeWire.
 
 use pw_graph_backend::{
-    BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
+    BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy, NodeAudioState,
+    NodeCapabilities,
 };
 use pw_graph_core::{
     backend_for_link, backend_for_node, backend_for_port, BackendKind, Graph, GraphError, Link,
@@ -24,7 +25,7 @@ use pw_graph_alsamidi::AlsaMidiDriver;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 use pw_graph_backend::PipewireDriver;
 #[cfg(target_os = "windows")]
-use pw_graph_backend::WindowsAudioDriver;
+use pw_graph_backend::{WindowsAudioDriver, WindowsMidiDriver};
 
 /// The native driver that owns a pair of graph ports.  This classification is
 /// kept independent of the UI and is used before a mutation is forwarded to a
@@ -73,16 +74,16 @@ pub fn route_for_ports(src: PortId, dst: PortId) -> Result<CompositeRoute, &'sta
 
 /// A backend that can be used by the application layer.  Relay is an optional
 /// extension of the same object rather than a second UI-owned driver.
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 pub trait ApplicationDriver: GraphDriver + pw_graph_backend::RelayDriver {}
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 impl<T> ApplicationDriver for T where T: GraphDriver + pw_graph_backend::RelayDriver {}
 
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 pub trait ApplicationDriver: GraphDriver {}
 
-#[cfg(not(all(target_os = "linux", feature = "relay")))]
+#[cfg(not(feature = "relay"))]
 impl<T> ApplicationDriver for T where T: GraphDriver {}
 
 /// Result of attempting to open the optional native backends.  A missing
@@ -93,6 +94,7 @@ pub struct BackendAvailability {
     pub pipewire: bool,
     pub alsa: bool,
     pub windows_audio: bool,
+    pub windows_midi: bool,
     pub failures: Vec<String>,
 }
 
@@ -105,6 +107,8 @@ pub struct CompositeDriver {
     pub alsa: Option<AlsaMidiDriver>,
     #[cfg(target_os = "windows")]
     pub windows_audio: Option<WindowsAudioDriver>,
+    #[cfg(target_os = "windows")]
+    pub windows_midi: Option<WindowsMidiDriver>,
     graph: Graph,
 }
 
@@ -147,6 +151,17 @@ impl CompositeDriver {
             Err(error) => availability.failures.push(error.to_string()),
         }
 
+        #[cfg(target_os = "windows")]
+        if !no_midi {
+            match WindowsMidiDriver::new() {
+                Ok(driver) => {
+                    composite.windows_midi = Some(driver);
+                    availability.windows_midi = true;
+                }
+                Err(error) => availability.failures.push(error.to_string()),
+            }
+        }
+
         (composite, availability)
     }
 
@@ -169,6 +184,7 @@ impl CompositeDriver {
     pub fn with_windows_audio(driver: WindowsAudioDriver) -> Self {
         Self {
             windows_audio: Some(driver),
+            windows_midi: None,
             graph: Graph::default(),
         }
     }
@@ -200,6 +216,10 @@ impl CompositeDriver {
         }
         #[cfg(target_os = "windows")]
         if let Some(driver) = self.windows_audio.as_ref() {
+            Self::merge_graph(&mut graph, driver.graph())?;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_ref() {
             Self::merge_graph(&mut graph, driver.graph())?;
         }
         self.graph = graph;
@@ -316,6 +336,14 @@ impl CompositeDriver {
                         .map(GraphDriver::capabilities)
                         .unwrap_or_default();
                 }
+                #[cfg(target_os = "windows")]
+                if backend == BackendKind::WindowsMidi {
+                    return self
+                        .windows_midi
+                        .as_ref()
+                        .map(GraphDriver::capabilities)
+                        .unwrap_or_default();
+                }
                 BackendCapabilities::default()
             }
         }
@@ -351,6 +379,10 @@ impl GraphDriver for CompositeDriver {
         if let Some(driver) = self.windows_audio.as_ref() {
             capabilities = capabilities.union(driver.capabilities());
         }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_ref() {
+            capabilities = capabilities.union(driver.capabilities());
+        }
         capabilities
     }
 
@@ -365,6 +397,10 @@ impl GraphDriver for CompositeDriver {
         }
         #[cfg(target_os = "windows")]
         if let Some(driver) = self.windows_audio.as_mut() {
+            driver.refresh()?;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_midi.as_mut() {
             driver.refresh()?;
         }
         self.rebuild_merged_graph()?;
@@ -397,7 +433,18 @@ impl GraphDriver for CompositeDriver {
                 Err(Self::unsupported("Windows audio routing is not supported"))
             }
             Ok(CompositeRoute::WindowsMidi) => {
-                Err(Self::unsupported("Windows MIDI routing is not supported"))
+                #[cfg(target_os = "windows")]
+                {
+                    let link = self
+                        .windows_midi
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows MIDI backend is unavailable"))?
+                        .connect(src, dst)?;
+                    self.refresh()?;
+                    Ok(link)
+                }
+                #[cfg(not(target_os = "windows"))]
+                Err(Self::unsupported("Windows MIDI backend is unavailable"))
             }
             Ok(CompositeRoute::Demo) => Err(Self::unsupported(
                 "demo resources are not part of the live composite",
@@ -441,7 +488,18 @@ impl GraphDriver for CompositeDriver {
                 Err(Self::unsupported("Windows audio routing is not supported"))
             }
             CompositeRoute::WindowsMidi => {
-                Err(Self::unsupported("Windows MIDI routing is not supported"))
+                #[cfg(target_os = "windows")]
+                {
+                    let removed = self
+                        .windows_midi
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows MIDI backend is unavailable"))?
+                        .disconnect(link)?;
+                    self.refresh()?;
+                    Ok(removed)
+                }
+                #[cfg(not(target_os = "windows"))]
+                Err(Self::unsupported("Windows MIDI backend is unavailable"))
             }
             CompositeRoute::Demo => Err(Self::unsupported(
                 "demo resources are not part of the live composite",
@@ -543,6 +601,88 @@ impl GraphDriver for CompositeDriver {
         }
     }
 
+    /// Forwarded to the backend that owns the node.
+    ///
+    /// This must stay in sync with `set_node_volume`/`set_node_mute`: the trait
+    /// default answers `UNSUPPORTED`, so a composite that forgets to delegate
+    /// silently strips every audio control off every live card instead of
+    /// failing loudly. Covered by `composite_forwards_audio_state_to_the_owning_backend`.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        match backend_for_node(node) {
+            // Real nodes with nothing to control, not errors.
+            Some(BackendKind::AlsaMidi) | Some(BackendKind::WindowsMidi) => {
+                Ok(NodeAudioState::UNSUPPORTED)
+            }
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    match self.pipewire.as_ref() {
+                        Some(driver) => driver.node_audio_state(node),
+                        None => Ok(NodeAudioState::UNSUPPORTED),
+                    }
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    let _ = node;
+                    Ok(NodeAudioState::UNSUPPORTED)
+                }
+            }
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    match self.windows_audio.as_ref() {
+                        Some(driver) => driver.node_audio_state(node),
+                        None => Ok(NodeAudioState::UNSUPPORTED),
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = node;
+                    Ok(NodeAudioState::UNSUPPORTED)
+                }
+            }
+            Some(BackendKind::Demo) => Err(Self::unsupported(
+                "demo resources are not part of the live composite",
+            )),
+            None => Err(Self::unsupported("node has an unknown backend namespace")),
+        }
+    }
+
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        match backend_for_node(node) {
+            Some(BackendKind::AlsaMidi) | Some(BackendKind::WindowsMidi) => NodeCapabilities::NONE,
+            Some(BackendKind::PipeWire) => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    match self.pipewire.as_ref() {
+                        Some(driver) => driver.node_capabilities(node),
+                        None => NodeCapabilities::NONE,
+                    }
+                }
+                #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+                {
+                    let _ = node;
+                    NodeCapabilities::NONE
+                }
+            }
+            Some(BackendKind::WindowsAudio) => {
+                #[cfg(target_os = "windows")]
+                {
+                    match self.windows_audio.as_ref() {
+                        Some(driver) => driver.node_capabilities(node),
+                        None => NodeCapabilities::NONE,
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = node;
+                    NodeCapabilities::NONE
+                }
+            }
+            Some(BackendKind::Demo) | None => NodeCapabilities::NONE,
+        }
+    }
+
     fn set_node_mute(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
         match backend_for_node(node) {
             Some(BackendKind::AlsaMidi) => Err(Self::unsupported(
@@ -621,6 +761,29 @@ impl GraphDriver for CompositeDriver {
             )),
             None => Err(Self::unsupported("node has an unknown backend namespace")),
         }
+    }
+
+    /// Only trustworthy when every live child reports its own changes: one
+    /// child that must be polled means the composite must be polled.
+    fn reports_graph_changes(&self) -> bool {
+        let mut children = 0;
+        let mut reporting = 0;
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
+        if let Some(driver) = self.pipewire.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
+        #[cfg(all(target_os = "linux", feature = "alsa"))]
+        if let Some(driver) = self.alsa.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(driver) = self.windows_audio.as_ref() {
+            children += 1;
+            reporting += usize::from(driver.reports_graph_changes());
+        }
+        children > 0 && children == reporting
     }
 
     fn graph(&self) -> &Graph {
@@ -880,24 +1043,66 @@ impl pw_graph_backend::EffectDriver for CompositeDriver {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+/// Which child driver hosts the relay on this platform.
+///
+/// PipeWire carries it on Linux through virtual devices; Windows carries it
+/// through WASAPI endpoints. Resolving the concrete type once here lets the
+/// delegation below be written a single time, so the two platforms cannot
+/// drift apart method by method.
+#[cfg(feature = "relay")]
+impl CompositeDriver {
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    fn relay_backend(&self) -> Option<&PipewireDriver> {
+        self.pipewire.as_ref()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    fn relay_backend_mut(&mut self) -> Option<&mut PipewireDriver> {
+        self.pipewire.as_mut()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn relay_backend(&self) -> Option<&WindowsAudioDriver> {
+        self.windows_audio.as_ref()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn relay_backend_mut(&mut self) -> Option<&mut WindowsAudioDriver> {
+        self.windows_audio.as_mut()
+    }
+
+    // No relay-capable backend on this target; `DemoDriver` only supplies a
+    // concrete type that implements the trait so the signatures line up.
+    #[cfg(not(any(all(target_os = "linux", feature = "pipewire"), target_os = "windows")))]
+    fn relay_backend(&self) -> Option<&pw_graph_backend::DemoDriver> {
+        None
+    }
+
+    #[cfg(not(any(all(target_os = "linux", feature = "pipewire"), target_os = "windows")))]
+    fn relay_backend_mut(&mut self) -> Option<&mut pw_graph_backend::DemoDriver> {
+        None
+    }
+
+    fn relay_unavailable() -> BackendError {
+        Self::unsupported("audio relay is not available for this backend")
+    }
+}
+
+#[cfg(feature = "relay")]
 impl pw_graph_backend::RelayDriver for CompositeDriver {
     fn relay_available(&self) -> bool {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .is_some_and(|driver| driver.relay_available())
     }
 
     fn relay_status(&self) -> pw_graph_backend::RelayEngineStatus {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .map(|driver| driver.relay_status())
             .unwrap_or_default()
     }
 
     fn relay_devices_active(&self) -> bool {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .is_some_and(|driver| driver.relay_devices_active())
     }
 
@@ -905,11 +1110,20 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         &mut self,
         request: pw_graph_backend::RelayHostRequest,
     ) -> BackendResult<u16> {
-        self.mutate_pipewire(|driver| driver.relay_start_host(request))
+        let port = self
+            .relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_start_host(request)?;
+        // Starting the host can add virtual nodes to the child graph, so the
+        // merged view has to catch up. A no-op where it cannot.
+        self.rebuild_after_native_mutation();
+        Ok(port)
     }
 
     fn relay_stop_host(&mut self) -> BackendResult<()> {
-        self.pipewire_mut()?.relay_stop_host()
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_stop_host()
     }
 
     fn relay_connect(
@@ -918,40 +1132,45 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         pin: &str,
         roles: pw_graph_backend::RelayRoles,
     ) -> BackendResult<()> {
-        self.mutate_pipewire(|driver| driver.relay_connect(target, pin, roles))
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_connect(target, pin, roles)?;
+        self.rebuild_after_native_mutation();
+        Ok(())
     }
 
     fn relay_disconnect(&mut self, session: pw_graph_backend::RelaySessionId) -> BackendResult<()> {
-        self.pipewire_mut()?.relay_disconnect(session)
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_disconnect(session)
     }
 
     fn relay_events(&mut self) -> Vec<pw_graph_backend::RelayEvent> {
-        self.pipewire
-            .as_mut()
+        self.relay_backend_mut()
             .map(|driver| driver.relay_events())
             .unwrap_or_default()
     }
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {
-        self.pipewire_mut()?.relay_discovery_start()
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_discovery_start()
     }
 
     fn relay_discovery_stop(&mut self) {
-        if let Some(driver) = self.pipewire.as_mut() {
+        if let Some(driver) = self.relay_backend_mut() {
             driver.relay_discovery_stop();
         }
     }
 
     fn relay_peers(&self) -> Vec<pw_graph_backend::RelayPeerInfo> {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .map(|driver| driver.relay_peers())
             .unwrap_or_default()
     }
 
     fn relay_local_links(&self) -> Vec<pw_graph_backend::RelayLocalLink> {
-        self.pipewire
-            .as_ref()
+        self.relay_backend()
             .map(|driver| driver.relay_local_links())
             .unwrap_or_default()
     }
@@ -962,6 +1181,80 @@ mod tests {
     use super::*;
     use pw_graph_backend::InMemoryDriver;
     use pw_graph_core::{encode_backend_id, BackendNamespace, Direction, Node, Port};
+
+    /// Regression: the composite implemented `set_node_volume`/`set_node_mute`
+    /// but not `node_audio_state`/`node_capabilities`, so the trait default
+    /// answered `UNSUPPORTED` for every live node. The UI drives its controls
+    /// off that, so every card on a real backend lost its volume and mute
+    /// controls even though the driver underneath reported both.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn composite_forwards_audio_state_to_the_owning_backend() {
+        let Ok(mut driver) = pw_graph_backend::WindowsAudioDriver::new() else {
+            // No Core Audio in this environment.
+            return;
+        };
+        if driver.refresh().is_err() || driver.graph().nodes.is_empty() {
+            return;
+        }
+        let expected: Vec<_> = driver
+            .graph()
+            .nodes
+            .keys()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    driver.node_audio_state(*node_id).ok(),
+                    driver.node_capabilities(*node_id),
+                )
+            })
+            .collect();
+        assert!(
+            expected
+                .iter()
+                .any(|(_, _, capabilities)| capabilities.has_any_control()),
+            "an endpoint should report controls, or this proves nothing"
+        );
+
+        let mut composite = CompositeDriver::with_windows_audio(driver);
+        composite.refresh().expect("composite refresh");
+
+        for (node_id, state, capabilities) in expected {
+            assert_eq!(
+                composite.node_audio_state(node_id).ok(),
+                state,
+                "composite must not swallow the backend's reading"
+            );
+            assert_eq!(composite.node_capabilities(node_id), capabilities);
+        }
+    }
+
+    /// The other half of the same failure: a merged graph must list each port
+    /// on its node exactly once, or the card grows a second row and a phantom
+    /// pin that captures the link belonging to the real one.
+    #[test]
+    fn merging_a_graph_lists_every_port_once() {
+        let mut source = Graph::default();
+        let node_id = NodeId(encode_backend_id(BackendNamespace::PipeWire, 7));
+        let port_id = PortId(encode_backend_id(BackendNamespace::PipeWire, 8));
+        source
+            .add_node(Node::new(node_id, "Speakers", NodeType::PipeWire))
+            .unwrap();
+        source
+            .add_port(Port::new(
+                port_id,
+                node_id,
+                "audio",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+
+        let mut merged = Graph::default();
+        CompositeDriver::merge_graph(&mut merged, &source).expect("merge succeeds");
+
+        assert_eq!(merged.nodes[&node_id].ports, vec![port_id]);
+    }
 
     #[test]
     fn composite_reports_cross_backend_connections_before_mutation() {

@@ -11,7 +11,7 @@ use pw_graph_backend::{
     AudioMeter, BackendCapabilities, DemoDriver, EffectDriver, EffectInsertRequest, EffectInstance,
     EffectNodeRequest, GraphDriver, MeterPolicy,
 };
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use pw_graph_backend::{
     RelayDriver, RelayEngineStatus, RelayEvent, RelayHostRequest, RelayLocalLink, RelayPeerInfo,
     RelayRoles, RelaySessionId,
@@ -145,6 +145,10 @@ impl ApplicationDriver {
         GraphDriver::graph_dirty(self)
     }
 
+    pub(crate) fn reports_graph_changes(&self) -> bool {
+        GraphDriver::reports_graph_changes(self)
+    }
+
     pub(crate) fn set_meter_policy(&mut self, policy: MeterPolicy) -> Result<(), String> {
         self.meter_policy = policy;
         GraphDriver::set_meter_policy(self, policy).map_err(|error| error.to_string())
@@ -168,6 +172,32 @@ impl ApplicationDriver {
 
     pub(crate) fn set_node_mute(&mut self, node: NodeId, muted: bool) -> Result<(), String> {
         GraphDriver::set_node_mute(self, node, muted).map_err(|error| error.to_string())
+    }
+
+    /// Audio state as the backend reports it. The UI renders this and keeps no
+    /// copy, so a value the backend cannot read stays visibly unknown.
+    pub(crate) fn node_audio_state(
+        &self,
+        node: NodeId,
+    ) -> Result<pw_graph_backend::NodeAudioState, String> {
+        GraphDriver::node_audio_state(self, node).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn node_capabilities(&self, node: NodeId) -> pw_graph_backend::NodeCapabilities {
+        GraphDriver::node_capabilities(self, node)
+    }
+
+    /// Whether the backend that owns this node can rewire it.
+    ///
+    /// Backend-wide `connect` is a union across children, so on Windows it is
+    /// true because MIDI can route even though Core Audio cannot. Asking per
+    /// node is what lets the canvas offer a connect gesture only where one can
+    /// actually succeed.
+    pub(crate) fn node_connectable(&self, node: NodeId) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.capabilities().connect,
+            BackendKind::Live(driver) => driver.capabilities_for_node(node).connect,
+        }
     }
 
     pub(crate) fn connect_by_key_if_missing(
@@ -229,27 +259,27 @@ impl ApplicationDriver {
         EffectDriver::remove_effect(self, instance_id).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_available(&self) -> bool {
         RelayDriver::relay_available(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_status(&self) -> RelayEngineStatus {
         RelayDriver::relay_status(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_start_host(&mut self, request: RelayHostRequest) -> Result<u16, String> {
         RelayDriver::relay_start_host(self, request).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_stop_host(&mut self) -> Result<(), String> {
         RelayDriver::relay_stop_host(self).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_connect(
         &mut self,
         target: std::net::SocketAddr,
@@ -259,32 +289,32 @@ impl ApplicationDriver {
         RelayDriver::relay_connect(self, target, pin, roles).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_disconnect(&mut self, session: RelaySessionId) -> Result<(), String> {
         RelayDriver::relay_disconnect(self, session).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_events(&mut self) -> Vec<RelayEvent> {
         RelayDriver::relay_events(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_discovery_start(&mut self) -> Result<(), String> {
         RelayDriver::relay_discovery_start(self).map_err(|error| error.to_string())
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_discovery_stop(&mut self) {
         RelayDriver::relay_discovery_stop(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_peers(&self) -> Vec<RelayPeerInfo> {
         RelayDriver::relay_peers(self)
     }
 
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_local_links(&self) -> Vec<RelayLocalLink> {
         RelayDriver::relay_local_links(self)
     }
@@ -354,6 +384,23 @@ impl GraphDriver for ApplicationDriver {
         }
     }
 
+    fn node_audio_state(
+        &self,
+        node: NodeId,
+    ) -> pw_graph_backend::BackendResult<pw_graph_backend::NodeAudioState> {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.node_audio_state(node),
+            BackendKind::Live(driver) => driver.node_audio_state(node),
+        }
+    }
+
+    fn node_capabilities(&self, node: NodeId) -> pw_graph_backend::NodeCapabilities {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.node_capabilities(node),
+            BackendKind::Live(driver) => driver.node_capabilities(node),
+        }
+    }
+
     fn set_node_mute(&mut self, node: NodeId, muted: bool) -> pw_graph_backend::BackendResult<()> {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.set_node_mute(node, muted),
@@ -383,6 +430,13 @@ impl GraphDriver for ApplicationDriver {
         match &self.backend {
             BackendKind::Demo(driver) => driver.graph_dirty(),
             BackendKind::Live(driver) => driver.graph_dirty(),
+        }
+    }
+
+    fn reports_graph_changes(&self) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.reports_graph_changes(),
+            BackendKind::Live(driver) => driver.reports_graph_changes(),
         }
     }
 
@@ -508,7 +562,7 @@ impl EffectDriver for ApplicationDriver {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 impl RelayDriver for ApplicationDriver {
     fn relay_available(&self) -> bool {
         match &self.backend {

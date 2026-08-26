@@ -1,6 +1,6 @@
 //! Framework-neutral state projected into Slint models.
 
-use pw_graph_backend::GraphDriver;
+use pw_graph_backend::{GraphDriver, NodeAudioState, NodeCapabilities};
 use pw_graph_config::AppConfig;
 use pw_graph_core::{
     Direction, Graph, LinkId, Node, NodeAppearance, NodeId, NodeType, Port, PortId, PortType,
@@ -214,8 +214,47 @@ pub(crate) struct NodeView {
     pub(crate) font_scale: f32,
     pub(crate) appearance: NodeAppearance,
     pub(crate) has_audio_controls: bool,
+    /// Whether this node''s backend can rewire it. Backend-wide `connect` is a
+    /// union across children, so it is true on Windows because MIDI can route
+    /// even though Core Audio cannot.
+    pub(crate) connectable: bool,
+    /// Audio state and per-node capability, both read from the backend. The
+    /// UI keeps no copy of its own: whatever is here is what the backend last
+    /// reported, and an unknown value stays unknown.
+    pub(crate) audio: NodeBackendProfile,
     pub(crate) meter: MeterReading,
     pub(crate) ports: Vec<PortGroupView>,
+}
+
+/// What the owning backend says about one node.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct NodeBackendProfile {
+    pub(crate) state: NodeAudioState,
+    pub(crate) capabilities: NodeCapabilities,
+    /// Whether this node''s backend can rewire it.
+    pub(crate) connectable: bool,
+}
+
+/// Stand-in for a backend that supports everything, used where a test cares
+/// about projection rather than about capability gating.
+#[cfg(test)]
+pub(crate) fn fully_capable_backend_profiles(
+    graph: &Graph,
+) -> BTreeMap<NodeId, NodeBackendProfile> {
+    graph
+        .nodes
+        .keys()
+        .map(|node_id| {
+            (
+                *node_id,
+                NodeBackendProfile {
+                    state: NodeAudioState::readable(1.0, false),
+                    capabilities: NodeCapabilities::FULL,
+                    connectable: true,
+                },
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -277,7 +316,13 @@ impl UiGraphState {
 
     #[cfg(test)]
     pub(crate) fn snapshot(&mut self, graph: &Graph, config: &AppConfig) -> GraphSnapshot {
-        self.snapshot_with_meters(graph, config, &BTreeMap::new(), MeterState::Unavailable)
+        self.snapshot_with_meters(
+            graph,
+            config,
+            &BTreeMap::new(),
+            MeterState::Unavailable,
+            &fully_capable_backend_profiles(graph),
+        )
     }
 
     pub(crate) fn snapshot_with_meters(
@@ -286,6 +331,7 @@ impl UiGraphState {
         config: &AppConfig,
         meters: &BTreeMap<NodeId, MeterReading>,
         meter_fallback: MeterState,
+        backend_profiles: &BTreeMap<NodeId, NodeBackendProfile>,
     ) -> GraphSnapshot {
         self.ids.rebuild(graph);
         self.local_positions
@@ -326,7 +372,11 @@ impl UiGraphState {
                     pin_groups.insert(*id, port.pin_id);
                 }
             }
-            let has_audio_controls = node.node_type != NodeType::Effect
+            // Which controls exist is the backend's call, not a guess from the
+            // node type: a Windows application session and a Windows endpoint
+            // are both "audio nodes" but expose different controls.
+            let audio = backend_profiles.get(&node.id).copied().unwrap_or_default();
+            let has_audio_controls = audio.capabilities.has_any_control()
                 && node.ports.iter().any(|id| {
                     graph
                         .port(*id)
@@ -352,6 +402,8 @@ impl UiGraphState {
                 font_scale: self.node_text_scale,
                 appearance,
                 has_audio_controls,
+                connectable: audio.connectable,
+                audio,
                 meter: meters.get(&node.id).copied().unwrap_or(MeterReading {
                     state: meter_fallback,
                     ..MeterReading::default()
@@ -1329,6 +1381,74 @@ mod tests {
         );
     }
 
+    /// The UI must not draw a control the node's backend cannot provide. A
+    /// Windows application session that exposes no volume, or an effect node
+    /// with no controls at all, has to come out of the projection without an
+    /// audio block rather than with a dead fader.
+    #[test]
+    fn cards_hide_controls_the_backend_does_not_support() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let uncontrollable = graph
+            .nodes
+            .keys()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    NodeBackendProfile {
+                        state: NodeAudioState::UNSUPPORTED,
+                        capabilities: NodeCapabilities::NONE,
+                        connectable: false,
+                    },
+                )
+            })
+            .collect();
+
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &BTreeMap::new(),
+            MeterState::Unavailable,
+            &uncontrollable,
+        );
+
+        assert!(
+            snapshot.nodes.iter().all(|node| !node.has_audio_controls),
+            "no card claims controls the backend cannot serve"
+        );
+        assert!(
+            snapshot
+                .nodes
+                .iter()
+                .all(|node| node.audio.state.volume.is_none()),
+            "and none of them carries an invented level"
+        );
+    }
+
+    /// The same graph with a capable backend keeps its controls, so the gate
+    /// above is really reading capability and not just switching everything off.
+    #[test]
+    fn cards_show_controls_a_capable_backend_reports() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+
+        let snapshot = state.snapshot(&graph, &config);
+
+        let audio_cards = snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.has_audio_controls)
+            .count();
+        assert!(audio_cards > 0, "a capable backend still gets audio cards");
+        assert!(snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.has_audio_controls)
+            .all(|node| node.audio.capabilities.volume_write));
+    }
+
     #[test]
     fn thumbnail_projection_matches_the_compact_canvas_mode() {
         let graph = graph();
@@ -1377,7 +1497,13 @@ mod tests {
             },
         );
 
-        let snapshot = state.snapshot_with_meters(&graph, &config, &meters, MeterState::Waiting);
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &meters,
+            MeterState::Waiting,
+            &fully_capable_backend_profiles(&graph),
+        );
         let source = snapshot
             .nodes
             .iter()

@@ -23,23 +23,10 @@ pub(crate) enum UiEvent {
     LinkDropped(i32, f32, f32),
     ToggleCollapse(i32),
     DragCommitted(i32, f32, f32),
+    /// An existing link was dragged onto a different pin.
+    LinkRerouted(/* link */ i32, /* new pin */ i32),
     SetAudioVolume(i32, f32),
     ToggleAudioMute(i32),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct AudioControl {
-    pub(crate) volume_position: f32,
-    pub(crate) muted: bool,
-}
-
-impl Default for AudioControl {
-    fn default() -> Self {
-        Self {
-            volume_position: 0.9,
-            muted: false,
-        }
-    }
 }
 
 pub(crate) struct Application {
@@ -70,10 +57,9 @@ pub(crate) struct Application {
     pub(crate) meter_error: Option<String>,
     /// Audio controls are live UI state only. They are intentionally not
     /// restored from a second Slint-specific file on startup.
-    pub(crate) audio_controls: BTreeMap<pw_graph_core::NodeId, AudioControl>,
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) relay_levels: BTreeMap<u64, f32>,
-    #[cfg(all(target_os = "linux", feature = "relay"))]
+    #[cfg(feature = "relay")]
     pub(crate) relay_connecting: Option<String>,
 }
 

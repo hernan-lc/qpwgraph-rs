@@ -1,9 +1,57 @@
 use crate::model::ConnectMode;
-use pw_graph_command::{ConnectCommand, ConnectManyCommand, DisconnectManyCommand};
+use pw_graph_command::{
+    ConnectCommand, ConnectManyCommand, DisconnectManyCommand, RerouteLinkCommand,
+};
 use pw_graph_core::{Direction, PortKey};
 use std::time::Instant;
 
 use super::app::{set_connection_feedback, Application};
+
+/// Move one end of an existing edge onto a different pin.
+///
+/// This is one user action, so it is one undoable command rather than a
+/// disconnect followed by a connect: undoing once has to put the edge back
+/// where it was, not leave the graph disconnected.
+pub(crate) fn handle_link_rerouted(application: &mut Application, link_id: i32, pin_id: i32) {
+    let capabilities = application.source.capabilities();
+    if !capabilities.connect || !capabilities.disconnect {
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
+    let (Some(link), Some(port)) = (
+        application.view.ids.link_id(link_id),
+        application.view.ids.port_id(pin_id),
+    ) else {
+        return;
+    };
+    if !application.source.is_link_mutable(link) {
+        // An observed relationship is not ours to move.
+        set_connection_feedback(
+            application,
+            application.t("status.connections_unavailable"),
+            true,
+        );
+        return;
+    }
+    match application.commands.execute(
+        Box::new(RerouteLinkCommand::new(link, port)),
+        &mut application.source,
+    ) {
+        Ok(()) => {
+            let message = application.t("status.connection_created");
+            set_connection_feedback(application, message, false);
+        }
+        Err(error) => {
+            let message =
+                application.tf("status.connection_failed", &[("error", error.to_string())]);
+            set_connection_feedback(application, message, true);
+        }
+    }
+}
 
 pub(crate) fn handle_link_requested(application: &mut Application, start_id: i32, end_id: i32) {
     if !application.source.capabilities().connect {

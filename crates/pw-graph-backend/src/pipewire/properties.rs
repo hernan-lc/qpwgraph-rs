@@ -53,7 +53,7 @@ impl PipewireDriver {
         node: NodeId,
         volume: f32,
     ) -> BackendResult<()> {
-        let volume = volume.clamp(0.0, 1.5);
+        let volume = volume.clamp(0.0, PIPEWIRE_MAX_VOLUME);
         let spa_volume = ui_volume_to_spa_volume(volume);
         self.set_node_props_locked(
             node,

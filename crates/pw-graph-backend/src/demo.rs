@@ -1,16 +1,20 @@
 //! Deterministic in-memory backend used by demo mode and tests.
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 use super::api::RelayDriver;
 use super::api::{
     BackendCapabilities, BackendError, BackendResult, EffectDriver, EffectInsertRequest,
-    EffectInstance, EffectNodeRequest, GraphDriver, NodeAudioControl,
+    EffectInstance, EffectNodeRequest, GraphDriver, NodeAudioControl, NodeAudioState,
+    NodeCapabilities,
 };
 use pw_graph_core::{
     Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
 };
 use pw_graph_effects::{AudioSpec, EffectHost, EffectInstanceConfig, EffectProcessor};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Boost headroom, matching PipeWire so demo mode behaves like the real thing.
+const DEMO_MAX_VOLUME: f32 = 1.5;
 
 /// A deterministic demo backend that behaves like a PipeWire registry from
 /// the perspective of the application. It is useful for `--demo`, examples,
@@ -312,8 +316,39 @@ impl GraphDriver for DemoDriver {
         if !self.graph.nodes.contains_key(&node) {
             return Err(GraphError::MissingNode(node).into());
         }
-        self.audio_controls.entry(node).or_default().volume = volume.clamp(0.0, 1.5);
+        self.audio_controls.entry(node).or_default().volume = volume.clamp(0.0, DEMO_MAX_VOLUME);
         Ok(())
+    }
+
+    /// The demo driver owns its controls outright, so this is a real read of
+    /// backend state rather than a placeholder. Effect nodes carry no audio
+    /// controls, exactly as a DSP node would not on a native backend.
+    fn node_audio_state(&self, node: NodeId) -> BackendResult<NodeAudioState> {
+        let record = self
+            .graph
+            .nodes
+            .get(&node)
+            .ok_or(GraphError::MissingNode(node))?;
+        if record.node_type == NodeType::Effect {
+            return Ok(NodeAudioState::UNSUPPORTED);
+        }
+        let control = self.audio_controls.get(&node).copied().unwrap_or_default();
+        Ok(NodeAudioState::readable(control.volume, control.muted))
+    }
+
+    fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
+        let Ok(state) = self.node_audio_state(node) else {
+            return NodeCapabilities::NONE;
+        };
+        let mut capabilities = state.control_capabilities();
+        // Effect nodes are pass-through DSP: nothing to meter and nothing to
+        // control, so they must not be given a meter either.
+        if state.is_supported() {
+            capabilities.volume_max = DEMO_MAX_VOLUME;
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+        }
+        capabilities
     }
 
     fn graph(&self) -> &Graph {
@@ -321,7 +356,7 @@ impl GraphDriver for DemoDriver {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "relay"))]
+#[cfg(feature = "relay")]
 impl RelayDriver for DemoDriver {}
 
 impl EffectDriver for DemoDriver {

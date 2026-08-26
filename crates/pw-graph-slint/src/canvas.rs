@@ -98,6 +98,10 @@ pub(crate) struct PinGeometry {
     pub(crate) y: f32,
     pub(crate) visible: bool,
     pub(crate) node_selected: bool,
+    /// Whether this pin''s backend can actually make a connection. Backend-wide
+    /// capability is a union across children, so a Windows audio pin and a
+    /// Windows MIDI pin disagree even though the composite says `connect`.
+    pub(crate) connectable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -216,6 +220,11 @@ impl CanvasGeometry {
             y += drag.1;
         }
         (x, y)
+    }
+
+    /// Whether a pin belongs to a backend that can rewire it.
+    pub(crate) fn pin_connectable(&self, pin_id: i32) -> bool {
+        self.pin(pin_id).is_some_and(|pin| pin.connectable)
     }
 
     /// Nearest visible pin within `radius`, or `0` when the pointer is clear of
@@ -361,6 +370,30 @@ impl CanvasGeometry {
             return String::new();
         };
         curve_commands(self.anchor(&start, drag), self.anchor(&end, drag))
+    }
+
+    /// Which end of a link stays put when it is dragged from `(x, y)`.
+    ///
+    /// Grabbing an edge near one endpoint moves that endpoint and pivots around
+    /// the other, which is how every patchbay behaves. Returns the pin that
+    /// stays anchored, or `0` when the link or its pins are not cached.
+    pub(crate) fn link_drag_anchor(&self, link_id: i32, x: f32, y: f32) -> i32 {
+        let Some(link) = self.links.iter().find(|link| link.id == link_id) else {
+            return 0;
+        };
+        let (Some(start), Some(end)) = (self.pin(link.start_pin), self.pin(link.end_pin)) else {
+            return 0;
+        };
+        let start_point = self.anchor(&start, (0.0, 0.0));
+        let end_point = self.anchor(&end, (0.0, 0.0));
+        let to_start = (start_point.0 - x).powi(2) + (start_point.1 - y).powi(2);
+        let to_end = (end_point.0 - x).powi(2) + (end_point.1 - y).powi(2);
+        // The nearer endpoint is the one being moved, so the far one anchors.
+        if to_start <= to_end {
+            link.end_pin
+        } else {
+            link.start_pin
+        }
     }
 
     /// SVG commands for the rubber-band curve drawn while creating a link.
@@ -565,6 +598,7 @@ mod tests {
                     y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
                 PinGeometry {
                     pin_id: 202,
@@ -574,6 +608,7 @@ mod tests {
                     y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
             ],
             vec![LinkGeometry {
@@ -663,6 +698,53 @@ mod tests {
         assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
     }
 
+    /// Dragging an edge pivots around the far end, so grabbing near the output
+    /// anchors the input and the other way round.
+    #[test]
+    fn dragging_an_edge_anchors_its_far_end() {
+        let canvas = geometry();
+        let start = canvas.pin(101).unwrap();
+        let end = canvas.pin(202).unwrap();
+
+        assert_eq!(canvas.link_drag_anchor(1, start.x, start.y), 202);
+        assert_eq!(canvas.link_drag_anchor(1, end.x, end.y), 101);
+        // A grab just past the midpoint leans to the nearer endpoint.
+        let midpoint = ((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+        assert_eq!(
+            canvas.link_drag_anchor(1, midpoint.0 + 40.0, midpoint.1),
+            101
+        );
+        assert_eq!(
+            canvas.link_drag_anchor(1, midpoint.0 - 40.0, midpoint.1),
+            202
+        );
+    }
+
+    /// Backend-wide `connect` is a union across children, so on Windows it is
+    /// true because MIDI can route while Core Audio cannot. Offering a connect
+    /// gesture on a pin that can never accept one is the failure this prevents.
+    #[test]
+    fn a_pin_whose_backend_cannot_rewire_is_not_connectable() {
+        let mut canvas = geometry();
+        let mut pins: Vec<PinGeometry> = canvas.pins.values().copied().collect();
+        pins[0].connectable = false;
+        let nodes = canvas.nodes.clone();
+        let links = canvas.links.clone();
+        canvas.replace(nodes, pins, links, false);
+
+        assert!(!canvas.pin_connectable(101));
+        assert!(canvas.pin_connectable(202));
+        // An unknown pin is never connectable.
+        assert!(!canvas.pin_connectable(0));
+        assert!(!canvas.pin_connectable(9999));
+    }
+
+    #[test]
+    fn an_unknown_link_has_no_drag_anchor() {
+        let canvas = geometry();
+        assert_eq!(canvas.link_drag_anchor(999, 0.0, 0.0), 0);
+    }
+
     #[test]
     fn links_are_hit_along_the_rendered_curve() {
         let canvas = geometry();
@@ -713,6 +795,7 @@ mod tests {
                     y: 100.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
                 PinGeometry {
                     pin_id: 202,
@@ -722,6 +805,7 @@ mod tests {
                     y: 700.0 + port_row_top(0, false) + PORT_ROW_HEIGHT / 2.0,
                     visible: true,
                     node_selected: false,
+                    connectable: true,
                 },
             ],
             vec![LinkGeometry {

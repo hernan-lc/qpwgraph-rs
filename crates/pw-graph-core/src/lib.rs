@@ -396,7 +396,13 @@ impl Graph {
         if self.ports.contains_key(&port.id) {
             return Err(GraphError::DuplicatePort(port.id));
         }
-        node.ports.push(port.id);
+        // A node may arrive already listing this port -- merging two graphs
+        // clones whole nodes and then re-adds their ports. Listing the same id
+        // twice draws the port twice, gives it two pins, and lets the second
+        // (phantom) pin capture the link that belongs to the first.
+        if !node.ports.contains(&port.id) {
+            node.ports.push(port.id);
+        }
         self.ports.insert(port.id, port);
         Ok(())
     }
@@ -729,6 +735,37 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Merging two graphs clones whole nodes -- ports vec included -- and then
+    /// re-adds every port. Listing an id twice gives the port two rows and two
+    /// pins on the card, and the phantom second pin steals the link that
+    /// belongs to the real one, so edges are drawn to the wrong place.
+    #[test]
+    fn re_adding_a_port_a_node_already_lists_does_not_duplicate_it() {
+        let source = graph();
+        let mut merged = Graph::default();
+        for node in source.nodes.values().cloned() {
+            merged.add_node(node).unwrap();
+        }
+        for port in source.ports.values().cloned() {
+            merged.add_port(port).unwrap();
+        }
+
+        for node in merged.nodes.values() {
+            let mut unique = node.ports.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(
+                node.ports.len(),
+                unique.len(),
+                "node {:?} lists a port more than once: {:?}",
+                node.name,
+                node.ports
+            );
+        }
+        assert_eq!(merged.nodes[&NodeId(1)].ports, vec![PortId(1)]);
+        assert_eq!(merged.ports.len(), source.ports.len());
+    }
 
     fn graph() -> Graph {
         let mut graph = Graph::default();
