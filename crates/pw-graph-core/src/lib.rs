@@ -245,7 +245,8 @@ pub struct Node {
     pub name: String,
     pub node_type: NodeType,
     /// Backend-provided identity that survives global-ID churn when possible.
-    /// PipeWire exposes this as `object.serial`; demo and ALSA nodes leave it
+    /// PipeWire exposes this as `object.serial`; Windows uses a stable hash of
+    /// its native endpoint/session identifier. Demo and ALSA nodes leave it
     /// unset and are resolved by their names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<u64>,
@@ -443,7 +444,16 @@ impl Graph {
             })
             .filter_map(|port| {
                 let node = self.node(port.node_id)?;
-                if node.name != key.node_name || node.node_type != key.node_type {
+                if node.node_type != key.node_type {
+                    return None;
+                }
+                let serial_matches = matches!((key.node_serial, node.serial),
+                    (Some(expected), Some(actual)) if expected == actual);
+                // A stable backend identity is authoritative when both sides
+                // provide it. Display names are still required for legacy or
+                // name-only keys, but a renamed Windows endpoint/session must
+                // remain resolvable by its native identity.
+                if !serial_matches && node.name != key.node_name {
                     return None;
                 }
                 if let (Some(expected), Some(actual)) =
@@ -454,7 +464,7 @@ impl Graph {
                     }
                 }
                 let serial_score = match (key.node_serial, node.serial) {
-                    (Some(expected), Some(actual)) if expected == actual => 100,
+                    (Some(expected), Some(actual)) if expected == actual => 200,
                     (Some(_), Some(_)) => 0,
                     (None, None) => 20,
                     (None, Some(_)) => 10,
@@ -763,6 +773,37 @@ mod tests {
         let mut graph = graph();
         let error = graph.add_link(LinkId(1), PortId(2), PortId(1)).unwrap_err();
         assert_eq!(error, GraphError::NotSource(PortId(2)));
+    }
+
+    #[test]
+    fn stable_serial_resolves_a_renamed_windows_endpoint() {
+        let node_id = NodeId(encode_backend_id(BackendNamespace::WindowsAudio, 1));
+        let port_id = PortId(encode_backend_id(BackendNamespace::WindowsAudio, 2));
+        let mut graph = Graph::default();
+        graph
+            .add_node(
+                Node::new(
+                    node_id,
+                    "Speakers (old name)",
+                    NodeType::WindowsAudioEndpoint,
+                )
+                .with_serial(0x1234),
+            )
+            .unwrap();
+        graph
+            .add_port(Port::new(
+                port_id,
+                node_id,
+                "audio",
+                Direction::Sink,
+                PortType::Audio,
+            ))
+            .unwrap();
+
+        let key = graph.port_key(port_id).unwrap();
+        graph.nodes.get_mut(&node_id).unwrap().name = "Speakers (new name)".into();
+
+        assert_eq!(graph.resolve_port_key(&key), Some(port_id));
     }
 
     #[test]
