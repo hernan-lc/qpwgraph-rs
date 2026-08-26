@@ -442,6 +442,11 @@ mod tests {
             return;
         };
 
+        // Clear the dirty flag immediately before the write, so the check
+        // below is about this volume change and not about whatever the system
+        // did earlier. Other audio activity on the machine can still race it,
+        // which is why the hardware tests want `--test-threads=1`.
+        let _ = driver.refresh();
         unsafe { control.SetMasterVolumeLevelScalar(target, std::ptr::null()) }
             .expect("the external write should succeed");
         // The callback lands on a Core Audio notification thread.
