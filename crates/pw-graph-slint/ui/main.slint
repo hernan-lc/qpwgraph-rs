@@ -287,7 +287,7 @@ export component MainWindow inherits Window {
     callback graph-audio-mute-toggled(int);
     callback graph-node-collapse-toggled(int);
     // Geometry lives in Rust; these are the only questions the canvas asks.
-    pure callback graph-hit-test(float, float) -> HitResult;
+    pure callback graph-hit-test(/* world-x */ float, /* world-y */ float, /* zoom */ float) -> HitResult;
     pure callback graph-link-path(int, int, float, float) -> string;
     pure callback graph-pin-preview-path(int, float, float) -> string;
     pure callback graph-node-preview-path(int, float, float) -> string;
@@ -479,7 +479,7 @@ export component MainWindow inherits Window {
                 min-zoom: 0.35;
                 max-zoom: 2.5;
 
-                hit-test(x, y) => { root.graph-hit-test(x, y) }
+                hit-test(x, y, zoom) => { root.graph-hit-test(x, y, zoom) }
                 link-path(id, version, dx, dy) => { root.graph-link-path(id, version, dx, dy) }
                 pin-preview-path(pin, x, y) => { root.graph-pin-preview-path(pin, x, y) }
                 node-preview-path(node, x, y) => { root.graph-node-preview-path(node, x, y) }

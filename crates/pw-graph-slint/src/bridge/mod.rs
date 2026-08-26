@@ -1159,7 +1159,7 @@ mod tests {
         let hit = harness
             .geometry
             .borrow()
-            .hit_test(body_point.0, body_point.1);
+            .hit_test(body_point.0, body_point.1, 1.0);
         assert_eq!(hit.kind, HIT_NODE, "advanced mode drags the card");
 
         handle_action(
@@ -1172,7 +1172,7 @@ mod tests {
         let hit = harness
             .geometry
             .borrow()
-            .hit_test(body_point.0, body_point.1);
+            .hit_test(body_point.0, body_point.1, 1.0);
         assert_eq!(
             hit.kind, HIT_NODE_BODY,
             "easy mode turns the body into a connect gesture"

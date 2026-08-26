@@ -321,7 +321,7 @@ export component NodeCanvas inherits Rectangle {
     out property <int> hovered-link: -1;
 
     // === Computation, all resolved in Rust ===
-    pure callback hit-test(/* world-x */ float, /* world-y */ float) -> HitResult;
+    pure callback hit-test(/* world-x */ float, /* world-y */ float, /* zoom */ float) -> HitResult;
     pure callback link-path(/* link-id */ int, /* version */ int, /* drag-dx */ float, /* drag-dy */ float) -> string;
     pure callback pin-preview-path(/* pin-id */ int, /* world-x */ float, /* world-y */ float) -> string;
     pure callback node-preview-path(/* node-id */ int, /* world-x */ float, /* world-y */ float) -> string;
@@ -433,7 +433,7 @@ export component NodeCanvas inherits Rectangle {
         }
 
         double-clicked => {
-            let hit = root.hit-test(root.to-world-x(self.mouse-x), root.to-world-y(self.mouse-y));
+            let hit = root.hit-test(root.to-world-x(self.mouse-x), root.to-world-y(self.mouse-y), root.zoom);
             if (hit.kind == 2 || hit.kind == 4) {
                 root.node-double-clicked(hit.id);
             }
@@ -481,12 +481,12 @@ export component NodeCanvas inherits Rectangle {
     }
 
     pure function hit-link-at(screen-x: length, screen-y: length) -> int {
-        let hit = root.hit-test(root.to-world-x(screen-x), root.to-world-y(screen-y));
+        let hit = root.hit-test(root.to-world-x(screen-x), root.to-world-y(screen-y), root.zoom);
         return hit.kind == 3 ? hit.id : -1;
     }
 
     function begin-left-press(shift: bool, ctrl: bool) {
-        let hit = root.hit-test(root.to-world-x(root.press-x), root.to-world-y(root.press-y));
+        let hit = root.hit-test(root.to-world-x(root.press-x), root.to-world-y(root.press-y), root.zoom);
         if (ctrl) {
             // Ctrl always means "marquee", even over a card.
             if (root.pending-pin != 0) {
@@ -549,7 +549,7 @@ export component NodeCanvas inherits Rectangle {
             }
         } else if (root.gesture == 4) {
             if (root.passed-threshold) {
-                let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y));
+                let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y), root.zoom);
                 if (target.kind == 1 && target.id != root.active-id) {
                     root.link-requested(root.active-id, target.id);
                     root.pending-pin = 0;
@@ -575,7 +575,7 @@ export component NodeCanvas inherits Rectangle {
         } else if (root.gesture == 5) {
             if (root.passed-threshold) {
                 if (root.pending-pin != 0) {
-                    let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y));
+                    let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y), root.zoom);
                     if (target.kind == 1 && target.id != root.pending-pin) {
                         root.link-requested(root.pending-pin, target.id);
                     } else {

@@ -22,10 +22,19 @@ pub(crate) const PORT_ROW_PITCH: f32 = 25.0;
 pub(crate) const PORT_ROW_HEIGHT: f32 = 22.0;
 /// Horizontal distance from the node edge to the centre of a pin.
 pub(crate) const PIN_INSET: f32 = 10.0;
-/// Pointer slack around a pin, in world units.
-pub(crate) const PIN_HIT_RADIUS: f32 = 11.0;
-/// Pointer slack around a link, in world units.
-pub(crate) const LINK_HIT_RADIUS: f32 = 7.0;
+/// Pointer slack around a pin, in logical screen pixels.
+///
+/// Hit tolerances are screen-space on purpose: they describe how precisely a
+/// person can aim, which does not change when the canvas is zoomed out. They
+/// are divided by the zoom just before they are used against world geometry.
+pub(crate) const PIN_SCREEN_HIT_RADIUS: f32 = 11.0;
+/// Pointer slack around a link, in logical screen pixels.
+pub(crate) const LINK_SCREEN_HIT_RADIUS: f32 = 9.0;
+/// Snap distance for resolving a finished drop onto a pin, in world units.
+///
+/// Unlike the pointer tolerances above this one is about card geometry -- how
+/// close to a port a drop counts as landing on it -- so it stays world-space.
+pub(crate) const PIN_DROP_RADIUS: f32 = 11.0;
 
 /// Nothing was hit.
 pub(crate) const HIT_NONE: i32 = 0;
@@ -262,8 +271,17 @@ impl CanvasGeometry {
     }
 
     /// Resolve a pointer press into the gesture it should start.
-    pub(crate) fn hit_test(&self, x: f32, y: f32) -> Hit {
-        let pin = self.find_pin_at(x, y, PIN_HIT_RADIUS);
+    ///
+    /// `zoom` converts the screen-space pointer tolerances into the world units
+    /// the cached geometry is expressed in, so an edge stays just as easy to
+    /// click when the canvas is zoomed out as it is at 1:1.
+    pub(crate) fn hit_test(&self, x: f32, y: f32, zoom: f32) -> Hit {
+        let zoom = if zoom.is_finite() && zoom > 0.01 {
+            zoom
+        } else {
+            1.0
+        };
+        let pin = self.find_pin_at(x, y, PIN_SCREEN_HIT_RADIUS / zoom);
         if pin != 0 {
             if let Some(pin) = self.pin(pin) {
                 return Hit {
@@ -288,7 +306,7 @@ impl CanvasGeometry {
                 y,
             };
         }
-        let link = self.find_link_at(x, y, LINK_HIT_RADIUS);
+        let link = self.find_link_at(x, y, LINK_SCREEN_HIT_RADIUS / zoom);
         if link >= 0 {
             return Hit {
                 kind: HIT_LINK,
@@ -568,7 +586,7 @@ mod tests {
     fn pins_win_over_the_node_under_the_pointer() {
         let canvas = geometry();
         let pin = canvas.pin(101).unwrap();
-        let hit = canvas.hit_test(pin.x, pin.y);
+        let hit = canvas.hit_test(pin.x, pin.y, 1.0);
         assert_eq!(hit.kind, HIT_PIN);
         assert_eq!(hit.id, 101);
         assert_eq!((hit.x, hit.y), (pin.x, pin.y));
@@ -579,19 +597,22 @@ mod tests {
         let canvas = geometry();
         let pin = canvas.pin(202).unwrap();
         assert_eq!(
-            canvas.find_pin_at(pin.x + 8.0, pin.y + 4.0, PIN_HIT_RADIUS),
+            canvas.find_pin_at(pin.x + 8.0, pin.y + 4.0, PIN_SCREEN_HIT_RADIUS),
             202
         );
-        assert_eq!(canvas.find_pin_at(pin.x + 40.0, pin.y, PIN_HIT_RADIUS), 0);
+        assert_eq!(
+            canvas.find_pin_at(pin.x + 40.0, pin.y, PIN_SCREEN_HIT_RADIUS),
+            0
+        );
     }
 
     #[test]
     fn node_press_reports_a_move_gesture_in_advanced_mode() {
         let canvas = geometry();
-        let hit = canvas.hit_test(200.0, 110.0);
+        let hit = canvas.hit_test(200.0, 110.0, 1.0);
         assert_eq!(hit.kind, HIT_NODE);
         assert_eq!(hit.id, 7);
-        let body = canvas.hit_test(200.0, 190.0);
+        let body = canvas.hit_test(200.0, 190.0, 1.0);
         assert_eq!(body.kind, HIT_NODE);
     }
 
@@ -599,8 +620,8 @@ mod tests {
     fn easy_mode_turns_the_node_body_into_a_connection_gesture() {
         let mut canvas = geometry();
         canvas.easy_mode = true;
-        assert_eq!(canvas.hit_test(200.0, 110.0).kind, HIT_NODE);
-        assert_eq!(canvas.hit_test(200.0, 190.0).kind, HIT_NODE_BODY);
+        assert_eq!(canvas.hit_test(200.0, 110.0, 1.0).kind, HIT_NODE);
+        assert_eq!(canvas.hit_test(200.0, 190.0, 1.0).kind, HIT_NODE_BODY);
     }
 
     #[test]
@@ -610,11 +631,11 @@ mod tests {
         let end = canvas.pin(202).unwrap();
         let midpoint = ((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
         assert_eq!(
-            canvas.find_link_at(midpoint.0, midpoint.1, LINK_HIT_RADIUS),
+            canvas.find_link_at(midpoint.0, midpoint.1, LINK_SCREEN_HIT_RADIUS),
             1
         );
         assert_eq!(
-            canvas.find_link_at(midpoint.0, midpoint.1 + 120.0, LINK_HIT_RADIUS),
+            canvas.find_link_at(midpoint.0, midpoint.1 + 120.0, LINK_SCREEN_HIT_RADIUS),
             -1
         );
     }
@@ -697,7 +718,7 @@ mod tests {
         // here, which is the whole point: the curve is continuous, not dotted.
         let awkward = point_on_link(&canvas, 1, 0.37);
         assert_eq!(
-            canvas.find_link_at(awkward.0, awkward.1, LINK_HIT_RADIUS),
+            canvas.find_link_at(awkward.0, awkward.1, LINK_SCREEN_HIT_RADIUS),
             1
         );
 
@@ -705,7 +726,7 @@ mod tests {
             let t = step as f32 / 200.0;
             let point = point_on_link(&canvas, 1, t);
             assert_eq!(
-                canvas.find_link_at(point.0, point.1, LINK_HIT_RADIUS),
+                canvas.find_link_at(point.0, point.1, LINK_SCREEN_HIT_RADIUS),
                 1,
                 "the pointer sits on the drawn curve at t={t}"
             );
@@ -717,17 +738,62 @@ mod tests {
         let canvas = long_link_geometry();
         let point = point_on_link(&canvas, 1, 0.37);
         assert_eq!(
-            canvas.find_link_at(point.0, point.1 + LINK_HIT_RADIUS * 6.0, LINK_HIT_RADIUS),
+            canvas.find_link_at(
+                point.0,
+                point.1 + LINK_SCREEN_HIT_RADIUS * 6.0,
+                LINK_SCREEN_HIT_RADIUS
+            ),
             -1
         );
-        assert_eq!(canvas.find_link_at(0.0, 0.0, LINK_HIT_RADIUS), -1);
+        assert_eq!(canvas.find_link_at(0.0, 0.0, LINK_SCREEN_HIT_RADIUS), -1);
+    }
+
+    #[test]
+    fn hit_tolerance_is_measured_in_screen_pixels_not_world_units() {
+        let canvas = long_link_geometry();
+        let point = point_on_link(&canvas, 1, 0.37);
+        // 16 world units off the curve: further than the 9px tolerance at 1:1,
+        // but well inside it once the canvas is halved, because the pointer is
+        // then only 8 screen pixels away from the drawn line.
+        let near_miss = (point.0, point.1 + 16.0);
+
+        assert_eq!(
+            canvas.hit_test(near_miss.0, near_miss.1, 1.0).kind,
+            HIT_NONE
+        );
+        let zoomed = canvas.hit_test(near_miss.0, near_miss.1, 0.5);
+        assert_eq!(zoomed.kind, HIT_LINK);
+        assert_eq!(zoomed.id, 1);
+
+        // Zooming in tightens the world tolerance by the same rule.
+        let pin = canvas.pin(202).unwrap();
+        assert_eq!(
+            canvas.hit_test(pin.x, pin.y + 8.0, 1.0).kind,
+            HIT_PIN,
+            "8 world units is inside the 11px pin tolerance at 1:1"
+        );
+        assert_ne!(
+            canvas.hit_test(pin.x - 8.0, pin.y - 8.0, 2.5).kind,
+            HIT_PIN,
+            "the same offset is far outside the pin once magnified"
+        );
+    }
+
+    #[test]
+    fn hit_test_survives_a_degenerate_zoom() {
+        let canvas = long_link_geometry();
+        let point = point_on_link(&canvas, 1, 0.37);
+        for zoom in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let hit = canvas.hit_test(point.0, point.1, zoom);
+            assert_eq!(hit.kind, HIT_LINK, "zoom {zoom} falls back to 1:1");
+        }
     }
 
     #[test]
     fn pin_wins_over_link_at_endpoint() {
         let canvas = long_link_geometry();
         let pin = canvas.pin(202).unwrap();
-        let hit = canvas.hit_test(pin.x, pin.y);
+        let hit = canvas.hit_test(pin.x, pin.y, 1.0);
         assert_eq!(hit.kind, HIT_PIN);
         assert_eq!(hit.id, 202);
     }
@@ -751,7 +817,7 @@ mod tests {
         let links = canvas.links.clone();
         canvas.replace(nodes, pins, links, false);
 
-        let hit = canvas.hit_test(middle.0, middle.1);
+        let hit = canvas.hit_test(middle.0, middle.1, 1.0);
         assert_eq!(hit.kind, HIT_NODE, "cards stay clickable through an edge");
         assert_eq!(hit.id, 9);
     }
@@ -792,7 +858,7 @@ mod tests {
         assert!(canvas
             .link_path(1, (0.0, 0.0))
             .starts_with("M 344.00 120.00"));
-        assert_eq!(canvas.find_pin_at(344.0, 120.0, PIN_HIT_RADIUS), 0);
+        assert_eq!(canvas.find_pin_at(344.0, 120.0, PIN_SCREEN_HIT_RADIUS), 0);
     }
 
     #[test]
