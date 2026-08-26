@@ -70,6 +70,43 @@ mod tests {
         assert_eq!(MeterPolicy::default(), MeterPolicy::OnDemand);
     }
 
+    /// Regression: metering eligibility used to require an audio *source*
+    /// port, so a playback sink -- speakers, headphones, any output device --
+    /// was never measurable and silently showed no meter, even though the
+    /// meter stream already knew how to read a sink through its monitor.
+    #[test]
+    fn playback_sinks_are_measurable_through_their_monitor() {
+        // Speakers: input ports only, no source port anywhere.
+        assert!(is_measurable_audio_node("Audio/Sink", false, true));
+        // A capture device keeps working exactly as before.
+        assert!(is_measurable_audio_node("Audio/Source", true, false));
+        // So does an application playing audio.
+        assert!(is_measurable_audio_node("Stream/Output/Audio", true, false));
+    }
+
+    #[test]
+    fn nodes_without_measurable_audio_are_left_alone() {
+        // A recording application is not a sink and has no source port, so
+        // there is nothing to capture and no stream should be opened for it.
+        assert!(!is_measurable_audio_node("Stream/Input/Audio", false, true));
+        // Video and MIDI nodes report neither audio direction.
+        assert!(!is_measurable_audio_node("Video/Sink", false, false));
+        assert!(!is_measurable_audio_node("Midi/Bridge", false, false));
+        // A sink with no audio ports at all is not measurable either.
+        assert!(!is_measurable_audio_node("Audio/Sink", false, false));
+    }
+
+    #[test]
+    fn playback_sink_detection_matches_the_meter_stream_rule() {
+        // `create_meter_locked` sets `stream.capture.sink` on the same test,
+        // so the two must agree or a meter would capture the wrong side.
+        assert!(media_class_is_playback_sink("Audio/Sink"));
+        assert!(media_class_is_playback_sink("audio/sink"));
+        assert!(!media_class_is_playback_sink("Audio/Source"));
+        assert!(!media_class_is_playback_sink("Stream/Output/Audio"));
+        assert!(!media_class_is_playback_sink(""));
+    }
+
     #[test]
     fn demo_backend_connects_and_disconnects() {
         let mut driver = DemoDriver::demo();

@@ -582,17 +582,36 @@ impl PipewireDriver {
         }
     }
 
-    /// Nodes that can be measured: they expose at least one audio source port.
+    /// Nodes that can be measured.
+    ///
+    /// Audio source ports are read directly; playback sinks are read through
+    /// their monitor, which `create_meter_locked` already arranges with
+    /// `stream.capture.sink`. The rule itself lives in [`crate::api`] so it can
+    /// be unit-tested without a PipeWire daemon.
     fn measurable_nodes(&self) -> BTreeSet<NodeId> {
+        let state = self.state.borrow();
         self.graph
             .nodes
             .values()
             .filter(|node| {
-                node.ports.iter().any(|port_id| {
-                    self.graph.port(*port_id).is_some_and(|port| {
-                        port.direction.is_source() && port.port_type == PortType::Audio
-                    })
-                })
+                let mut has_source = false;
+                let mut has_sink = false;
+                for port_id in &node.ports {
+                    let Some(port) = self.graph.port(*port_id) else {
+                        continue;
+                    };
+                    if port.port_type != PortType::Audio {
+                        continue;
+                    }
+                    has_source |= port.direction.is_source();
+                    has_sink |= port.direction.is_sink();
+                }
+                let media_class = state
+                    .nodes
+                    .get(&native_node_id(node.id))
+                    .map(|record| record.media_class.as_str())
+                    .unwrap_or_default();
+                is_measurable_audio_node(media_class, has_source, has_sink)
             })
             .map(|node| node.id)
             .collect()

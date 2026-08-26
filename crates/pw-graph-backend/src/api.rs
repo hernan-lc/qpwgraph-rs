@@ -272,6 +272,39 @@ pub struct AudioMeter {
     pub available: bool,
 }
 
+/// Whether a media class names a playback device whose output can be observed
+/// through its monitor ports.
+///
+/// PipeWire device sinks (`Audio/Sink`) carry the audio a user actually hears.
+/// Application streams (`Stream/Output/Audio`, `Stream/Input/Audio`) never
+/// match, because a stream has no monitor of its own.
+pub fn media_class_is_playback_sink(media_class: &str) -> bool {
+    media_class.to_ascii_lowercase().contains("sink")
+}
+
+/// Whether a node can be metered at all.
+///
+/// A node is measurable when either
+/// * it exposes an audio source port -- capture devices and the output side of
+///   application streams, which a helper stream can read directly; or
+/// * it is a playback sink with audio input ports, which is read through its
+///   monitor. Sinks used to be excluded because the check only looked for
+///   source ports, so speakers and other output devices never showed a meter
+///   even though the meter stream already knew how to capture them.
+///
+/// Deciding this from plain data keeps the rule testable on every platform,
+/// including the ones where the PipeWire driver is not compiled at all.
+pub fn is_measurable_audio_node(
+    media_class: &str,
+    has_audio_source_port: bool,
+    has_audio_sink_port: bool,
+) -> bool {
+    if has_audio_source_port {
+        return true;
+    }
+    media_class_is_playback_sink(media_class) && has_audio_sink_port
+}
+
 /// Audio controls exposed by a graph node when its backend supports them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodeAudioControl {
