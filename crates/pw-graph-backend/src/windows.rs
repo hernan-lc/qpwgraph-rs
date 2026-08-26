@@ -384,11 +384,7 @@ impl CoreAudioWorker {
         for (endpoint_id, flow, device) in endpoint_specs {
             let node_id = NodeId(graph_id(endpoint_node_local_id(&endpoint_id)));
             let port_id = PortId(graph_id(endpoint_port_local_id(&endpoint_id)));
-            let direction = if flow == Audio::eRender {
-                Direction::Sink
-            } else {
-                Direction::Source
-            };
+            let direction = endpoint_direction(flow);
             let name = endpoint_name(&device).unwrap_or_else(|| {
                 format!(
                     "Windows {} endpoint",
@@ -518,11 +514,7 @@ impl CoreAudioWorker {
                     stable_local_id(&format!("session:{}:{session_id}", endpoint.id)),
                 ),
             )?;
-            let session_direction = if endpoint.flow == Audio::eRender {
-                Direction::Source
-            } else {
-                Direction::Sink
-            };
+            let session_direction = session_direction(endpoint.flow);
             graph.add_port(Port::new(
                 port_id,
                 node_id,
@@ -530,11 +522,7 @@ impl CoreAudioWorker {
                 session_direction,
                 PortType::Audio,
             ))?;
-            let (output, input) = if endpoint.flow == Audio::eRender {
-                (port_id, endpoint.port_id)
-            } else {
-                (endpoint.port_id, port_id)
-            };
+            let (output, input) = session_link_ports(endpoint.flow, port_id, endpoint.port_id);
             let link_id = LinkId(graph_id(session_link_local_id(&endpoint.id, &session_id)));
             graph.insert_existing_link(Link {
                 id: link_id,
@@ -843,6 +831,34 @@ fn graph_id(local_id: u64) -> u64 {
     encode_backend_id(BackendNamespace::WindowsAudio, local_id)
 }
 
+fn endpoint_direction(flow: Audio::EDataFlow) -> Direction {
+    if flow == Audio::eRender {
+        Direction::Sink
+    } else {
+        Direction::Source
+    }
+}
+
+fn session_direction(flow: Audio::EDataFlow) -> Direction {
+    if flow == Audio::eRender {
+        Direction::Source
+    } else {
+        Direction::Sink
+    }
+}
+
+fn session_link_ports(
+    flow: Audio::EDataFlow,
+    session_port: PortId,
+    endpoint_port: PortId,
+) -> (PortId, PortId) {
+    if flow == Audio::eRender {
+        (session_port, endpoint_port)
+    } else {
+        (endpoint_port, session_port)
+    }
+}
+
 fn stable_local_id(value: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in value.as_bytes() {
@@ -949,6 +965,8 @@ fn process_name(process_id: u32) -> Option<String> {
 mod tests {
     use super::*;
     use pw_graph_core::{backend_for_node, backend_for_port, BackendKind};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     #[test]
     fn stable_ids_are_deterministic_and_namespaced() {
@@ -976,5 +994,66 @@ mod tests {
             session_link_local_id("endpoint-a", "session-a"),
             session_link_local_id("endpoint-a", "session-b")
         );
+    }
+
+    #[test]
+    fn endpoint_and_session_direction_mapping_matches_core_audio_flow() {
+        assert_eq!(endpoint_direction(Audio::eRender), Direction::Sink);
+        assert_eq!(endpoint_direction(Audio::eCapture), Direction::Source);
+        assert_eq!(session_direction(Audio::eRender), Direction::Source);
+        assert_eq!(session_direction(Audio::eCapture), Direction::Sink);
+
+        let session_port = PortId(10);
+        let endpoint_port = PortId(20);
+        assert_eq!(
+            session_link_ports(Audio::eRender, session_port, endpoint_port),
+            (session_port, endpoint_port)
+        );
+        assert_eq!(
+            session_link_ports(Audio::eCapture, session_port, endpoint_port),
+            (endpoint_port, session_port)
+        );
+    }
+
+    #[test]
+    fn endpoint_notifications_mark_the_graph_dirty() {
+        let dirty = Arc::new(AtomicBool::new(false));
+        let callback: Audio::IMMNotificationClient = EndpointNotificationClient {
+            dirty: Arc::clone(&dirty),
+        }
+        .into();
+
+        unsafe {
+            callback
+                .OnDeviceAdded(PCWSTR(std::ptr::null()))
+                .expect("notification callback should accept a device event");
+        }
+        assert!(dirty.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn live_backend_startup_is_optional_for_headless_windows_ci() {
+        let Ok(mut driver) = WindowsAudioDriver::new() else {
+            // Windows CI runners may not expose an audio service or endpoint.
+            return;
+        };
+        let nodes = driver
+            .refresh()
+            .expect("Core Audio refresh should succeed after startup");
+        assert!(nodes.iter().all(|node| {
+            matches!(
+                node.node_type,
+                NodeType::WindowsAudioEndpoint | NodeType::WindowsAudioSession
+            )
+        }));
+        assert!(driver
+            .graph()
+            .ports
+            .values()
+            .all(|port| port.port_type == PortType::Audio));
+        assert!(driver.graph().links.values().all(|link| {
+            driver.graph().port(link.output_port).is_some()
+                && driver.graph().port(link.input_port).is_some()
+        }));
     }
 }
