@@ -169,25 +169,35 @@ the loopback tap is whole-endpoint.
 Ordered by how much each one improves what a user actually sees. Everything
 above the line has landed; what is left is blocked on something specific.
 
-1. **Windows per-app output routing.** *Blocked: the interface is not reachable
-   here.* The edge the graph draws between an application session and an
-   endpoint is the one relationship Windows lets a user change -- Settings
-   calls it "App volume and device preferences". Two things were probed on
-   10.0.19045:
+1. **Windows per-app output routing.** *Blocked on an ABI that cannot be
+   derived by probing.* The edge the graph draws between an application session
+   and an endpoint is the one relationship Windows lets a user change --
+   Settings calls it "App volume and device preferences". The undocumented
+   object behind it was probed on 10.0.19045, and these results are worth
+   keeping because they narrow the next attempt considerably:
 
-   * `Windows.Media.Internal.AudioPolicyConfig` **does activate**
-     (`RoGetActivationFactory` returns S_OK) and is a valid `IActivationFactory`
-     and `IInspectable`.
-   * Querying it for `IAudioPolicyConfigFactory`
-     (`{ab3d4648-e242-459f-b02f-541c70306324}`) returns **E_NOINTERFACE**.
+   | Probe | Result |
+   | --- | --- |
+   | Activate `Windows.Media.Internal.AudioPolicyConfig` | **S_OK** |
+   | `IActivationFactory` / `IInspectable` | **S_OK** |
+   | IID `{ab3d4648-e242-459f-b02f-541c70306324}` (Windows 11) | E_NOINTERFACE |
+   | IID `{2a59116d-6c4f-45e0-a74f-707e3fef9258}` (Windows 10) | **S_OK** |
 
-   So there is no vtable to target on this build and nothing to verify against.
-   The IID matters because it *is* the layout contract: writing against a
-   guessed layout is undefined behaviour, not a failed call. The next step is
-   finding which IID this build actually exposes, on a machine where a
-   known-good implementation is confirmed working, and gating the call on that
-   exact IID so an unexpected build reports unsupported rather than calling
-   into the wrong slots.
+   So the interface **is present here**, under the Windows 10 IID. What could
+   not be established is its method layout. Calling vtable slots 0-11 past
+   `IInspectable` with a `(u32 pid, i32 flow, i32 role, out HSTRING)` signature
+   faults on most of them and returns a uniform `E_INVALIDARG` on the two that
+   survive, across every flow and role, with and without a live audio session
+   for the calling process. That points at the parameter list being wrong
+   rather than the values -- the first argument is probably not a bare process
+   id on this interface.
+
+   Guessing further is not worth it: a wrong slot is undefined behaviour, not a
+   failed call, and the probe above demonstrated that concretely. The next
+   attempt should start from a known-good implementation's declaration for the
+   `{2a59116d-…}` IID, and gate every call on that exact IID so a build that
+   exposes a different one reports unsupported instead of calling into the
+   wrong slots.
 2. **Relay a single application.** *Blocked on the OS build here.* Metering one
    application no longer needs process loopback (see Metering), but capturing
    its audio still does, and that requires build 20348 or newer; this machine
