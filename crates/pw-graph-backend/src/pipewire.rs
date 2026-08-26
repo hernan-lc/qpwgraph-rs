@@ -648,7 +648,7 @@ impl PipewireDriver {
                 .filter_map(|node_id| {
                     state
                         .nodes
-                        .get(&native_node_id(*node_id))
+                        .get(&native_node_id(node_id))
                         .map(|record| (node_id, record.clone()))
                 })
                 .collect()
