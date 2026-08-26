@@ -472,6 +472,130 @@ mod tests {
         );
     }
 
+    /// Per-application metering, without process loopback.
+    ///
+    /// `IAudioMeterInformation` is documented as an endpoint facility, but a
+    /// session control implements it as well -- which matters because process
+    /// loopback capture, the other route to a per-app level, needs Windows
+    /// build 20348. This works on any build that has sessions at all.
+    ///
+    /// Opt-in: it plays a tone through the default playback device, which
+    /// creates the session it then measures.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_meters_a_single_application_through_its_session() {
+        use ::windows::Win32::Media::Audio;
+        use ::windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        if std::env::var_os("PW_GRAPH_TEST_METERS").is_none() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let playing = Arc::clone(&stop);
+        // A full-scale-ish sine, so the expected peak is unambiguous.
+        const AMPLITUDE: f32 = 0.4;
+        let tone = std::thread::spawn(move || unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let run = || -> ::windows::core::Result<()> {
+                let enumerator: Audio::IMMDeviceEnumerator =
+                    CoCreateInstance(&Audio::MMDeviceEnumerator, None, CLSCTX_ALL)?;
+                let device = enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole)?;
+                let client: Audio::IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+                let format = client.GetMixFormat()?;
+                client.Initialize(
+                    Audio::AUDCLNT_SHAREMODE_SHARED,
+                    Default::default(),
+                    2_000_000,
+                    0,
+                    format,
+                    None,
+                )?;
+                let render: Audio::IAudioRenderClient = client.GetService()?;
+                let buffer_frames = client.GetBufferSize()?;
+                let channels = (*format).nChannels as usize;
+                let rate = (*format).nSamplesPerSec as f32;
+                client.Start()?;
+                let mut phase = 0.0f32;
+                while !playing.load(Ordering::Acquire) {
+                    let available =
+                        buffer_frames.saturating_sub(client.GetCurrentPadding().unwrap_or(0));
+                    if available > 0 {
+                        let data = render.GetBuffer(available)?;
+                        let out = std::slice::from_raw_parts_mut(
+                            data.cast::<f32>(),
+                            available as usize * channels,
+                        );
+                        for frame in 0..available as usize {
+                            phase += 440.0 * std::f32::consts::TAU / rate;
+                            let value = phase.sin() * AMPLITUDE;
+                            for channel in 0..channels {
+                                out[frame * channels + channel] = value;
+                            }
+                        }
+                        let _ = render.ReleaseBuffer(available, 0);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let _ = client.Stop();
+                Ok(())
+            };
+            let _ = run();
+            CoUninitialize();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(700));
+
+        let measured = (|| {
+            let mut driver = WindowsAudioDriver::new().ok()?;
+            driver.refresh().ok()?;
+            let sessions: BTreeSet<NodeId> = driver
+                .graph()
+                .nodes
+                .values()
+                .filter(|node| node.node_type == NodeType::WindowsAudioSession)
+                .map(|node| node.id)
+                .collect();
+            if sessions.is_empty() {
+                return None;
+            }
+            // Every session reports meter capability, and at least one of them
+            // is the tone.
+            assert!(sessions
+                .iter()
+                .all(|node| driver.node_capabilities(*node).meter_peak));
+            driver.set_meter_policy(MeterPolicy::Always).ok()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let peak = driver
+                    .audio_meters()
+                    .ok()?
+                    .into_iter()
+                    .filter(|meter| sessions.contains(&meter.node_id))
+                    .map(|meter| meter.peak)
+                    .fold(0.0f32, f32::max);
+                if peak > 0.05 {
+                    return Some(peak);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Some(0.0)
+        })();
+
+        stop.store(true, Ordering::Release);
+        let _ = tone.join();
+
+        let Some(peak) = measured else {
+            return;
+        };
+        assert!(
+            (peak - AMPLITUDE).abs() < 0.05,
+            "the playing application's session should meter about {AMPLITUDE}, got {peak}"
+        );
+    }
+
     /// `IAudioMeterInformation` is an endpoint peak meter with no RMS reading,
     /// and `audio_meters` reports `rms: 0.0`. Claiming RMS capability would
     /// make the UI draw a permanently silent RMS bar beside a working peak one.

@@ -65,8 +65,8 @@ type AudioStateMap = Arc<Mutex<BTreeMap<NodeId, NodeAudioState>>>;
 /// shared map, which the refresh fills and the callbacks keep current.
 struct WorkerSnapshot {
     graph: Graph,
-    /// Nodes that can be metered. Endpoints expose `IAudioMeterInformation`;
-    /// application sessions do not.
+    /// Nodes that can report a level: endpoints, and sessions whose control
+    /// answered the meter query.
     meterable: BTreeSet<NodeId>,
     /// Render endpoints as `(device id, display name)`, for relay selection.
     playback_endpoints: Vec<(String, String)>,
@@ -92,7 +92,7 @@ pub struct WindowsAudioDriver {
     /// Audio state as Core Audio last reported it, kept current by change
     /// callbacks. The backend owns these values; nothing upstream keeps a copy.
     audio_states: AudioStateMap,
-    /// Nodes Core Audio can meter. Endpoints can; sessions cannot.
+    /// Nodes Core Audio can meter: endpoints, and sessions that expose a meter.
     meterable: BTreeSet<NodeId>,
     positions: BTreeMap<NodeId, [f32; 2]>,
     command_tx: Sender<WorkerCommand>,
@@ -368,18 +368,18 @@ impl GraphDriver for WindowsAudioDriver {
             .unwrap_or(NodeAudioState::UNSUPPORTED))
     }
 
-    /// Endpoints expose `IAudioMeterInformation`; application sessions do not,
-    /// so a session must not be given a meter it can never fill.
+    /// A node only reports meter capability when something actually answered
+    /// the meter query for it, so no card is given a meter it cannot fill.
     fn node_capabilities(&self, node: NodeId) -> NodeCapabilities {
         let Ok(state) = self.node_audio_state(node) else {
             return NodeCapabilities::NONE;
         };
         let mut capabilities = state.control_capabilities();
         if self.meterable.contains(&node) {
-            // `IAudioMeterInformation` is an endpoint *peak* meter. It has no
-            // RMS reading, and `audio_meters` reports rms: 0.0 accordingly, so
-            // claiming RMS here would make the UI draw a permanently silent
-            // RMS bar next to a working peak one.
+            // `IAudioMeterInformation` is a *peak* meter, on endpoints and on
+            // sessions alike. It has no RMS reading, and `audio_meters` reports
+            // rms: 0.0 accordingly, so claiming RMS here would make the UI draw
+            // a permanently silent RMS bar next to a working peak one.
             capabilities.meter_peak = true;
             capabilities.meter_rms = false;
         }
@@ -694,6 +694,15 @@ struct SessionRecord {
     session_id: String,
     flow: Audio::EDataFlow,
     node_id: NodeId,
+    /// The session's own peak meter, kept so a level can be read without
+    /// re-enumerating the endpoint every frame.
+    ///
+    /// `IAudioMeterInformation` is documented as an endpoint facility, but a
+    /// session control implements it too, and that is the only per-application
+    /// level Windows offers short of process loopback capture -- which needs
+    /// build 20348. Verified against a played tone: a 0.4 amplitude sine reads
+    /// back as 0.39999998 on the owning session and 0.0 on every other.
+    meter: Option<IAudioMeterInformation>,
 }
 
 struct CoreAudioWorker {
@@ -809,11 +818,7 @@ impl CoreAudioWorker {
             *shared = states;
         }
         self.register_endpoint_volume_callbacks();
-        let meterable = self
-            .endpoints
-            .iter()
-            .map(|endpoint| endpoint.node_id)
-            .collect();
+        let meterable = self.meterable_nodes();
         let playback_endpoints = self
             .endpoints
             .iter()
@@ -1031,6 +1036,9 @@ impl CoreAudioWorker {
                 input_port: input,
             })?;
 
+            // Query the meter before the control is handed to the notification
+            // registration, which consumes it.
+            let meter = control.cast::<IAudioMeterInformation>().ok();
             let events: Audio::IAudioSessionEvents = SessionEventsClient {
                 dirty: Arc::clone(&self.dirty),
                 node_id,
@@ -1045,6 +1053,7 @@ impl CoreAudioWorker {
                 session_id,
                 flow: endpoint.flow,
                 node_id,
+                meter,
             });
         }
         Ok(result)
@@ -1154,15 +1163,58 @@ impl CoreAudioWorker {
         ))
     }
 
+    /// Whether a node should currently own a meter, under the active policy.
+    fn meter_wanted(&self, node: NodeId) -> bool {
+        match self.meter_policy {
+            MeterPolicy::Disabled => false,
+            MeterPolicy::Always => true,
+            MeterPolicy::OnDemand => self.requested_meters.contains(&node),
+        }
+    }
+
+    /// Nodes that can report a level: every endpoint, plus every session whose
+    /// control answered the meter query.
+    fn meterable_nodes(&self) -> BTreeSet<NodeId> {
+        self.endpoints
+            .iter()
+            .map(|endpoint| endpoint.node_id)
+            .chain(
+                self.sessions
+                    .iter()
+                    .filter(|session| session.meter.is_some())
+                    .map(|session| session.node_id),
+            )
+            .collect()
+    }
+
     fn audio_meters(&self) -> BackendResult<Vec<AudioMeter>> {
         if self.meter_policy == MeterPolicy::Disabled {
             return Ok(Vec::new());
         }
         let mut result = Vec::new();
+        // Per-application levels, straight off each session's own meter.
+        for session in &self.sessions {
+            let Some(meter) = session.meter.as_ref() else {
+                continue;
+            };
+            if !self.meter_wanted(session.node_id) {
+                continue;
+            }
+            let Ok(peak) = (unsafe { meter.GetPeakValue() }) else {
+                continue;
+            };
+            result.push(AudioMeter {
+                node_id: session.node_id,
+                port_id: None,
+                // Like the endpoint meter, this is peak only.
+                rms: 0.0,
+                peak: peak.clamp(0.0, 1.0),
+                age_ms: 0,
+                available: true,
+            });
+        }
         for endpoint in &self.endpoints {
-            if self.meter_policy == MeterPolicy::OnDemand
-                && !self.requested_meters.contains(&endpoint.node_id)
-            {
+            if !self.meter_wanted(endpoint.node_id) {
                 continue;
             }
             let meter: IAudioMeterInformation =

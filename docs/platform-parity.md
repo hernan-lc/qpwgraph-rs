@@ -86,7 +86,7 @@ top of a Windows fader is no longer dead travel that silently clamps.
 | --- | --- | --- | --- |
 | Meter a capture source | Yes | Yes | Equivalent |
 | Meter a playback sink | Yes, through its monitor | Yes | Equivalent |
-| Meter an application stream | Yes | No | Missing (build 20348+) |
+| Meter an application stream | Yes | Yes, peak only | Equivalent |
 | Meter policies (off/on-demand/always) | Yes | Yes | Equivalent |
 
 Playback sinks used to be excluded from metering on Linux: eligibility required
