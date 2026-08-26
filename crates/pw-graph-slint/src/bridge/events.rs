@@ -156,13 +156,10 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
             if let Some(node_id) = application.view.ids.node_id(id) {
                 let position = position.clamp(0.0, 1.0);
                 let volume = volume_from_track_position(position);
+                // The backend owns the value; the next sync reads back whatever
+                // it actually applied, so nothing is cached here.
                 match application.source.set_node_volume(node_id, volume) {
                     Ok(()) => {
-                        application
-                            .audio_controls
-                            .entry(node_id)
-                            .or_default()
-                            .volume_position = position;
                         application.status = application.tf(
                             "status.node_volume_changed",
                             &[("volume", format!("{:.0}%", volume * 100.0))],
@@ -177,15 +174,17 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
         }
         UiEvent::ToggleAudioMute(id) => {
             if let Some(node_id) = application.view.ids.node_id(id) {
+                // Toggle against the backend's own reading. A node whose mute
+                // state has never been read is treated as unmuted, so the first
+                // toggle mutes it -- the same thing the user just asked for.
                 let muted = !application
-                    .audio_controls
-                    .get(&node_id)
-                    .copied()
-                    .unwrap_or_default()
-                    .muted;
+                    .source
+                    .node_audio_state(node_id)
+                    .ok()
+                    .and_then(|state| state.muted)
+                    .unwrap_or(false);
                 match application.source.set_node_mute(node_id, muted) {
                     Ok(()) => {
-                        application.audio_controls.entry(node_id).or_default().muted = muted;
                         application.status = application.tf(
                             "status.node_mute_changed",
                             &[(

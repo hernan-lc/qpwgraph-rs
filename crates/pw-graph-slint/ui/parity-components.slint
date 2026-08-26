@@ -166,8 +166,15 @@ component ScaleSettingRow inherits Rectangle {
 }
 
 export component NodeAudioControl inherits Rectangle {
-    in property <float> volume-position: 0.9;
+    in property <float> volume-position: 0.0;
+    // Whether the backend actually reported a level. A card that has not read
+    // one dims the fader instead of drawing a level the system does not have.
+    in property <bool> volume-known: false;
     in property <bool> muted: false;
+    // Per-node capability: a node whose backend cannot write these must not
+    // offer a control the user can move.
+    in property <bool> volume-enabled: true;
+    in property <bool> mute-enabled: true;
     in property <float> meter-peak: 0.0;
     in property <float> meter-peak-position: 0.0;
     in property <bool> meter-available: false;
@@ -207,7 +214,9 @@ export component NodeAudioControl inherits Rectangle {
         border-radius: 5px;
 
         Rectangle { x: 8px; y: 8px; width: parent.width - 16px; height: 3px; background: #4d5864; border-radius: 2px; }
-        Rectangle { x: 8px; y: 8px; width: (parent.width - 16px) * root.displayed-volume-position; height: 3px; background: #9aa7b2; border-radius: 2px; }
+        // Dimmed while the level is unknown or the node cannot be written, so
+        // an un-read fader never looks like a real setting.
+        Rectangle { x: 8px; y: 8px; width: (parent.width - 16px) * root.displayed-volume-position; height: 3px; background: #9aa7b2; border-radius: 2px; opacity: root.volume-known && root.volume-enabled ? 1.0 : 0.35; }
 
         for _[index] in 31: Rectangle {
             property <float> fraction: index / 30;
@@ -231,12 +240,14 @@ export component NodeAudioControl inherits Rectangle {
             border-color: #aab5be;
             border-width: 1px;
             border-radius: 8px;
+            opacity: root.volume-known && root.volume-enabled ? 1.0 : 0.35;
         }
 
         slider-touch := TouchArea {
             property <bool> pending: false;
             property <float> drag-position: root.volume-position;
             width: 100%; height: 100%;
+            enabled: root.volume-enabled;
             mouse-cursor: MouseCursor.pointer;
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
@@ -273,6 +284,7 @@ export component NodeAudioControl inherits Rectangle {
             property <bool> pending: false;
             property <bool> requested-muted: root.muted;
             width: 100%; height: 100%; mouse-cursor: MouseCursor.pointer;
+            enabled: root.mute-enabled;
             clicked => {
                 requested-muted = !root.displayed-muted;
                 pending = true;

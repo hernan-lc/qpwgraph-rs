@@ -39,7 +39,10 @@ export struct NodeRow {
     meter-available: bool,
     meter-label: string,
     audio-volume-position: float,
+    audio-volume-known: bool,
     audio-muted: bool,
+    audio-volume-enabled: bool,
+    audio-mute-enabled: bool,
     ports: [PortRow],
 }
 
@@ -170,7 +173,10 @@ component GraphNode inherits Rectangle {
             y: 7px;
             width: parent.width - 20px;
             volume-position: data.audio-volume-position;
+            volume-known: data.audio-volume-known;
             muted: data.audio-muted;
+            volume-enabled: data.audio-volume-enabled;
+            mute-enabled: data.audio-mute-enabled;
             meter-peak: data.meter-peak;
             meter-peak-position: data.meter-peak-position;
             meter-label: data.meter-label;

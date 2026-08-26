@@ -70,14 +70,27 @@ pub(crate) fn language_code(index: i32) -> &'static str {
     }
 }
 
+/// Unity gain sits at 90% of the track, leaving the top tenth for boost.
+const UNITY_TRACK_POSITION: f32 = 0.9;
+const MAX_VOLUME: f32 = 1.5;
+
 pub(crate) fn volume_from_track_position(position: f32) -> f32 {
-    const UNITY_TRACK_POSITION: f32 = 0.9;
-    const MAX_VOLUME: f32 = 1.5;
     let position = position.clamp(0.0, 1.0);
     if position <= UNITY_TRACK_POSITION {
         position / UNITY_TRACK_POSITION
     } else {
         1.0 + (position - UNITY_TRACK_POSITION) / (1.0 - UNITY_TRACK_POSITION) * (MAX_VOLUME - 1.0)
+    }
+}
+
+/// Inverse of [`volume_from_track_position`], for drawing a backend-reported
+/// level on the same track the user drags.
+pub(crate) fn track_position_from_volume(volume: f32) -> f32 {
+    let volume = volume.clamp(0.0, MAX_VOLUME);
+    if volume <= 1.0 {
+        volume * UNITY_TRACK_POSITION
+    } else {
+        UNITY_TRACK_POSITION + (volume - 1.0) / (MAX_VOLUME - 1.0) * (1.0 - UNITY_TRACK_POSITION)
     }
 }
 

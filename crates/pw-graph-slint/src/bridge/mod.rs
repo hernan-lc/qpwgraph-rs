@@ -120,7 +120,6 @@ impl UiBridge {
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
             meter_error: None,
-            audio_controls: BTreeMap::new(),
             #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_levels: BTreeMap::new(),
             #[cfg(all(target_os = "linux", feature = "relay"))]
@@ -451,7 +450,6 @@ mod tests {
             last_refresh: Instant::now(),
             meters: BTreeMap::new(),
             meter_error: None,
-            audio_controls: BTreeMap::new(),
             #[cfg(all(target_os = "linux", feature = "relay"))]
             relay_levels: BTreeMap::new(),
             #[cfg(all(target_os = "linux", feature = "relay"))]

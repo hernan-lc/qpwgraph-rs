@@ -1,6 +1,6 @@
 //! Framework-neutral state projected into Slint models.
 
-use pw_graph_backend::GraphDriver;
+use pw_graph_backend::{GraphDriver, NodeAudioState, NodeCapabilities};
 use pw_graph_config::AppConfig;
 use pw_graph_core::{
     Direction, Graph, LinkId, Node, NodeAppearance, NodeId, NodeType, Port, PortId, PortType,
@@ -214,8 +214,38 @@ pub(crate) struct NodeView {
     pub(crate) font_scale: f32,
     pub(crate) appearance: NodeAppearance,
     pub(crate) has_audio_controls: bool,
+    /// Audio state and per-node capability, both read from the backend. The
+    /// UI keeps no copy of its own: whatever is here is what the backend last
+    /// reported, and an unknown value stays unknown.
+    pub(crate) audio: NodeAudioProfile,
     pub(crate) meter: MeterReading,
     pub(crate) ports: Vec<PortGroupView>,
+}
+
+/// What one backend says about a node's audio controls.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct NodeAudioProfile {
+    pub(crate) state: NodeAudioState,
+    pub(crate) capabilities: NodeCapabilities,
+}
+
+/// Stand-in for a backend that supports everything, used where a test cares
+/// about projection rather than about capability gating.
+#[cfg(test)]
+pub(crate) fn fully_capable_audio_profiles(graph: &Graph) -> BTreeMap<NodeId, NodeAudioProfile> {
+    graph
+        .nodes
+        .keys()
+        .map(|node_id| {
+            (
+                *node_id,
+                NodeAudioProfile {
+                    state: NodeAudioState::readable(1.0, false),
+                    capabilities: NodeCapabilities::FULL,
+                },
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -277,7 +307,13 @@ impl UiGraphState {
 
     #[cfg(test)]
     pub(crate) fn snapshot(&mut self, graph: &Graph, config: &AppConfig) -> GraphSnapshot {
-        self.snapshot_with_meters(graph, config, &BTreeMap::new(), MeterState::Unavailable)
+        self.snapshot_with_meters(
+            graph,
+            config,
+            &BTreeMap::new(),
+            MeterState::Unavailable,
+            &fully_capable_audio_profiles(graph),
+        )
     }
 
     pub(crate) fn snapshot_with_meters(
@@ -286,6 +322,7 @@ impl UiGraphState {
         config: &AppConfig,
         meters: &BTreeMap<NodeId, MeterReading>,
         meter_fallback: MeterState,
+        audio_profiles: &BTreeMap<NodeId, NodeAudioProfile>,
     ) -> GraphSnapshot {
         self.ids.rebuild(graph);
         self.local_positions
@@ -326,7 +363,11 @@ impl UiGraphState {
                     pin_groups.insert(*id, port.pin_id);
                 }
             }
-            let has_audio_controls = node.node_type != NodeType::Effect
+            // Which controls exist is the backend's call, not a guess from the
+            // node type: a Windows application session and a Windows endpoint
+            // are both "audio nodes" but expose different controls.
+            let audio = audio_profiles.get(&node.id).copied().unwrap_or_default();
+            let has_audio_controls = audio.capabilities.has_any_control()
                 && node.ports.iter().any(|id| {
                     graph
                         .port(*id)
@@ -352,6 +393,7 @@ impl UiGraphState {
                 font_scale: self.node_text_scale,
                 appearance,
                 has_audio_controls,
+                audio,
                 meter: meters.get(&node.id).copied().unwrap_or(MeterReading {
                     state: meter_fallback,
                     ..MeterReading::default()
@@ -1377,7 +1419,13 @@ mod tests {
             },
         );
 
-        let snapshot = state.snapshot_with_meters(&graph, &config, &meters, MeterState::Waiting);
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &meters,
+            MeterState::Waiting,
+            &fully_capable_audio_profiles(&graph),
+        );
         let source = snapshot
             .nodes
             .iter()

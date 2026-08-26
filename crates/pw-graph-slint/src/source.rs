@@ -170,6 +170,19 @@ impl ApplicationDriver {
         GraphDriver::set_node_mute(self, node, muted).map_err(|error| error.to_string())
     }
 
+    /// Audio state as the backend reports it. The UI renders this and keeps no
+    /// copy, so a value the backend cannot read stays visibly unknown.
+    pub(crate) fn node_audio_state(
+        &self,
+        node: NodeId,
+    ) -> Result<pw_graph_backend::NodeAudioState, String> {
+        GraphDriver::node_audio_state(self, node).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn node_capabilities(&self, node: NodeId) -> pw_graph_backend::NodeCapabilities {
+        GraphDriver::node_capabilities(self, node)
+    }
+
     pub(crate) fn connect_by_key_if_missing(
         &mut self,
         output: &PortKey,
@@ -351,6 +364,23 @@ impl GraphDriver for ApplicationDriver {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.set_node_position(node, position),
             BackendKind::Live(driver) => driver.set_node_position(node, position),
+        }
+    }
+
+    fn node_audio_state(
+        &self,
+        node: NodeId,
+    ) -> pw_graph_backend::BackendResult<pw_graph_backend::NodeAudioState> {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.node_audio_state(node),
+            BackendKind::Live(driver) => driver.node_audio_state(node),
+        }
+    }
+
+    fn node_capabilities(&self, node: NodeId) -> pw_graph_backend::NodeCapabilities {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.node_capabilities(node),
+            BackendKind::Live(driver) => driver.node_capabilities(node),
         }
     }
 
