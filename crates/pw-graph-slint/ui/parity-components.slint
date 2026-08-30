@@ -132,7 +132,10 @@ component SwitchSettingRow inherits Rectangle {
     Text { x: 32px; y: 6px; width: parent.width - 84px; height: 18px; text: root.title; color: #e6edf2; font-size: 11px * UiTheme.panel-scale; vertical-alignment: center; overflow: elide; }
     Text { x: 32px; y: 27px; width: parent.width - 84px; height: 19px; text: root.help; color: #8393a0; font-size: 8px * UiTheme.panel-scale; vertical-alignment: top; wrap: word-wrap; overflow: elide; }
     CheckBox { x: parent.width - 37px; y: 18px; width: 22px; checked <=> root.checked; }
-    touch := TouchArea { width: parent.width - 48px; height: parent.height; clicked => { root.checked = !root.checked; } }
+    // Anchored left so the row's clickable area stops short of the check box
+    // instead of being centred: centring left the icon unclickable and made
+    // the two hit areas overlap, so a click near the box toggled twice.
+    touch := TouchArea { x: 0px; y: 0px; width: parent.width - 48px; height: parent.height; clicked => { root.checked = !root.checked; } }
 }
 
 component SelectSettingRow inherits Rectangle {
@@ -211,6 +214,11 @@ export component NodeAudioControl inherits Rectangle {
     }
 
     slider := Rectangle {
+        // Without an explicit position this is centred, which left a gap the
+        // width of the mute button to its left and pushed the fader out of
+        // line with the meter drawn on cards that have no volume control.
+        x: 0px;
+        y: 0px;
         width: root.slider-width;
         height: 27px;
         background: #1d232a;
@@ -276,6 +284,7 @@ export component NodeAudioControl inherits Rectangle {
 
     mute := Rectangle {
         x: root.slider-width + 5px;
+        y: 0px;
         width: root.mute-width;
         height: 27px;
         background: mute-touch.has-hover ? #303a45 : #1f252e;
