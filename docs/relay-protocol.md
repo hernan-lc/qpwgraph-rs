@@ -50,6 +50,11 @@ so it does not depend on UDP. Android-client-to-desktop-host uses
 `adb reverse`; desktop-client-to-Android-host uses `adb forward`. ADB mode is
 explicit and has no mDNS/USB peer discovery.
 
+Normal UDP sockets are bound to the selected local interface. A wildcard
+(`0.0.0.0`) is used only by `Auto` when no classified relay-capable interface
+is available, or when an embedding explicitly requests a wildcard bind. ADB
+is loopback-only and never masquerades as a USB network interface.
+
 ## Threat model
 
 The relay is designed to be safe on a network containing untrusted devices:
@@ -137,11 +142,29 @@ sent in cleartext. The authenticated client sends an enrollment message after
 
 ```text
 C → H  TrustEnroll       peer_id, secret (hex, sealed)
-H → C  TrustAccepted     (sealed)
+H → application  TrustedPeerEnrollmentRequested (transaction_id, metadata)
+application → H  accept_trusted_enrollment(transaction_id)
+H → C  TrustAccepted     (sealed, only after durable commit)
 ```
+
+`TrustEnroll`, `TrustAccepted`, and `TrustRejected` are valid only inside the
+authenticated sealed control channel. The host keeps a bounded 64-entry,
+10-second enrollment transaction table. The embedding retrieves the secret
+through its private enrollment API, durably commits it, and only then accepts
+the transaction. Persistence failure, timeout, malformed credentials, and a
+second enrollment for the same peer leave the existing credential unchanged.
+A later PIN pairing for the same identity is a transactional rotation: the old
+credential remains valid until the new durable commit, then the host replaces
+it.
 
 A host configured for PIN-only operation answers with sealed
 `TrustRejected` and does not retain the credential.
+
+Desktop persistence is an owner-only atomic config write (temporary sibling,
+flush, rename, and parent-directory sync). Android encrypts the credential with
+a non-exportable Android Keystore AES-256-GCM key and stores only the version,
+nonce, ciphertext, peer ID, and display metadata in `relay.xml`. `relay.xml` is
+excluded from backup and device transfer. PINs are never persisted.
 
 For subsequent connections the client proves the credential without a PIN:
 
@@ -297,7 +320,14 @@ TCP stream replaces the old one. The host holds a dropped session open for 15
 seconds; the client makes three attempts with exponential backoff. Each
 attempt starts with the original target and then tries addresses discovered
 for the same stable peer ID, so a Wi-Fi-to-USB address change can be resumed
-without treating a different nearby host as the session owner.
+without treating a different nearby host as the session owner. Candidate
+addresses are grouped by stable ID, capped, ranked as last-successful address,
+USB, same-subnet, Wi-Fi, Bluetooth PAN, then LAN, and backed off per
+`(peer_id, address)`. A public discovery ID is only a routing hint; the resume
+proof remains the identity check. A healthy Wi-Fi session is not proactively
+moved merely because USB appears; authenticated resume/failover performs the
+interface-scoped UDP switch and keeps the old path available if rebinding
+fails.
 
 ## Resource limits
 
@@ -313,6 +343,9 @@ unauthenticated peer.
 | Jitter buffer capacity      | 128     | Frames held regardless of sequence spread  |
 | Control frame size          | 64 KiB  | Allocation per control frame               |
 | Event queue                 | 256     | Events held for a slow UI consumer         |
+| Trusted enrollment requests | 64      | Durable enrollment transactions            |
+| Trusted candidate addresses | 16/peer | Discovery candidates for one identity      |
+| Candidate failure records   | 1024    | Per-address reconnect backoff state        |
 
 The host honours an explicit bind address first. Otherwise it binds the highest-
 ranked active relay-capable local link under the preference order USB, Wi-Fi,

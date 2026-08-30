@@ -28,6 +28,43 @@ class RelayModelTest {
     }
 
     @Test
+    fun trusted_auto_connect_policy_requires_explicit_wifi_opt_in() {
+        val usb = DiscoveredPeer("host", "Host", "192.168.42.1:48123", "usb")
+        val wifi = DiscoveredPeer("host", "Host", "192.168.1.20:48123", "wifi")
+        val lan = DiscoveredPeer("host", "Host", "10.0.0.20:48123", "lan")
+        assertTrue(trustedAutoConnectAllowed(RelaySettings(), usb))
+        assertFalse(trustedAutoConnectAllowed(RelaySettings(), wifi))
+        assertTrue(
+            trustedAutoConnectAllowed(
+                RelaySettings(autoConnectTrustedWifi = true),
+                wifi,
+            ),
+        )
+        assertFalse(
+            trustedAutoConnectAllowed(
+                RelaySettings(autoConnectTrustedWifi = true),
+                lan,
+            ),
+        )
+        assertFalse(
+            trustedAutoConnectAllowed(
+                RelaySettings(autoConnectTrusted = false, autoConnectTrustedWifi = true),
+                usb,
+            ),
+        )
+    }
+
+    @Test
+    fun credential_bearing_models_do_not_reveal_secrets_in_to_string() {
+        val secret = "ab".repeat(32)
+        assertFalse(
+            TrustedRelayPeer("host", secret).toString().contains(secret),
+        )
+        assertFalse(HostSettings(pin = "123456").toString().contains("123456"))
+        assertFalse(RelaySettings(pin = "123456").toString().contains("123456"))
+    }
+
+    @Test
     fun service_geometry_uses_host_settings_for_host_and_client_settings_for_client() {
         val client = RelaySettings(sampleRate = 16_000, channels = 1, frameMs = 60)
         val host = HostSettings(sampleRate = 48_000, channels = 1, frameMs = 5)

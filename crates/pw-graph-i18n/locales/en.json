@@ -227,6 +227,8 @@
   "relay.peer_lost": "Relay host disappeared: {name}",
   "relay.session_connected": "Relay session connected to {name}",
   "relay.session_lost": "Relay session lost: {reason}",
+  "relay.trusted_peer_forgotten": "Trusted relay device forgotten",
+  "relay.trusted_connection_rejected": "Trusted connection was rejected. Pair with the host PIN again.",
   "relay.error": "Relay error: {error}",
   "relay.direction_both": "send + receive",
   "relay.direction_send": "send",

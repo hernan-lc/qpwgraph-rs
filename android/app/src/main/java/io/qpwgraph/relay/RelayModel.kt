@@ -9,11 +9,19 @@ data class RelaySettings(
     val role: String = "emit",
     val codec: String = "opus",
     val transport: String = "auto",
+    /** Trusted auto-connect is explicit; USB is the only default candidate. */
+    val autoConnectTrusted: Boolean = true,
+    val autoConnectTrustedWifi: Boolean = false,
     val deviceName: String = "android-relay",
     val sampleRate: Int = 48_000,
     val channels: Int = 1,
     val frameMs: Int = 20,
-)
+) {
+    override fun toString(): String =
+        "RelaySettings(target=$target, role=$role, codec=$codec, transport=$transport, " +
+            "autoConnectTrusted=$autoConnectTrusted, autoConnectTrustedWifi=$autoConnectTrustedWifi, " +
+            "deviceName=$deviceName, sampleRate=$sampleRate, channels=$channels, frameMs=$frameMs)"
+}
 
 /** Settings for broadcasting this device's audio as a relay host. */
 data class HostSettings(
@@ -28,7 +36,11 @@ data class HostSettings(
     val sampleRate: Int = 48_000,
     val channels: Int = 1,
     val frameMs: Int = 20,
-)
+) {
+    override fun toString(): String =
+        "HostSettings(deviceName=$deviceName, port=$port, codec=$codec, transport=$transport, " +
+            "sampleRate=$sampleRate, channels=$channels, frameMs=$frameMs)"
+}
 
 const val DEFAULT_HOST_PORT = 48123
 
@@ -145,7 +157,43 @@ data class DiscoveredPeer(
     val id: String,
     val name: String,
     val address: String,
+    /** Discovery hint only; authentication still proves the peer identity. */
+    val link: String = "",
 )
+
+/**
+ * Policy gate for background reconnect. The caller must additionally prove
+ * that [peer.id] has a stored credential; a public discovery ID alone is not
+ * sufficient. USB tethering is the conservative default, while Wi-Fi and
+ * other IP links require an explicit opt-in.
+ */
+fun trustedAutoConnectAllowed(settings: RelaySettings, peer: DiscoveredPeer): Boolean =
+    settings.autoConnectTrusted && when {
+        peer.link.equals("usb", ignoreCase = true) || isLikelyUsbAddress(peer.address) -> true
+        !settings.autoConnectTrustedWifi -> false
+        // A durable last-known address may have no discovery link hint. The
+        // explicit Wi-Fi opt-in permits that fallback, while a classified
+        // Bluetooth/LAN candidate remains disallowed.
+        peer.link.isBlank() || peer.link.equals("wifi", ignoreCase = true) -> true
+        else -> false
+    }
+
+/** Durable metadata is preferred over public discovery ordering. */
+fun trustedCandidateRank(peer: DiscoveredPeer, stored: TrustedRelayPeer?): Int {
+    if (stored?.address == peer.address) return 0
+    return when {
+        peer.link.equals("usb", ignoreCase = true) || isLikelyUsbAddress(peer.address) -> 1
+        peer.link.equals("wifi", ignoreCase = true) -> 2
+        peer.link.equals("bluetooth", ignoreCase = true) -> 3
+        peer.link.equals("lan", ignoreCase = true) -> 4
+        else -> 5
+    }
+}
+
+fun isLikelyUsbAddress(address: String): Boolean {
+    val host = address.substringBeforeLast(':').removePrefix("[")
+    return host.startsWith("192.168.42.") || host.startsWith("10.42.")
+}
 
 /** Durable credential created after a successful explicit PIN pairing. */
 data class TrustedRelayPeer(
@@ -153,6 +201,16 @@ data class TrustedRelayPeer(
     val secret: String,
     val name: String = "",
     val address: String = "",
+) {
+    override fun toString(): String =
+        "TrustedRelayPeer(peerId=$peerId, name=$name, address=$address)"
+}
+
+/** Metadata shown in management UI; it intentionally contains no secret. */
+data class TrustedRelayPeerSummary(
+    val peerId: String,
+    val name: String,
+    val address: String,
 )
 
 /** One live session on the local host. */
@@ -162,6 +220,11 @@ data class RelaySessionInfo(
     val address: String,
     val sending: Boolean,
     val receiving: Boolean,
+    val transport: String = "",
+    val link: String = "",
+    val controlState: String = "",
+    val audioChannelState: String = "",
+    val trusted: Boolean = false,
 )
 
 data class RelayUiState(
@@ -180,6 +243,9 @@ data class RelayUiState(
     val hostAddress: String? = null,
     val hostMessage: String = "",
     val hostRms: Float = 0f,
+    val transport: String = "",
+    val link: String = "",
+    val audioChannelState: String = "",
     val sessions: List<RelaySessionInfo> = emptyList(),
     // Discovery section (shared by both modes).
     val discoveryActive: Boolean = false,
@@ -189,6 +255,7 @@ data class RelayUiState(
     val usbLink: UsbLinkInfo? = null,
     // All usable local links, best-first; shown with the host port.
     val localLinks: List<LocalLinkInfo> = emptyList(),
+    val trustedPeers: List<TrustedRelayPeerSummary> = emptyList(),
     // Selected tab.
     val mode: RelayMode = RelayMode.Receiver,
 )

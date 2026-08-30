@@ -18,6 +18,8 @@
     <string name="relay_session_connected">Session connected: %1$s</string>
     <string name="relay_error_discovery_failed">Unable to start discovery.</string>
     <string name="relay_error_audio_service_stopped">The relay audio service stopped unexpectedly; reconnect to restart it.</string>
+    <string name="relay_error_trusted_enrollment">Trusted credential enrollment was not accepted by the host.</string>
+    <string name="relay_error_trusted_revocation">Trusted-device revocation could not be completed; the credential was kept.</string>
     <string name="relay_discovery_started">Discovery started</string>
     <string name="relay_discovery_multicast_unavailable">Wi-Fi multicast access is unavailable; USB discovery remains active.</string>
     <string name="relay_discovery_stopped">Discovery stopped</string>

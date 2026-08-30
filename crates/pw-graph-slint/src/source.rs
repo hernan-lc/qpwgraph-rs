@@ -357,6 +357,39 @@ impl ApplicationDriver {
     }
 
     #[cfg(feature = "relay")]
+    pub(crate) fn relay_trusted_enrollment_secret(
+        &self,
+        transaction_id: u64,
+    ) -> Result<Option<[u8; 32]>, String> {
+        RelayDriver::relay_trusted_enrollment_secret(self, transaction_id)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_accept_trusted_enrollment(
+        &mut self,
+        transaction_id: u64,
+    ) -> Result<(), String> {
+        RelayDriver::relay_accept_trusted_enrollment(self, transaction_id)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_reject_trusted_enrollment(
+        &mut self,
+        transaction_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        RelayDriver::relay_reject_trusted_enrollment(self, transaction_id, reason)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_remove_trusted_peer(&mut self, peer_id: &str) -> Result<(), String> {
+        RelayDriver::relay_remove_trusted_peer(self, peer_id).map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_events(&mut self) -> Vec<RelayEvent> {
         RelayDriver::relay_events(self)
     }
@@ -738,6 +771,48 @@ impl RelayDriver for ApplicationDriver {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.relay_disconnect(session),
             BackendKind::Live(driver) => driver.relay_disconnect(session),
+        }
+    }
+
+    fn relay_trusted_enrollment_secret(
+        &self,
+        transaction_id: u64,
+    ) -> pw_graph_backend::BackendResult<Option<[u8; 32]>> {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.relay_trusted_enrollment_secret(transaction_id),
+            BackendKind::Live(driver) => driver.relay_trusted_enrollment_secret(transaction_id),
+        }
+    }
+
+    fn relay_accept_trusted_enrollment(
+        &mut self,
+        transaction_id: u64,
+    ) -> pw_graph_backend::BackendResult<()> {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => driver.relay_accept_trusted_enrollment(transaction_id),
+            BackendKind::Live(driver) => driver.relay_accept_trusted_enrollment(transaction_id),
+        }
+    }
+
+    fn relay_reject_trusted_enrollment(
+        &mut self,
+        transaction_id: u64,
+        reason: &str,
+    ) -> pw_graph_backend::BackendResult<()> {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => {
+                driver.relay_reject_trusted_enrollment(transaction_id, reason)
+            }
+            BackendKind::Live(driver) => {
+                driver.relay_reject_trusted_enrollment(transaction_id, reason)
+            }
+        }
+    }
+
+    fn relay_remove_trusted_peer(&mut self, peer_id: &str) -> pw_graph_backend::BackendResult<()> {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => driver.relay_remove_trusted_peer(peer_id),
+            BackendKind::Live(driver) => driver.relay_remove_trusted_peer(peer_id),
         }
     }
 

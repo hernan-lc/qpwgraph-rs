@@ -378,6 +378,8 @@ fn trusted_pairing_allows_a_later_pinless_connection() {
 
     let mut client_established = false;
     let mut trusted = None;
+    let mut host_established = false;
+    let mut host_enrolled = false;
     assert!(wait_until(|| {
         for event in first_handle.events() {
             match event {
@@ -390,24 +392,36 @@ fn trusted_pairing_allows_a_later_pinless_connection() {
                 _ => {}
             }
         }
-        client_established && trusted.is_some()
+        // Raw engine users are the durable owner of trusted credentials.  The
+        // test simulates that owner by committing the transaction before the
+        // engine is allowed to send TrustAccepted.
+        for event in host_handle.events() {
+            match event {
+                RelayEvent::TrustedPeerEnrollmentRequested { transaction_id, .. } => {
+                    let secret = host_handle
+                        .trusted_enrollment_secret(transaction_id)
+                        .expect("pending enrollment should retain the secret");
+                    host_handle
+                        .accept_trusted_enrollment(transaction_id)
+                        .expect("simulated durable enrollment should succeed");
+                    assert_eq!(secret.len(), 32);
+                    host_enrolled = true;
+                }
+                RelayEvent::SessionEstablished { .. } => host_established = true,
+                _ => {}
+            }
+        }
+        client_established && trusted.is_some() && host_enrolled
     }));
     let trusted = trusted.expect("explicit PIN pairing should produce a credential");
     assert_eq!(trusted.peer_id, "host-installation");
 
     // Wait until the host has accepted and stored the encrypted enrollment;
     // the second connection must be able to authenticate without its PIN.
-    let mut host_established = false;
-    let mut host_enrolled = false;
     assert!(wait_until(|| {
         for event in host_handle.events() {
             match event {
                 RelayEvent::SessionEstablished { .. } => host_established = true,
-                RelayEvent::TrustedPeerAvailable { peer_id, .. }
-                    if peer_id == "client-installation" =>
-                {
-                    host_enrolled = true
-                }
                 _ => {}
             }
         }

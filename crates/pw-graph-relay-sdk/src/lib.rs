@@ -57,7 +57,8 @@ pub use pw_graph_relay::{
     netlink::{display_links, listen_bind_addr, local_links, select_links},
     CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink, PeerInfo, RelayError,
     RelayEvent, RelayResult, Roles, SessionId, SessionStatus, TransportPreference, TrustedPeer,
-    FRAME_DURATIONS_MS, MAX_REALTIME_QUANTUM_SAMPLES, SAMPLE_RATES_HZ,
+    FRAME_DURATIONS_MS, MAX_DISCOVERED_PEER_ADDRESSES, MAX_REALTIME_QUANTUM_SAMPLES,
+    MAX_TRUSTED_PEERS, SAMPLE_RATES_HZ,
 };
 // `RelayHost::handle`/`RelayClient::handle` return this, so it has to be
 // nameable by callers holding one.
@@ -331,6 +332,14 @@ impl RelayHost {
     pub fn disconnect(&self, session: SessionId) -> RelayResult<()> {
         self.handle.disconnect(session)
     }
+
+    pub fn remove_trusted_peer(&self, peer_id: &str) -> RelayResult<()> {
+        self.handle.remove_trusted_peer(peer_id)
+    }
+
+    pub fn trusted_peers(&self) -> Vec<TrustedPeer> {
+        self.handle.trusted_peers()
+    }
 }
 
 /// Builder for [`RelayClient`].
@@ -600,6 +609,14 @@ impl RelayClient {
     /// Disconnect from the host.
     pub fn disconnect(self) -> RelayResult<()> {
         self.handle.disconnect(self.session)
+    }
+
+    pub fn remove_trusted_peer(&self, peer_id: &str) -> RelayResult<()> {
+        self.handle.remove_trusted_peer(peer_id)
+    }
+
+    pub fn trusted_peers(&self) -> Vec<TrustedPeer> {
+        self.handle.trusted_peers()
     }
 }
 

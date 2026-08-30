@@ -48,6 +48,12 @@ Every article lives in [`docs/`](docs). This page is the index.
 | [Adaptive noise reduction report](docs/adaptive-noise-reduction.md) | Why the four-band suppressor was removed |
 | [Audit follow-ups](docs/audit-follow-ups.md) | Resolved audit items and regression coverage |
 
+The relay requires an explicit PIN for first pairing. A successfully paired
+identity may use its stored trusted credential on later connections; unknown
+discovered peers never auto-connect. The desktop relay panel controls trusted
+auto-connect and can forget a device. USB tethering is a real IP transport;
+ADB forwarding is a separate explicit localhost TCP control/audio transport.
+
 ## Contributing
 
 Before opening a pull request:

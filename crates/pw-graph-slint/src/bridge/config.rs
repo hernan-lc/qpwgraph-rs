@@ -48,6 +48,7 @@ pub(crate) fn read_window_state(window: &MainWindow, application: &mut Applicati
         .unwrap_or(application.config.relay_host_port);
     application.config.relay_client_target = window.get_relay_client_target().to_string();
     application.config.relay_client_pin = window.get_relay_client_pin().to_string();
+    application.config.relay_auto_connect_trusted = window.get_relay_auto_connect_trusted();
     application.config.relay_role = relay_role_from_index(window.get_relay_role_index()).into();
     application.config.relay_codec = relay_codec_from_index(window.get_relay_codec_index()).into();
     application.config.relay_frame_ms = relay_frame_from_index(window.get_relay_frame_index());

@@ -45,6 +45,8 @@ export struct RelayRow {
     level: float,
     connected: bool,
     connecting: bool,
+    trusted: bool,
+    peer-id: string,
 }
 
 export struct HistoryRow {
@@ -236,6 +238,7 @@ export component MainWindow inherits Window {
     in-out property <string> relay-host-port-text: "48123";
     in-out property <string> relay-client-target: "";
     in-out property <string> relay-client-pin: "";
+    in-out property <bool> relay-auto-connect-trusted: true;
     in-out property <int> relay-role-index: 2;
     in-out property <int> relay-codec-index: 0;
     in-out property <int> relay-frame-index: 0;
@@ -582,6 +585,12 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
+                        if row.trusted : ActionButton {
+                            x: parent.width - 58px; y: 12px; width: 22px;
+                            text: "×";
+                            enabled: root.relay-available && row.peer-id != "";
+                            clicked => { root.action("relay-forget:" + row.peer-id); }
+                        }
                     }
                 }
             }
@@ -610,7 +619,7 @@ export component MainWindow inherits Window {
                 Text { x: 12px; y: 263px + relay-fields-offset; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.qr_pin", root.relay-host-pin) : UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
             }
             if root.relay-tab == 2: Rectangle {
-                x: 16px; y: 108px; width: parent.width - 32px; height: 300px; background: #29323c; border-radius: 5px;
+                x: 16px; y: 108px; width: parent.width - 32px; height: 350px; background: #29323c; border-radius: 5px;
                 Text { x: 12px; y: 12px; text: UiI18n.localized("relay.advanced"); color: #edf3f7; font-size: 14px * UiTheme.panel-scale; }
                 Text { x: 12px; y: 45px; text: UiI18n.localized("relay.role"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
                 ComboBox { x: 98px; y: 34px; width: 140px; model: [UiI18n.localized("relay.role_emit"), UiI18n.localized("relay.role_receive"), UiI18n.localized("relay.role_both")]; current-index <=> root.relay-role-index; }
@@ -620,7 +629,9 @@ export component MainWindow inherits Window {
                 ComboBox { x: 98px; y: 122px; width: 140px; model: root.relay-frame-options; current-index <=> root.relay-frame-index; }
                 Text { x: 12px; y: 177px; text: UiI18n.localized("relay.transport"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
                 ComboBox { x: 98px; y: 166px; width: 140px; model: root.relay-transport-options; current-index <=> root.relay-transport-index; }
-                Text { x: 12px; y: 222px; width: parent.width - 24px; text: UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; wrap: word-wrap; }
+                CheckBox { x: 12px; y: 214px; text: "Automatically reconnect trusted devices"; checked <=> root.relay-auto-connect-trusted; }
+                Text { x: 12px; y: 256px; width: parent.width - 24px; text: "Unknown peers never reconnect automatically. PIN pairing remains explicit."; color: #aebdca; font-size: 10px * UiTheme.panel-scale; wrap: word-wrap; }
+                Text { x: 12px; y: 304px; width: parent.width - 24px; text: UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; wrap: word-wrap; }
             }
         }
 

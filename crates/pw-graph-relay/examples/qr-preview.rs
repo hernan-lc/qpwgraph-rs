@@ -30,7 +30,9 @@ fn main() {
         std::process::exit(1);
     };
 
-    println!("payload : {payload}");
+    // The rendered QR still contains the caller-supplied pairing PIN, but
+    // stdout is diagnostic output and must not become a credential log.
+    println!("payload : <redacted; pairing credential is encoded in the QR>");
     println!(
         "modules : {}x{} code, {scale}px/module, {}px quiet zone",
         bitmap.width / scale - DEFAULT_QUIET_MODULES * 2,

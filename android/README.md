@@ -47,9 +47,14 @@ The app mirrors the desktop relay panel with three tabs:
 
 USB is not a manual link option: the app (like the desktop) auto-detects an
 active USB tether, shows it under the tab bar, and `Auto` prefers it. After a
-successful PIN pairing, the app stores a per-host credential in its private
-SharedPreferences. A later discovery result with the same stable peer ID can
-connect without another PIN; unknown peers are never auto-connected.
+successful PIN pairing, the app stores a per-host credential encrypted with a
+non-exportable Android Keystore AES-256-GCM key. Only ciphertext and peer
+metadata are kept in `relay.xml`, and the file is excluded from backup/device
+transfer. A later discovery result with the same stable peer ID can connect
+without another PIN; unknown peers are never auto-connected. Receiver settings
+provide global trusted auto-connect and a separate Wi-Fi opt-in; USB is the
+default background candidate. Use Forget in Trusted devices to revoke a
+credential immediately.
 
 ## Pair by QR code
 
@@ -111,6 +116,13 @@ once with the host PIN. Keep the host on port `48123` or use the same explicit
 port in the ADB command and target. ADB forwarding does not provide peer
 discovery; QR and automatic USB discovery still require a network link.
 
+If ADB is selected but `127.0.0.1:48123` refuses the connection, create the
+matching rule and retry. The app reports this as an ADB forwarding diagnostic,
+not as a bad PIN. The secondary audio TCP stream reconnects independently from
+the control stream with a fresh authenticated challenge/proof; removing and
+recreating the forwarding rule should therefore restore audio without a new
+PIN pairing.
+
 ## Use
 
 1. Start the desktop qpwgraph-rs application with the default `relay` feature.
@@ -131,9 +143,28 @@ connections are limited to the stored credential and stable identity of that
 same peer. USB tethering uses TCP plus encrypted UDP. ADB forwarding uses the
 explicit TCP audio mode described above.
 
-The stable installation ID and trusted bearer credentials live in Android's
-private relay preferences. That file is excluded from cloud backup and device
-transfer so a restored copy cannot impersonate the original installation.
+### Physical-device validation checklist
+
+For Android client → desktop host over USB tether: start the host, pair once,
+confirm trusted credential creation, enable USB tethering, confirm the same
+stable peer is discovered and reconnects without a PIN, verify audio, disable
+USB, and verify the intended Wi-Fi resume/failover behavior.
+
+For a live Wi-Fi → USB transition: establish audio, plug in USB and enable
+tethering, verify whether policy keeps Wi-Fi until failure or the product's
+authenticated migration path moves immediately, and confirm the status reports
+the actual link.
+
+For ADB: enable USB debugging, create the correct reverse/forward rule, select
+ADB and connect to `127.0.0.1:48123`, pair, verify bidirectional audio, delete
+the forwarding rule, observe `Reconnecting audio`, recreate it, and verify
+audio returns without PIN pairing. Also exercise service death, process death,
+restart, retained trusted credentials, and mode switching for stale handles.
+
+The stable installation ID and encrypted trusted bearer credentials live in
+Android's private `relay` preferences. The file is excluded from cloud backup
+and device transfer so a restored copy cannot impersonate the original
+installation. Deleting a trusted credential does not regenerate the stable ID.
 
 ## Troubleshooting
 

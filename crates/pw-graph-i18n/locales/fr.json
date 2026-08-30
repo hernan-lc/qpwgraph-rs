@@ -214,6 +214,8 @@
   "relay.peer_lost": "Hôte du relais disparu : {name}",
   "relay.session_connected": "Session du relais connectée à {name}",
   "relay.session_lost": "Session du relais perdue : {reason}",
+  "relay.trusted_peer_forgotten": "Appareil relais de confiance oublié",
+  "relay.trusted_connection_rejected": "La connexion de confiance a été rejetée. Réassociez-vous avec le code PIN de l’hôte.",
   "relay.error": "Erreur du relais : {error}",
   "toolbar.refresh": "Actualiser",
   "toolbar.undo": "Annuler",

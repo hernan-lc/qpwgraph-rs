@@ -5,6 +5,7 @@ use pw_graph_core::PortKey;
 use pw_graph_effects::EffectInstanceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -20,7 +21,7 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(default = "AppConfig::default")]
 pub struct AppConfig {
     pub language: String,
@@ -119,7 +120,31 @@ pub struct AppConfig {
     pub extra: BTreeMap<String, toml::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field("language", &self.language)
+            .field("relay_device_id", &self.relay_device_id)
+            .field("relay_trusted_peers", &self.relay_trusted_peers)
+            .field(
+                "relay_auto_connect_trusted",
+                &self.relay_auto_connect_trusted,
+            )
+            .field("relay_device_name", &self.relay_device_name)
+            .field("relay_host_pin", &"<redacted>")
+            .field("relay_host_port", &self.relay_host_port)
+            .field("relay_client_target", &self.relay_client_target)
+            .field("relay_client_pin", &"<redacted>")
+            .field("relay_role", &self.relay_role)
+            .field("relay_codec", &self.relay_codec)
+            .field("relay_frame_ms", &self.relay_frame_ms)
+            .field("relay_transport", &self.relay_transport)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub struct PersistedRelayPeer {
     pub peer_id: String,
     pub secret: String,
@@ -127,6 +152,18 @@ pub struct PersistedRelayPeer {
     pub name: String,
     #[serde(default)]
     pub address: String,
+}
+
+impl fmt::Debug for PersistedRelayPeer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PersistedRelayPeer")
+            .field("peer_id", &self.peer_id)
+            .field("secret", &"<redacted>")
+            .field("name", &self.name)
+            .field("address", &self.address)
+            .finish()
+    }
 }
 
 fn default_relay_auto_connect() -> bool {
@@ -310,6 +347,26 @@ mod tests {
         assert!(reloaded.relay_host_pin.is_empty());
         assert!(reloaded.relay_client_pin.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_debug_redacts_pairing_pins_and_trusted_secrets() {
+        let config = AppConfig {
+            relay_host_pin: "864209".into(),
+            relay_client_pin: "135790".into(),
+            relay_trusted_peers: vec![PersistedRelayPeer {
+                peer_id: "phone".into(),
+                secret: "ab".repeat(32),
+                name: "phone".into(),
+                address: "192.168.42.2:48123".into(),
+            }],
+            ..AppConfig::default()
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("864209"));
+        assert!(!debug.contains("135790"));
+        assert!(!debug.contains(&"ab".repeat(32)));
+        assert!(debug.contains("redacted"));
     }
 
     #[cfg(unix)]

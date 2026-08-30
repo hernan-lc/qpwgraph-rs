@@ -35,8 +35,12 @@ internal object NativeBridge {
         peerId: String,
         secret: String,
     ): String
+    /** Credential-only result; normal connected/status JSON never carries it. */
+    external fun clientTrustedPeer(handle: Long): String
+    external fun removeTrustedPeer(handle: Long, peerId: String): Boolean
     external fun disconnect(handle: Long): Boolean
     external fun pollEvents(handle: Long): String
+    external fun clientStatus(handle: Long): String
     /** Feed the separate discovery handle's snapshot to client resume logic. */
     external fun updateClientPeers(handle: Long, peersJson: String): Boolean
     /** Surface a fatal platform-audio failure through the relay event queue. */
@@ -82,6 +86,10 @@ internal object NativeBridge {
     external fun hostStop(handle: Long): String
     external fun hostPollEvents(handle: Long): String
     external fun hostStatus(handle: Long): String
+    external fun hostTrustedEnrollmentSecret(handle: Long, transactionId: Long): String
+    external fun hostAcceptTrustedEnrollment(handle: Long, transactionId: Long): Boolean
+    external fun hostRejectTrustedEnrollment(handle: Long, transactionId: Long, reason: String): Boolean
+    external fun hostRemoveTrustedPeer(handle: Long, peerId: String): Boolean
     external fun hostDisconnectSession(handle: Long, sessionId: Long): String
     /** Surface a fatal platform-audio failure through the host event queue. */
     external fun hostReportError(handle: Long, message: String): Boolean
@@ -91,7 +99,8 @@ internal object NativeBridge {
 
     /** Same contract as [pullPlayback], using the running host engine. */
     external fun hostPullPlayback(handle: Long, output: FloatArray): Int
-    external fun hostRelease(handle: Long)
+    /** Returns false when the native host is still running or transitioning. */
+    external fun hostRelease(handle: Long): Boolean
 
     // Discovery ----------------------------------------------------------
     external fun discoveryCreate(deviceName: String): String

@@ -185,6 +185,7 @@ pub(crate) fn sync_models(
     window.set_relay_client_pin(SharedString::from(
         application.config.relay_client_pin.clone(),
     ));
+    window.set_relay_auto_connect_trusted(application.config.relay_auto_connect_trusted);
     window.set_relay_role_index(relay_role_index(&application.config.relay_role));
     window.set_relay_codec_index(relay_codec_index(&application.config.relay_codec));
     window.set_relay_frame_index(relay_frame_index(application.config.relay_frame_ms));

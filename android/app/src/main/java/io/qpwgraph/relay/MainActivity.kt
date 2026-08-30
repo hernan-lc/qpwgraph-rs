@@ -39,6 +39,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -194,6 +195,7 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
                     },
                 )
             }
+            TrustedDevicesCard(state, viewModel)
         }
     }
     if (showScanner) {
@@ -382,6 +384,44 @@ private fun ReceiverTab(
             modifier = Modifier.weight(1f),
         )
     }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Automatically reconnect trusted devices")
+                Switch(
+                    checked = state.settings.autoConnectTrusted,
+                    onCheckedChange = { enabled ->
+                        viewModel.update(state.settings.copy(autoConnectTrusted = enabled))
+                    },
+                )
+            }
+            if (state.settings.autoConnectTrusted) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Allow trusted Wi-Fi reconnect")
+                    Switch(
+                        checked = state.settings.autoConnectTrustedWifi,
+                        onCheckedChange = { enabled ->
+                            viewModel.update(
+                                state.settings.copy(autoConnectTrustedWifi = enabled),
+                            )
+                        },
+                    )
+                }
+                Text(
+                    "USB tethering is enabled by default; LAN, Wi-Fi, and ADB remain opt-in.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (state.connection == RelayConnectionState.Connected ||
             state.connection == RelayConnectionState.Connecting
@@ -402,8 +442,43 @@ private fun ReceiverTab(
             Text(state.connection.name.lowercase().replace('_', ' '))
             if (state.hostName.isNotBlank()) Text("Host: ${state.hostName}")
             if (state.sessionId != null) Text("Session: ${state.sessionId}")
+            if (state.transport.isNotBlank()) {
+                Text(
+                    "Connected via ${state.link.ifBlank { "unknown link" }} " +
+                        "(${state.transport})",
+                )
+            }
+            if (state.audioChannelState == "reconnecting") Text("Reconnecting audio")
             if (state.message.isNotBlank()) Text(state.message)
             Text("Level: ${(state.rms * 100).toInt()}%")
+        }
+    }
+}
+
+@Composable
+private fun TrustedDevicesCard(state: RelayUiState, viewModel: RelayViewModel) {
+    if (state.trustedPeers.isEmpty()) return
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Trusted devices", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(6.dp))
+            state.trustedPeers.forEach { peer ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(peer.name.ifBlank { peer.peerId })
+                        if (peer.address.isNotBlank()) {
+                            Text(peer.address, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    TextButton(onClick = { viewModel.forgetTrustedPeer(peer.peerId) }) {
+                        Text("Forget")
+                    }
+                }
+            }
         }
     }
 }
@@ -506,7 +581,21 @@ private fun EmitterTab(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text("${session.name} — ${session.address}")
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("${session.name} — ${session.address}")
+                            if (session.transport.isNotBlank()) {
+                                Text(
+                                    "${session.link.ifBlank { "unknown link" }} / " +
+                                        session.transport +
+                                        if (session.audioChannelState == "reconnecting") {
+                                            " — reconnecting audio"
+                                        } else {
+                                            ""
+                                        },
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
                         TextButton(onClick = { viewModel.disconnectSession(session.id) }) {
                             Text("Disconnect")
                         }

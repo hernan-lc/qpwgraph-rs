@@ -22,6 +22,7 @@
 
 use crate::crypto::{Opener, Sealer};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::io::{self, Read, Write};
 
 pub const CONTROL_MAGIC: &[u8; 4] = b"QPR3";
@@ -152,7 +153,7 @@ impl CodecKind {
 
 /// Control-channel messages. Tagged by the `type` field; unknown tags fall
 /// through to [`ControlMessage::Unknown`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
     /// C→H first message: who is calling, what they can do, and the client's
@@ -306,6 +307,44 @@ pub enum ControlMessage {
     /// versions do not kill the connection.
     #[serde(other)]
     Unknown,
+}
+
+/// Control frames contain bearer credentials, proofs, and session material in
+/// addition to ordinary metadata. Keep their debug representation tag-only so
+/// an accidental diagnostic of a parsed frame cannot disclose a secret.
+impl fmt::Debug for ControlMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Hello { .. } => "Hello",
+            Self::Challenge { .. } => "Challenge",
+            Self::Pair { .. } => "Pair",
+            Self::PairConfirm { .. } => "PairConfirm",
+            Self::PairOk { .. } => "PairOk",
+            Self::PairFail { .. } => "PairFail",
+            Self::TrustedHello { .. } => "TrustedHello",
+            Self::TrustedChallenge { .. } => "TrustedChallenge",
+            Self::TrustedProof { .. } => "TrustedProof",
+            Self::TrustedOk { .. } => "TrustedOk",
+            Self::SessionStart { .. } => "SessionStart",
+            Self::SessionReady { .. } => "SessionReady",
+            Self::TrustEnroll { .. } => "TrustEnroll",
+            Self::TrustAccepted { .. } => "TrustAccepted",
+            Self::TrustRejected { .. } => "TrustRejected",
+            Self::AudioHello { .. } => "AudioHello",
+            Self::AudioChallenge { .. } => "AudioChallenge",
+            Self::AudioProof { .. } => "AudioProof",
+            Self::AudioReady { .. } => "AudioReady",
+            Self::Keepalive { .. } => "Keepalive",
+            Self::ResumeHello { .. } => "ResumeHello",
+            Self::ResumeChallenge { .. } => "ResumeChallenge",
+            Self::ResumeProof { .. } => "ResumeProof",
+            Self::ResumeOk { .. } => "ResumeOk",
+            Self::ControlHint { .. } => "ControlHint",
+            Self::Bye { .. } => "Bye",
+            Self::Unknown => "Unknown",
+        };
+        formatter.write_str(name)
+    }
 }
 
 const HEADER_LEN: usize = 9;
@@ -543,6 +582,22 @@ mod tests {
     fn bad_magic_is_rejected() {
         let mut cursor = Cursor::new(b"XXXX\x02\x00\x00\x00\x00".to_vec());
         assert!(read_frame(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn control_debug_never_contains_bearer_material_or_proofs() {
+        let message = ControlMessage::TrustEnroll {
+            peer_id: "phone-installation".into(),
+            secret: "ab".repeat(32),
+        };
+        let debug = format!("{message:?}");
+        assert_eq!(debug, "TrustEnroll");
+        assert!(!debug.contains("phone-installation"));
+
+        let proof = ControlMessage::ResumeProof {
+            proof: "cd".repeat(32),
+        };
+        assert_eq!(format!("{proof:?}"), "ResumeProof");
     }
 
     fn sealed_pair() -> (crate::crypto::Sealer, crate::crypto::Opener) {

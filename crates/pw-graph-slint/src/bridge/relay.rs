@@ -10,7 +10,7 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 #[cfg(feature = "relay")]
 use std::collections::BTreeSet;
 #[cfg(feature = "relay")]
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 #[cfg(feature = "relay")]
 use std::str::FromStr;
 #[cfg(feature = "relay")]
@@ -24,12 +24,20 @@ use pw_graph_i18n::I18n;
 use super::app::Application;
 #[cfg(feature = "relay")]
 use super::app::RelayAttempt;
+#[cfg(feature = "relay")]
+use super::config::save_config;
 use super::RelayRow;
 
 #[cfg(feature = "relay")]
 fn relay_device_id(application: &mut Application) -> String {
     if application.config.relay_device_id.trim().is_empty() {
         application.config.relay_device_id = pw_graph_backend::relay_generate_device_id();
+        // The ID is installation state, not a per-session discovery value.
+        // Mark it dirty before exposing it to the engine so the normal atomic
+        // config writer persists it on the next UI pump.
+        application
+            .config_dirty_since
+            .get_or_insert_with(Instant::now);
     }
     application.config.relay_device_id.clone()
 }
@@ -166,10 +174,20 @@ fn session_or_attempt_for_peer(application: &Application, peer: &RelayPeerInfo) 
 /// pairing. This is deliberately only called for a discovered peer whose
 /// stable identity has a matching stored secret.
 #[cfg(feature = "relay")]
-fn connect_trusted_peer(application: &mut Application, peer: &RelayPeerInfo) -> bool {
+fn connect_trusted_peer(
+    application: &mut Application,
+    peer: &RelayPeerInfo,
+    automatic: bool,
+) -> bool {
     let Some(secret) = trusted_secret_for(application, &peer.id) else {
         return false;
     };
+    if automatic
+        && (application.relay_trusted_auth_rejected
+            || !trusted_candidate_allowed(application, peer))
+    {
+        return false;
+    }
     application.relay_trusted_auto_attempt_at = Some(Instant::now());
     if session_or_attempt_for_peer(application, peer) {
         return true;
@@ -192,9 +210,92 @@ fn connect_trusted_peer(application: &mut Application, peer: &RelayPeerInfo) -> 
             });
             application.status = application.t("relay.connecting");
         }
-        Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
+        Err(error) => {
+            if automatic {
+                note_trusted_candidate_failure(application, &peer.id, &peer.addr.to_string());
+            }
+            application.status = application.tf("relay.error", &[("error", error)])
+        }
     }
     true
+}
+
+fn trusted_candidate_allowed(application: &mut Application, peer: &RelayPeerInfo) -> bool {
+    let key = (peer.id.clone(), peer.addr.to_string());
+    let Some((_, retry_at)) = application.relay_trusted_candidate_failures.get(&key) else {
+        return true;
+    };
+    if *retry_at <= Instant::now() {
+        application.relay_trusted_candidate_failures.remove(&key);
+        true
+    } else {
+        false
+    }
+}
+
+fn note_trusted_candidate_failure(application: &mut Application, peer_id: &str, address: &str) {
+    const MAX_FAILURES: usize = 256;
+    let now = Instant::now();
+    let key = (peer_id.to_owned(), address.to_owned());
+    if !application
+        .relay_trusted_candidate_failures
+        .contains_key(&key)
+        && application.relay_trusted_candidate_failures.len() >= MAX_FAILURES
+    {
+        application
+            .relay_trusted_candidate_failures
+            .retain(|_, (_, retry_at)| *retry_at > now);
+        if application.relay_trusted_candidate_failures.len() >= MAX_FAILURES {
+            if let Some(oldest) = application
+                .relay_trusted_candidate_failures
+                .iter()
+                .min_by_key(|(_, (_, retry_at))| *retry_at)
+                .map(|(key, _)| key.clone())
+            {
+                application.relay_trusted_candidate_failures.remove(&oldest);
+            }
+        }
+    }
+    let count = application
+        .relay_trusted_candidate_failures
+        .get(&key)
+        .map(|(count, _)| count.saturating_add(1))
+        .unwrap_or(1)
+        .min(7);
+    let delay = Duration::from_millis(500u64.saturating_mul(1u64 << (count - 1)));
+    application
+        .relay_trusted_candidate_failures
+        .insert(key, (count, now + delay.min(Duration::from_secs(30))));
+}
+
+fn trusted_candidate_rank(application: &Application, peer: &RelayPeerInfo) -> (u8, SocketAddr) {
+    if application
+        .config
+        .relay_trusted_peers
+        .iter()
+        .find(|stored| stored.peer_id == peer.id)
+        .and_then(|stored| stored.address.parse::<SocketAddr>().ok())
+        == Some(peer.addr)
+    {
+        return (0, peer.addr);
+    }
+    if let IpAddr::V4(address) = peer.addr.ip() {
+        let octets = address.octets();
+        if (octets[0] == 192 && octets[1] == 168 && octets[2] == 42)
+            || (octets[0] == 10 && octets[1] == 42)
+        {
+            return (1, peer.addr);
+        }
+        if application
+            .source
+            .relay_local_links()
+            .iter()
+            .any(|link| link.contains(address))
+        {
+            return (2, peer.addr);
+        }
+    }
+    (3, peer.addr)
 }
 
 /// Retry a trusted peer whose discovery record is still present. Discovery
@@ -223,13 +324,34 @@ fn retry_trusted_auto_connect(application: &mut Application) {
     {
         return;
     }
-    let peer = application
-        .source
-        .relay_peers()
-        .into_iter()
-        .find(|peer| trusted_secret_for(application, &peer.id).is_some());
+    let mut peers = application.source.relay_peers();
+    // Discovery is untrusted and may be crowded by same-ID advertisements.
+    // Keep the last durable address in the candidate set as well, so a forged
+    // sixteen-address burst cannot evict the address that worked previously.
+    for stored in &application.config.relay_trusted_peers {
+        let Ok(address) = stored.address.parse::<SocketAddr>() else {
+            continue;
+        };
+        if !peers
+            .iter()
+            .any(|peer| peer.id == stored.peer_id && peer.addr == address)
+        {
+            peers.push(RelayPeerInfo {
+                id: stored.peer_id.clone(),
+                name: stored.name.clone(),
+                kind: pw_graph_backend::RelayDeviceKind::Other,
+                addr: address,
+            });
+        }
+    }
+    peers.retain(|peer| {
+        trusted_secret_for(application, &peer.id).is_some()
+            && trusted_candidate_allowed(application, peer)
+    });
+    peers.sort_by_key(|peer| trusted_candidate_rank(application, peer));
+    let peer = peers.into_iter().next();
     if let Some(peer) = peer {
-        let _ = connect_trusted_peer(application, &peer);
+        let _ = connect_trusted_peer(application, &peer, true);
     }
 }
 
@@ -420,9 +542,53 @@ pub(crate) fn stop_relay_host(application: &mut Application) {
     }
 }
 
+/// Revoke a trusted identity in both the live engine and the durable desktop
+/// config. The engine operation comes first so a failed backend call never
+/// leaves the UI claiming that a credential was forgotten.
+pub(crate) fn forget_trusted_peer(application: &mut Application, peer_id: &str) {
+    #[cfg(feature = "relay")]
+    {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return;
+        }
+        if let Err(error) = application.source.relay_remove_trusted_peer(peer_id) {
+            application.status = application.tf("relay.error", &[("error", error)]);
+            return;
+        }
+        let before_config = application.config.clone();
+        let before_count = application.config.relay_trusted_peers.len();
+        application
+            .config
+            .relay_trusted_peers
+            .retain(|peer| peer.peer_id != peer_id);
+        if application.config.relay_trusted_peers.len() != before_count {
+            save_config(application, false);
+            if application.config != application.config_saved_snapshot {
+                // The live map was changed first, so restore it when the
+                // durable removal failed. Otherwise a process crash could
+                // resurrect the credential from the old config while this
+                // engine silently stayed revoked.
+                application.config = before_config;
+                application.config_dirty_since = None;
+                if let Err(error) = configure_relay_identity(application) {
+                    application.status = application.tf("relay.error", &[("error", error)]);
+                }
+                return;
+            }
+        }
+        application.status = application.t("relay.trusted_peer_forgotten");
+    }
+    #[cfg(not(feature = "relay"))]
+    let _ = (application, peer_id);
+}
+
 pub(crate) fn connect_relay(application: &mut Application, requested_target: Option<&str>) {
     #[cfg(feature = "relay")]
     {
+        // An explicit user action is the documented way to retry a stale
+        // trusted credential or start a fresh PIN pairing.
+        application.relay_trusted_auth_rejected = false;
         let raw_target = requested_target
             .map(str::to_owned)
             .unwrap_or_else(|| application.config.relay_client_target.clone());
@@ -467,7 +633,7 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
             .into_iter()
             .find(|peer| peer.addr == target)
         {
-            if connect_trusted_peer(application, &peer) {
+            if connect_trusted_peer(application, &peer, false) {
                 return;
             }
         }
@@ -530,7 +696,7 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                 application.status =
                     application.tf("relay.peer_discovered", &[("name", peer.name.clone())]);
                 if application.config.relay_auto_connect_trusted {
-                    let _ = connect_trusted_peer(application, &peer);
+                    let _ = connect_trusted_peer(application, &peer, true);
                 }
             }
             RelayEvent::PeerLost { peer } => {
@@ -543,6 +709,57 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
             } => {
                 remember_trusted_peer(application, &peer_id, &peer, secret);
             }
+            RelayEvent::TrustedPeerEnrollmentRequested {
+                transaction_id,
+                peer_id,
+                peer,
+            } => {
+                // The engine deliberately withholds TrustAccepted until this
+                // synchronous owner-only config write succeeds. A failed
+                // write is rejected, leaving the client without a permanent
+                // credential and the old credential (if any) untouched.
+                let before = application.config.clone();
+                let persisted = application
+                    .source
+                    .relay_trusted_enrollment_secret(transaction_id)
+                    .ok()
+                    .flatten()
+                    .map(|secret| {
+                        remember_trusted_peer(application, &peer_id, &peer, secret);
+                        save_config(application, false);
+                        let committed = application.config == application.config_saved_snapshot;
+                        if !committed {
+                            // Keep the in-memory config aligned with the
+                            // durable snapshot when persistence failed. This
+                            // also preserves the previously active credential
+                            // for retry/rollback semantics.
+                            application.config = before.clone();
+                        }
+                        committed
+                    })
+                    .unwrap_or(false);
+                if persisted {
+                    if let Err(error) = application
+                        .source
+                        .relay_accept_trusted_enrollment(transaction_id)
+                    {
+                        // Do not leave a newly persisted client credential
+                        // behind if the host-side transaction expired or
+                        // otherwise failed to commit. Restore the prior
+                        // durable record so rotation remains transactional.
+                        application.config = before;
+                        save_config(application, false);
+                        application.status = application.tf("relay.error", &[("error", error)]);
+                    }
+                } else {
+                    if let Err(error) = application.source.relay_reject_trusted_enrollment(
+                        transaction_id,
+                        "trusted credential could not be durably persisted",
+                    ) {
+                        application.status = application.tf("relay.error", &[("error", error)]);
+                    }
+                }
+            }
             RelayEvent::SessionEstablished { id, peer, .. } => {
                 if application
                     .relay_connecting
@@ -552,6 +769,7 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                     application.relay_connecting = None;
                 }
                 refresh_trusted_peer_address(application, &peer);
+                application.relay_trusted_auth_rejected = false;
                 application.status =
                     application.tf("relay.session_connected", &[("name", peer.name)]);
             }
@@ -566,9 +784,26 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                     .as_ref()
                     .is_some_and(|attempt| attempt.session == id.0)
                 {
+                    let attempt = application
+                        .relay_connecting
+                        .as_ref()
+                        .map(|attempt| (attempt.peer_id.clone(), attempt.target.clone()));
+                    if let Some((Some(peer_id), target)) = attempt {
+                        let lower = reason.to_ascii_lowercase();
+                        if lower.contains("trusted")
+                            && (lower.contains("authentication") || lower.contains("rejected"))
+                        {
+                            application.relay_trusted_auth_rejected = true;
+                        }
+                        note_trusted_candidate_failure(application, &peer_id, &target);
+                    }
                     application.relay_connecting = None;
                 }
-                application.status = application.tf("relay.session_lost", &[("reason", reason)]);
+                application.status = if application.relay_trusted_auth_rejected {
+                    application.t("relay.trusted_connection_rejected")
+                } else {
+                    application.tf("relay.session_lost", &[("reason", reason)])
+                };
             }
             RelayEvent::AudioLevel { id, rms } => {
                 application.relay_levels.insert(id.0, rms.clamp(0.0, 1.0));
@@ -656,6 +891,12 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
         let status = application.source.relay_status();
         let mut rows = Vec::new();
         let mut connected = BTreeSet::new();
+        let trusted_ids = application
+            .config
+            .relay_trusted_peers
+            .iter()
+            .map(|peer| peer.peer_id.as_str())
+            .collect::<BTreeSet<_>>();
         for session in status.sessions {
             let address = session.peer.addr.to_string();
             if !session.peer.id.is_empty() {
@@ -668,13 +909,28 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                 (false, true) => i18n.text("relay.direction_receive"),
                 (false, false) => i18n.text("relay.direction_connected"),
             };
+            let transport = if session.transport.is_empty() {
+                "unknown".to_owned()
+            } else {
+                session.transport.clone()
+            };
+            let link = if session.link.is_empty() {
+                "unknown".to_owned()
+            } else {
+                session.link.clone()
+            };
+            let audio_state = if session.audio_channel_state == "reconnecting" {
+                " · reconnecting audio"
+            } else {
+                ""
+            };
             rows.push(RelayRow {
                 id: SharedString::from(session.id.0.to_string()),
                 name: SharedString::from(session.peer.name),
                 address: SharedString::from(address.clone()),
                 state: SharedString::from(format!(
-                    "{} · {direction}",
-                    i18n.text("relay.group_connected")
+                    "{} · {direction} · {transport}/{link}{audio_state}",
+                    i18n.text("relay.group_connected"),
                 )),
                 level: application
                     .relay_levels
@@ -683,6 +939,8 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                     .unwrap_or_default(),
                 connected: true,
                 connecting: false,
+                trusted: trusted_ids.contains(session.peer.id.as_str()),
+                peer_id: SharedString::from(session.peer.id),
             });
         }
         let connecting = application
@@ -711,6 +969,8 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                 level: 0.0,
                 connected: false,
                 connecting: connecting == Some(address.as_str()),
+                trusted: trusted_ids.contains(peer.id.as_str()),
+                peer_id: SharedString::from(peer.id),
             });
         }
         if let Some(target) = connecting {
@@ -723,6 +983,8 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                     level: 0.0,
                     connected: false,
                     connecting: true,
+                    trusted: false,
+                    peer_id: SharedString::new(),
                 });
             }
         }
@@ -735,6 +997,8 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                 level: 0.0,
                 connected: false,
                 connecting: false,
+                trusted: false,
+                peer_id: SharedString::new(),
             });
         }
         if rows.is_empty() {
@@ -746,6 +1010,8 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                 level: 0.0,
                 connected: false,
                 connecting: false,
+                trusted: false,
+                peer_id: SharedString::new(),
             });
         }
         rows
@@ -760,6 +1026,8 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
             level: 0.0,
             connected: false,
             connecting: false,
+            trusted: false,
+            peer_id: SharedString::new(),
         }]
     }
 }

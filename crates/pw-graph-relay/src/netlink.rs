@@ -303,20 +303,16 @@ pub fn outbound_bind_addr(
 }
 
 /// Choose the local address a host should listen on for a transport
-/// preference. `Auto` selects the highest-ranked active relay link. If an
-/// explicit preference has no matching link, the best active link is used as
-/// a safe fallback. `None` means that no usable link information exists; the
-/// caller may then use its documented all-interface fallback.
+/// preference. `Auto` selects the highest-ranked active relay link. An
+/// explicit preference returns `None` when that link is unavailable so the
+/// caller cannot silently expose the relay on an unrelated interface.
 ///
 /// Selecting "USB tether" used to change only which link outbound
 /// connections preferred, while the listener still accepted pairing on the
 /// LAN, on every VPN, and on anything else that happened to be up. Honouring
 /// the preference here makes the choice mean what it says.
 pub fn listen_bind_addr(links: &[LocalLink], preference: TransportPreference) -> Option<Ipv4Addr> {
-    if let Some(link) = select_links(links, preference).first() {
-        return Some(link.addr);
-    }
-    select_links(links, TransportPreference::Auto)
+    select_links(links, preference)
         .first()
         .map(|link| link.addr)
 }
@@ -611,7 +607,7 @@ mod tests {
         );
         assert_eq!(
             listen_bind_addr(&[lan, wifi.clone()], TransportPreference::Usb),
-            Some(wifi.addr)
+            None
         );
         assert_eq!(listen_bind_addr(&[], TransportPreference::Auto), None);
     }

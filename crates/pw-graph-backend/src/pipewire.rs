@@ -1408,6 +1408,51 @@ impl RelayDriver for PipewireDriver {
             .map_err(|error| BackendError::native(format!("relay disconnect failed: {error}")))
     }
 
+    fn relay_trusted_enrollment_secret(
+        &self,
+        transaction_id: u64,
+    ) -> BackendResult<Option<[u8; 32]>> {
+        Ok(self
+            .relay
+            .as_ref()
+            .and_then(|set| set.handle().trusted_enrollment_secret(transaction_id)))
+    }
+
+    fn relay_accept_trusted_enrollment(&mut self, transaction_id: u64) -> BackendResult<()> {
+        let Some(set) = self.relay.as_ref() else {
+            return Err(BackendError::native("no relay host is running"));
+        };
+        set.handle()
+            .accept_trusted_enrollment(transaction_id)
+            .map_err(|error| {
+                BackendError::native(format!("trusted enrollment commit failed: {error}"))
+            })
+    }
+
+    fn relay_reject_trusted_enrollment(
+        &mut self,
+        transaction_id: u64,
+        reason: &str,
+    ) -> BackendResult<()> {
+        let Some(set) = self.relay.as_ref() else {
+            return Err(BackendError::native("no relay host is running"));
+        };
+        set.handle()
+            .reject_trusted_enrollment(transaction_id, reason)
+            .map_err(|error| {
+                BackendError::native(format!("trusted enrollment rejection failed: {error}"))
+            })
+    }
+
+    fn relay_remove_trusted_peer(&mut self, peer_id: &str) -> BackendResult<()> {
+        let Some(set) = self.relay.as_ref() else {
+            return Err(BackendError::native("no relay engine is running"));
+        };
+        set.handle()
+            .remove_trusted_peer(peer_id)
+            .map_err(|error| BackendError::native(format!("trusted peer removal failed: {error}")))
+    }
+
     fn relay_events(&mut self) -> Vec<RelayEvent> {
         self.relay
             .as_mut()

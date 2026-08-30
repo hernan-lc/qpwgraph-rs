@@ -77,6 +77,16 @@ pub fn parse_txt_properties(properties: &BTreeMap<String, String>) -> Discovered
     }
 }
 
+fn parse_link_kind(value: &str) -> Option<LinkKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "usb" => Some(LinkKind::Usb),
+        "wifi" | "wi-fi" => Some(LinkKind::Wifi),
+        "bluetooth" | "bluetooth-pan" => Some(LinkKind::BluetoothPan),
+        "lan" | "ethernet" => Some(LinkKind::Lan),
+        _ => None,
+    }
+}
+
 /// Advertise the local relay host. Dropping or stopping the advertiser
 /// unregisters the service and shuts the mDNS daemon down.
 pub(crate) struct Advertiser {
@@ -238,7 +248,8 @@ fn browse_loop(
                         addr: SocketAddr::new(IpAddr::V4(**addr), info.get_port()),
                     })
                     .collect();
-                inner.refresh_service(&service_id, peers);
+                let link = meta.link.as_deref().and_then(parse_link_kind);
+                inner.refresh_service_with_link(&service_id, peers, link);
             }
             ServiceEvent::ServiceRemoved(_ty, fullname) => {
                 inner.lost_peer(&fullname);
@@ -324,9 +335,87 @@ impl EngineInner {
     }
 
     pub(crate) fn refresh_service(&self, service_id: &str, current: Vec<PeerInfo>) {
+        let link = (service_id == crate::usb_probe::USB_PROBE_SERVICE).then_some(LinkKind::Usb);
+        self.refresh_service_with_link(service_id, current, link);
+    }
+
+    /// Refresh the embedding-owned discovery snapshot while retaining each
+    /// candidate's non-authoritative link classification. The grouping keeps
+    /// the existing service table semantics, and stale groups are removed so
+    /// an Android discovery handle cannot leave old addresses behind forever.
+    pub(crate) fn refresh_embedding_candidates(&self, current: Vec<(PeerInfo, Option<LinkKind>)>) {
+        const PREFIX: &str = "embedding-discovery/";
+        let mut grouped = BTreeMap::<String, (Option<LinkKind>, Vec<PeerInfo>)>::new();
+        for (peer, link) in current {
+            let name = match link {
+                Some(link) => format!("{PREFIX}{}", link.as_str()),
+                None => format!("{PREFIX}unknown"),
+            };
+            grouped
+                .entry(name)
+                .or_insert_with(|| (link, Vec::new()))
+                .1
+                .push(peer);
+        }
+        let active = grouped
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        for (service_id, (link, peers)) in grouped {
+            self.refresh_service_with_link(&service_id, peers, link);
+        }
+        let stale = self
+            .peer_services
+            .lock()
+            .map(|services| {
+                services
+                    .keys()
+                    .filter(|id| id.starts_with(PREFIX) && !active.contains(*id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for service_id in stale {
+            self.lost_peer(&service_id);
+        }
+    }
+
+    pub(crate) fn refresh_service_with_link(
+        &self,
+        service_id: &str,
+        current: Vec<PeerInfo>,
+        link: Option<LinkKind>,
+    ) {
+        // Discovery is attacker-controlled metadata. Bound the service
+        // snapshot before storing it, not only the merged public peer map;
+        // otherwise one forged advertisement could leave an unbounded vector
+        // behind even though only a few candidates were admitted globally.
+        let mut per_peer = BTreeMap::<String, usize>::new();
+        let current = current
+            .into_iter()
+            .filter(|peer| {
+                if per_peer.len() >= crate::MAX_DISCOVERED_PEER_ADDRESSES
+                    && !per_peer.contains_key(&peer.id)
+                {
+                    return false;
+                }
+                let count = per_peer.entry(peer.id.clone()).or_insert(0);
+                if *count >= crate::MAX_TRUSTED_CANDIDATE_ADDRESSES {
+                    return false;
+                }
+                *count += 1;
+                true
+            })
+            .take(crate::MAX_DISCOVERED_PEER_ADDRESSES)
+            .collect::<Vec<_>>();
         let mut discovered = Vec::new();
         let mut lost = Vec::new();
         if let (Ok(mut services), Ok(mut peers)) = (self.peer_services.lock(), self.peers.lock()) {
+            if !services.contains_key(service_id)
+                && services.len() >= crate::MAX_DISCOVERED_PEER_ADDRESSES
+            {
+                return;
+            }
             let previous = services.insert(
                 service_id.to_owned(),
                 current
@@ -335,13 +424,34 @@ impl EngineInner {
                     .collect(),
             );
             for peer in &current {
-                if previous
-                    .as_ref()
-                    .is_none_or(|old| !old.contains_key(&peer.addr))
-                {
-                    discovered.push(peer.clone());
+                let admitted = peers
+                    .get(&peer.addr)
+                    .is_some_and(|existing| existing.id == peer.id)
+                    || peers
+                        .values()
+                        .filter(|existing| existing.id == peer.id)
+                        .count()
+                        < crate::MAX_TRUSTED_CANDIDATE_ADDRESSES
+                        && (peers.contains_key(&peer.addr)
+                            || peers.len() < crate::MAX_DISCOVERED_PEER_ADDRESSES);
+                if admitted {
+                    if previous
+                        .as_ref()
+                        .is_none_or(|old| !old.contains_key(&peer.addr))
+                    {
+                        discovered.push(peer.clone());
+                    }
+                    peers.insert(peer.addr, peer.clone());
+                    if let Some(link) = link {
+                        if let Ok(mut links) = self.peer_links.lock() {
+                            if links.contains_key(&peer.addr)
+                                || links.len() < crate::MAX_DISCOVERED_PEER_ADDRESSES
+                            {
+                                links.insert(peer.addr, link);
+                            }
+                        }
+                    }
                 }
-                peers.insert(peer.addr, peer.clone());
             }
             if let Some(previous) = previous {
                 for (addr, peer) in previous {
@@ -349,7 +459,38 @@ impl EngineInner {
                         && !services.values().any(|service| service.contains_key(&addr))
                     {
                         peers.remove(&addr);
+                        if let Ok(mut links) = self.peer_links.lock() {
+                            links.remove(&addr);
+                        }
                         lost.push(peer);
+                    }
+                }
+            }
+            // A peer may be present through several discovery workers. Enforce
+            // the cap globally as well as per refresh, so a spoofed stable ID
+            // cannot grow the candidate set through repeated advertisements.
+            let mut counts = BTreeMap::<String, usize>::new();
+            let over_limit = peers
+                .iter()
+                .filter_map(|(addr, peer)| {
+                    let count = counts.entry(peer.id.clone()).or_insert(0);
+                    *count += 1;
+                    (*count > crate::MAX_TRUSTED_CANDIDATE_ADDRESSES).then_some(*addr)
+                })
+                .collect::<Vec<_>>();
+            for addr in over_limit {
+                peers.remove(&addr);
+                if let Ok(mut links) = self.peer_links.lock() {
+                    links.remove(&addr);
+                }
+            }
+            if peers.len() > crate::MAX_DISCOVERED_PEER_ADDRESSES {
+                let excess = peers.len() - crate::MAX_DISCOVERED_PEER_ADDRESSES;
+                let evicted = peers.keys().take(excess).copied().collect::<Vec<_>>();
+                for addr in evicted {
+                    peers.remove(&addr);
+                    if let Ok(mut links) = self.peer_links.lock() {
+                        links.remove(&addr);
                     }
                 }
             }
@@ -370,6 +511,9 @@ impl EngineInner {
                     let still_advertised =
                         services.values().any(|service| service.contains_key(&addr));
                     if !still_advertised && peers.remove(&addr).is_some() {
+                        if let Ok(mut links) = self.peer_links.lock() {
+                            links.remove(&addr);
+                        }
                         lost.push(peer);
                     }
                 }
@@ -396,6 +540,9 @@ impl EngineInner {
             (self.peer_services.lock(), self.peers.lock())
         {
             services.clear();
+            if let Ok(mut links) = self.peer_links.lock() {
+                links.clear();
+            }
             std::mem::take(&mut *peers)
                 .into_values()
                 .collect::<Vec<_>>()

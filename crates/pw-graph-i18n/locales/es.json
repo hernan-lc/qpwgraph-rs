@@ -214,6 +214,8 @@
   "relay.peer_lost": "Host del relé desaparecido: {name}",
   "relay.session_connected": "Sesión del relé conectada a {name}",
   "relay.session_lost": "Sesión del relé perdida: {reason}",
+  "relay.trusted_peer_forgotten": "Dispositivo de relé de confianza olvidado",
+  "relay.trusted_connection_rejected": "La conexión de confianza fue rechazada. Vuelve a emparejar con el PIN del host.",
   "relay.error": "Error del relé: {error}",
   "toolbar.refresh": "Actualizar",
   "toolbar.undo": "Deshacer",

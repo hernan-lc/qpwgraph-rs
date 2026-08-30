@@ -38,8 +38,15 @@ After a successful explicit PIN pairing, both sides receive a random
 per-peer credential. Applications store it in owner-only storage together
 with the peer's stable device ID. A later mDNS/USB result for that same ID can
 auto-connect without another PIN; an unknown or mismatched peer is never
-auto-connected. The client also associates resume with that stable ID and can
-try newly discovered addresses when a host moves from Wi-Fi to USB.
+auto-connected. The desktop panel exposes a global trusted auto-connect switch;
+Android enables trusted USB reconnect by default and keeps Wi-Fi reconnect
+opt-in. Both clients keep multiple candidates per identity, back off a failed
+address independently, and prefer the last successful path followed by USB,
+same-subnet, Wi-Fi, Bluetooth PAN, and LAN. Users can forget a trusted device
+without restarting; forgetting removes the live credential, stored credential,
+and future automatic reconnect permission. The client also associates resume
+with that stable ID and can try newly discovered addresses when a host moves
+from Wi-Fi to USB.
 
 ADB-only cables are supported through the explicit **ADB** transport. The
 client uses the normal TCP listener for control and opens a second authenticated
@@ -47,7 +54,17 @@ TCP connection for encrypted, length-framed audio. Android client → desktop
 host uses `adb reverse tcp:48123 tcp:48123`; desktop client → Android host uses
 `adb forward tcp:48123 tcp:48123`. Select ADB, target `127.0.0.1:48123`, and
 create the tunnel first. ADB forwarding is not peer discovery; USB tethering
-remains the zero-configuration network workflow.
+remains the zero-configuration network workflow. The ADB audio stream has its
+own supervisor: loss of the audio TCP connection leaves a healthy control
+session alive while the client retries with a fresh authenticated nonce/proof.
+If localhost is unreachable, the UI reports that the ADB reverse/forward rule
+must be created rather than presenting the failure as a PIN error.
+
+The relay status reports the active transport and link (for example, `udp / usb`,
+`udp / wifi`, or `adb-tcp / loopback`) plus the ADB audio-channel state. A
+healthy Wi-Fi session is intentionally not proactively migrated just because
+USB appears; authenticated resume/failover performs the interface-scoped UDP
+switch and keeps the old path available if rebinding fails.
 
 On Android, the platform audio endpoints currently run mono PCM16. Android
 rejects stereo relay geometry until stereo `AudioRecord`/`AudioTrack` I/O is
@@ -76,6 +93,13 @@ cargo run -p pw-graph-app --no-default-features --features pipewire,relay
 `pw-graph-relay-sdk` is the stable API for third-party applications, with
 `RelayHostBuilder` and `RelayClientBuilder` as the entry points.
 `pw-graph-relay-android` wraps that SDK in JNI bindings for Android.
+
+SDK hosts receive `RelayEvent::TrustedPeerEnrollmentRequested`. They must call
+`trusted_enrollment_secret`, persist the secret in their own durable private
+store, then call `accept_trusted_enrollment`; otherwise call
+`reject_trusted_enrollment`. `TrustAccepted` is never sent for an in-memory-only
+credential. `remove_trusted_peer` revokes a credential from the live engine and
+the embedding should remove its durable record as well.
 
 `.audio(sample_rate, channels, frame_ms)` sets both the negotiated wire
 geometry and the local geometry of the PCM you push and pull; use

@@ -65,6 +65,26 @@ use thiserror::Error;
 /// the recent state of the world, not a backlog.
 pub const MAX_QUEUED_EVENTS: usize = 256;
 
+/// Maximum number of host-side enrollment transactions waiting for an
+/// embedding to durably commit them. Keeping this bounded prevents a peer
+/// from turning the application callback into an allocation DoS.
+pub const MAX_PENDING_TRUST_ENROLLMENTS: usize = 64;
+/// A host embedding has this long to persist an enrollment and accept it.
+pub const TRUST_ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum discovered addresses retained for one stable peer identity.
+pub const MAX_TRUSTED_CANDIDATE_ADDRESSES: usize = 16;
+/// Maximum `(peer, address)` failure records retained for candidate backoff.
+pub const MAX_TRUSTED_CANDIDATE_FAILURES: usize = 1024;
+/// Maximum discovered addresses retained across all stable peer identities.
+/// Discovery is untrusted input and must not be allowed to grow metadata maps.
+pub const MAX_DISCOVERED_PEER_ADDRESSES: usize = 4096;
+/// Maximum stable identities retained in the last-success preference cache.
+pub const MAX_TRUSTED_SUCCESSFUL_ADDRESSES: usize = 1024;
+/// Maximum trusted credentials accepted from an embedding or persistence
+/// layer. Trusted-device management is user-controlled, but its backing table
+/// still needs a hard bound against malformed or stale configuration.
+pub const MAX_TRUSTED_PEERS: usize = 256;
+
 /// Failed pairings one source address may make before it is locked out.
 pub const PAIRING_ATTEMPT_LIMIT: u32 = 5;
 /// How long a source stays locked out. With a PAKE, guessing a six-digit PIN
@@ -82,6 +102,27 @@ struct FailureRecord {
     count: u32,
     locked_until: Instant,
     last_seen: Instant,
+}
+
+enum EnrollmentDecision {
+    Pending,
+    Accepted,
+    Rejected(String),
+}
+
+struct PendingEnrollment {
+    session_id: SessionId,
+    peer_id: String,
+    secret: [u8; 32],
+    created: Instant,
+    decision: EnrollmentDecision,
+}
+
+struct EnrollmentResolution {
+    peer_id: String,
+    secret: [u8; 32],
+    accepted: bool,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -131,14 +172,24 @@ pub struct PeerInfo {
 /// The engine never derives this from a PIN. It is generated after an
 /// explicit PIN pairing and can therefore be used for later cable/network
 /// discovery without weakening the one-time pairing exchange.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TrustedPeer {
     pub peer_id: String,
     pub secret: [u8; 32],
 }
 
+impl fmt::Debug for TrustedPeer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrustedPeer")
+            .field("peer_id", &self.peer_id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Events drained by the host application (typically once per UI frame).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum RelayEvent {
     HostStarted {
         port: u16,
@@ -159,6 +210,15 @@ pub enum RelayEvent {
         peer_id: String,
         peer: PeerInfo,
         secret: [u8; 32],
+    },
+    /// A host embedding must durably persist the credential obtained through
+    /// [`RelayHandle::trusted_enrollment_secret`] and then call
+    /// [`RelayHandle::accept_trusted_enrollment`]. No credential is imported
+    /// into the live engine and no TrustAccepted is sent before that call.
+    TrustedPeerEnrollmentRequested {
+        transaction_id: u64,
+        peer_id: String,
+        peer: PeerInfo,
     },
     SessionEstablished {
         id: SessionId,
@@ -181,9 +241,71 @@ pub enum RelayEvent {
     },
 }
 
+impl fmt::Debug for RelayEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TrustedPeerAvailable { peer_id, peer, .. } => formatter
+                .debug_struct("TrustedPeerAvailable")
+                .field("peer_id", peer_id)
+                .field("peer", peer)
+                .field("secret", &"<redacted>")
+                .finish(),
+            Self::TrustedPeerEnrollmentRequested {
+                transaction_id,
+                peer_id,
+                peer,
+            } => formatter
+                .debug_struct("TrustedPeerEnrollmentRequested")
+                .field("transaction_id", transaction_id)
+                .field("peer_id", peer_id)
+                .field("peer", peer)
+                .finish(),
+            Self::HostStarted { port } => formatter
+                .debug_struct("HostStarted")
+                .field("port", port)
+                .finish(),
+            Self::HostStopped => formatter.write_str("HostStopped"),
+            Self::PeerDiscovered { peer } => formatter
+                .debug_struct("PeerDiscovered")
+                .field("peer", peer)
+                .finish(),
+            Self::PeerLost { peer } => formatter
+                .debug_struct("PeerLost")
+                .field("peer", peer)
+                .finish(),
+            Self::SessionEstablished {
+                id,
+                peer,
+                roles,
+                codec,
+            } => formatter
+                .debug_struct("SessionEstablished")
+                .field("id", id)
+                .field("peer", peer)
+                .field("roles", roles)
+                .field("codec", codec)
+                .finish(),
+            Self::SessionLost { id, reason } => formatter
+                .debug_struct("SessionLost")
+                .field("id", id)
+                .field("reason", reason)
+                .finish(),
+            Self::AudioLevel { id, rms } => formatter
+                .debug_struct("AudioLevel")
+                .field("id", id)
+                .field("rms", rms)
+                .finish(),
+            Self::Error { message } => formatter
+                .debug_struct("Error")
+                .field("message", message)
+                .finish(),
+        }
+    }
+}
+
 /// Engine-wide configuration. Apply with [`RelayHandle::update_config`]
 /// before starting a host; `connect` reads the audio parameters live.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct EngineConfig {
     /// Stable identity for this installation. It is advertised in discovery
     /// records and bound into trusted handshakes.
@@ -227,6 +349,32 @@ pub struct EngineConfig {
     /// enabled by default so a user who pairs once gets real cable
     /// auto-connect; embedders that want PIN-only operation can disable it.
     pub trust_new_peers: bool,
+}
+
+impl fmt::Debug for EngineConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineConfig")
+            .field("device_id", &self.device_id)
+            .field("device_name", &self.device_name)
+            .field("device_kind", &self.device_kind)
+            .field("pin", &"<redacted>")
+            .field("port", &self.port)
+            .field("codec", &self.codec)
+            .field("frame_ms", &self.frame_ms)
+            .field("sample_rate", &self.sample_rate)
+            .field("channels", &self.channels)
+            .field("client_roles", &self.client_roles)
+            .field("transport", &self.transport)
+            .field("local_sample_rate", &self.local_sample_rate)
+            .field("local_channels", &self.local_channels)
+            .field("bind_addr", &self.bind_addr)
+            .field("max_pending_handshakes", &self.max_pending_handshakes)
+            .field("max_sessions", &self.max_sessions)
+            .field("trusted_peers", &self.trusted_peers)
+            .field("trust_new_peers", &self.trust_new_peers)
+            .finish()
+    }
 }
 
 impl Default for EngineConfig {
@@ -280,6 +428,18 @@ pub struct SessionStatus {
     pub sending: bool,
     /// True when this side receives audio in the session.
     pub receiving: bool,
+    /// Carrier used by the session: `udp` for normal links or `adb-tcp` for
+    /// ADB forwarding. This is diagnostic metadata, never an authorization
+    /// signal.
+    pub transport: String,
+    /// Classified link used by the current peer address, when known.
+    pub link: String,
+    /// Local endpoint is not exposed until the transport has one to report.
+    pub local_addr: Option<SocketAddr>,
+    pub remote_addr: SocketAddr,
+    pub control_state: String,
+    pub audio_channel_state: String,
+    pub trusted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -347,6 +507,12 @@ pub(crate) struct SessionRecord {
     /// Authenticated replacement stream for ADB-only operation. `None`
     /// means the session uses UDP audio.
     pub tcp_audio: Option<Arc<session::TcpAudioSlot>>,
+    /// Interface-scoped UDP socket, replaceable after authenticated resume.
+    pub udp_audio: Option<Arc<session::UdpAudioSlot>>,
+    /// Current authenticated control peer address. The stable discovery
+    /// address in `peer` remains the identity label; this field reports the
+    /// path actually carrying the live control session.
+    pub control_peer_addr: Mutex<SocketAddr>,
     /// Explicitly gates resume takeover and serializes racing attempts.
     pub control_state: Mutex<ControlState>,
     /// UDP address of the peer's audio socket.
@@ -489,11 +655,21 @@ pub(crate) struct EngineInner {
     trusted_peers: Mutex<BTreeMap<String, [u8; 32]>>,
     /// Connections currently inside the pre-authentication handshake.
     pending_handshakes: AtomicU64,
+    /// Durable-enrollment transactions awaiting an embedding decision.
+    /// Secrets remain private to this map and are never included in the
+    /// request event or diagnostics.
+    pending_enrollments: Mutex<BTreeMap<u64, PendingEnrollment>>,
+    next_enrollment: AtomicU64,
     host: Mutex<Option<session::HostRecord>>,
     /// Discovered (not necessarily connected) relay hosts, keyed by address.
     peers: Mutex<BTreeMap<SocketAddr, PeerInfo>>,
     /// Resolved addresses grouped by mDNS service identity.
     peer_services: Mutex<BTreeMap<String, BTreeMap<SocketAddr, PeerInfo>>>,
+    /// Discovery metadata used only to rank candidate addresses. Identity is
+    /// still proved by the trusted/resume handshake, never by this metadata.
+    peer_links: Mutex<BTreeMap<SocketAddr, LinkKind>>,
+    candidate_failures: Mutex<BTreeMap<(String, SocketAddr), FailureRecord>>,
+    last_successful_addresses: Mutex<BTreeMap<String, SocketAddr>>,
     advertiser: Mutex<Option<discovery::Advertiser>>,
     browser: Mutex<Option<discovery::Browser>>,
     usb_scanner: Mutex<Option<usb_probe::UsbScanner>>,
@@ -506,6 +682,7 @@ impl EngineInner {
         let trusted_peers = config
             .trusted_peers
             .iter()
+            .take(MAX_TRUSTED_PEERS)
             .map(|peer| (peer.peer_id.clone(), peer.secret))
             .collect();
         Arc::new(Self {
@@ -518,9 +695,14 @@ impl EngineInner {
             pairing_failures: Mutex::new(BTreeMap::new()),
             trusted_peers: Mutex::new(trusted_peers),
             pending_handshakes: AtomicU64::new(0),
+            pending_enrollments: Mutex::new(BTreeMap::new()),
+            next_enrollment: AtomicU64::new(1),
             host: Mutex::new(None),
             peers: Mutex::new(BTreeMap::new()),
             peer_services: Mutex::new(BTreeMap::new()),
+            peer_links: Mutex::new(BTreeMap::new()),
+            candidate_failures: Mutex::new(BTreeMap::new()),
+            last_successful_addresses: Mutex::new(BTreeMap::new()),
             advertiser: Mutex::new(None),
             browser: Mutex::new(None),
             usb_scanner: Mutex::new(None),
@@ -625,6 +807,79 @@ impl EngineInner {
         }
     }
 
+    pub(crate) fn candidate_allowed(&self, peer_id: &str, addr: SocketAddr) -> bool {
+        let Ok(mut failures) = self.candidate_failures.lock() else {
+            return true;
+        };
+        let key = (peer_id.to_owned(), addr);
+        let Some(record) = failures.get(&key) else {
+            return true;
+        };
+        if record.locked_until <= Instant::now() {
+            failures.remove(&key);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn note_candidate_failure(&self, peer_id: &str, addr: SocketAddr) {
+        let Ok(mut failures) = self.candidate_failures.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let key = (peer_id.to_owned(), addr);
+        if !failures.contains_key(&key) && failures.len() >= MAX_TRUSTED_CANDIDATE_FAILURES {
+            failures.retain(|_, record| record.locked_until > now);
+            if failures.len() >= MAX_TRUSTED_CANDIDATE_FAILURES {
+                if let Some(oldest) = failures
+                    .iter()
+                    .min_by_key(|(_, record)| record.last_seen)
+                    .map(|(key, _)| key.clone())
+                {
+                    failures.remove(&oldest);
+                }
+            }
+        }
+        let record = failures.entry(key).or_insert(FailureRecord {
+            count: 0,
+            locked_until: now,
+            last_seen: now,
+        });
+        record.count = record.count.saturating_add(1);
+        record.last_seen = now;
+        let exponent = record.count.saturating_sub(1).min(6);
+        let delay = Duration::from_millis(500u64.saturating_mul(1u64 << exponent));
+        record.locked_until = now + delay.min(Duration::from_secs(30));
+    }
+
+    pub(crate) fn note_candidate_success(&self, peer_id: &str, addr: SocketAddr) {
+        if let Ok(mut failures) = self.candidate_failures.lock() {
+            failures.remove(&(peer_id.to_owned(), addr));
+        }
+        if let Ok(mut addresses) = self.last_successful_addresses.lock() {
+            if !addresses.contains_key(peer_id)
+                && addresses.len() >= MAX_TRUSTED_SUCCESSFUL_ADDRESSES
+            {
+                if let Some(oldest) = addresses.keys().next().cloned() {
+                    addresses.remove(&oldest);
+                }
+            }
+            addresses.insert(peer_id.to_owned(), addr);
+        }
+    }
+
+    pub(crate) fn last_successful_address(&self, peer_id: &str) -> Option<SocketAddr> {
+        self.last_successful_addresses
+            .lock()
+            .ok()
+            .and_then(|addresses| addresses.get(peer_id).copied())
+    }
+
+    pub(crate) fn discovered_link(&self, addr: SocketAddr) -> Option<LinkKind> {
+        self.peer_links.lock().ok()?.get(&addr).copied()
+    }
+
     fn drain_events(&self) -> Vec<RelayEvent> {
         self.events
             .lock()
@@ -647,6 +902,196 @@ impl EngineInner {
         if let Ok(mut peers) = self.trusted_peers.lock() {
             peers.insert(peer_id, secret);
         }
+    }
+
+    /// Start a host-side durable enrollment transaction. The secret is kept
+    /// only in the bounded transaction table until the embedding confirms
+    /// that its own durable store has committed it.
+    pub(crate) fn begin_trusted_enrollment(
+        &self,
+        session_id: SessionId,
+        peer_id: String,
+        peer: PeerInfo,
+        secret: [u8; 32],
+    ) -> Result<u64, String> {
+        if peer_id.trim().is_empty() || peer_id != peer.id {
+            return Err("trusted peer identity did not match the session".into());
+        }
+        if secret.iter().all(|byte| *byte == 0) {
+            return Err("trusted credential was malformed".into());
+        }
+        if self.trusted_secret(&peer_id).is_none()
+            && self
+                .trusted_peers
+                .lock()
+                .map(|peers| peers.len() >= MAX_TRUSTED_PEERS)
+                .unwrap_or(true)
+        {
+            return Err("trusted credential capacity has been reached".into());
+        }
+        let now = Instant::now();
+        let mut pending = self
+            .pending_enrollments
+            .lock()
+            .map_err(|_| "trusted enrollment state is locked".to_string())?;
+        pending.retain(|_, enrollment| {
+            now.duration_since(enrollment.created) < TRUST_ENROLLMENT_TIMEOUT
+        });
+        if pending.len() >= MAX_PENDING_TRUST_ENROLLMENTS {
+            return Err("too many trusted enrollments are pending".into());
+        }
+        if pending
+            .values()
+            .any(|enrollment| enrollment.peer_id == peer_id || enrollment.session_id == session_id)
+        {
+            return Err("a trusted enrollment for this peer is already pending".into());
+        }
+        let transaction_id = self.next_enrollment.fetch_add(1, Ordering::Relaxed);
+        pending.insert(
+            transaction_id,
+            PendingEnrollment {
+                session_id,
+                peer_id,
+                secret,
+                created: now,
+                decision: EnrollmentDecision::Pending,
+            },
+        );
+        Ok(transaction_id)
+    }
+
+    /// Return a transaction's secret to the embedding that owns durable
+    /// storage. Callers should copy it only for the persistence operation and
+    /// then immediately accept or reject the transaction.
+    pub(crate) fn trusted_enrollment_secret(&self, transaction_id: u64) -> Option<[u8; 32]> {
+        let pending = self.pending_enrollments.lock().ok()?;
+        let enrollment = pending.get(&transaction_id)?;
+        (enrollment.created.elapsed() < TRUST_ENROLLMENT_TIMEOUT).then_some(enrollment.secret)
+    }
+
+    pub(crate) fn accept_trusted_enrollment(&self, transaction_id: u64) -> RelayResult<()> {
+        let mut pending = self
+            .pending_enrollments
+            .lock()
+            .map_err(|_| RelayError::Engine("trusted enrollment state is locked".into()))?;
+        let enrollment = pending
+            .get_mut(&transaction_id)
+            .ok_or_else(|| RelayError::Engine("trusted enrollment expired or is unknown".into()))?;
+        if enrollment.created.elapsed() >= TRUST_ENROLLMENT_TIMEOUT {
+            pending.remove(&transaction_id);
+            return Err(RelayError::Engine("trusted enrollment expired".into()));
+        }
+        match &enrollment.decision {
+            EnrollmentDecision::Pending => enrollment.decision = EnrollmentDecision::Accepted,
+            EnrollmentDecision::Accepted => {}
+            EnrollmentDecision::Rejected(_) => {
+                return Err(RelayError::Engine("trusted enrollment was rejected".into()))
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reject_trusted_enrollment(
+        &self,
+        transaction_id: u64,
+        reason: String,
+    ) -> RelayResult<()> {
+        let mut pending = self
+            .pending_enrollments
+            .lock()
+            .map_err(|_| RelayError::Engine("trusted enrollment state is locked".into()))?;
+        let enrollment = pending
+            .get_mut(&transaction_id)
+            .ok_or_else(|| RelayError::Engine("trusted enrollment expired or is unknown".into()))?;
+        if enrollment.created.elapsed() >= TRUST_ENROLLMENT_TIMEOUT {
+            pending.remove(&transaction_id);
+            return Err(RelayError::Engine("trusted enrollment expired".into()));
+        }
+        if matches!(&enrollment.decision, EnrollmentDecision::Accepted) {
+            return Err(RelayError::Engine(
+                "trusted enrollment was already accepted".into(),
+            ));
+        }
+        enrollment.decision = EnrollmentDecision::Rejected(if reason.trim().is_empty() {
+            "trusted enrollment rejected".into()
+        } else {
+            reason
+        });
+        Ok(())
+    }
+
+    /// Resolve one transaction belonging to a session. Expiry is resolved as
+    /// a rejection, so the client never waits forever for a host callback.
+    pub(crate) fn take_trusted_enrollment(
+        &self,
+        session_id: SessionId,
+    ) -> Option<EnrollmentResolution> {
+        let mut pending = self.pending_enrollments.lock().ok()?;
+        let transaction_id = pending
+            .iter()
+            .filter(|(_, enrollment)| enrollment.session_id == session_id)
+            .min_by_key(|(_, enrollment)| enrollment.created)
+            .map(|(id, _)| *id)?;
+        let enrollment = pending.get(&transaction_id)?;
+        let expired = enrollment.created.elapsed() >= TRUST_ENROLLMENT_TIMEOUT;
+        let accepted = matches!(&enrollment.decision, EnrollmentDecision::Accepted);
+        let reason = match &enrollment.decision {
+            EnrollmentDecision::Rejected(reason) => Some(reason.clone()),
+            EnrollmentDecision::Pending if expired => Some("trusted enrollment timed out".into()),
+            _ => None,
+        };
+        if !accepted && reason.is_none() {
+            return None;
+        }
+        let enrollment = pending.remove(&transaction_id)?;
+        Some(EnrollmentResolution {
+            peer_id: enrollment.peer_id,
+            secret: enrollment.secret,
+            accepted,
+            reason,
+        })
+    }
+
+    pub(crate) fn remove_trusted_peer(&self, peer_id: &str) -> bool {
+        let removed = self
+            .trusted_peers
+            .lock()
+            .ok()
+            .and_then(|mut peers| peers.remove(peer_id))
+            .is_some();
+        let ids = self
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .filter(|record| record.peer.id == peer_id)
+                    .map(|record| record.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for id in &ids {
+            session::teardown(self, *id, "trusted peer was revoked".into());
+        }
+        if let Ok(mut pending) = self.pending_enrollments.lock() {
+            pending.retain(|_, enrollment| enrollment.peer_id != peer_id);
+        }
+        removed || !ids.is_empty()
+    }
+
+    pub(crate) fn trusted_peers(&self) -> Vec<TrustedPeer> {
+        self.trusted_peers
+            .lock()
+            .map(|peers| {
+                peers
+                    .iter()
+                    .map(|(peer_id, secret)| TrustedPeer {
+                        peer_id: peer_id.clone(),
+                        secret: *secret,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn next_session_id(&self) -> SessionId {
@@ -882,19 +1327,73 @@ impl EngineInner {
         let (host_port, host_addr) = host
             .map(|(port, addr)| (Some(port), addr))
             .unwrap_or((None, None));
+        let config = self.config();
         let sessions = self
             .sessions
             .lock()
             .map(|sessions| {
                 sessions
                     .values()
-                    .map(|record| SessionStatus {
-                        id: record.id,
-                        peer: record.peer.clone(),
-                        roles: record.roles,
-                        codec: record.codec,
-                        sending: record.sending,
-                        receiving: record.receiving,
+                    .map(|record| {
+                        let control_state = record
+                            .control_state
+                            .lock()
+                            .map(|state| match *state {
+                                ControlState::Active => "active",
+                                ControlState::ResumeEligible { .. } => "resume-eligible",
+                                ControlState::Resuming { .. } => "resuming",
+                            })
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let audio_over_tcp = record.tcp_audio.is_some();
+                        let audio_channel_state = if let Some(audio) = &record.tcp_audio {
+                            if audio.is_active() {
+                                "active"
+                            } else {
+                                "reconnecting"
+                            }
+                        } else {
+                            "active"
+                        };
+                        let remote_addr = record
+                            .control_peer_addr
+                            .lock()
+                            .ok()
+                            .map(|addr| *addr)
+                            .unwrap_or(record.peer.addr);
+                        let link = if config.transport == TransportPreference::Adb {
+                            "loopback"
+                        } else {
+                            self.discovered_link(remote_addr)
+                                .map(LinkKind::as_str)
+                                .unwrap_or("unknown")
+                        };
+                        let local_addr = record
+                            .udp_audio
+                            .as_ref()
+                            .and_then(|socket| socket.local_addr());
+                        let trusted = record
+                            .trust_secret
+                            .lock()
+                            .ok()
+                            .and_then(|secret| *secret)
+                            .is_some()
+                            || self.trusted_secret(&record.peer.id).is_some();
+                        SessionStatus {
+                            id: record.id,
+                            peer: record.peer.clone(),
+                            roles: record.roles,
+                            codec: record.codec,
+                            sending: record.sending,
+                            receiving: record.receiving,
+                            transport: if audio_over_tcp { "adb-tcp" } else { "udp" }.into(),
+                            link: link.into(),
+                            local_addr,
+                            remote_addr,
+                            control_state,
+                            audio_channel_state: audio_channel_state.into(),
+                            trusted,
+                        }
                     })
                     .collect()
             })
@@ -1009,7 +1508,13 @@ impl RelayHandle {
         }
         if let Ok(mut peers) = self.inner.trusted_peers.lock() {
             peers.clear();
-            for peer in self.inner.config().trusted_peers {
+            for peer in self
+                .inner
+                .config()
+                .trusted_peers
+                .into_iter()
+                .take(MAX_TRUSTED_PEERS)
+            {
                 peers.insert(peer.peer_id, peer.secret);
             }
         }
@@ -1096,6 +1601,50 @@ impl RelayHandle {
         id
     }
 
+    /// Return the secret held by a pending host enrollment transaction. The
+    /// embedding must durably commit this value before accepting the
+    /// transaction. It is intentionally not carried in the request event.
+    pub fn trusted_enrollment_secret(&self, transaction_id: u64) -> Option<[u8; 32]> {
+        self.inner.trusted_enrollment_secret(transaction_id)
+    }
+
+    /// Commit a pending trusted enrollment after durable application
+    /// persistence has succeeded. Only after the control thread observes this
+    /// decision does it import the credential and send TrustAccepted.
+    pub fn accept_trusted_enrollment(&self, transaction_id: u64) -> RelayResult<()> {
+        self.inner.accept_trusted_enrollment(transaction_id)
+    }
+
+    /// Reject a pending trusted enrollment. The client is not told to retain
+    /// the credential and the live trusted map is unchanged.
+    pub fn reject_trusted_enrollment(
+        &self,
+        transaction_id: u64,
+        reason: impl Into<String>,
+    ) -> RelayResult<()> {
+        self.inner
+            .reject_trusted_enrollment(transaction_id, reason.into())
+    }
+
+    /// Remove a trusted identity immediately from the live engine. An
+    /// embedding should remove the same record from its durable store too.
+    pub fn remove_trusted_peer(&self, peer_id: &str) -> RelayResult<()> {
+        if peer_id.trim().is_empty() {
+            return Err(RelayError::Config(
+                "trusted peer id must not be empty".into(),
+            ));
+        }
+        self.inner.remove_trusted_peer(peer_id);
+        Ok(())
+    }
+
+    /// Snapshot of live trusted identities. Secrets are returned only because
+    /// this API is used to rebuild an engine's authenticated configuration;
+    /// status and event JSON never expose them.
+    pub fn trusted_peers(&self) -> Vec<TrustedPeer> {
+        self.inner.trusted_peers()
+    }
+
     /// Begin browsing for relay hosts on the local network. Discovered peers
     /// arrive as [`RelayEvent::PeerDiscovered`]. Runs mDNS alongside a direct
     /// probe of USB tether subnets, because mDNS often does not cross a USB
@@ -1144,6 +1693,23 @@ impl RelayHandle {
         self.inner.discovered_peers()
     }
 
+    /// Discovery snapshot with non-authoritative link classification for
+    /// candidate ranking and diagnostics. The link is public metadata; only a
+    /// successful authenticated handshake establishes peer identity.
+    pub fn discovered_peer_candidates(&self) -> Vec<(PeerInfo, Option<LinkKind>)> {
+        let peers = self.inner.discovered_peers();
+        let links = self.inner.peer_links.lock().ok();
+        peers
+            .into_iter()
+            .map(|peer| {
+                let link = links
+                    .as_ref()
+                    .and_then(|links| links.get(&peer.addr).copied());
+                (peer, link)
+            })
+            .collect()
+    }
+
     /// Supply peer addresses discovered by an embedding-owned browser.
     ///
     /// Some platform adapters keep discovery in a separate engine (for
@@ -1154,6 +1720,13 @@ impl RelayHandle {
     pub fn update_discovered_peers(&self, peers: Vec<PeerInfo>) {
         self.inner
             .refresh_service("embedding-discovery._qpw-relay._udp.local.", peers);
+    }
+
+    /// Supply an embedding-owned discovery snapshot with link hints for
+    /// candidate ranking. The hints are public routing metadata only; resume
+    /// and trusted authentication still prove the peer identity.
+    pub fn update_discovered_peer_candidates(&self, peers: Vec<(PeerInfo, Option<LinkKind>)>) {
+        self.inner.refresh_embedding_candidates(peers);
     }
 
     /// End a session gracefully.
@@ -1437,6 +2010,141 @@ mod tests {
         );
     }
 
+    fn enrollment_peer(id: &str) -> PeerInfo {
+        PeerInfo {
+            id: id.into(),
+            name: format!("{id}-name"),
+            kind: DeviceKind::Other,
+            addr: "192.168.42.2:48123".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn trusted_enrollment_is_not_imported_until_the_embedding_commits() {
+        let inner = EngineInner::new(EngineConfig::default());
+        let peer = enrollment_peer("phone");
+        let secret = [7u8; 32];
+        let transaction = inner
+            .begin_trusted_enrollment(SessionId(9), peer.id.clone(), peer.clone(), secret)
+            .unwrap();
+
+        assert_eq!(inner.trusted_secret(&peer.id), None);
+        assert_eq!(inner.trusted_enrollment_secret(transaction), Some(secret));
+        inner.accept_trusted_enrollment(transaction).unwrap();
+        let resolution = inner.take_trusted_enrollment(SessionId(9)).unwrap();
+        assert!(resolution.accepted);
+        inner.remember_trusted_peer(resolution.peer_id, resolution.secret);
+        assert_eq!(inner.trusted_secret(&peer.id), Some(secret));
+    }
+
+    #[test]
+    fn failed_or_rejected_enrollment_preserves_the_previous_credential() {
+        let inner = EngineInner::new(EngineConfig::default());
+        let peer = enrollment_peer("phone");
+        let old = [3u8; 32];
+        let new = [4u8; 32];
+        inner.remember_trusted_peer(peer.id.clone(), old);
+        let transaction = inner
+            .begin_trusted_enrollment(SessionId(10), peer.id.clone(), peer, new)
+            .unwrap();
+        inner
+            .reject_trusted_enrollment(transaction, "simulated persistence failure".into())
+            .unwrap();
+        let resolution = inner.take_trusted_enrollment(SessionId(10)).unwrap();
+        assert!(!resolution.accepted);
+        assert_eq!(inner.trusted_secret("phone"), Some(old));
+    }
+
+    #[test]
+    fn enrollment_rejects_malformed_duplicate_and_mismatched_requests() {
+        let inner = EngineInner::new(EngineConfig::default());
+        let peer = enrollment_peer("phone");
+        assert!(inner
+            .begin_trusted_enrollment(SessionId(1), peer.id.clone(), peer.clone(), [0u8; 32],)
+            .is_err());
+        assert!(inner
+            .begin_trusted_enrollment(SessionId(1), "other".into(), peer.clone(), [1u8; 32],)
+            .is_err());
+        let transaction = inner
+            .begin_trusted_enrollment(SessionId(1), peer.id.clone(), peer.clone(), [1u8; 32])
+            .unwrap();
+        assert!(inner
+            .begin_trusted_enrollment(SessionId(1), peer.id.clone(), peer, [2u8; 32])
+            .is_err());
+        assert!(inner
+            .begin_trusted_enrollment(
+                SessionId(2),
+                "another".into(),
+                enrollment_peer("another"),
+                [2u8; 32],
+            )
+            .is_ok());
+        inner
+            .reject_trusted_enrollment(transaction, "duplicate".into())
+            .unwrap();
+    }
+
+    #[test]
+    fn enrollment_expiry_is_bounded_and_does_not_expose_the_secret() {
+        let inner = EngineInner::new(EngineConfig::default());
+        let peer = enrollment_peer("phone");
+        let peer_id = peer.id.clone();
+        let transaction = inner
+            .begin_trusted_enrollment(SessionId(3), peer_id, peer, [9u8; 32])
+            .unwrap();
+        inner
+            .pending_enrollments
+            .lock()
+            .unwrap()
+            .get_mut(&transaction)
+            .unwrap()
+            .created = Instant::now() - TRUST_ENROLLMENT_TIMEOUT - Duration::from_secs(1);
+        assert_eq!(inner.trusted_enrollment_secret(transaction), None);
+        assert!(inner.accept_trusted_enrollment(transaction).is_err());
+    }
+
+    #[test]
+    fn revocation_removes_the_live_credential_without_affecting_other_peers() {
+        let inner = EngineInner::new(EngineConfig::default());
+        inner.remember_trusted_peer("one".into(), [1u8; 32]);
+        inner.remember_trusted_peer("two".into(), [2u8; 32]);
+        assert!(inner.remove_trusted_peer("one"));
+        assert_eq!(inner.trusted_secret("one"), None);
+        assert_eq!(inner.trusted_secret("two"), Some([2u8; 32]));
+    }
+
+    #[test]
+    fn candidate_backoff_is_scoped_to_one_peer_and_address() {
+        let inner = EngineInner::new(EngineConfig::default());
+        let fake: SocketAddr = "192.168.1.66:48123".parse().unwrap();
+        let real: SocketAddr = "192.168.42.1:48123".parse().unwrap();
+        inner.note_candidate_failure("host", fake);
+        assert!(!inner.candidate_allowed("host", fake));
+        assert!(inner.candidate_allowed("host", real));
+        assert!(inner.candidate_allowed("other", fake));
+        inner.note_candidate_success("host", real);
+        assert_eq!(inner.last_successful_address("host"), Some(real));
+        assert!(!inner
+            .candidate_failures
+            .lock()
+            .unwrap()
+            .contains_key(&("host".into(), real)));
+    }
+
+    #[test]
+    fn trusted_peer_debug_redacts_the_secret() {
+        let secret = [0xabu8; 32];
+        let text = format!(
+            "{:?}",
+            TrustedPeer {
+                peer_id: "phone".into(),
+                secret
+            }
+        );
+        assert!(!text.contains("ab".repeat(32).as_str()));
+        assert!(text.contains("redacted"));
+    }
+
     /// A session record with just enough filled in to exercise mixing. The
     /// crypto halves are real, because `SessionRecord` has nowhere to put a
     /// placeholder, but nothing in the mix path touches them.
@@ -1475,6 +2183,8 @@ mod tests {
             resume_secret: keys.resume_auth_key(),
             trust_secret: Mutex::new(None),
             tcp_audio: None,
+            udp_audio: None,
+            control_peer_addr: Mutex::new("127.0.0.1:1".parse().unwrap()),
             control_state: Mutex::new(ControlState::Active),
             peer_audio_addr: Mutex::new(None),
             outgoing: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),

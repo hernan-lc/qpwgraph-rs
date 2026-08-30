@@ -134,6 +134,10 @@ impl UiBridge {
             relay_usb_auto_attempted: false,
             #[cfg(feature = "relay")]
             relay_trusted_auto_attempt_at: None,
+            #[cfg(feature = "relay")]
+            relay_trusted_candidate_failures: BTreeMap::new(),
+            #[cfg(feature = "relay")]
+            relay_trusted_auth_rejected: false,
         }));
 
         let window = MainWindow::new()?;
@@ -240,6 +244,7 @@ impl UiBridge {
             window.set_relay_client_pin(SharedString::from(
                 application.config.relay_client_pin.clone(),
             ));
+            window.set_relay_auto_connect_trusted(application.config.relay_auto_connect_trusted);
             window.set_relay_role_index(relay_role_index(&application.config.relay_role));
             window.set_relay_codec_index(relay_codec_index(&application.config.relay_codec));
             window.set_relay_frame_index(relay_frame_index(application.config.relay_frame_ms));
@@ -475,6 +480,10 @@ mod tests {
             relay_usb_auto_attempted: false,
             #[cfg(feature = "relay")]
             relay_trusted_auto_attempt_at: None,
+            #[cfg(feature = "relay")]
+            relay_trusted_candidate_failures: BTreeMap::new(),
+            #[cfg(feature = "relay")]
+            relay_trusted_auth_rejected: false,
         }
     }
 

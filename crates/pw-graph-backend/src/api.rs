@@ -827,7 +827,7 @@ pub use pw_graph_relay::{
 
 /// Parameters for starting the relay host.
 #[cfg(feature = "relay")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RelayHostRequest {
     /// Stable identity and previously enrolled credentials for this host.
     pub device_id: String,
@@ -842,6 +842,24 @@ pub struct RelayHostRequest {
     pub frame_ms: u16,
     /// Preferred transport link for advertising and selection.
     pub transport: RelayTransportPreference,
+}
+
+#[cfg(feature = "relay")]
+impl std::fmt::Debug for RelayHostRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayHostRequest")
+            .field("device_id", &self.device_id)
+            .field("trusted_peers", &self.trusted_peers)
+            .field("trust_new_peers", &self.trust_new_peers)
+            .field("device_name", &self.device_name)
+            .field("pin", &"<redacted>")
+            .field("port", &self.port)
+            .field("codec", &self.codec)
+            .field("frame_ms", &self.frame_ms)
+            .field("transport", &self.transport)
+            .finish()
+    }
 }
 
 #[cfg(feature = "relay")]
@@ -921,6 +939,40 @@ pub trait RelayDriver {
     fn relay_disconnect(&mut self, _session: RelaySessionId) -> BackendResult<()> {
         Err(BackendError::Unsupported(
             "audio relay is not available for this backend".into(),
+        ))
+    }
+
+    /// Read a pending enrollment secret only for the durable host-store
+    /// callback. The default keeps this capability unavailable on non-relay
+    /// backends.
+    fn relay_trusted_enrollment_secret(
+        &self,
+        _transaction_id: u64,
+    ) -> BackendResult<Option<[u8; 32]>> {
+        Err(BackendError::Unsupported(
+            "trusted enrollment is not available for this backend".into(),
+        ))
+    }
+
+    fn relay_accept_trusted_enrollment(&mut self, _transaction_id: u64) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "trusted enrollment is not available for this backend".into(),
+        ))
+    }
+
+    fn relay_reject_trusted_enrollment(
+        &mut self,
+        _transaction_id: u64,
+        _reason: &str,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "trusted enrollment is not available for this backend".into(),
+        ))
+    }
+
+    fn relay_remove_trusted_peer(&mut self, _peer_id: &str) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "trusted-device management is not available for this backend".into(),
         ))
     }
 

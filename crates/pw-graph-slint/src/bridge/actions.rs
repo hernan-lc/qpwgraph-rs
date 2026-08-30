@@ -17,8 +17,8 @@ use super::patchbay::{
     save_profile, save_rule, select_profile, snapshot_patchbay, toggle_rule_pin,
 };
 use super::relay::{
-    connect_relay, disconnect_relay, relay_host_active, relay_qr_payload, start_relay_discovery,
-    start_relay_host, stop_relay_discovery, stop_relay_host,
+    connect_relay, disconnect_relay, forget_trusted_peer, relay_host_active, relay_qr_payload,
+    start_relay_discovery, start_relay_host, stop_relay_discovery, stop_relay_host,
 };
 use super::MainWindow;
 
@@ -406,6 +406,10 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
                 .strip_prefix("relay-disconnect:")
                 .and_then(|value| value.parse::<u64>().ok());
             disconnect_relay(application, session);
+        }
+        _ if action.strip_prefix("relay-forget:").is_some() => {
+            let peer_id = action.strip_prefix("relay-forget:").unwrap_or_default();
+            forget_trusted_peer(application, peer_id);
         }
         _ => {
             application.status =
