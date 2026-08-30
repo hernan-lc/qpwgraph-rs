@@ -136,8 +136,6 @@ impl UiBridge {
             relay_trusted_auto_attempt_at: None,
             #[cfg(feature = "relay")]
             relay_trusted_candidate_failures: BTreeMap::new(),
-            #[cfg(feature = "relay")]
-            relay_trusted_auth_rejected: false,
         }));
 
         let window = MainWindow::new()?;
@@ -482,8 +480,6 @@ mod tests {
             relay_trusted_auto_attempt_at: None,
             #[cfg(feature = "relay")]
             relay_trusted_candidate_failures: BTreeMap::new(),
-            #[cfg(feature = "relay")]
-            relay_trusted_auth_rejected: false,
         }
     }
 

@@ -99,12 +99,10 @@ pub(crate) struct Application {
     /// UI frame, but a transient cable/link failure should be retried even if
     /// discovery does not emit another `PeerDiscovered` event.
     pub(crate) relay_trusted_auto_attempt_at: Option<Instant>,
-    /// Address-scoped backoff for discovered candidates. A spoofed stable ID
-    /// must not make every other address for the same trusted peer unusable.
+    /// `(peer_id,address)`-scoped backoff for discovered candidates. A
+    /// spoofed stable ID must not make every other address for the same
+    /// trusted peer unusable, nor couple unrelated peers sharing an address.
     pub(crate) relay_trusted_candidate_failures: BTreeMap<(String, String), (u8, Instant)>,
-    /// Cryptographic rejection needs explicit re-pairing, while ordinary
-    /// refusal/timeouts remain retryable.
-    pub(crate) relay_trusted_auth_rejected: bool,
 }
 
 const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);

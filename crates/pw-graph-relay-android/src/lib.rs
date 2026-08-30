@@ -46,7 +46,17 @@ fn error_json(
     env: &mut JNIEnv<'_>,
     error: impl ToString,
 ) -> jni::errors::Result<jni::sys::jstring> {
-    json_string(env, json!({"type":"error","message":error.to_string()}))
+    let message = error.to_string();
+    let code = native_error_code(&message);
+    json_string(env, json!({"type":"error","code":code,"message":message}))
+}
+
+fn native_error_code(message: &str) -> &'static str {
+    match message {
+        "unknown client handle" => "unknown_client_handle",
+        "unknown host handle" => "unknown_host_handle",
+        _ => "internal_error",
+    }
 }
 
 fn parse_role(value: &str) -> Result<Role, String> {
@@ -1515,6 +1525,19 @@ mod tests {
         assert!(parse_role("not-a-role").is_err());
         assert!(parse_codec("not-a-codec").is_err());
         assert!(parse_transport("not-a-transport").is_err());
+    }
+
+    #[test]
+    fn lifecycle_error_codes_are_stable_and_not_message_parsed_by_clients() {
+        assert_eq!(
+            native_error_code("unknown client handle"),
+            "unknown_client_handle"
+        );
+        assert_eq!(
+            native_error_code("unknown host handle"),
+            "unknown_host_handle"
+        );
+        assert_eq!(native_error_code("something else"), "internal_error");
     }
 
     #[test]

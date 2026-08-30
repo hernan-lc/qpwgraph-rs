@@ -1,5 +1,7 @@
 package io.qpwgraph.relay
 
+import java.util.LinkedHashMap
+
 /** Settings for connecting to a relay host as a receiver. */
 data class RelaySettings(
     val target: String = "",
@@ -160,6 +162,58 @@ data class DiscoveredPeer(
     /** Discovery hint only; authentication still proves the peer identity. */
     val link: String = "",
 )
+
+/** Identity-scoped key for bounded trusted reconnect backoff. */
+data class TrustedCandidateKey(
+    val peerId: String,
+    val address: String,
+)
+
+private data class TrustedCandidateFailure(val count: Int, val retryAt: Long)
+
+/**
+ * Bounded candidate-local retry state. Public discovery addresses are
+ * untrusted, so a failure must not quarantine every peer that later receives
+ * the same address (for example after USB address reuse).
+ */
+class TrustedCandidateBackoff(private val maxEntries: Int = 256) {
+    init {
+        require(maxEntries > 0) { "candidate backoff capacity must be positive" }
+    }
+
+    private val failures = LinkedHashMap<TrustedCandidateKey, TrustedCandidateFailure>()
+
+    fun allowed(peerId: String, address: String, now: Long): Boolean {
+        val key = TrustedCandidateKey(peerId, address)
+        val failure = failures[key] ?: return true
+        if (failure.retryAt <= now) {
+            failures.remove(key)
+            return true
+        }
+        return false
+    }
+
+    fun noteFailure(peerId: String, address: String, now: Long) {
+        val key = TrustedCandidateKey(peerId, address)
+        val previous = failures[key]
+        if (previous == null && failures.size >= maxEntries) {
+            // Expired entries are deterministic garbage. If none expired,
+            // evict the oldest insertion so attacker-controlled discovery
+            // cannot grow this table without bound.
+            val expired = failures.entries.firstOrNull { it.value.retryAt <= now }?.key
+            failures.remove(expired ?: failures.entries.first().key)
+        }
+        val count = (previous?.count ?: 0).plus(1).coerceAtMost(7)
+        val delay = minOf(30_000L, 500L shl (count - 1))
+        failures[key] = TrustedCandidateFailure(count, now + delay)
+    }
+
+    fun clear(peerId: String, address: String) {
+        failures.remove(TrustedCandidateKey(peerId, address))
+    }
+
+    internal fun size(): Int = failures.size
+}
 
 /**
  * Policy gate for background reconnect. The caller must additionally prove

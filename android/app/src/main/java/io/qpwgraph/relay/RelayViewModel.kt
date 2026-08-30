@@ -27,7 +27,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
-import kotlin.math.min
 
 /**
  * Single state holder for both relay roles.
@@ -77,10 +76,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var usbWasPresent = false
     private var lastTrustedAutoAttemptAt = 0L
-    private var trustedCredentialRejected = false
-    private val trustedAddressFailures = LinkedHashMap<String, TrustedAddressFailure>()
-
-    private data class TrustedAddressFailure(val count: Int, val retryAt: Long)
+    private val trustedCandidateBackoff = TrustedCandidateBackoff()
 
     init {
         // Pairing PINs are credentials, not app preferences. Remove values
@@ -296,14 +292,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     return@withLock
                 }
-                trustedCredentialRejected = false
                 setState { it.copy(trustedPeers = trustedPeerSummaries()) }
             }
         }
     }
 
     fun connect() {
-        trustedCredentialRejected = false
         val settings = mutableState.value.settings
         if (clientNeedsMicrophone(settings.role) && !hasMicrophonePermission()) {
             permissionDenied(host = false)
@@ -332,9 +326,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Connect to a discovered peer with its previously enrolled credential. */
     fun connectToTrustedPeer(peer: DiscoveredPeer) {
-        // This is an explicit user action, so it is allowed to retry a
-        // credential that automatic reconnect has quarantined as stale.
-        trustedCredentialRejected = false
+        // This is an explicit user action, so it may retry this candidate
+        // immediately even while automatic reconnect has it backed off.
         val trusted = trustedPeer(peer.id) ?: return
         update(mutableState.value.settings.copy(target = peer.address))
         setState { it.copy(mode = RelayMode.Receiver) }
@@ -417,10 +410,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     if (response.optString("type") == "error") {
                         val message = response.optString("message")
-                        if (message.contains("unknown client handle", ignoreCase = true)) {
+                        if (response.optString("code") == "unknown_client_handle") {
                             clientHandle = 0L
                         }
-                        if (trusted != null) noteTrustedAddressFailure(settings.target)
+                        if (trusted != null) {
+                            noteTrustedCandidateFailure(trusted.peerId, settings.target)
+                        }
                         clientError(message)
                         return@withLock
                     }
@@ -436,7 +431,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     if (trusted == null) {
                         rememberTrustedPeerFromNative(clientHandle)
                     } else {
-                        trustedAddressFailures.remove(settings.target)
+                        trustedCandidateBackoff.clear(trusted.peerId, settings.target)
                     }
                     nativeConnected = true
 
@@ -477,7 +472,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                             clientHandle = 0L
                         }
                     }
-                    if (trusted != null) noteTrustedAddressFailure(settings.target)
+                    if (trusted != null) {
+                        noteTrustedCandidateFailure(trusted.peerId, settings.target)
+                    }
                     clientError(error.message ?: text(R.string.relay_error_connect_failed))
                 }
             }
@@ -541,7 +538,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val response = JSONObject(raw)
             if (response.optString("type") == "error") {
                 val message = response.optString("message")
-                val unknownHandle = message.contains("unknown client handle", ignoreCase = true)
+                val unknownHandle = response.optString("code") == "unknown_client_handle"
                 if (unknownHandle) {
                     operationMutex.withLock { clientHandle = 0L }
                 }
@@ -615,12 +612,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun clientError(message: String) {
-        if (message.contains("trusted authentication", ignoreCase = true) ||
-            message.contains("trusted connection", ignoreCase = true) &&
-            message.contains("rejected", ignoreCase = true)
-        ) {
-            trustedCredentialRejected = true
-        }
         setState {
             it.copy(
                 connection = RelayConnectionState.Error,
@@ -1268,9 +1259,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val candidate = peers
                 .filter { peer ->
                 peer.id.isNotBlank() && trustedRecords.any { it.peerId == peer.id } &&
-                    !trustedCredentialRejected &&
                     trustedAutoConnectAllowed(current.settings, peer) &&
-                    trustedAddressAllowed(peer.address, now)
+                    trustedCandidateAllowed(peer.id, peer.address, now)
                 }
                 .minWithOrNull(compareBy<DiscoveredPeer> {
                     trustedCandidateRank(it, trustedRecords.firstOrNull { stored -> stored.peerId == it.id })
@@ -1295,31 +1285,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun trustedAddressAllowed(address: String, now: Long): Boolean {
-        val failure = trustedAddressFailures[address] ?: return true
-        if (failure.retryAt <= now) {
-            trustedAddressFailures.remove(address)
-            return true
-        }
-        return false
-    }
+    private fun trustedCandidateAllowed(peerId: String, address: String, now: Long): Boolean =
+        trustedCandidateBackoff.allowed(peerId, address, now)
 
-    /** Keep address-specific retry state bounded; it must not become a
-     * discovery-driven allocation sink. */
-    private fun noteTrustedAddressFailure(address: String) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        val previous = trustedAddressFailures[address]
-        val count = (previous?.count ?: 0).plus(1).coerceAtMost(7)
-        val delay = min(30_000L, 500L shl (count - 1))
-        if (previous == null && trustedAddressFailures.size >= 256) {
-            trustedAddressFailures.entries.iterator().let { iterator ->
-                if (iterator.hasNext()) {
-                    iterator.next()
-                    iterator.remove()
-                }
-            }
-        }
-        trustedAddressFailures[address] = TrustedAddressFailure(count, now + delay)
+    private fun noteTrustedCandidateFailure(peerId: String, address: String) {
+        trustedCandidateBackoff.noteFailure(
+            peerId,
+            address,
+            android.os.SystemClock.elapsedRealtime(),
+        )
     }
 
     private fun consumeDiscoveryEvents(raw: String) {

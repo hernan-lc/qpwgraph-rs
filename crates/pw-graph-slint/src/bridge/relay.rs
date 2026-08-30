@@ -182,10 +182,7 @@ fn connect_trusted_peer(
     let Some(secret) = trusted_secret_for(application, &peer.id) else {
         return false;
     };
-    if automatic
-        && (application.relay_trusted_auth_rejected
-            || !trusted_candidate_allowed(application, peer))
-    {
+    if automatic && !trusted_candidate_allowed(application, peer) {
         return false;
     }
     application.relay_trusted_auto_attempt_at = Some(Instant::now());
@@ -586,9 +583,6 @@ pub(crate) fn forget_trusted_peer(application: &mut Application, peer_id: &str) 
 pub(crate) fn connect_relay(application: &mut Application, requested_target: Option<&str>) {
     #[cfg(feature = "relay")]
     {
-        // An explicit user action is the documented way to retry a stale
-        // trusted credential or start a fresh PIN pairing.
-        application.relay_trusted_auth_rejected = false;
         let raw_target = requested_target
             .map(str::to_owned)
             .unwrap_or_else(|| application.config.relay_client_target.clone());
@@ -769,7 +763,6 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                     application.relay_connecting = None;
                 }
                 refresh_trusted_peer_address(application, &peer);
-                application.relay_trusted_auth_rejected = false;
                 application.status =
                     application.tf("relay.session_connected", &[("name", peer.name)]);
             }
@@ -789,21 +782,15 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                         .as_ref()
                         .map(|attempt| (attempt.peer_id.clone(), attempt.target.clone()));
                     if let Some((Some(peer_id), target)) = attempt {
-                        let lower = reason.to_ascii_lowercase();
-                        if lower.contains("trusted")
-                            && (lower.contains("authentication") || lower.contains("rejected"))
-                        {
-                            application.relay_trusted_auth_rejected = true;
-                        }
                         note_trusted_candidate_failure(application, &peer_id, &target);
                     }
                     application.relay_connecting = None;
                 }
-                application.status = if application.relay_trusted_auth_rejected {
-                    application.t("relay.trusted_connection_rejected")
-                } else {
-                    application.tf("relay.session_lost", &[("reason", reason)])
-                };
+                // Clear trusted-handshake failures are unauthenticated
+                // routing results. Keep the failure scoped to the attempted
+                // peer/address; never quarantine the durable credential from
+                // a message sent by a same-ID candidate.
+                application.status = application.tf("relay.session_lost", &[("reason", reason)]);
             }
             RelayEvent::AudioLevel { id, rms } => {
                 application.relay_levels.insert(id.0, rms.clamp(0.0, 1.0));

@@ -55,6 +55,34 @@ class RelayModelTest {
     }
 
     @Test
+    fun trusted_candidate_backoff_is_scoped_to_peer_and_address() {
+        val backoff = TrustedCandidateBackoff(maxEntries = 2)
+        backoff.noteFailure("peer-a", "192.168.42.1:48123", 0)
+
+        assertFalse(backoff.allowed("peer-a", "192.168.42.1:48123", 1))
+        assertTrue(
+            backoff.allowed("peer-b", "192.168.42.1:48123", 1),
+        )
+        assertTrue(backoff.allowed("peer-a", "192.168.42.2:48123", 1))
+
+        backoff.clear("peer-a", "192.168.42.1:48123")
+        assertTrue(backoff.allowed("peer-a", "192.168.42.1:48123", 1))
+    }
+
+    @Test
+    fun trusted_candidate_backoff_expires_and_stays_bounded() {
+        val backoff = TrustedCandidateBackoff(maxEntries = 2)
+        backoff.noteFailure("peer-a", "a:1", 0)
+        assertFalse(backoff.allowed("peer-a", "a:1", 499))
+        assertTrue(backoff.allowed("peer-a", "a:1", 500))
+
+        backoff.noteFailure("peer-a", "a:1", 1_000)
+        backoff.noteFailure("peer-b", "b:1", 1_000)
+        backoff.noteFailure("peer-c", "c:1", 1_000)
+        assertEquals(2, backoff.size())
+    }
+
+    @Test
     fun credential_bearing_models_do_not_reveal_secrets_in_to_string() {
         val secret = "ab".repeat(32)
         assertFalse(

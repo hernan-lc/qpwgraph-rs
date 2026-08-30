@@ -1705,6 +1705,17 @@ fn await_resume_grace_with_deadlines(
     }
 }
 
+fn fail_trusted_attempt(
+    inner: &Arc<EngineInner>,
+    id: SessionId,
+    target: SocketAddr,
+    host_id: &str,
+    reason: String,
+) {
+    inner.note_candidate_failure(host_id, target);
+    fail_attempt(inner, id, reason);
+}
+
 fn trusted_client_thread(
     inner: Arc<EngineInner>,
     id: SessionId,
@@ -1722,7 +1733,13 @@ fn trusted_client_thread(
     let mut stream = match connect_control_tcp(target, bind, config.transport) {
         Ok(stream) => stream,
         Err(error) => {
-            fail_attempt(&inner, id, format!("trusted connection failed: {error}"));
+            fail_trusted_attempt(
+                &inner,
+                id,
+                target,
+                &host_id,
+                format!("trusted connection failed: {error}"),
+            );
             return;
         }
     };
@@ -1745,9 +1762,11 @@ fn trusted_client_thread(
     )
     .is_err()
     {
-        fail_attempt(
+        fail_trusted_attempt(
             &inner,
             id,
+            target,
+            &host_id,
             "trusted handshake failed while sending hello".into(),
         );
         return;
@@ -1756,34 +1775,50 @@ fn trusted_client_thread(
         Ok(ControlMessage::TrustedChallenge {
             server_nonce,
             session_id,
-            host_id,
+            host_id: challenge_host_id,
             host_name,
         }) => match decode_resume_nonce(&server_nonce) {
-            Some(server_nonce) => (server_nonce, session_id, host_id, host_name),
+            Some(server_nonce) => (server_nonce, session_id, challenge_host_id, host_name),
             None => {
-                fail_attempt(&inner, id, "trusted host sent a malformed challenge".into());
+                fail_trusted_attempt(
+                    &inner,
+                    id,
+                    target,
+                    &host_id,
+                    "trusted host sent a malformed challenge".into(),
+                );
                 return;
             }
         },
         Ok(ControlMessage::PairFail { reason }) => {
-            fail_attempt(
+            fail_trusted_attempt(
                 &inner,
                 id,
+                target,
+                &host_id,
                 format!("host rejected trusted connection: {reason}"),
             );
             return;
         }
         Ok(_) | Err(_) => {
-            fail_attempt(
+            fail_trusted_attempt(
                 &inner,
                 id,
+                target,
+                &host_id,
                 "trusted handshake response was malformed".into(),
             );
             return;
         }
     };
     if returned_host_id != host_id {
-        fail_attempt(&inner, id, "trusted host identity did not match".into());
+        fail_trusted_attempt(
+            &inner,
+            id,
+            target,
+            &host_id,
+            "trusted host identity did not match".into(),
+        );
         return;
     }
     let proof = crate::crypto::trusted_proof(
@@ -1802,9 +1837,11 @@ fn trusted_client_thread(
     )
     .is_err()
     {
-        fail_attempt(
+        fail_trusted_attempt(
             &inner,
             id,
+            target,
+            &host_id,
             "trusted handshake failed while proving credential".into(),
         );
         return;
@@ -1812,21 +1849,26 @@ fn trusted_client_thread(
     match read_frame(&mut stream) {
         Ok(ControlMessage::TrustedOk {}) => {}
         Ok(ControlMessage::PairFail { reason }) => {
-            fail_attempt(
+            fail_trusted_attempt(
                 &inner,
                 id,
+                target,
+                &host_id,
                 format!("host rejected trusted connection: {reason}"),
             );
             return;
         }
         Ok(_) | Err(_) => {
-            fail_attempt(&inner, id, "trusted handshake was not accepted".into());
+            fail_trusted_attempt(
+                &inner,
+                id,
+                target,
+                &host_id,
+                "trusted handshake was not accepted".into(),
+            );
             return;
         }
     }
-    // The target is now authenticated for this stable host identity. Learn
-    // it as the preferred address for later multi-candidate reconnects.
-    inner.note_candidate_success(&host_id, target);
     let keys = crate::crypto::trusted_session_keys(
         &secret,
         &config.device_id,
@@ -1837,9 +1879,11 @@ fn trusted_client_thread(
         Side::Client,
     );
     let Ok((sealer, opener)) = keys.control_channel() else {
-        fail_attempt(
+        fail_trusted_attempt(
             &inner,
             id,
+            target,
+            &host_id,
             "trusted control keys could not be prepared".into(),
         );
         return;
@@ -2234,11 +2278,23 @@ fn client_session_after_auth(
             session_id,
         }) => (audio_port, session_id),
         Ok(ControlMessage::PairFail { reason }) => {
-            fail_attempt(&inner, id, format!("host rejected pairing: {reason}"));
+            fail_trusted_attempt(
+                &inner,
+                id,
+                target,
+                &host_id,
+                format!("host rejected pairing: {reason}"),
+            );
             return;
         }
         Ok(_) | Err(_) => {
-            fail_attempt(&inner, id, "pairing response was malformed".into());
+            fail_trusted_attempt(
+                &inner,
+                id,
+                target,
+                &host_id,
+                "pairing response was malformed".into(),
+            );
             return;
         }
     };
@@ -2255,26 +2311,46 @@ fn client_session_after_auth(
         )
         .is_err()
     {
-        fail_attempt(&inner, id, "handshake failed during session setup".into());
+        fail_trusted_attempt(
+            &inner,
+            id,
+            target,
+            &host_id,
+            "handshake failed during session setup".into(),
+        );
         return;
     }
     match cipher.receive(&mut stream) {
         Ok(ControlMessage::SessionReady {}) => {}
         Ok(ControlMessage::PairFail { reason }) => {
-            fail_attempt(&inner, id, format!("host rejected session: {reason}"));
+            fail_trusted_attempt(
+                &inner,
+                id,
+                target,
+                &host_id,
+                format!("host rejected session: {reason}"),
+            );
             return;
         }
         Ok(_) | Err(_) => {
-            fail_attempt(
+            fail_trusted_attempt(
                 &inner,
                 id,
+                target,
+                &host_id,
                 "host sent an unexpected session response".into(),
             );
             return;
         }
     }
     let Ok((audio_sealer, audio_opener)) = keys.audio_channel() else {
-        fail_attempt(&inner, id, "audio keys could not be prepared".into());
+        fail_trusted_attempt(
+            &inner,
+            id,
+            target,
+            &host_id,
+            "audio keys could not be prepared".into(),
+        );
         return;
     };
     let audio_over_tcp = config.transport == crate::TransportPreference::Adb;
@@ -2290,9 +2366,11 @@ fn client_session_after_auth(
                 match UdpAudioSlot::new(socket) {
                     Ok(slot) => Some(slot),
                     Err(error) => {
-                        fail_attempt(
+                        fail_trusted_attempt(
                             &inner,
                             id,
+                            target,
+                            &host_id,
                             format!("could not prepare audio socket: {error}"),
                         );
                         return;
@@ -2300,7 +2378,13 @@ fn client_session_after_auth(
                 }
             }
             Err(error) => {
-                fail_attempt(&inner, id, format!("could not open audio socket: {error}"));
+                fail_trusted_attempt(
+                    &inner,
+                    id,
+                    target,
+                    &host_id,
+                    format!("could not open audio socket: {error}"),
+                );
                 return;
             }
         }
@@ -2359,7 +2443,7 @@ fn client_session_after_auth(
                 reason: reason.clone(),
             },
         );
-        fail_attempt(&inner, id, reason);
+        fail_trusted_attempt(&inner, id, target, &record.peer.id, reason);
         return;
     }
     if let Err(reason) = spawn_session_workers(&inner, &record, &socket, false) {
@@ -2369,12 +2453,18 @@ fn client_session_after_auth(
                 reason: reason.clone(),
             },
         );
+        inner.note_candidate_failure(&record.peer.id, target);
         teardown(&inner, id, reason);
         return;
     }
     if !inner.session_alive(id) {
         return;
     }
+    // A clear TrustedOk only proves that the candidate followed the wire
+    // shape. Record the address only after the sealed session setup and all
+    // requested workers have succeeded, which proves possession of the
+    // trusted credential on the host side.
+    inner.note_candidate_success(&record.peer.id, target);
     inner.emit(RelayEvent::SessionEstablished {
         id,
         peer: record.peer.clone(),
@@ -2634,11 +2724,13 @@ fn resume_client_control(
                     // terminal failure for the reconnecting client.
                     continue;
                 }
-                inner.emit(RelayEvent::Error {
-                    message: format!("host rejected resume: {reason}"),
-                });
                 inner.note_candidate_failure(&record.peer.id, resumed_target);
-                return None;
+                // PairFail is cleartext at this point. It is evidence only
+                // about this address, not about the session-wide resume
+                // secret or the peer identity. Continue with other bounded
+                // candidates, including a real USB path behind a spoofed ID.
+                let _ = reason;
+                continue;
             }
             _ => {
                 inner.note_candidate_failure(&record.peer.id, resumed_target);
@@ -2686,11 +2778,11 @@ fn resume_client_control(
                 return Some((stream, cipher, resumed_target));
             }
             Ok(ControlMessage::PairFail { reason }) => {
-                inner.emit(RelayEvent::Error {
-                    message: format!("host rejected resume: {reason}"),
-                });
                 inner.note_candidate_failure(&record.peer.id, resumed_target);
-                return None;
+                // A rejection here is still candidate-local. Continue so a
+                // legitimate address can complete the session's proof flow.
+                let _ = reason;
+                continue;
             }
             _ => {
                 inner.note_candidate_failure(&record.peer.id, resumed_target);
@@ -2838,6 +2930,19 @@ fn is_timeout(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn is_recoverable_tcp_audio_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
     )
 }
 
@@ -3200,6 +3305,34 @@ fn run_tx(
     );
 }
 
+fn send_tcp_audio_datagram(audio: &Arc<TcpAudioSlot>, datagram: &[u8]) -> std::io::Result<()> {
+    let Some(connection) = audio.current() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "TCP audio connection is not ready",
+        ));
+    };
+    let result = connection
+        .writer
+        .lock()
+        .map_err(|_| std::io::Error::other("TCP audio writer is poisoned"))
+        .and_then(|mut writer| write_tcp_audio_frame(&mut *writer, datagram));
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if is_recoverable_tcp_audio_error(&error) => {
+            // ADB audio is a replaceable secondary stream. Its loss must wake
+            // the supervisor without being interpreted by run_tx_source as a
+            // fatal session failure.
+            audio.clear(&connection);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "ADB audio connection is reconnecting",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn run_tcp_tx(
     inner: Arc<EngineInner>,
     record: Arc<SessionRecord>,
@@ -3212,23 +3345,7 @@ fn run_tcp_tx(
         record,
         ready,
         move || send_audio.current().is_some(),
-        move |datagram| {
-            let Some(connection) = audio.current() else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "TCP audio connection is not ready",
-                ));
-            };
-            let result = connection
-                .writer
-                .lock()
-                .map_err(|_| std::io::Error::other("TCP audio writer is poisoned"))
-                .and_then(|mut writer| write_tcp_audio_frame(&mut *writer, datagram));
-            if result.is_err() {
-                audio.clear(&connection);
-            }
-            result
-        },
+        move |datagram| send_tcp_audio_datagram(&audio, datagram),
     );
 }
 
@@ -3303,6 +3420,12 @@ fn run_tx_source(
                 };
                 if let Err(error) = send_datagram(&datagram) {
                     if is_timeout(&error) {
+                        // The datagram was already sealed, so its AEAD
+                        // counter was consumed even though the transport
+                        // dropped it. Keep the wire timeline monotonic too;
+                        // the next frame must not reuse its sequence number.
+                        sequence = sequence.wrapping_add(1);
+                        timestamp_ms = timestamp_ms.wrapping_add(record.format.frame_ms as u32);
                         continue;
                     }
                     fail_session(&inner, &record, format!("audio send failed: {error}"));
@@ -3620,6 +3743,137 @@ mod tests {
     }
 
     #[test]
+    fn unauthenticated_resume_pairfail_tries_the_next_peer_address() {
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let record = resumable_session(7_008);
+        assert!(inner.insert_session(Arc::clone(&record)));
+        assert!(record.mark_control_dropped());
+
+        // Bind two loopback addresses to the same port. The original target
+        // is the malicious candidate; the discovered address is the real
+        // host and is intentionally ranked later for this test.
+        let attacker = TcpListener::bind(("127.0.0.2", 0)).unwrap();
+        let port = attacker.local_addr().unwrap().port();
+        let legitimate = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let attacker_target = attacker.local_addr().unwrap();
+        let legitimate_target = legitimate.local_addr().unwrap();
+
+        let attacker_thread = std::thread::spawn(move || {
+            let (mut stream, _) = attacker.accept().unwrap();
+            let _ = read_frame(&mut stream).unwrap();
+            write_frame(
+                &mut stream,
+                &ControlMessage::PairFail {
+                    reason: "unauthenticated candidate rejection".into(),
+                },
+            )
+            .unwrap();
+        });
+
+        let server_inner = Arc::clone(&inner);
+        let legitimate_thread = std::thread::spawn(move || {
+            let (mut stream, _) = legitimate.accept().unwrap();
+            let ControlMessage::ResumeHello {
+                session_id,
+                client_nonce,
+            } = read_frame(&mut stream).unwrap()
+            else {
+                panic!("legitimate candidate received the wrong message");
+            };
+            resume_peer_session(&server_inner, SessionId(session_id), stream, &client_nonce);
+        });
+
+        let handle = crate::RelayHandle {
+            inner: Arc::clone(&inner),
+        };
+        handle.update_discovered_peer_candidates(vec![(
+            PeerInfo {
+                id: record.peer.id.clone(),
+                name: record.peer.name.clone(),
+                kind: DeviceKind::Other,
+                addr: legitimate_target,
+            },
+            Some(crate::LinkKind::Lan),
+        )]);
+
+        let (stream, _cipher, resumed_target) =
+            resume_client_control(&inner, &record, attacker_target).expect("fallback resumes");
+        assert_eq!(resumed_target, legitimate_target);
+        assert_eq!(
+            inner.last_successful_address(&record.peer.id),
+            Some(legitimate_target)
+        );
+        assert!(!inner.candidate_allowed(&record.peer.id, attacker_target));
+
+        drop(stream);
+        teardown(&inner, record.id, "resume candidate test complete".into());
+        attacker_thread.join().unwrap();
+        legitimate_thread.join().unwrap();
+    }
+
+    #[test]
+    fn clear_trusted_ok_without_sealed_setup_does_not_learn_candidate() {
+        let inner = EngineInner::new(crate::EngineConfig {
+            device_id: "client-id".into(),
+            ..crate::EngineConfig::default()
+        });
+        let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = target_listener.local_addr().unwrap();
+        let host_id = "trusted-host".to_string();
+        let secret = [0x27; 32];
+        let server = std::thread::spawn({
+            let host_id = host_id.clone();
+            move || {
+                let (mut stream, _) = target_listener.accept().unwrap();
+                let (client_nonce, roles) = match read_frame(&mut stream).unwrap() {
+                    ControlMessage::TrustedHello {
+                        client_nonce,
+                        roles,
+                        ..
+                    } => (decode_resume_nonce(&client_nonce).unwrap(), roles),
+                    message => panic!("unexpected trusted hello: {message:?}"),
+                };
+                let server_nonce = [0x28; RESUME_NONCE_LEN];
+                write_frame(
+                    &mut stream,
+                    &ControlMessage::TrustedChallenge {
+                        server_nonce: hex_encode(&server_nonce),
+                        session_id: 9_009,
+                        host_id: host_id.clone(),
+                        host_name: "fake host".into(),
+                    },
+                )
+                .unwrap();
+                assert!(matches!(
+                    read_frame(&mut stream).unwrap(),
+                    ControlMessage::TrustedProof { .. }
+                ));
+                write_frame(&mut stream, &ControlMessage::TrustedOk {}).unwrap();
+                // The fake candidate cannot produce the sealed PairOk. The
+                // client must reject it without recording this address.
+                let _ = roles;
+                drop(stream);
+                let _ = client_nonce;
+            }
+        });
+
+        trusted_client_thread(
+            Arc::clone(&inner),
+            SessionId(7_009),
+            target,
+            host_id.clone(),
+            secret,
+            Roles::emit_only(),
+        );
+        server.join().unwrap();
+        assert_eq!(inner.last_successful_address(&host_id), None);
+        assert!(matches!(
+            inner.drain_events().as_slice(),
+            [RelayEvent::SessionLost { id, .. }] if *id == SessionId(7_009)
+        ));
+    }
+
+    #[test]
     fn failed_resume_ok_has_no_ownerless_zombie_session() {
         let inner = EngineInner::new(crate::EngineConfig::default());
         let record = resumable_session(7_005);
@@ -3869,6 +4123,95 @@ mod tests {
         assert!(open_tcp_audio_once(&inner, &record, &slot, target).is_err());
         assert!(!slot.is_active());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn adb_tx_transport_loss_clears_the_slot_as_a_recoverable_write() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = listener.local_addr().unwrap();
+        let client = TcpStream::connect(target).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let slot = TcpAudioSlot::new();
+        slot.install(client).unwrap();
+
+        // Force the installed writer into the same terminal state observed
+        // after BrokenPipe/ConnectionReset, without relying on peer timing.
+        slot.current()
+            .unwrap()
+            .writer
+            .lock()
+            .unwrap()
+            .shutdown(Shutdown::Both)
+            .unwrap();
+        drop(server);
+
+        let error = send_tcp_audio_datagram(&slot, &[0x01]).expect_err("write must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(!slot.is_active(), "supervisor must see an empty slot");
+    }
+
+    #[test]
+    fn adb_tcp_audio_transport_errors_are_distinct_from_fatal_errors() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::WouldBlock,
+        ] {
+            assert!(is_recoverable_tcp_audio_error(&std::io::Error::from(kind)));
+        }
+        assert!(!is_recoverable_tcp_audio_error(&std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "locally invalid frame",
+        )));
+    }
+
+    #[test]
+    fn adb_tx_reconnect_signal_does_not_emit_session_loss() {
+        let inner = EngineInner::new(crate::EngineConfig {
+            transport: crate::TransportPreference::Adb,
+            ..crate::EngineConfig::default()
+        });
+        let record = resumable_session(7_010);
+        let frame_samples = record.format.frame_samples();
+        record.outgoing.push(&vec![0.0; frame_samples]);
+        assert!(inner.insert_session(Arc::clone(&record)));
+
+        let attempted = Arc::new(AtomicBool::new(false));
+        let attempted_by_worker = Arc::clone(&attempted);
+        let worker_inner = Arc::clone(&inner);
+        let worker_record = Arc::clone(&record);
+        let worker = std::thread::spawn(move || {
+            run_tx_source(
+                worker_inner,
+                worker_record,
+                None,
+                || true,
+                move |_| {
+                    attempted_by_worker.store(true, Ordering::Release);
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "ADB audio connection is reconnecting",
+                    ))
+                },
+            );
+        });
+
+        for _ in 0..100 {
+            if attempted.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(attempted.load(Ordering::Acquire));
+        assert!(inner.session_alive(record.id));
+        assert!(inner.drain_events().is_empty());
+
+        teardown(&inner, record.id, "ADB TX reconnect test complete".into());
+        worker.join().unwrap();
     }
 
     #[test]
