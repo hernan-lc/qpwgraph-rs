@@ -348,3 +348,181 @@ fn status_reflects_host_and_sessions() {
     host_handle.host_stop().unwrap();
     assert!(!host_handle.status().host_active);
 }
+
+#[test]
+fn unauthenticated_datagrams_cannot_inject_audio_or_move_the_peer_address() {
+    use std::net::UdpSocket;
+
+    let (_host, host_handle, port) = host_engine("123456");
+    let (_client, client_handle) = client_engine();
+    establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::emit_only(),
+    );
+
+    // Deliver real audio first so the path is known good, then drain it.
+    let warmup = ramp(FRAME * 4);
+    let delivered = stream_frames(
+        |frame| client_handle.push_capture(frame),
+        &host_handle,
+        &warmup,
+    );
+    assert!(!delivered.is_empty(), "the honest path must work first");
+    let mut received = Vec::new();
+    drain_playback(&host_handle, &mut received);
+    received.clear();
+
+    // Now play the attacker: forge datagrams in the documented wire format
+    // from an unrelated socket. Without the session key they cannot be
+    // sealed, so none of them may reach the playback queue.
+    let attacker = UdpSocket::bind("127.0.0.1:0").expect("attacker socket binds");
+    for candidate in 1024..1200u16 {
+        let mut forged = vec![0u8; 20 + 64];
+        forged[0..2].copy_from_slice(&0xA1E5u16.to_le_bytes());
+        forged[2] = 2 | 0x20; // version 2, keyframe
+        forged[3] = 0; // PCM
+        let _ = attacker.send_to(&forged, ("127.0.0.1", candidate));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    drain_playback(&host_handle, &mut received);
+    assert!(
+        received.is_empty(),
+        "forged datagrams must never reach playback, got {} samples",
+        received.len()
+    );
+
+    // The session must still work afterwards: rejecting the forgeries is not
+    // allowed to disturb the real stream.
+    let signal = ramp(FRAME * 4);
+    let delivered = stream_frames(
+        |frame| client_handle.push_capture(frame),
+        &host_handle,
+        &signal,
+    );
+    assert!(delivered.len() >= signal.len());
+}
+
+#[test]
+fn repeated_wrong_pins_lock_the_source_out() {
+    let (_host, host_handle, port) = host_engine("123456");
+    let target: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    // Burn through the attempt budget. A PAKE makes guessing online-only, and
+    // the lockout is what makes an online guessing run hopeless.
+    for _ in 0..pw_graph_relay::PAIRING_ATTEMPT_LIMIT {
+        let (_client, client_handle) = client_engine();
+        let session = client_handle.connect(target, "999999", Roles::emit_only());
+        assert!(await_event(&client_handle, |event| matches!(
+            event,
+            RelayEvent::SessionLost { id, .. } if *id == session
+        ))
+        .is_some());
+    }
+
+    // Even the correct PIN is now refused while the lockout stands.
+    let (_client, client_handle) = client_engine();
+    let session = client_handle.connect(target, "123456", Roles::emit_only());
+    let event = await_event(
+        &client_handle,
+        |event| matches!(event, RelayEvent::SessionLost { id, .. } if *id == session),
+    );
+    match event {
+        Some(RelayEvent::SessionLost { reason, .. }) => assert!(
+            reason.contains("failed pairing attempts"),
+            "expected a lockout, got: {reason}"
+        ),
+        other => panic!("expected SessionLost, got {other:?}"),
+    }
+    let _ = host_handle;
+}
+
+#[test]
+fn a_session_at_a_different_rate_is_converted_not_misread() {
+    // A 16 kHz mono peer used to have its samples handed to a 48 kHz endpoint
+    // untouched, which plays back at three times the pitch.
+    let (_host, host_handle, port) = host_engine("123456");
+    let engine = RelayEngine::start(EngineConfig {
+        codec: CodecKind::Pcm,
+        device_name: "narrowband-client".into(),
+        sample_rate: 16_000,
+        local_sample_rate: 16_000,
+        frame_ms: 10,
+        ..EngineConfig::default()
+    })
+    .expect("client engine starts");
+    let client_handle = engine.handle();
+    establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::emit_only(),
+    );
+
+    // One second of 16 kHz audio must arrive as about one second of 48 kHz
+    // audio on the host, whose local format is the default 48 kHz.
+    let narrow_frame = 160;
+    let signal = ramp(narrow_frame * 20);
+    let mut received = Vec::new();
+    for (index, chunk) in signal.chunks(narrow_frame).enumerate() {
+        client_handle.push_capture(chunk);
+        let settled = index.saturating_sub(PIPELINE_SLACK) * narrow_frame * 3;
+        wait_until(|| {
+            drain_playback(&host_handle, &mut received);
+            received.len() >= settled
+        });
+    }
+    wait_until(|| {
+        drain_playback(&host_handle, &mut received);
+        received.len() >= signal.len() * 3 - FRAME
+    });
+    let expected = signal.len() * 3;
+    assert!(
+        received.len() as i64 > (expected as i64 * 8) / 10,
+        "16 kHz audio should arrive as ~{expected} samples at 48 kHz, got {}",
+        received.len()
+    );
+}
+
+#[test]
+fn two_peers_mix_instead_of_interleaving() {
+    // One shared playback queue used to concatenate two peers' audio; each
+    // session now decodes into its own queue and the engine sums them.
+    let (_host, host_handle, port) = host_engine("123456");
+    let (_a, a_handle) = client_engine();
+    let (_b, b_handle) = client_engine();
+    establish(&host_handle, &a_handle, port, "123456", Roles::emit_only());
+    establish(&host_handle, &b_handle, port, "123456", Roles::emit_only());
+
+    // Both peers send a constant, so a correct mix is their sum and a
+    // concatenation would alternate between the two values.
+    let mut received = Vec::new();
+    for index in 0..12usize {
+        a_handle.push_capture(&[0.25f32; FRAME]);
+        b_handle.push_capture(&[0.5f32; FRAME]);
+        // Pace against actual delivery, allowing the usual pipeline slack:
+        // waiting for the full total on every iteration would sit out the
+        // whole timeout on the first few.
+        let settled = index.saturating_sub(PIPELINE_SLACK) * FRAME;
+        wait_until(|| {
+            drain_playback(&host_handle, &mut received);
+            received.len() >= settled
+        });
+    }
+    wait_until(|| {
+        drain_playback(&host_handle, &mut received);
+        received.len() >= FRAME * 4
+    });
+    let mixed = received
+        .iter()
+        .filter(|sample| (**sample - 0.75).abs() < 1e-3)
+        .count();
+    assert!(
+        mixed > 0,
+        "expected summed samples of 0.75, saw values: {:?}",
+        &received[..received.len().min(8)]
+    );
+}

@@ -29,6 +29,18 @@ pub(crate) enum UiEvent {
     ToggleAudioMute(i32),
 }
 
+/// A relay connection attempt whose outcome the UI is still waiting for.
+///
+/// Only constructed when the relay feature is compiled in; the field that
+/// holds it stays present either way so the rest of the application state is
+/// one shape across feature combinations.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "relay"), allow(dead_code))]
+pub(crate) struct RelayAttempt {
+    pub(crate) target: String,
+    pub(crate) session: u64,
+}
+
 pub(crate) struct Application {
     pub(crate) source: ApplicationDriver,
     pub(crate) commands: CommandStack,
@@ -60,7 +72,11 @@ pub(crate) struct Application {
     #[cfg(feature = "relay")]
     pub(crate) relay_levels: BTreeMap<u64, f32>,
     #[cfg(feature = "relay")]
-    pub(crate) relay_connecting: Option<String>,
+    /// The connection attempt currently shown as "connecting", if any: the
+    /// target address for display plus the attempt's session id, so a
+    /// `SessionLost` for *this* attempt clears it and one for an unrelated
+    /// session does not.
+    pub(crate) relay_connecting: Option<RelayAttempt>,
 }
 
 const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);

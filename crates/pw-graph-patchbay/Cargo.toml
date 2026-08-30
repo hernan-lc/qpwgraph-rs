@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+# Workspace-internal: these crates depend on each other by path and are not
+# published to crates.io.
+publish = false
 
 [dependencies]
 pw-graph-backend = { path = "../pw-graph-backend" }
 pw-graph-core = { path = "../pw-graph-core" }
+pw-graph-utils = { path = "../pw-graph-utils" }
 quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true

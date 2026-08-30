@@ -10,6 +10,16 @@ pub enum CommandError {
     Backend(#[from] BackendError),
     #[error("command has no link to undo")]
     MissingUndoLink,
+    /// A group operation failed partway *and* the rollback could not put the
+    /// graph back. This is the one outcome the user has to be told about
+    /// explicitly: the command is not on the undo stack (it never completed),
+    /// so nothing else will offer to repair it.
+    #[error("{operation} failed and could not be rolled back: {cause}; {stranded} connection(s) were left changed")]
+    PartiallyApplied {
+        operation: &'static str,
+        cause: String,
+        stranded: usize,
+    },
 }
 
 /// A link's two endpoints, identified by stable name rather than by id.
@@ -44,8 +54,16 @@ fn pair_description(name: &str, keys: &Option<(PortKey, PortKey)>) -> String {
 
 /// Disconnect every stable pair, recording which ones were actually removed.
 /// Shared by the many/all disconnect commands.
+///
+/// The operation is all-or-nothing. Returning early on the first failure —
+/// as this used to — left the earlier links disconnected *and* kept the
+/// command off the undo stack, because `CommandStack::execute` only records
+/// commands that succeeded. The user was left with a partly-torn graph and no
+/// way to undo it. Now a failure rolls the earlier removals back, and only a
+/// failed rollback is reported as such.
 fn disconnect_keys(
     driver: &mut dyn GraphDriver,
+    operation: &'static str,
     keys: &[(PortKey, PortKey)],
     removed_keys: &mut Vec<(PortKey, PortKey)>,
 ) -> Result<Vec<Link>, CommandError> {
@@ -61,23 +79,67 @@ fn disconnect_keys(
                 continue;
             }
         }
-        if let Some(link) = driver.disconnect_by_key_if_present(output, input)? {
-            disconnected.push(link);
-            removed_keys.push((output.clone(), input.clone()));
+        match driver.disconnect_by_key_if_present(output, input) {
+            Ok(Some(link)) => {
+                disconnected.push(link);
+                removed_keys.push((output.clone(), input.clone()));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let stranded = rollback_disconnects(driver, removed_keys);
+                removed_keys.clear();
+                return Err(if stranded == 0 {
+                    error.into()
+                } else {
+                    CommandError::PartiallyApplied {
+                        operation,
+                        cause: error.to_string(),
+                        stranded,
+                    }
+                });
+            }
         }
     }
     Ok(disconnected)
 }
 
+/// Reconnect everything a failed group disconnect had already removed.
+/// Returns how many could not be restored.
+fn rollback_disconnects(
+    driver: &mut dyn GraphDriver,
+    removed_keys: &[(PortKey, PortKey)],
+) -> usize {
+    let mut stranded = 0;
+    for (output, input) in removed_keys.iter().rev() {
+        if driver.connect_by_key_if_missing(output, input).is_err() {
+            stranded += 1;
+        }
+    }
+    stranded
+}
+
 /// Reconnect every previously removed pair, returning the restored links.
+///
+/// An undo that fails partway is reported as partially applied rather than as
+/// a bare backend error: the command stays on the undo stack, but the caller
+/// needs to know the graph is now in neither the before nor the after state.
 fn restore_keys(
     driver: &mut dyn GraphDriver,
+    operation: &'static str,
     removed_keys: &[(PortKey, PortKey)],
 ) -> Result<Vec<Link>, CommandError> {
     let mut restored = Vec::with_capacity(removed_keys.len());
-    for (output, input) in removed_keys {
-        if let Some(link) = driver.connect_by_key_if_missing(output, input)? {
-            restored.push(link);
+    for (index, (output, input)) in removed_keys.iter().enumerate() {
+        match driver.connect_by_key_if_missing(output, input) {
+            Ok(Some(link)) => restored.push(link),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(CommandError::PartiallyApplied {
+                    operation,
+                    cause: error.to_string(),
+                    stranded: removed_keys.len() - index,
+                })
+            }
         }
     }
     Ok(restored)
@@ -369,6 +431,11 @@ pub struct RerouteLinkCommand {
     old_keys: Option<EndpointPair>,
     new_keys: Option<EndpointPair>,
     applied: bool,
+    /// Whether *this command* created the new link, as opposed to finding one
+    /// already there. Undo must only remove a link it made: tearing down a
+    /// connection somebody else established would be a silent, unrelated
+    /// change the user never asked for.
+    created_new: bool,
 }
 
 impl RerouteLinkCommand {
@@ -379,6 +446,7 @@ impl RerouteLinkCommand {
             old_keys: None,
             new_keys: None,
             applied: false,
+            created_new: false,
         }
     }
 
@@ -437,16 +505,35 @@ impl Command for RerouteLinkCommand {
         // Connect first would briefly leave the source feeding two inputs, and
         // some backends refuse a second link from the same port, so the old one
         // goes first and is restored if the new connection cannot be made.
-        driver.disconnect_by_key_if_present(&old.0, &old.1)?;
+        let removed_old = driver
+            .disconnect_by_key_if_present(&old.0, &old.1)?
+            .is_some();
         match driver.connect_by_key_if_missing(&new.0, &new.1) {
-            Ok(_) => {
+            // `None` means the target link already existed. Recording that
+            // distinction is what stops undo from deleting it.
+            Ok(created) => {
+                self.created_new = created.is_some();
                 self.old_keys = Some(old);
                 self.new_keys = Some(new);
                 self.applied = true;
                 Ok(())
             }
             Err(error) => {
-                let _ = driver.connect_by_key_if_missing(&old.0, &old.1);
+                if removed_old {
+                    // Restoring the old route is the whole point of removing it
+                    // last; if even that fails the graph is left with neither
+                    // route, and saying so is better than reporting the
+                    // original error as if nothing had changed.
+                    if let Err(restore) = driver.connect_by_key_if_missing(&old.0, &old.1) {
+                        return Err(CommandError::PartiallyApplied {
+                            operation: "Reroute",
+                            cause: format!(
+                                "{error}; restoring the previous route failed: {restore}"
+                            ),
+                            stranded: 1,
+                        });
+                    }
+                }
                 Err(error.into())
             }
         }
@@ -459,14 +546,36 @@ impl Command for RerouteLinkCommand {
         let new = self
             .new_keys
             .as_ref()
+            .cloned()
             .ok_or(CommandError::MissingUndoLink)?;
         let old = self
             .old_keys
             .as_ref()
+            .cloned()
             .ok_or(CommandError::MissingUndoLink)?;
-        driver.disconnect_by_key_if_present(&new.0, &new.1)?;
-        driver.connect_by_key_if_missing(&old.0, &old.1)?;
+        let removed_new = if self.created_new {
+            driver
+                .disconnect_by_key_if_present(&new.0, &new.1)?
+                .is_some()
+        } else {
+            false
+        };
+        if let Err(error) = driver.connect_by_key_if_missing(&old.0, &old.1) {
+            // Undo has already taken the new route down; leaving the graph
+            // with neither route and reporting a plain backend error would
+            // hide that. Put the new route back if we can.
+            if removed_new {
+                let _ = driver.connect_by_key_if_missing(&new.0, &new.1);
+                return Err(error.into());
+            }
+            return Err(CommandError::PartiallyApplied {
+                operation: "Reroute",
+                cause: error.to_string(),
+                stranded: 1,
+            });
+        }
         self.applied = false;
+        self.created_new = false;
         Ok(())
     }
 }
@@ -535,12 +644,12 @@ impl Command for DisconnectManyCommand {
                 .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
                 .collect();
         }
-        self.links = disconnect_keys(driver, &self.keys, &mut self.removed_keys)?;
+        self.links = disconnect_keys(driver, self.name(), &self.keys, &mut self.removed_keys)?;
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        self.links = restore_keys(driver, &self.removed_keys)?;
+        self.links = restore_keys(driver, self.name(), &self.removed_keys)?;
         Ok(())
     }
 }
@@ -579,12 +688,12 @@ impl Command for DisconnectAllCommand {
             .filter(|link| driver.is_link_mutable(link.id))
             .filter_map(|link| stable_pair(driver.graph(), link.output_port, link.input_port))
             .collect();
-        self.links = disconnect_keys(driver, &self.keys, &mut self.removed_keys)?;
+        self.links = disconnect_keys(driver, self.name(), &self.keys, &mut self.removed_keys)?;
         Ok(())
     }
 
     fn undo(&mut self, driver: &mut dyn GraphDriver) -> Result<(), CommandError> {
-        self.links = restore_keys(driver, &self.removed_keys)?;
+        self.links = restore_keys(driver, self.name(), &self.removed_keys)?;
         Ok(())
     }
 }
@@ -829,6 +938,84 @@ mod tests {
         assert_eq!(driver.graph().links.len(), 2);
         commands.undo(&mut driver).unwrap();
         assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn a_failed_group_disconnect_leaves_the_graph_untouched() {
+        // The regression this guards: the first links were removed, the error
+        // propagated, and `CommandStack::execute` then refused to record the
+        // command — so the user lost connections with no undo available.
+        let mut driver = InMemoryDriver::demo();
+        let first = driver.connect(PortId(1), PortId(3)).unwrap();
+        let second = driver.connect(PortId(2), PortId(4)).unwrap();
+        driver.fail_disconnect_of(second.id);
+        let mut commands = CommandStack::new();
+
+        let error = commands
+            .execute(
+                Box::new(DisconnectManyCommand::new(vec![first.id, second.id])),
+                &mut driver,
+            )
+            .expect_err("the group disconnect must fail");
+        assert!(matches!(error, CommandError::Backend(_)));
+        assert_eq!(
+            driver.graph().links.len(),
+            2,
+            "a failed group disconnect must roll back the links it removed"
+        );
+        assert!(!commands.can_undo());
+    }
+
+    #[test]
+    fn reroute_undo_keeps_a_connection_it_did_not_create() {
+        // Rerouting onto a pair that already exists must not give undo licence
+        // to delete somebody else's connection.
+        let mut driver = InMemoryDriver::demo();
+        let moving = driver.connect(PortId(1), PortId(3)).unwrap();
+        let existing = driver.connect(PortId(2), PortId(4)).unwrap();
+        let mut commands = CommandStack::new();
+
+        // Drag the source end of `moving` onto port 2, which makes it the same
+        // pair as `existing`.
+        commands
+            .execute(
+                Box::new(RerouteLinkCommand::new(moving.id, PortId(2))),
+                &mut driver,
+            )
+            .unwrap();
+        assert!(driver.graph().link(existing.id).is_some());
+
+        commands.undo(&mut driver).unwrap();
+        assert!(
+            driver
+                .graph()
+                .find_link_by_keys(
+                    &driver.graph().port_key(PortId(2)).unwrap(),
+                    &driver.graph().port_key(PortId(4)).unwrap()
+                )
+                .is_some(),
+            "undo must not delete a pre-existing connection it did not create"
+        );
+    }
+
+    #[test]
+    fn a_failed_reroute_restores_the_original_route() {
+        let mut driver = InMemoryDriver::demo();
+        let link = driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.fail_connect_of(PortId(2), PortId(3));
+        let mut commands = CommandStack::new();
+
+        assert!(commands
+            .execute(
+                Box::new(RerouteLinkCommand::new(link.id, PortId(2))),
+                &mut driver
+            )
+            .is_err());
+        assert_eq!(
+            driver.graph().links.len(),
+            1,
+            "the original route must come back when the new one is refused"
+        );
     }
 
     #[test]

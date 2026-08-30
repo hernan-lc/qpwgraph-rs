@@ -278,6 +278,22 @@ pub fn outbound_bind_addr(
         .map(|link| link.addr)
 }
 
+/// Choose the local address a host should listen on for a transport
+/// preference. `Auto` returns `None`, meaning every interface.
+///
+/// Selecting "USB tether" used to change only which link outbound
+/// connections preferred, while the listener still accepted pairing on the
+/// LAN, on every VPN, and on anything else that happened to be up. Honouring
+/// the preference here makes the choice mean what it says.
+pub fn listen_bind_addr(links: &[LocalLink], preference: TransportPreference) -> Option<Ipv4Addr> {
+    if preference == TransportPreference::Auto {
+        return None;
+    }
+    select_links(links, preference)
+        .first()
+        .map(|link| link.addr)
+}
+
 /// Connect a TCP stream, optionally bound to a specific local address.
 ///
 /// When no bind address is requested the standard
@@ -457,6 +473,23 @@ mod tests {
         let wifi_only = select_links(&links, TransportPreference::Wifi);
         assert_eq!(wifi_only.len(), 1);
         assert_eq!(wifi_only[0].kind, LinkKind::Wifi);
+    }
+
+    #[test]
+    fn a_transport_preference_constrains_the_listener() {
+        let links = fixture_links();
+        // "Auto" is the only setting that means every interface.
+        assert_eq!(listen_bind_addr(&links, TransportPreference::Auto), None);
+        // A specific preference binds the listener to that link, rather than
+        // offering pairing on every interface the machine happens to have.
+        let usb = listen_bind_addr(&links, TransportPreference::Usb);
+        assert!(usb.is_some());
+        assert_eq!(
+            usb,
+            select_links(&links, TransportPreference::Usb)
+                .first()
+                .map(|link| link.addr)
+        );
     }
 
     #[test]

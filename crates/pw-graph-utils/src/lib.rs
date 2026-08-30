@@ -1,6 +1,9 @@
 //! Shared utilities and macros for the qpwgraph-rs workspace.
 
+pub mod fs;
 pub mod hex;
+
+pub use fs::atomic_write;
 
 /// Generate `as_str`, `parse`, and an `ALL` constant for a string-enum.
 ///

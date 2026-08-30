@@ -14,6 +14,8 @@
 
 pub mod audio;
 pub mod codec;
+pub mod convert;
+pub mod crypto;
 pub mod discovery;
 pub mod netlink;
 pub mod pairing;
@@ -26,16 +28,42 @@ mod realtime;
 mod session;
 
 pub use codec::AudioFormat;
+pub use convert::Converter;
+pub use crypto::{Opener, Sealer};
 pub use netlink::{LinkKind, LocalLink, TransportPreference};
-pub use protocol::{CodecKind, DeviceKind, Roles};
+pub use protocol::{
+    is_supported_frame_ms, normalize_frame_ms, CodecKind, DeviceKind, Roles, FRAME_DURATIONS_MS,
+};
 pub use queue::{PcmQueue, CAPTURE_DEPTH_FRAMES, DEFAULT_QUEUE_CAPACITY, PLAYBACK_DEPTH_FRAMES};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use thiserror::Error;
+
+/// Upper bound on queued events.
+///
+/// The queue used to be unbounded, which made it a memory-growth path: a peer
+/// sending malformed audio produced one error event per datagram, and a UI
+/// that drains once per frame could never keep up with a flood. Dropping the
+/// oldest events is right — a consumer that has fallen this far behind wants
+/// the recent state of the world, not a backlog.
+pub const MAX_QUEUED_EVENTS: usize = 256;
+
+/// Failed pairings one source address may make before it is locked out.
+pub const PAIRING_ATTEMPT_LIMIT: u32 = 5;
+/// How long a source stays locked out. With a PAKE, guessing a six-digit PIN
+/// is an online-only game; at five tries per lockout it would take centuries.
+pub const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
+
+/// Pairing failures recorded against one source address.
+struct FailureRecord {
+    count: u32,
+    locked_until: Instant,
+}
 
 #[derive(Debug, Error)]
 pub enum RelayError {
@@ -125,6 +153,22 @@ pub struct EngineConfig {
     pub client_roles: Roles,
     /// Preferred transport link (`auto` picks the best available).
     pub transport: TransportPreference,
+    /// Sample rate of this machine's own audio endpoints. Sessions are
+    /// converted to and from this rate, so a peer negotiating 16 kHz does not
+    /// play back at three times the pitch.
+    pub local_sample_rate: u32,
+    /// Channel count of this machine's own audio endpoints.
+    pub local_channels: u16,
+    /// Local address the host listens on. `None` binds every IPv4 interface,
+    /// which is the widest possible exposure — set it to the address of the
+    /// link the relay is actually meant to serve.
+    pub bind_addr: Option<Ipv4Addr>,
+    /// Concurrent connections allowed to sit in the pairing handshake. Each
+    /// costs a thread and a five-second read timeout before it has proven
+    /// anything, so an unbounded count is a trivial resource-exhaustion path.
+    pub max_pending_handshakes: usize,
+    /// Established sessions a host will hold at once.
+    pub max_sessions: usize,
 }
 
 impl Default for EngineConfig {
@@ -140,7 +184,19 @@ impl Default for EngineConfig {
             channels: 1,
             client_roles: Roles::emit_only(),
             transport: TransportPreference::Auto,
+            local_sample_rate: 48_000,
+            local_channels: 1,
+            bind_addr: None,
+            max_pending_handshakes: 8,
+            max_sessions: 16,
         }
+    }
+}
+
+impl EngineConfig {
+    /// This machine's own audio geometry, as a frame-less format.
+    pub fn local_format(&self) -> AudioFormat {
+        AudioFormat::new(self.local_sample_rate, self.local_channels, self.frame_ms)
     }
 }
 
@@ -187,20 +243,43 @@ pub(crate) struct SessionRecord {
     /// One resume takeover at a time; racing reconnects are rejected while
     /// it is set.
     pub resuming: AtomicBool,
-    /// UDP address of the peer's audio socket, learned from its first
-    /// datagram. Senders poll this until it is known.
+    /// UDP address of the peer's audio socket.
+    ///
+    /// Only ever updated from a datagram that authenticated against this
+    /// session's audio key. Learning it from any syntactically valid packet,
+    /// as an earlier version did, let anyone who could reach the port
+    /// redirect our outbound audio to themselves.
     pub peer_audio_addr: Mutex<Option<SocketAddr>>,
     /// Per-session transmit queue so one capture stream fans out to every
-    /// receiving peer without competing consumers.
+    /// receiving peer without competing consumers. Holds audio already
+    /// converted into *this session's* negotiated format.
     pub outgoing: PcmQueue,
+    /// Per-session receive queue holding audio converted into the engine's
+    /// local format, ready to be mixed with the other sessions'.
+    pub incoming: PcmQueue,
+    /// Local-format-to-session-format conversion for the transmit path, with
+    /// its reusable output buffer. One converter per session: they have
+    /// independent geometries and independent interpolation state.
+    pub capture_convert: Mutex<(Converter, Vec<f32>)>,
+    /// Seals this session's outgoing datagrams. Shared between the transmit
+    /// worker and the announce path, because a single nonce counter per key
+    /// is what keeps the AEAD safe.
+    pub audio_sealer: Mutex<Sealer>,
+    /// Opens this session's incoming datagrams and tracks its replay window.
+    pub audio_opener: Mutex<Opener>,
 }
 
 pub(crate) struct EngineInner {
     config: Mutex<EngineConfig>,
     events: Mutex<VecDeque<RelayEvent>>,
-    /// Decoded audio arriving from peers; drained by `pull_playback`.
-    pub incoming: PcmQueue,
+    /// Scratch used while summing the per-session receive queues.
+    mix_scratch: Mutex<Vec<f32>>,
     sessions: Mutex<BTreeMap<SessionId, Arc<SessionRecord>>>,
+    /// Recent failed pairing attempts per source address. A PAKE makes
+    /// guessing an online-only game; this is what makes that game slow.
+    pairing_failures: Mutex<BTreeMap<IpAddr, FailureRecord>>,
+    /// Connections currently inside the pre-authentication handshake.
+    pending_handshakes: AtomicU64,
     host: Mutex<Option<session::HostRecord>>,
     /// Discovered (not necessarily connected) relay hosts, keyed by address.
     peers: Mutex<BTreeMap<SocketAddr, PeerInfo>>,
@@ -218,8 +297,10 @@ impl EngineInner {
         Arc::new(Self {
             config: Mutex::new(config),
             events: Mutex::new(VecDeque::new()),
-            incoming: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
+            mix_scratch: Mutex::new(Vec::new()),
             sessions: Mutex::new(BTreeMap::new()),
+            pairing_failures: Mutex::new(BTreeMap::new()),
+            pending_handshakes: AtomicU64::new(0),
             host: Mutex::new(None),
             peers: Mutex::new(BTreeMap::new()),
             peer_services: Mutex::new(BTreeMap::new()),
@@ -232,8 +313,84 @@ impl EngineInner {
     }
 
     fn emit(&self, event: RelayEvent) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push_back(event);
+        let Ok(mut events) = self.events.lock() else {
+            return;
+        };
+        // Meter updates and repeated identical errors are replaceable rather
+        // than cumulative: a consumer only ever wants the latest. Coalescing
+        // them keeps a noisy session from pushing everything else out of a
+        // bounded queue.
+        let replaceable = match &event {
+            RelayEvent::AudioLevel { id, .. } => {
+                let id = *id;
+                events.iter_mut().find(|queued| {
+                    matches!(queued, RelayEvent::AudioLevel { id: queued, .. } if *queued == id)
+                })
+            }
+            RelayEvent::Error { message } => {
+                // Only a recent identical error is folded away; a genuinely
+                // new message always gets through.
+                let recent = events.len().saturating_sub(8);
+                events.iter_mut().skip(recent).find(|queued| {
+                    matches!(queued, RelayEvent::Error { message: queued } if queued.as_str() == message.as_str())
+                })
+            }
+            _ => None,
+        };
+        if let Some(slot) = replaceable {
+            *slot = event;
+            return;
+        }
+        events.push_back(event);
+        while events.len() > MAX_QUEUED_EVENTS {
+            events.pop_front();
+        }
+    }
+
+    /// Whether `addr` may attempt a pairing right now.
+    fn pairing_allowed(&self, addr: IpAddr) -> bool {
+        let Ok(mut failures) = self.pairing_failures.lock() else {
+            return true;
+        };
+        match failures.get(&addr) {
+            Some(record) if record.locked_until > Instant::now() => false,
+            Some(record)
+                if record.locked_until <= Instant::now()
+                    && record.count >= PAIRING_ATTEMPT_LIMIT =>
+            {
+                // The lockout expired; give the peer a fresh budget.
+                failures.remove(&addr);
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Record a failed pairing, locking the source out once it has burned
+    /// through its budget.
+    fn note_pairing_failure(&self, addr: IpAddr) {
+        let Ok(mut failures) = self.pairing_failures.lock() else {
+            return;
+        };
+        // Keep the table from growing without bound if many addresses probe.
+        if failures.len() > 1024 {
+            let now = Instant::now();
+            failures.retain(|_, record| record.locked_until > now);
+        }
+        let record = failures.entry(addr).or_insert(FailureRecord {
+            count: 0,
+            locked_until: Instant::now(),
+        });
+        record.count += 1;
+        if record.count >= PAIRING_ATTEMPT_LIMIT {
+            record.locked_until = Instant::now() + PAIRING_LOCKOUT;
+        }
+    }
+
+    /// Forget a source's failures after it pairs successfully.
+    fn clear_pairing_failures(&self, addr: IpAddr) {
+        if let Ok(mut failures) = self.pairing_failures.lock() {
+            failures.remove(&addr);
         }
     }
 
@@ -265,6 +422,38 @@ impl EngineInner {
         self.sessions.lock().ok()?.get(&id).cloned()
     }
 
+    fn session_count(&self) -> usize {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.len())
+            .unwrap_or(0)
+    }
+
+    /// Claim a pre-authentication handshake slot, or `None` when the host is
+    /// already handling as many as it allows.
+    fn claim_handshake(self: &Arc<Self>) -> Option<HandshakeSlot> {
+        let limit = self.config().max_pending_handshakes.max(1) as u64;
+        let mut current = self.pending_handshakes.load(Ordering::Relaxed);
+        loop {
+            if current >= limit {
+                return None;
+            }
+            match self.pending_handshakes.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(HandshakeSlot {
+                        inner: Arc::clone(self),
+                    })
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn session_alive(&self, id: SessionId) -> bool {
         self.running.load(Ordering::Relaxed)
             && self
@@ -274,6 +463,14 @@ impl EngineInner {
                 .unwrap_or(false)
     }
 
+    /// Fan captured audio out to every transmitting session, converting the
+    /// engine's local geometry into each session's negotiated one.
+    ///
+    /// `samples` are interleaved in the local format
+    /// ([`EngineConfig::local_sample_rate`] / `local_channels`). Sessions may
+    /// each have negotiated something different, so the conversion is
+    /// per-session and stateful; its buffers are reused, so the realtime path
+    /// does not allocate after warm-up.
     fn broadcast_capture(&self, samples: &[f32], realtime: bool) -> bool {
         let sessions = if realtime {
             let Ok(sessions) = self.sessions.try_lock() else {
@@ -288,15 +485,106 @@ impl EngineInner {
         };
         let mut accepted = true;
         for record in sessions.values().filter(|record| record.sending) {
-            let pushed = if realtime {
-                record.outgoing.try_push(samples)
+            let converted = if realtime {
+                record.capture_convert.try_lock().ok()
             } else {
-                record.outgoing.push(samples);
+                record.capture_convert.lock().ok()
+            };
+            let Some(mut converted) = converted else {
+                accepted = false;
+                continue;
+            };
+            let (converter, buffer) = &mut *converted;
+            if converter.is_identity() {
+                // Avoid the copy on the common matched-geometry path.
+                accepted &= if realtime {
+                    record.outgoing.try_push(samples)
+                } else {
+                    record.outgoing.push(samples);
+                    true
+                };
+                continue;
+            }
+            converter.convert(samples, buffer);
+            accepted &= if realtime {
+                record.outgoing.try_push(buffer)
+            } else {
+                record.outgoing.push(buffer);
                 true
             };
-            accepted &= pushed;
         }
         accepted
+    }
+
+    /// Sum every receiving session's decoded audio into `out`.
+    ///
+    /// Each session decodes into its own queue in the engine's local format,
+    /// so mixing is a plain sum. Sharing one queue — as an earlier version
+    /// did — concatenated two peers' audio into one stream rather than
+    /// mixing it, and let either peer resize the other's playback buffer.
+    fn mix_playback(&self, out: &mut [f32], realtime: bool) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        let sessions = if realtime {
+            let Ok(sessions) = self.sessions.try_lock() else {
+                return 0;
+            };
+            sessions
+        } else {
+            let Ok(sessions) = self.sessions.lock() else {
+                return 0;
+            };
+            sessions
+        };
+        let receiving: Vec<&Arc<SessionRecord>> = sessions
+            .values()
+            .filter(|record| record.receiving)
+            .collect();
+        match receiving.as_slice() {
+            [] => 0,
+            // One session is the overwhelmingly common case; skip the scratch
+            // buffer and the summing loop entirely.
+            [only] => {
+                if realtime {
+                    only.incoming.try_pull(out)
+                } else {
+                    only.incoming.pull(out)
+                }
+            }
+            many => {
+                let scratch = if realtime {
+                    self.mix_scratch.try_lock().ok()
+                } else {
+                    self.mix_scratch.lock().ok()
+                };
+                let Some(mut scratch) = scratch else {
+                    return 0;
+                };
+                scratch.clear();
+                scratch.resize(out.len(), 0.0);
+                out.fill(0.0);
+                let mut produced = 0;
+                for record in many {
+                    let count = if realtime {
+                        record.incoming.try_pull(&mut scratch[..])
+                    } else {
+                        record.incoming.pull(&mut scratch[..])
+                    };
+                    for (slot, sample) in out.iter_mut().zip(scratch.iter()).take(count) {
+                        *slot += *sample;
+                    }
+                    produced = produced.max(count);
+                }
+                // Summed peers can exceed full scale; clamping is far less
+                // objectionable than the wraparound a raw sum would hand to
+                // an integer conversion downstream.
+                for sample in out.iter_mut().take(produced) {
+                    *sample = sample.clamp(-1.0, 1.0);
+                }
+                produced
+            }
+        }
     }
 
     fn remove_session(&self, id: SessionId) -> Option<Arc<SessionRecord>> {
@@ -354,6 +642,18 @@ impl EngineInner {
     }
 }
 
+/// Releases a pre-authentication handshake slot when the handshake thread
+/// ends, however it ends.
+pub(crate) struct HandshakeSlot {
+    inner: Arc<EngineInner>,
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        self.inner.pending_handshakes.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The relay engine. Owns background threads until [`RelayEngine::shutdown`].
 pub struct RelayEngine {
     inner: Arc<EngineInner>,
@@ -408,10 +708,17 @@ impl RelayHandle {
     /// Start listening for clients. Returns the bound TCP control port.
     pub fn host_start(&self) -> RelayResult<u16> {
         let config = self.inner.config();
-        if config.pin.trim().is_empty() {
+        let pin = config.pin.trim();
+        if pin.is_empty() {
             return Err(RelayError::Engine(
                 "a pairing PIN must be configured before hosting".into(),
             ));
+        }
+        if pin.len() < pairing::PIN_LENGTH {
+            return Err(RelayError::Engine(format!(
+                "the pairing PIN must be at least {} characters",
+                pairing::PIN_LENGTH
+            )));
         }
         let mut host = self
             .inner
@@ -515,14 +822,15 @@ impl RelayHandle {
     }
 
     /// Take decoded audio received from peers (e.g. into the virtual relay
-    /// microphone). Returns the number of samples written to `out`.
+    /// microphone), mixed across sessions and converted into the engine's
+    /// local format. Returns the number of samples written to `out`.
     pub fn pull_playback(&self, out: &mut [f32]) -> usize {
-        self.inner.incoming.pull(out)
+        self.inner.mix_playback(out, false)
     }
 
     /// Realtime-safe variant of [`Self::pull_playback`].
     pub fn try_pull_playback(&self, out: &mut [f32]) -> usize {
-        self.inner.incoming.try_pull(out)
+        self.inner.mix_playback(out, true)
     }
 
     pub fn status(&self) -> EngineStatus {

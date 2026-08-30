@@ -76,9 +76,21 @@ pub struct AppConfig {
     /// modules.
     pub effects: Vec<PersistedEffect>,
     pub relay_device_name: String,
+    /// Pairing PIN this machine offers when hosting.
+    ///
+    /// Deliberately not persisted. A PIN that lives in a config file is a
+    /// long-lived shared secret in plaintext; a host PIN wants to be
+    /// ephemeral, freshly generated per hosting session and shown on screen.
+    /// A shipped default was worse still — every fresh install hosted behind
+    /// the same globally known `123456`.
+    #[serde(skip)]
     pub relay_host_pin: String,
     pub relay_host_port: u16,
     pub relay_client_target: String,
+    /// PIN last used to pair with a host. Also not persisted: it is the
+    /// host's secret, and keeping it on disk buys convenience at the cost of
+    /// leaving a working credential in a world-readable file.
+    #[serde(skip)]
     pub relay_client_pin: String,
     pub relay_role: String,
     pub relay_codec: String,
@@ -153,10 +165,10 @@ impl Default for AppConfig {
             active_patchbay_profile: "default".into(),
             effects: Vec::new(),
             relay_device_name: "qpwgraph-rs".into(),
-            relay_host_pin: "123456".into(),
+            relay_host_pin: String::new(),
             relay_host_port: 0,
             relay_client_target: String::new(),
-            relay_client_pin: "123456".into(),
+            relay_client_pin: String::new(),
             relay_role: "both".into(),
             relay_codec: "opus".into(),
             // Ten milliseconds halves the codec-side latency floor of the
@@ -179,13 +191,15 @@ impl AppConfig {
         Ok(toml::from_str(&text)?)
     }
 
+    /// Save the configuration.
+    ///
+    /// The write is atomic (temporary sibling plus rename) so a crash or a
+    /// full disk cannot destroy the only copy of the user's settings, and the
+    /// file is created owner-only.
     pub fn save_to(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(ConfigError::Write)?;
-        }
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(path, text).map_err(ConfigError::Write)
+        pw_graph_utils::atomic_write(path.as_ref(), text.as_bytes(), true)
+            .map_err(ConfigError::Write)
     }
 }
 
@@ -214,14 +228,16 @@ mod tests {
 
     #[test]
     fn defaults_round_trip() {
-        assert_eq!(AppConfig::default().relay_host_pin, "123456");
-        assert_eq!(AppConfig::default().relay_client_pin, "123456");
+        // No shipped default: a fresh install must not host behind a PIN
+        // every other install also has.
+        assert!(AppConfig::default().relay_host_pin.is_empty());
+        assert!(AppConfig::default().relay_client_pin.is_empty());
         let directory =
             std::env::temp_dir().join(format!("pw-graph-config-{}", std::process::id()));
         let path = directory.join("config.toml");
         let expected = AppConfig {
             relay_device_name: "studio-pc".into(),
-            relay_host_pin: "123456".into(),
+            relay_host_pin: String::new(),
             relay_client_target: "192.168.1.20:48123".into(),
             relay_capture_endpoint_id: Some("capture-endpoint".into()),
             relay_playback_endpoint_id: Some("playback-endpoint".into()),
@@ -230,6 +246,42 @@ mod tests {
         expected.save_to(&path).unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap(), expected);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pairing_pins_never_reach_disk() {
+        let path = std::env::temp_dir()
+            .join(format!("pw-graph-config-{}", std::process::id()))
+            .join("pins.toml");
+        let config = AppConfig {
+            relay_host_pin: "864209".into(),
+            relay_client_pin: "135790".into(),
+            ..AppConfig::default()
+        };
+        config.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("864209"), "the host PIN was written to disk");
+        assert!(
+            !text.contains("135790"),
+            "the client PIN was written to disk"
+        );
+        let reloaded = AppConfig::load_from(&path).unwrap();
+        assert!(reloaded.relay_host_pin.is_empty());
+        assert!(reloaded.relay_client_pin.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_config_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir()
+            .join(format!("pw-graph-config-mode-{}", std::process::id()))
+            .join("config.toml");
+        AppConfig::default().save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

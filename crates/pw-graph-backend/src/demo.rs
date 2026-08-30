@@ -29,6 +29,21 @@ pub struct DemoDriver {
     effect_host: EffectHost,
     effect_processors: BTreeMap<String, Box<dyn EffectProcessor>>,
     next_effect_id: u64,
+    /// Operations forced to fail. Boxed and absent by default so the common
+    /// driver stays small; see [`DemoDriver::fail_connect_of`].
+    forced_failures: Option<Box<ForcedFailures>>,
+}
+
+/// Operations a test wants the driver to refuse.
+///
+/// Real backends reject individual connects and disconnects for reasons a
+/// test cannot reproduce — a device disappearing mid-operation, a session
+/// manager refusing a route. Without a hook like this, the rollback paths
+/// written for exactly those cases could never be exercised.
+#[derive(Default)]
+struct ForcedFailures {
+    connects: BTreeSet<(PortId, PortId)>,
+    disconnects: BTreeSet<LinkId>,
 }
 
 impl DemoDriver {
@@ -43,6 +58,7 @@ impl DemoDriver {
             effect_host: EffectHost::new(),
             effect_processors: BTreeMap::new(),
             next_effect_id: 1000,
+            forced_failures: None,
         }
     }
 
@@ -121,6 +137,23 @@ impl DemoDriver {
     /// links, such as Windows audio-session relationships.
     pub fn mark_link_observed(&mut self, link: LinkId) {
         self.observed_links.insert(link);
+    }
+
+    /// Make every future `connect` of this port pair fail, so a caller's
+    /// rollback path can be tested.
+    pub fn fail_connect_of(&mut self, src: PortId, dst: PortId) {
+        self.forced_failures
+            .get_or_insert_with(Default::default)
+            .connects
+            .insert((src, dst));
+    }
+
+    /// Make every future `disconnect` of this link fail.
+    pub fn fail_disconnect_of(&mut self, link: LinkId) {
+        self.forced_failures
+            .get_or_insert_with(Default::default)
+            .disconnects
+            .insert(link);
     }
 
     fn allocate_link_id(&mut self) -> LinkId {
@@ -282,12 +315,28 @@ impl GraphDriver for DemoDriver {
     }
 
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+        if self
+            .forced_failures
+            .as_ref()
+            .is_some_and(|forced| forced.connects.contains(&(src, dst)))
+        {
+            return Err(BackendError::native("connect refused by the test driver"));
+        }
         let link_id = self.allocate_link_id();
         let link = self.graph.add_link(link_id, src, dst)?;
         Ok(link)
     }
 
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
+        if self
+            .forced_failures
+            .as_ref()
+            .is_some_and(|forced| forced.disconnects.contains(&link))
+        {
+            return Err(BackendError::native(
+                "disconnect refused by the test driver",
+            ));
+        }
         Ok(self.graph.remove_link(link)?)
     }
 

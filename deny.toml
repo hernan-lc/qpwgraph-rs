@@ -1,0 +1,62 @@
+# Dependency policy, enforced by `cargo deny check` in CI.
+#
+# The relay now carries cryptographic dependencies and speaks to untrusted
+# devices on the local network, so an unnoticed advisory in a transitive crate
+# matters more here than it would in a purely local tool.
+
+[graph]
+all-features = true
+
+[advisories]
+# Security vulnerabilities and yanked crates fail the build (cargo-deny's
+# defaults). "Unmaintained" notices are scoped to crates this workspace
+# actually chose: the ones in the tree today (`ttf-parser`, `rustybuzz`,
+# `paste`) all arrive through Slint's font stack, where the project has no
+# way to act on the notice short of dropping the UI toolkit. Letting those
+# fail CI would train everyone to ignore the job, which is how a real
+# advisory gets missed.
+unmaintained = "workspace"
+# Add a specific advisory id here, with a comment saying why it does not
+# apply, rather than relaxing the settings above.
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates depend on each other by path with no version
+# requirement, which is the normal shape for an unpublished workspace.
+allow-wildcard-paths = true
+
+[licenses]
+# The workspace is GPL-3.0-or-later; these are the permissive licences its
+# dependency tree is allowed to pull in.
+allow = [
+    "Apache-2.0",
+    # LLVM's runtime libraries, reached through the C toolchain crates.
+    "Apache-2.0 WITH LLVM-exception",
+    "NCSA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    # Slint is dual-licensed; the GPL arm is the one this GPL-3.0-or-later
+    # workspace takes.
+    "GPL-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "LicenseRef-Slint-Royalty-free-2.0",
+    "LicenseRef-Slint-Software-3.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

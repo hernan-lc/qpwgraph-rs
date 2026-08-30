@@ -28,6 +28,34 @@ pub enum PatchbayError {
     XmlAttributes,
     #[error(transparent)]
     Backend(#[from] BackendError),
+    /// Activation failed and the connections it had already removed could not
+    /// all be put back. The graph is in neither the previous nor the saved
+    /// state, and the user has to be told rather than shown a bare error.
+    #[error("activation failed ({cause}) and {stranded} connection(s) could not be restored")]
+    ActivationNotRolledBack { cause: String, stranded: usize },
+}
+
+/// Put back everything a failed activation had disconnected, and describe the
+/// outcome.
+fn rollback(
+    driver: &mut dyn GraphDriver,
+    undone: &[(PortKey, PortKey)],
+    cause: BackendError,
+) -> PatchbayError {
+    let mut stranded = 0;
+    for (output, input) in undone.iter().rev() {
+        if driver.connect_by_key_if_missing(output, input).is_err() {
+            stranded += 1;
+        }
+    }
+    if stranded == 0 {
+        PatchbayError::Backend(cause)
+    } else {
+        PatchbayError::ActivationNotRolledBack {
+            cause: cause.to_string(),
+            stranded,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -263,13 +291,12 @@ impl Patchbay {
             .and_then(|extension| extension.to_str())
             .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "qpwgraph" | "xml"))
             .unwrap_or(false);
-        if is_xml {
-            let xml = self.to_xml()?;
-            std::fs::write(path, xml).map_err(PatchbayError::Write)
+        let text = if is_xml {
+            self.to_xml()?
         } else {
-            let json = serde_json::to_string_pretty(self)?;
-            std::fs::write(path, json).map_err(PatchbayError::Write)
-        }
+            serde_json::to_string_pretty(self)?
+        };
+        pw_graph_utils::atomic_write(path, text.as_bytes(), false).map_err(PatchbayError::Write)
     }
 
     pub fn load_from(path: impl AsRef<Path>) -> Result<Self, PatchbayError> {
@@ -316,11 +343,23 @@ impl Patchbay {
             })
             .collect();
 
+        // Everything this activation takes down is recorded first, so a
+        // failure part-way can put the graph back. Disconnecting live routes
+        // and *then* discovering the desired ones cannot be made would
+        // otherwise leave the user with neither — the audible symptom being
+        // that activating a patchbay silently kills working audio.
+        let mut undone: Vec<(PortKey, PortKey)> = Vec::new();
+
         if exclusive {
             let live: Vec<_> = driver
                 .graph()
                 .links
                 .values()
+                // Observed relationships are not the patchbay's to remove.
+                // A composite backend can expose immutable Core Audio session
+                // links next to mutable MIDI ones and still report that it
+                // supports disconnection overall.
+                .filter(|link| driver.is_link_mutable(link.id))
                 .filter_map(|link| {
                     Some((
                         driver.graph().port_key(link.output_port)?,
@@ -329,23 +368,21 @@ impl Patchbay {
                 })
                 .collect();
             for (live_output, live_input) in live {
-                let saved = resolved.iter().any(|(output, input)| {
-                    driver
-                        .graph()
-                        .find_link_by_keys(output, input)
-                        .is_some_and(|saved_link| {
-                            driver
-                                .graph()
-                                .find_link_by_keys(&live_output, &live_input)
-                                .is_some_and(|live_link| saved_link.id == live_link.id)
-                        })
-                });
-                if !saved
-                    && driver
-                        .disconnect_by_key_if_present(&live_output, &live_input)?
-                        .is_some()
-                {
-                    report.disconnected += 1;
+                let saved = resolved
+                    .iter()
+                    .any(|(output, input)| output == &live_output && input == &live_input);
+                if saved {
+                    continue;
+                }
+                match driver.disconnect_by_key_if_present(&live_output, &live_input) {
+                    Ok(Some(_)) => {
+                        report.disconnected += 1;
+                        undone.push((live_output, live_input));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(rollback(driver, &undone, error));
+                    }
                 }
             }
         }
@@ -364,6 +401,7 @@ impl Patchbay {
                     .graph()
                     .links_for_port(input_port)
                     .filter(|link| link.input_port == input_port)
+                    .filter(|link| driver.is_link_mutable(link.id))
                     .filter_map(|link| {
                         Some((
                             driver.graph().port_key(link.output_port)?,
@@ -372,11 +410,15 @@ impl Patchbay {
                     })
                     .collect();
                 for (stale_output, stale_input) in stale {
-                    if driver
-                        .disconnect_by_key_if_present(&stale_output, &stale_input)?
-                        .is_some()
-                    {
-                        report.disconnected += 1;
+                    match driver.disconnect_by_key_if_present(&stale_output, &stale_input) {
+                        Ok(Some(_)) => {
+                            report.disconnected += 1;
+                            undone.push((stale_output, stale_input));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return Err(rollback(driver, &undone, error));
+                        }
                     }
                 }
             }
@@ -384,7 +426,29 @@ impl Patchbay {
             match driver.connect_by_key_if_missing(&output, &input) {
                 Ok(Some(_)) => report.connected += 1,
                 Ok(None) => report.already_present += 1,
-                Err(error) => report.failed.push(error.to_string()),
+                Err(error) => {
+                    // A route that cannot be made is reported, not fatal: the
+                    // rest of the patchbay is still worth applying. What must
+                    // not happen is losing the links taken down on its behalf,
+                    // so the ones this iteration removed go back.
+                    report.failed.push(error.to_string());
+                    for (removed_output, removed_input) in undone.drain(..).rev() {
+                        if driver
+                            .connect_by_key_if_missing(&removed_output, &removed_input)
+                            .is_err()
+                        {
+                            report.failed.push(format!(
+                                "could not restore {}:{} → {}:{}",
+                                removed_output.node_name,
+                                removed_output.port_name,
+                                removed_input.node_name,
+                                removed_input.port_name
+                            ));
+                        } else {
+                            report.disconnected = report.disconnected.saturating_sub(1);
+                        }
+                    }
+                }
             }
         }
         Ok(report)
@@ -585,6 +649,48 @@ mod tests {
                 .already_present,
             1
         );
+    }
+
+    #[test]
+    fn a_failed_activation_restores_what_it_disconnected() {
+        // The user-visible regression: activating a patchbay took working
+        // links down, the desired route was refused, and the old links stayed
+        // gone — so a failed activation silently killed audio.
+        let mut driver = InMemoryDriver::demo();
+        let existing = driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.fail_connect_of(PortId(2), PortId(3));
+
+        let mut patchbay = Patchbay::default();
+        patchbay.add_graph_connection(driver.graph(), PortId(2), PortId(3), false);
+
+        let report = patchbay
+            .activate(&mut driver, false, true)
+            .expect("activation reports rather than fails");
+        assert_eq!(report.failed.len(), 1, "the refused route is reported");
+        assert!(
+            driver.graph().link(existing.id).is_some()
+                || driver
+                    .graph()
+                    .find_link_by_keys(
+                        &driver.graph().port_key(PortId(1)).unwrap(),
+                        &driver.graph().port_key(PortId(3)).unwrap()
+                    )
+                    .is_some(),
+            "the pre-existing route must survive a failed activation"
+        );
+    }
+
+    #[test]
+    fn exclusive_activation_leaves_observed_links_alone() {
+        // Observed relationships belong to the backend, not the patchbay.
+        let mut driver = InMemoryDriver::demo();
+        let observed = driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.mark_link_observed(observed.id);
+
+        let patchbay = Patchbay::default();
+        let report = patchbay.activate(&mut driver, true, false).unwrap();
+        assert_eq!(report.disconnected, 0);
+        assert!(driver.graph().link(observed.id).is_some());
     }
 
     #[test]

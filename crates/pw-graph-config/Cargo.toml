@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+# Workspace-internal: these crates depend on each other by path and are not
+# published to crates.io.
+publish = false
 
 [dependencies]
 pw-graph-core = { path = "../pw-graph-core" }
 pw-graph-effects = { path = "../pw-graph-effects" }
+pw-graph-utils = { path = "../pw-graph-utils" }
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

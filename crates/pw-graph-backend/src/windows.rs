@@ -292,6 +292,12 @@ impl WindowsAudioDriver {
             channels: crate::windows_relay::RELAY_CHANNELS,
             client_roles: roles,
             transport,
+            // The WASAPI relay endpoints run 48 kHz stereo, so that is this
+            // machine's local geometry; sessions negotiating anything else are
+            // converted rather than misinterpreted.
+            local_sample_rate: crate::windows_relay::RELAY_SAMPLE_RATE,
+            local_channels: crate::windows_relay::RELAY_CHANNELS,
+            ..pw_graph_relay::EngineConfig::default()
         }
     }
 
@@ -558,7 +564,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         target: std::net::SocketAddr,
         pin: &str,
         roles: super::api::RelayRoles,
-    ) -> BackendResult<()> {
+    ) -> BackendResult<super::api::RelaySessionId> {
         // Both roles work here. `emit` means "send what this machine's relay
         // capture endpoint supplies", which on Windows is the playback
         // loopback, and `receive` means "play what the peer sends", which is
@@ -580,8 +586,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             roles,
         );
         let devices = self.ensure_relay(config)?;
-        devices.handle().connect(target, pin, roles);
-        Ok(())
+        Ok(devices.handle().connect(target, pin, roles))
     }
 
     fn relay_disconnect(&mut self, session: super::api::RelaySessionId) -> BackendResult<()> {

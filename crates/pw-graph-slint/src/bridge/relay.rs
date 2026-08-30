@@ -16,6 +16,8 @@ use std::str::FromStr;
 use pw_graph_i18n::I18n;
 
 use super::app::Application;
+#[cfg(feature = "relay")]
+use super::app::RelayAttempt;
 use super::RelayRow;
 
 pub(crate) fn start_relay_discovery(application: &mut Application) {
@@ -66,12 +68,21 @@ pub(crate) fn relay_nodes_visible(application: &Application) -> bool {
 pub(crate) fn start_relay_host(application: &mut Application) {
     #[cfg(feature = "relay")]
     {
+        // A host PIN is ephemeral: generate a fresh random one for each
+        // hosting session rather than reusing a stored (or, worse, shipped)
+        // value. It is displayed in the UI and in the pairing QR code.
+        if application.config.relay_host_pin.trim().is_empty() {
+            application.config.relay_host_pin = pw_graph_backend::relay_generate_pin();
+        }
         let request = RelayHostRequest {
             device_name: application.config.relay_device_name.trim().to_owned(),
             pin: application.config.relay_host_pin.trim().to_owned(),
             port: application.config.relay_host_port,
             codec: relay_codec(&application.config.relay_codec),
-            frame_ms: application.config.relay_frame_ms.clamp(5, 60),
+            // Snap to a duration the protocol actually negotiates. Clamping
+            // let a hand-edited config carry something like 7 ms all the way
+            // to the far end of a handshake before it was rejected.
+            frame_ms: pw_graph_backend::relay_normalize_frame_ms(application.config.relay_frame_ms),
             transport: relay_transport(&application.config.relay_transport),
         };
         match application.source.relay_start_host(request) {
@@ -145,8 +156,11 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
             application.config.relay_client_pin.trim(),
             relay_roles(&application.config.relay_role),
         ) {
-            Ok(()) => {
-                application.relay_connecting = Some(target.to_string());
+            Ok(session) => {
+                application.relay_connecting = Some(RelayAttempt {
+                    target: target.to_string(),
+                    session: session.0,
+                });
                 application.status = application.t("relay.connecting");
             }
             Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
@@ -194,13 +208,30 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
             RelayEvent::PeerLost { peer } => {
                 application.status = application.tf("relay.peer_lost", &[("name", peer.name)]);
             }
-            RelayEvent::SessionEstablished { peer, .. } => {
-                application.relay_connecting = None;
+            RelayEvent::SessionEstablished { id, peer, .. } => {
+                if application
+                    .relay_connecting
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.session == id.0)
+                {
+                    application.relay_connecting = None;
+                }
                 application.status =
                     application.tf("relay.session_connected", &[("name", peer.name)]);
             }
             RelayEvent::SessionLost { id, reason } => {
                 application.relay_levels.remove(&id.0);
+                // An attempt that fails before a session exists reports its
+                // loss this way, so this is what clears a stuck "connecting"
+                // row. Matching on the id keeps an unrelated session dropping
+                // from clearing a live attempt.
+                if application
+                    .relay_connecting
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.session == id.0)
+                {
+                    application.relay_connecting = None;
+                }
                 application.status = application.tf("relay.session_lost", &[("reason", reason)]);
             }
             RelayEvent::AudioLevel { id, rms } => {
@@ -243,12 +274,28 @@ fn relay_transport(value: &str) -> RelayTransportPreference {
 #[cfg(feature = "relay")]
 pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
     let port = application.source.relay_status().host_port?;
-    let link = application.source.relay_local_links().into_iter().next()?;
+    let addr = host_link_addr(application)?;
     Some(relay_build_qr_payload(
-        link.addr,
+        addr,
         port,
         application.config.relay_host_pin.trim(),
     ))
+}
+
+/// The local address to publish for pairing.
+///
+/// The host binds the link its transport preference selects, so the QR code
+/// and the endpoint label must name that same link — otherwise the app shows
+/// an address nothing is listening on.
+#[cfg(feature = "relay")]
+fn host_link_addr(application: &Application) -> Option<std::net::Ipv4Addr> {
+    let links = application.source.relay_local_links();
+    let preference = relay_transport(&application.config.relay_transport);
+    pw_graph_backend::relay_select_links(&links, preference)
+        .into_iter()
+        .next()
+        .or_else(|| links.into_iter().next())
+        .map(|link| link.addr)
 }
 
 #[cfg(not(feature = "relay"))]
@@ -289,7 +336,10 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                 connecting: false,
             });
         }
-        let connecting = application.relay_connecting.as_deref();
+        let connecting = application
+            .relay_connecting
+            .as_ref()
+            .map(|attempt| attempt.target.as_str());
         let mut peers = application.source.relay_peers();
         peers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.addr.cmp(&b.addr)));
         for peer in peers {
@@ -395,24 +445,33 @@ pub(crate) fn relay_codec_from_index(index: i32) -> &'static str {
     }
 }
 
+/// Frame durations offered by the settings combo box.
+///
+/// The settings panel exists whether or not the relay feature is compiled in,
+/// so this list cannot live behind the relay re-exports. It mirrors
+/// `pw_graph_relay::FRAME_DURATIONS_MS`, and
+/// `the_picker_offers_exactly_the_negotiable_frame_durations` fails if the two
+/// ever drift — the duplication is checked, not trusted.
+const FRAME_DURATIONS_MS: [u16; 5] = [5, 10, 20, 40, 60];
+
+/// Combo-box index for a frame duration. A value that is not exactly one of
+/// the offered durations snaps to the nearest, so a hand-edited config shows
+/// the duration it will actually negotiate rather than silently disagreeing
+/// with the wire.
 pub(crate) fn relay_frame_index(frame_ms: u16) -> i32 {
-    match frame_ms {
-        0..=5 => 0,
-        6..=15 => 1,
-        16..=30 => 2,
-        31..=50 => 3,
-        _ => 4,
-    }
+    FRAME_DURATIONS_MS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, candidate)| candidate.abs_diff(frame_ms))
+        .map(|(index, _)| index as i32)
+        .unwrap_or(1)
 }
 
 pub(crate) fn relay_frame_from_index(index: i32) -> u16 {
-    match index {
-        1 => 10,
-        2 => 20,
-        3 => 40,
-        4 => 60,
-        _ => 5,
-    }
+    FRAME_DURATIONS_MS
+        .get(index.clamp(0, FRAME_DURATIONS_MS.len() as i32 - 1) as usize)
+        .copied()
+        .unwrap_or(10)
 }
 
 pub(crate) fn relay_transport_index(value: &str) -> i32 {
@@ -438,12 +497,8 @@ pub(crate) fn relay_host_endpoint(application: &Application, port: Option<u16>) 
     let Some(port) = port else {
         return String::new();
     };
-    application
-        .source
-        .relay_local_links()
-        .into_iter()
-        .next()
-        .map(|link| format!("{}:{port}", link.addr))
+    host_link_addr(application)
+        .map(|addr| format!("{addr}:{port}"))
         .unwrap_or_else(|| format!("0.0.0.0:{port}"))
 }
 
@@ -480,4 +535,36 @@ pub(crate) fn qr_image(payload: &str) -> Image {
         SharedPixelBuffer::<Rgba8Pixel>::new(bitmap.width as u32, bitmap.height as u32);
     buffer.make_mut_slice().copy_from_slice(&pixels);
     Image::from_rgba8(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "relay")]
+    #[test]
+    fn the_picker_offers_exactly_the_negotiable_frame_durations() {
+        assert_eq!(
+            FRAME_DURATIONS_MS,
+            pw_graph_backend::RELAY_FRAME_DURATIONS_MS,
+            "the settings picker and the wire protocol disagree about frame durations"
+        );
+    }
+
+    #[test]
+    fn frame_durations_round_trip_through_the_picker() {
+        for (index, duration) in FRAME_DURATIONS_MS.iter().enumerate() {
+            assert_eq!(relay_frame_index(*duration), index as i32);
+            assert_eq!(relay_frame_from_index(index as i32), *duration);
+        }
+    }
+
+    #[test]
+    fn an_unsupported_stored_duration_snaps_to_a_real_one() {
+        // A hand-edited or older config could hold any u16; the picker must
+        // resolve it to a duration the protocol will actually accept.
+        for (stored, expected) in [(0u16, 5u16), (7, 5), (13, 10), (35, 40), (9_000, 60)] {
+            assert_eq!(relay_frame_from_index(relay_frame_index(stored)), expected);
+        }
+    }
 }

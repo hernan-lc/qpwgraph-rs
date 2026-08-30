@@ -10,19 +10,40 @@
 //! Every loop checks its session's stop flag and the engine's running flag,
 //! so shutdown completes within roughly one socket timeout.
 
-use crate::audio::{announce_packet, AudioPacket, JitterBuffer, JitterPop};
+use crate::audio::{
+    announce_packet, seal_datagram, AudioHeader, AudioPacket, JitterBuffer, JitterPop,
+};
 use crate::codec::{make_decoder, make_encoder, AudioFormat};
+use crate::convert::Converter;
+use crate::crypto::{pake_start, Opener, Sealer, SessionKeys, Side};
 use crate::netlink;
-use crate::pairing::{generate_salt, pair_digest, verify_digest};
 use crate::protocol::{
-    read_frame, write_frame, CodecKind, ControlMessage, DeviceKind, Roles, PROTOCOL_VERSION,
+    is_supported_frame_ms, read_frame, read_sealed_frame, write_frame, write_sealed_frame,
+    CodecKind, ControlMessage, DeviceKind, Roles, PROTOCOL_VERSION,
 };
 use crate::realtime::{request_realtime_thread, tune_audio_socket};
 use crate::{EngineInner, PeerInfo, RelayError, RelayEvent, RelayResult, SessionId, SessionRecord};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use pw_graph_utils::hex::{hex_decode, hex_encode};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// The two ends of an encrypted control channel, owned by one control thread.
+struct ControlCipher {
+    sealer: Sealer,
+    opener: Opener,
+}
+
+impl ControlCipher {
+    fn send(&mut self, stream: &mut TcpStream, message: &ControlMessage) -> std::io::Result<()> {
+        write_sealed_frame(stream, &mut self.sealer, message)
+    }
+
+    fn receive(&mut self, stream: &mut TcpStream) -> std::io::Result<ControlMessage> {
+        read_sealed_frame(stream, &mut self.opener)
+    }
+}
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,7 +73,12 @@ pub(crate) struct HostRecord {
 }
 
 pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<HostRecord> {
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+    // Binding every interface exposes pairing on the LAN, on any VPN, and on
+    // whatever else happens to be up. Honour the configured address, or the
+    // transport preference when no address is pinned, so the relay is offered
+    // on the link it is meant to serve.
+    let bind_ip = host_bind_addr(&inner.config());
+    let listener = TcpListener::bind((bind_ip.unwrap_or(Ipv4Addr::UNSPECIFIED), port))?;
     let bound = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -62,6 +88,14 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
         .name("relay-host".into())
         .spawn(move || accept_loop(inner, listener, thread_stop))?;
     Ok(HostRecord { port: bound, stop })
+}
+
+/// The address a host listens on: an explicitly configured one wins, then the
+/// transport preference, and finally every interface.
+fn host_bind_addr(config: &crate::EngineConfig) -> Option<Ipv4Addr> {
+    config
+        .bind_addr
+        .or_else(|| netlink::listen_bind_addr(&netlink::local_links(), config.transport))
 }
 
 pub(crate) fn stop_host(inner: &EngineInner) {
@@ -77,12 +111,30 @@ fn accept_loop(inner: Arc<EngineInner>, listener: TcpListener, stop: Arc<AtomicB
             break;
         }
         match listener.accept() {
-            Ok((stream, addr)) => {
+            Ok((mut stream, addr)) => {
                 let _ = stream.set_nonblocking(false);
+                // Every accepted connection costs a thread that can sit in a
+                // handshake read timeout before proving anything, so refuse
+                // rather than let an unauthenticated peer spawn without bound.
+                let Some(slot) = inner.claim_handshake() else {
+                    let _ = write_frame(
+                        &mut stream,
+                        &ControlMessage::PairFail {
+                            reason: "the host is busy; try again shortly".into(),
+                        },
+                    );
+                    continue;
+                };
                 let inner = Arc::clone(&inner);
-                let _ = std::thread::Builder::new()
+                if std::thread::Builder::new()
                     .name(format!("relay-peer-{addr}"))
-                    .spawn(move || host_peer_thread(inner, stream, addr));
+                    .spawn(move || host_peer_thread(inner, stream, addr, slot))
+                    .is_err()
+                {
+                    // The slot guard was moved into the closure only on
+                    // success; a failed spawn drops it here.
+                    continue;
+                }
             }
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -128,59 +180,76 @@ pub(crate) fn fail_attempt(inner: &EngineInner, id: SessionId, reason: String) {
 
 /// Host side of one peer connection: either a fresh handshake or a resume of
 /// an existing session, then the keepalive watcher.
-fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: SocketAddr) {
+///
+/// `_slot` is the pre-authentication admission ticket; holding it for the
+/// whole thread is what bounds concurrent handshakes.
+fn host_peer_thread(
+    inner: Arc<EngineInner>,
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    _slot: crate::HandshakeSlot,
+) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+
+    // Guessing a short PIN is now an online-only game, so make each round of
+    // that game cost the guesser a lockout.
+    if !inner.pairing_allowed(peer_addr.ip()) {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "too many failed pairing attempts; wait and retry".into(),
+            },
+        );
+        return;
+    }
 
     let first = match read_frame(&mut stream) {
         Ok(message) => message,
         Err(_) => return,
     };
-    let (peer_name, peer_kind) = match first {
-        ControlMessage::Resume { session_id } => {
-            resume_peer_session(&inner, SessionId(session_id), stream);
+    let (peer_name, peer_kind, client_pake) = match first {
+        ControlMessage::Resume { session_id, pake } => {
+            resume_peer_session(&inner, SessionId(session_id), stream, peer_addr, &pake);
             return;
         }
         ControlMessage::Hello {
             protocol,
             device_name,
             device_kind,
+            pake,
             ..
-        } if protocol == PROTOCOL_VERSION as u32 => (device_name, device_kind),
+        } if protocol == PROTOCOL_VERSION as u32 => (device_name, device_kind, pake),
         _ => return,
     };
 
-    let salt = generate_salt();
-    let host_name = inner.config().device_name;
-    if write_frame(
-        &mut stream,
-        &ControlMessage::Challenge {
-            protocol: PROTOCOL_VERSION as u32,
-            salt: salt.clone(),
-            host_name,
-        },
-    )
-    .is_err()
-    {
-        return;
-    }
-
-    let digest = match read_frame(&mut stream) {
-        Ok(ControlMessage::Pair { digest }) => digest,
-        _ => return,
-    };
-    let pin = inner.config().pin;
-    if !verify_digest(&pin, &salt, &digest) {
+    if inner.session_count() >= inner.config().max_sessions {
         let _ = write_frame(
             &mut stream,
             &ControlMessage::PairFail {
-                reason: "PIN did not match".into(),
+                reason: "the host is already at its session limit".into(),
             },
         );
         return;
     }
 
-    let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+    let host_name = inner.config().device_name;
+    let Some(keys) = host_pake_exchange(&inner, &mut stream, peer_addr, &client_pake, host_name)
+    else {
+        return;
+    };
+    inner.clear_pairing_failures(peer_addr.ip());
+    let Ok((control_sealer, control_opener)) = keys.control_channel() else {
+        return;
+    };
+    let mut cipher = ControlCipher {
+        sealer: control_sealer,
+        opener: control_opener,
+    };
+
+    // The audio socket follows the listener onto the same link.
+    let bind_ip = host_bind_addr(&inner.config()).unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let socket = match UdpSocket::bind((bind_ip, 0)) {
         Ok(socket) => socket,
         Err(_) => return,
     };
@@ -189,19 +258,20 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
         return;
     };
     let id = inner.next_session_id();
-    if write_frame(
-        &mut stream,
-        &ControlMessage::PairOk {
-            audio_port,
-            session_id: id.0,
-        },
-    )
-    .is_err()
+    if cipher
+        .send(
+            &mut stream,
+            &ControlMessage::PairOk {
+                audio_port,
+                session_id: id.0,
+            },
+        )
+        .is_err()
     {
         return;
     }
 
-    let start = match read_frame(&mut stream) {
+    let start = match cipher.receive(&mut stream) {
         Ok(ControlMessage::SessionStart {
             roles,
             codec,
@@ -213,7 +283,7 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
     };
     let (roles, codec, frame_ms, sample_rate, channels) = start;
     if let Err(error) = validate_negotiation(codec, frame_ms, sample_rate, channels) {
-        let _ = write_frame(
+        let _ = cipher.send(
             &mut stream,
             &ControlMessage::PairFail {
                 reason: error.to_string(),
@@ -222,7 +292,7 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
         return;
     }
     if roles.is_empty() {
-        let _ = write_frame(
+        let _ = cipher.send(
             &mut stream,
             &ControlMessage::PairFail {
                 reason: "no audio direction requested".into(),
@@ -235,7 +305,7 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
     if let Err(error) =
         make_encoder(codec, format).and_then(|_| make_decoder(codec, format).map(|_| ()))
     {
-        let _ = write_frame(
+        let _ = cipher.send(
             &mut stream,
             &ControlMessage::PairFail {
                 reason: error.to_string(),
@@ -243,9 +313,16 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
         );
         return;
     }
-    if write_frame(&mut stream, &ControlMessage::SessionReady {}).is_err() {
+    let Ok((audio_sealer, audio_opener)) = keys.audio_channel() else {
+        return;
+    };
+    if cipher
+        .send(&mut stream, &ControlMessage::SessionReady {})
+        .is_err()
+    {
         return;
     }
+    let local = inner.config().local_format();
     let record = Arc::new(SessionRecord {
         id,
         wire_id: id.0,
@@ -267,6 +344,18 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
         resuming: AtomicBool::new(false),
         peer_audio_addr: Mutex::new(None),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+        incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+        capture_convert: Mutex::new((
+            Converter::new(
+                local.sample_rate,
+                local.channels,
+                format.sample_rate,
+                format.channels,
+            ),
+            Vec::new(),
+        )),
+        audio_sealer: Mutex::new(audio_sealer),
+        audio_opener: Mutex::new(audio_opener),
     });
     inner.insert_session(Arc::clone(&record));
     inner.emit(RelayEvent::SessionEstablished {
@@ -295,13 +384,94 @@ fn host_peer_thread(inner: Arc<EngineInner>, mut stream: TcpStream, peer_addr: S
     }
 
     record.control_generation.fetch_add(1, Ordering::Relaxed);
-    host_control_loop(inner, record, stream);
+    host_control_loop(inner, record, stream, cipher);
+}
+
+/// Run the host's half of the SPAKE2 exchange and both key confirmations.
+///
+/// Returns the derived keys only when the client proved it holds the same
+/// PIN. A mismatch is recorded against the source address so repeated
+/// guessing runs into the lockout.
+fn host_pake_exchange(
+    inner: &Arc<EngineInner>,
+    stream: &mut TcpStream,
+    peer_addr: SocketAddr,
+    client_pake: &str,
+    host_name: String,
+) -> Option<SessionKeys> {
+    let Ok(client_message) = hex_decode(client_pake) else {
+        return None;
+    };
+    let pin = inner.config().pin;
+    let host = pake_start(Side::Host, &pin);
+    let host_message = host.message.clone();
+    if write_frame(
+        stream,
+        &ControlMessage::Challenge {
+            protocol: PROTOCOL_VERSION as u32,
+            pake: hex_encode(&host_message),
+            host_name,
+        },
+    )
+    .is_err()
+    {
+        return None;
+    }
+    let keys = match host.finish(&client_message) {
+        Ok(keys) => keys,
+        Err(_) => {
+            // A malformed SPAKE2 message is as much a failed attempt as a
+            // wrong PIN, and must count against the same budget.
+            reject_pairing(inner, stream, peer_addr.ip(), "pairing exchange failed");
+            return None;
+        }
+    };
+    let confirm = match read_frame(stream) {
+        Ok(ControlMessage::Pair { confirm, .. }) => confirm,
+        _ => return None,
+    };
+    let Ok(confirm) = hex_decode(&confirm) else {
+        reject_pairing(inner, stream, peer_addr.ip(), "PIN did not match");
+        return None;
+    };
+    if !keys.verify_confirmation(&confirm) {
+        reject_pairing(inner, stream, peer_addr.ip(), "PIN did not match");
+        return None;
+    }
+    if write_frame(
+        stream,
+        &ControlMessage::PairConfirm {
+            confirm: hex_encode(&keys.confirmation()),
+        },
+    )
+    .is_err()
+    {
+        return None;
+    }
+    Some(keys)
+}
+
+fn reject_pairing(inner: &Arc<EngineInner>, stream: &mut TcpStream, addr: IpAddr, reason: &str) {
+    inner.note_pairing_failure(addr);
+    let _ = write_frame(
+        stream,
+        &ControlMessage::PairFail {
+            reason: reason.into(),
+        },
+    );
 }
 
 /// Host-side resume of a session whose control link dropped. Re-authenticates
-/// the client with a fresh challenge, then takes over the control watch. The
-/// UDP audio workers never stopped, so audio resumes without renegotiation.
-fn resume_peer_session(inner: &Arc<EngineInner>, id: SessionId, mut stream: TcpStream) {
+/// the client with a fresh SPAKE2 exchange, then takes over the control
+/// watch. Only the control channel is rekeyed: the UDP audio workers never
+/// stopped, so their keys and replay windows carry on untouched.
+fn resume_peer_session(
+    inner: &Arc<EngineInner>,
+    id: SessionId,
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    client_pake: &str,
+) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
 
@@ -315,41 +485,24 @@ fn resume_peer_session(inner: &Arc<EngineInner>, id: SessionId, mut stream: TcpS
         return;
     };
 
-    let salt = generate_salt();
     let host_name = inner.config().device_name;
-    if write_frame(
-        &mut stream,
-        &ControlMessage::Challenge {
-            protocol: PROTOCOL_VERSION as u32,
-            salt: salt.clone(),
-            host_name,
-        },
-    )
-    .is_err()
-    {
+    let Some(keys) = host_pake_exchange(inner, &mut stream, peer_addr, client_pake, host_name)
+    else {
         return;
-    }
-    let digest = match read_frame(&mut stream) {
-        Ok(ControlMessage::Pair { digest }) => digest,
-        _ => return,
     };
-    let pin = inner.config().pin;
-    if !verify_digest(&pin, &salt, &digest) {
-        let _ = write_frame(
-            &mut stream,
-            &ControlMessage::PairFail {
-                reason: "PIN did not match".into(),
-            },
-        );
+    inner.clear_pairing_failures(peer_addr.ip());
+    let Ok((sealer, opener)) = keys.control_channel() else {
         return;
-    }
+    };
+    let mut cipher = ControlCipher { sealer, opener };
+
     // One takeover at a time: a racing reconnect loses cleanly.
     if record
         .resuming
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        let _ = write_frame(
+        let _ = cipher.send(
             &mut stream,
             &ControlMessage::PairFail {
                 reason: "a resume is already in progress".into(),
@@ -357,7 +510,10 @@ fn resume_peer_session(inner: &Arc<EngineInner>, id: SessionId, mut stream: TcpS
         );
         return;
     }
-    if write_frame(&mut stream, &ControlMessage::ResumeOk {}).is_err() {
+    if cipher
+        .send(&mut stream, &ControlMessage::ResumeOk {})
+        .is_err()
+    {
         record.resuming.store(false, Ordering::Relaxed);
         return;
     }
@@ -365,7 +521,7 @@ fn resume_peer_session(inner: &Arc<EngineInner>, id: SessionId, mut stream: TcpS
     record.control_generation.fetch_add(1, Ordering::Relaxed);
     record.resuming.store(false, Ordering::Relaxed);
     let inner = Arc::clone(inner);
-    host_control_loop(inner, record, stream);
+    host_control_loop(inner, record, stream, cipher);
 }
 
 /// Handle a clean control-watch exit that ends the session. Returns `true`
@@ -392,8 +548,13 @@ fn handle_teardown_exit(
 /// Watch the control channel, waiting out link drops for [`RESUME_GRACE`]
 /// so a reconnecting client can take over without losing the session. The
 /// resuming thread runs its own watch, so every outcome ends this one.
-fn host_control_loop(inner: Arc<EngineInner>, record: Arc<SessionRecord>, stream: TcpStream) {
-    let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream);
+fn host_control_loop(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    stream: TcpStream,
+    cipher: ControlCipher,
+) {
+    let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream, cipher);
     handle_teardown_exit(&inner, &record, result, |reason| {
         if await_resume_grace(&inner, &record) {
             return false;
@@ -450,6 +611,7 @@ fn client_thread(
     };
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
 
+    let client = pake_start(Side::Client, &pin);
     let hello = ControlMessage::Hello {
         protocol: PROTOCOL_VERSION as u32,
         device_name: config.device_name.clone(),
@@ -457,18 +619,23 @@ fn client_thread(
         roles,
         sample_rate: config.sample_rate,
         channels: config.channels,
+        pake: hex_encode(&client.message),
     };
     if write_frame(&mut stream, &hello).is_err() {
         fail_attempt(&inner, id, "handshake failed while sending hello".into());
         return;
     }
 
-    let (salt, host_name) = match read_frame(&mut stream) {
+    let (host_pake, host_name) = match read_frame(&mut stream) {
         Ok(ControlMessage::Challenge {
             protocol,
-            salt,
+            pake,
             host_name,
-        }) if protocol == PROTOCOL_VERSION as u32 => (salt, host_name),
+        }) if protocol == PROTOCOL_VERSION as u32 => (pake, host_name),
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(&inner, id, format!("host rejected pairing: {reason}"));
+            return;
+        }
         Ok(_) => {
             fail_attempt(&inner, id, "host sent an unexpected message".into());
             return;
@@ -478,14 +645,58 @@ fn client_thread(
             return;
         }
     };
-
-    let digest = pair_digest(&pin, &salt);
-    if write_frame(&mut stream, &ControlMessage::Pair { digest }).is_err() {
+    let Ok(host_message) = hex_decode(&host_pake) else {
+        fail_attempt(&inner, id, "host sent a malformed pairing message".into());
+        return;
+    };
+    let keys = match client.finish(&host_message) {
+        Ok(keys) => keys,
+        Err(error) => {
+            fail_attempt(&inner, id, format!("pairing failed: {error}"));
+            return;
+        }
+    };
+    if write_frame(
+        &mut stream,
+        &ControlMessage::Pair {
+            pake: String::new(),
+            confirm: hex_encode(&keys.confirmation()),
+        },
+    )
+    .is_err()
+    {
         fail_attempt(&inner, id, "handshake failed while pairing".into());
         return;
     }
+    // The host's confirmation is what tells the client its PIN was right —
+    // without it a wrong PIN would only show up as traffic that never
+    // decrypts, several messages later.
+    match read_frame(&mut stream) {
+        Ok(ControlMessage::PairConfirm { confirm }) => {
+            let matched = hex_decode(&confirm)
+                .map(|confirm| keys.verify_confirmation(&confirm))
+                .unwrap_or(false);
+            if !matched {
+                fail_attempt(&inner, id, "the PIN did not match the host".into());
+                return;
+            }
+        }
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(&inner, id, format!("host rejected pairing: {reason}"));
+            return;
+        }
+        Ok(_) | Err(_) => {
+            fail_attempt(&inner, id, "pairing response was malformed".into());
+            return;
+        }
+    }
+    let Ok((sealer, opener)) = keys.control_channel() else {
+        fail_attempt(&inner, id, "session keys could not be prepared".into());
+        return;
+    };
+    let mut cipher = ControlCipher { sealer, opener };
 
-    let (audio_port, wire_id) = match read_frame(&mut stream) {
+    let (audio_port, wire_id) = match cipher.receive(&mut stream) {
         Ok(ControlMessage::PairOk {
             audio_port,
             session_id,
@@ -507,11 +718,11 @@ fn client_thread(
         sample_rate: config.sample_rate,
         channels: config.channels,
     };
-    if write_frame(&mut stream, &start).is_err() {
+    if cipher.send(&mut stream, &start).is_err() {
         fail_attempt(&inner, id, "handshake failed during session setup".into());
         return;
     }
-    match read_frame(&mut stream) {
+    match cipher.receive(&mut stream) {
         Ok(ControlMessage::SessionReady {}) => {}
         Ok(ControlMessage::PairFail { reason }) => {
             fail_attempt(&inner, id, format!("host rejected session: {reason}"));
@@ -530,6 +741,10 @@ fn client_thread(
             return;
         }
     }
+    let Ok((audio_sealer, audio_opener)) = keys.audio_channel() else {
+        fail_attempt(&inner, id, "audio keys could not be prepared".into());
+        return;
+    };
 
     let socket = match UdpSocket::bind((bind.unwrap_or(Ipv4Addr::UNSPECIFIED), 0)) {
         Ok(socket) => socket,
@@ -540,10 +755,15 @@ fn client_thread(
     };
     tune_audio_socket(&socket);
     let host_audio_addr = SocketAddr::new(target.ip(), audio_port);
-    // Teach the host our UDP address before real audio flows.
-    let _ = socket.send_to(&announce_packet(config.codec), host_audio_addr);
 
     let format = AudioFormat::new(config.sample_rate, config.channels, config.frame_ms);
+    let local = config.local_format();
+    let mut audio_sealer = audio_sealer;
+    // Teach the host our UDP address before real audio flows. The announce is
+    // sealed with the session key, so only the paired client can move it.
+    if let Ok(announce) = announce_packet(&mut audio_sealer, config.codec) {
+        let _ = socket.send_to(&announce, host_audio_addr);
+    }
     let record = Arc::new(SessionRecord {
         id,
         wire_id,
@@ -564,6 +784,18 @@ fn client_thread(
         resuming: AtomicBool::new(false),
         peer_audio_addr: Mutex::new(Some(host_audio_addr)),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+        incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+        capture_convert: Mutex::new((
+            Converter::new(
+                local.sample_rate,
+                local.channels,
+                format.sample_rate,
+                format.channels,
+            ),
+            Vec::new(),
+        )),
+        audio_sealer: Mutex::new(audio_sealer),
+        audio_opener: Mutex::new(audio_opener),
     });
     inner.insert_session(Arc::clone(&record));
     inner.emit(RelayEvent::SessionEstablished {
@@ -591,7 +823,7 @@ fn client_thread(
             .spawn(move || run_tx(inner, record, socket));
     }
 
-    client_control_loop(inner, record, stream, socket, target, pin);
+    client_control_loop(inner, record, stream, cipher, socket, target, pin);
 }
 
 /// Client-side control watch: on a link drop the host is re-dialed and the
@@ -600,15 +832,16 @@ fn client_control_loop(
     inner: Arc<EngineInner>,
     record: Arc<SessionRecord>,
     stream: TcpStream,
+    cipher: ControlCipher,
     socket: Arc<UdpSocket>,
     target: SocketAddr,
     pin: String,
 ) {
     let socket_codec = record.codec;
-    let mut stream = Some(stream);
+    let mut stream = Some((stream, cipher));
     loop {
-        let taken = stream.take().expect("stream is set between iterations");
-        let result = watch_control(Arc::clone(&inner), Arc::clone(&record), taken);
+        let (taken, cipher) = stream.take().expect("stream is set between iterations");
+        let result = watch_control(Arc::clone(&inner), Arc::clone(&record), taken, cipher);
         let torn_down = handle_teardown_exit(&inner, &record, result, |reason| {
             if record.bye_requested.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
                 teardown(&inner, record.id, reason);
@@ -618,17 +851,23 @@ fn client_control_loop(
                 message: format!("control link to host lost ({reason}); attempting to resume"),
             });
             match resume_client_control(&inner, &record, target, &pin) {
-                Some(new_stream) => {
-                    // Re-announce our UDP address from the real audio
-                    // socket: the route may have changed link (e.g.
-                    // Wi-Fi to USB tethering), and the host must learn
-                    // the new source address.
-                    if let Ok(slot) = record.peer_audio_addr.lock() {
+                Some(resumed) => {
+                    // Re-announce our UDP address from the real audio socket:
+                    // the route may have changed link (e.g. Wi-Fi to USB
+                    // tethering), and the host must learn the new source
+                    // address. The announce is sealed with the session's
+                    // unchanged audio key, which is exactly what authorises
+                    // the host to follow us.
+                    if let (Ok(slot), Ok(mut sealer)) =
+                        (record.peer_audio_addr.lock(), record.audio_sealer.lock())
+                    {
                         if let Some(addr) = *slot {
-                            let _ = socket.send_to(&announce_packet(socket_codec), addr);
+                            if let Ok(announce) = announce_packet(&mut sealer, socket_codec) {
+                                let _ = socket.send_to(&announce, addr);
+                            }
                         }
                     }
-                    stream = Some(new_stream);
+                    stream = Some(resumed);
                     false
                 }
                 None => {
@@ -644,13 +883,13 @@ fn client_control_loop(
 }
 
 /// Re-dial the host and resume an established session. Returns the new
-/// control stream on success.
+/// control stream and its freshly rekeyed cipher on success.
 fn resume_client_control(
     inner: &Arc<EngineInner>,
     record: &Arc<SessionRecord>,
     target: SocketAddr,
     pin: &str,
-) -> Option<TcpStream> {
+) -> Option<(TcpStream, ControlCipher)> {
     let config = inner.config();
     let mut backoff = Duration::from_millis(500);
     for _ in 0..RESUME_ATTEMPTS {
@@ -667,21 +906,25 @@ fn resume_client_control(
             Err(_) => continue,
         };
         let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+        // A resume re-runs the full PAKE: the control channel gets fresh keys
+        // so a captured earlier transcript is useless against it.
+        let client = pake_start(Side::Client, pin);
         if write_frame(
             &mut stream,
             &ControlMessage::Resume {
                 session_id: record.wire_id,
+                pake: hex_encode(&client.message),
             },
         )
         .is_err()
         {
             continue;
         }
-        let salt = match read_frame(&mut stream) {
-            Ok(ControlMessage::Challenge { protocol, salt, .. })
+        let host_pake = match read_frame(&mut stream) {
+            Ok(ControlMessage::Challenge { protocol, pake, .. })
                 if protocol == PROTOCOL_VERSION as u32 =>
             {
-                salt
+                pake
             }
             Ok(ControlMessage::PairFail { reason }) => {
                 inner.emit(RelayEvent::Error {
@@ -691,14 +934,51 @@ fn resume_client_control(
             }
             _ => continue,
         };
-        let digest = pair_digest(pin, &salt);
-        if write_frame(&mut stream, &ControlMessage::Pair { digest }).is_err() {
+        let Ok(host_message) = hex_decode(&host_pake) else {
+            continue;
+        };
+        let Ok(keys) = client.finish(&host_message) else {
+            continue;
+        };
+        if write_frame(
+            &mut stream,
+            &ControlMessage::Pair {
+                pake: String::new(),
+                confirm: hex_encode(&keys.confirmation()),
+            },
+        )
+        .is_err()
+        {
             continue;
         }
         match read_frame(&mut stream) {
+            Ok(ControlMessage::PairConfirm { confirm }) => {
+                let matched = hex_decode(&confirm)
+                    .map(|confirm| keys.verify_confirmation(&confirm))
+                    .unwrap_or(false);
+                if !matched {
+                    inner.emit(RelayEvent::Error {
+                        message: "the host failed key confirmation on resume".into(),
+                    });
+                    return None;
+                }
+            }
+            Ok(ControlMessage::PairFail { reason }) => {
+                inner.emit(RelayEvent::Error {
+                    message: format!("host rejected resume: {reason}"),
+                });
+                return None;
+            }
+            _ => continue,
+        }
+        let Ok((sealer, opener)) = keys.control_channel() else {
+            continue;
+        };
+        let mut cipher = ControlCipher { sealer, opener };
+        match cipher.receive(&mut stream) {
             Ok(ControlMessage::ResumeOk {}) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                return Some(stream);
+                return Some((stream, cipher));
             }
             Ok(ControlMessage::PairFail { reason }) => {
                 inner.emit(RelayEvent::Error {
@@ -718,7 +998,7 @@ fn validate_negotiation(
     sample_rate: u32,
     channels: u16,
 ) -> RelayResult<()> {
-    if !matches!(frame_ms, 5 | 10 | 20 | 40 | 60) {
+    if !is_supported_frame_ms(frame_ms) {
         return Err(RelayError::Protocol(format!(
             "unsupported frame duration {frame_ms} ms"
         )));
@@ -744,7 +1024,13 @@ fn is_timeout(error: &std::io::Error) -> bool {
     )
 }
 
-/// Receive loop: datagrams → jitter buffer → decoder → incoming queue.
+/// Receive loop: datagrams → authenticate → jitter buffer → decoder →
+/// convert to the local format → this session's playback queue.
+///
+/// Every fatal error tears the session down. Leaving the session registered
+/// after its audio path has permanently died — as an earlier version did for
+/// socket and encoder failures — makes the engine report a healthy, silent
+/// connection that will never carry audio again.
 fn run_rx(
     inner: Arc<EngineInner>,
     record: Arc<SessionRecord>,
@@ -753,25 +1039,34 @@ fn run_rx(
 ) {
     request_realtime_thread();
     let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
+    let local = inner.config().local_format();
     // Bound what a stalled playback consumer can turn into standing delay:
-    // decoded audio waiting here is latency, not safety.
-    inner
+    // decoded audio waiting here is latency, not safety. The depth is this
+    // session's own, in local-format samples.
+    let local_frame_samples = (local.sample_rate as usize / 1000)
+        * record.format.frame_ms as usize
+        * local.channels as usize;
+    record
         .incoming
-        .set_target_depth(record.format.frame_samples() * crate::PLAYBACK_DEPTH_FRAMES);
+        .set_target_depth(local_frame_samples.max(1) * crate::PLAYBACK_DEPTH_FRAMES);
     let mut decoder = match make_decoder(record.codec, record.format) {
         Ok(decoder) => decoder,
         Err(error) => {
-            inner.emit(RelayEvent::Error {
-                message: format!("decoder init failed: {error}"),
-            });
-            teardown(&inner, record.id, format!("decoder init failed: {error}"));
+            fail_session(&inner, &record, format!("decoder init failed: {error}"));
             return;
         }
     };
+    let mut converter = Converter::new(
+        record.format.sample_rate,
+        record.format.channels,
+        local.sample_rate,
+        local.channels,
+    );
 
     let mut jitter = JitterBuffer::new(JITTER_DEPTH_FRAMES);
     let mut datagram = vec![0u8; MAX_DATAGRAM];
     let mut frame_buf = vec![0.0f32; record.format.frame_samples()];
+    let mut converted = Vec::new();
     let mut sumsq = 0.0f64;
     let mut level_samples = 0usize;
     let mut frames_since_level = 0u32;
@@ -783,54 +1078,74 @@ fn run_rx(
         let (len, addr) = match socket.recv_from(&mut datagram) {
             Ok(result) => result,
             Err(error) if is_timeout(&error) => continue,
-            Err(_) => break,
+            Err(error) => {
+                fail_session(&inner, &record, format!("audio socket failed: {error}"));
+                return;
+            }
         };
         let Some(packet) = AudioPacket::parse(&datagram[..len]) else {
             continue;
         };
+        // Authenticate *before* anything else observes the datagram. A packet
+        // that does not open never reaches the address bookkeeping, the
+        // jitter buffer, or the decoder, so a stranger who can reach this
+        // port cannot inject audio or redirect ours.
+        let payload = {
+            let Ok(mut opener) = record.audio_opener.lock() else {
+                break;
+            };
+            match packet.open(&mut opener) {
+                Ok(payload) => payload,
+                Err(_) => continue,
+            }
+        };
 
         if host_side {
             // Keep the peer's audio address current: after a link roam the
-            // client may return from a different source address. The socket
-            // stays unconnected so the new source is accepted.
+            // client may return from a different source address. Only an
+            // authenticated datagram gets to move it.
             if let Ok(mut slot) = record.peer_audio_addr.lock() {
                 if *slot != Some(addr) {
                     *slot = Some(addr);
                 }
             }
         }
-        if packet.is_announce() {
+        if payload.is_empty() {
+            // An announce packet: address bookkeeping only.
             continue;
         }
         if packet.keyframe {
             jitter.set_anchor(packet.sequence);
         }
-        if !jitter.push(packet.sequence, packet.payload.to_vec()) {
+        if !jitter.push(packet.sequence, payload) {
             continue;
         }
 
         loop {
-            match jitter.pop() {
+            let decoded = match jitter.pop() {
                 JitterPop::Buffering => break,
                 JitterPop::Frame(payload) => match decoder.decode(&payload, &mut frame_buf) {
                     Ok(samples) => {
-                        let frame = &frame_buf[..samples];
-                        inner.incoming.push(frame);
-                        for sample in frame {
+                        for sample in &frame_buf[..samples] {
                             sumsq += (*sample as f64) * (*sample as f64);
                         }
                         level_samples += samples;
+                        Some(samples)
                     }
-                    Err(error) => inner.emit(RelayEvent::Error {
-                        message: format!("audio decode failed: {error}"),
-                    }),
+                    Err(error) => {
+                        inner.emit(RelayEvent::Error {
+                            message: format!("audio decode failed: {error}"),
+                        });
+                        None
+                    }
                 },
-                JitterPop::Lost => {
-                    if let Ok(samples) = decoder.conceal(&mut frame_buf) {
-                        inner.incoming.push(&frame_buf[..samples]);
-                    }
-                }
-            }
+                JitterPop::Lost => decoder.conceal(&mut frame_buf).ok(),
+            };
+            let Some(samples) = decoded else {
+                continue;
+            };
+            converter.convert(&frame_buf[..samples], &mut converted);
+            record.incoming.push(&converted);
         }
 
         frames_since_level += 1;
@@ -851,7 +1166,21 @@ fn run_rx(
     }
 }
 
-/// Send loop: outgoing queue → encoder → datagrams.
+/// Tear a session down after an unrecoverable worker failure, surfacing the
+/// reason once. Both are idempotent, so a deliberate shutdown that races a
+/// worker failure still produces exactly one `SessionLost`.
+fn fail_session(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>, reason: String) {
+    // A stop that was already requested is an orderly shutdown, not a fault.
+    if record.stop.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
+        return;
+    }
+    inner.emit(RelayEvent::Error {
+        message: reason.clone(),
+    });
+    teardown(inner, record.id, reason);
+}
+
+/// Send loop: outgoing queue → encoder → sealed datagrams.
 ///
 /// Pacing comes from the capture side filling the queue in real time. The
 /// thread parks on the queue's condvar rather than polling, so a completed
@@ -869,9 +1198,7 @@ fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSo
     let mut encoder = match make_encoder(record.codec, record.format) {
         Ok(encoder) => encoder,
         Err(error) => {
-            inner.emit(RelayEvent::Error {
-                message: format!("encoder init failed: {error}"),
-            });
+            fail_session(&inner, &record, format!("encoder init failed: {error}"));
             return;
         }
     };
@@ -901,25 +1228,36 @@ fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSo
         match encoder.encode(&samples, &mut payload) {
             Ok(0) => continue,
             Ok(_) => {
-                let packet = AudioPacket {
+                let header = AudioHeader {
                     stereo: record.format.is_stereo(),
                     keyframe: sequence == 0,
                     codec: record.codec,
                     sequence,
                     timestamp_ms,
-                    payload: &payload,
                 };
-                if socket.send_to(&packet.to_datagram(), peer_addr).is_err() {
-                    break;
+                let datagram = {
+                    let Ok(mut sealer) = record.audio_sealer.lock() else {
+                        fail_session(&inner, &record, "audio sealer is poisoned".into());
+                        return;
+                    };
+                    match seal_datagram(&mut sealer, &header, &payload) {
+                        Ok(datagram) => datagram,
+                        Err(error) => {
+                            fail_session(&inner, &record, format!("audio seal failed: {error}"));
+                            return;
+                        }
+                    }
+                };
+                if let Err(error) = socket.send_to(&datagram, peer_addr) {
+                    fail_session(&inner, &record, format!("audio send failed: {error}"));
+                    return;
                 }
                 sequence = sequence.wrapping_add(1);
                 timestamp_ms = timestamp_ms.wrapping_add(record.format.frame_ms as u32);
             }
             Err(error) => {
-                inner.emit(RelayEvent::Error {
-                    message: format!("audio encode failed: {error}"),
-                });
-                break;
+                fail_session(&inner, &record, format!("audio encode failed: {error}"));
+                return;
             }
         }
     }
@@ -942,6 +1280,7 @@ fn watch_control(
     inner: Arc<EngineInner>,
     record: Arc<SessionRecord>,
     mut stream: TcpStream,
+    mut cipher: ControlCipher,
 ) -> ControlExit {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let mut last_seen = Instant::now();
@@ -952,7 +1291,7 @@ fn watch_control(
             return ControlExit::Stopped;
         }
         if record.bye_requested.load(Ordering::Relaxed) {
-            let _ = write_frame(
+            let _ = cipher.send(
                 &mut stream,
                 &ControlMessage::Bye {
                     reason: "user disconnected".into(),
@@ -960,7 +1299,7 @@ fn watch_control(
             );
             return ControlExit::Stopped;
         }
-        match read_frame(&mut stream) {
+        match cipher.receive(&mut stream) {
             Ok(ControlMessage::Bye { reason }) => return ControlExit::PeerBye(reason),
             Ok(_) => last_seen = Instant::now(),
             Err(error) if is_timeout(&error) => {}
@@ -971,7 +1310,12 @@ fn watch_control(
             return ControlExit::Dropped("keepalive timeout".into());
         }
         if now.duration_since(last_keepalive) >= KEEPALIVE_INTERVAL {
-            let _ = write_frame(&mut stream, &ControlMessage::Keepalive {});
+            if cipher
+                .send(&mut stream, &ControlMessage::Keepalive {})
+                .is_err()
+            {
+                return ControlExit::Dropped("control channel closed".into());
+            }
             last_keepalive = now;
         }
         std::thread::sleep(Duration::from_millis(100));

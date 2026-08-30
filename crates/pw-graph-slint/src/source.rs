@@ -25,7 +25,9 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 enum BackendKind {
-    Demo(DemoDriver),
+    // Both variants are boxed: they are large, similar in size, and this enum
+    // is moved around as part of the application state.
+    Demo(Box<DemoDriver>),
     Live(Box<CompositeDriver>),
 }
 
@@ -40,7 +42,7 @@ impl ApplicationDriver {
     pub(crate) fn new(args: &Args, meter_policy: MeterPolicy, i18n: &I18n) -> (Self, String) {
         if args.demo {
             let mut source = Self {
-                backend: BackendKind::Demo(DemoDriver::demo()),
+                backend: BackendKind::Demo(Box::new(DemoDriver::demo())),
                 backend_name: "demo".to_owned(),
                 meter_policy,
                 meter_epoch: Instant::now(),
@@ -322,7 +324,7 @@ impl ApplicationDriver {
         target: std::net::SocketAddr,
         pin: &str,
         roles: RelayRoles,
-    ) -> Result<(), String> {
+    ) -> Result<RelaySessionId, String> {
         RelayDriver::relay_connect(self, target, pin, roles).map_err(|error| error.to_string())
     }
 
@@ -659,7 +661,7 @@ impl RelayDriver for ApplicationDriver {
         target: std::net::SocketAddr,
         pin: &str,
         roles: RelayRoles,
-    ) -> pw_graph_backend::BackendResult<()> {
+    ) -> pw_graph_backend::BackendResult<RelaySessionId> {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.relay_connect(target, pin, roles),
             BackendKind::Live(driver) => driver.relay_connect(target, pin, roles),
@@ -752,7 +754,7 @@ mod tests {
         backend.mark_link_observed(link.id);
 
         let application = ApplicationDriver {
-            backend: BackendKind::Demo(backend),
+            backend: BackendKind::Demo(Box::new(backend)),
             backend_name: "test".into(),
             meter_policy: MeterPolicy::Disabled,
             meter_epoch: Instant::now(),

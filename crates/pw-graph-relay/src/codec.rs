@@ -107,8 +107,23 @@ struct PcmDecoder {
 }
 
 impl AudioDecode for PcmDecoder {
+    /// Decode exactly one negotiated frame.
+    ///
+    /// The length check is strict on purpose. A framed realtime protocol has
+    /// exactly one right size for a packet; silently ignoring trailing bytes
+    /// or accepting a short frame lets a malformed or truncated datagram
+    /// perturb the stream's timing instead of being dropped as the corrupt
+    /// packet it is.
     fn decode(&mut self, payload: &[u8], out: &mut [f32]) -> Result<usize, RelayError> {
-        let samples = payload.len() / 4;
+        let expected = self.format.frame_samples();
+        if payload.len() != expected * 4 {
+            return Err(RelayError::Codec(format!(
+                "PCM frame of {} bytes is not the negotiated {} bytes",
+                payload.len(),
+                expected * 4
+            )));
+        }
+        let samples = expected;
         if samples > out.len() {
             return Err(RelayError::Codec(format!(
                 "PCM frame of {samples} samples exceeds the {} sample buffer",
@@ -250,6 +265,18 @@ mod tests {
         let mut out = vec![0.0; 960];
         assert_eq!(decoder.decode(&payload, &mut out).unwrap(), 960);
         assert_eq!(out, pcm);
+    }
+
+    #[test]
+    fn pcm_frames_must_be_exactly_the_negotiated_size() {
+        let format = AudioFormat::new(48_000, 1, 20);
+        let mut decoder = make_decoder(CodecKind::Pcm, format).unwrap();
+        let mut out = vec![0.0; 960];
+        // Short, long, and ragged payloads are all corrupt frames.
+        assert!(decoder.decode(&vec![0u8; 960 * 4 - 4], &mut out).is_err());
+        assert!(decoder.decode(&vec![0u8; 960 * 4 + 4], &mut out).is_err());
+        assert!(decoder.decode(&vec![0u8; 960 * 4 + 3], &mut out).is_err());
+        assert!(decoder.decode(&vec![0u8; 960 * 4], &mut out).is_ok());
     }
 
     #[test]

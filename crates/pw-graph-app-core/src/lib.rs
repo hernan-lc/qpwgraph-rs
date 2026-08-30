@@ -133,6 +133,10 @@ struct RefreshSchedule {
 const EVENT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(all(target_os = "linux", feature = "alsa"))]
 const ALSA_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+// MIDI device arrival on Windows is polled rather than evented, so it gets a
+// shorter interval than the audio side. Gated like the ALSA constant above:
+// otherwise every non-Windows build reports it as dead code.
+#[cfg(target_os = "windows")]
 const WINDOWS_MIDI_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 fn refresh_due(deadline: Option<Instant>, dirty: bool, now: Instant) -> bool {
@@ -1317,12 +1321,13 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         target: std::net::SocketAddr,
         pin: &str,
         roles: pw_graph_backend::RelayRoles,
-    ) -> BackendResult<()> {
-        self.relay_backend_mut()
+    ) -> BackendResult<pw_graph_backend::RelaySessionId> {
+        let session = self
+            .relay_backend_mut()
             .ok_or_else(Self::relay_unavailable)?
             .relay_connect(target, pin, roles)?;
         self.rebuild_after_native_mutation();
-        Ok(())
+        Ok(session)
     }
 
     fn relay_disconnect(&mut self, session: pw_graph_backend::RelaySessionId) -> BackendResult<()> {

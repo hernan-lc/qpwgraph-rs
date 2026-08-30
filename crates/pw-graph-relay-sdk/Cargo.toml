@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+# Workspace-internal: these crates depend on each other by path and are not
+# published to crates.io.
+publish = false
 description = "Public SDK for the qpwgraph-rs audio relay: host and client roles for any app"
 
 [dependencies]

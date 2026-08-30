@@ -51,6 +51,10 @@ pub fn candidate_hosts(link: &LocalLink, local_addrs: &[Ipv4Addr]) -> Vec<Ipv4Ad
 pub fn probe_target(target: SocketAddr, timeout: Duration) -> Option<PeerInfo> {
     let mut stream = crate::netlink::connect_tcp(target, None, timeout).ok()?;
     stream.set_read_timeout(Some(timeout)).ok()?;
+    // A well-formed SPAKE2 message even though the probe never pairs: a
+    // malformed one would count against the host's pairing-attempt budget and
+    // let discovery lock this machine out of its own relay.
+    let pake = crate::crypto::pake_start(crate::crypto::Side::Client, "probe");
     let hello = ControlMessage::Hello {
         protocol: PROTOCOL_VERSION as u32,
         device_name: "qpw-relay-probe".into(),
@@ -58,6 +62,7 @@ pub fn probe_target(target: SocketAddr, timeout: Duration) -> Option<PeerInfo> {
         roles: Roles::emit_only(),
         sample_rate: 48_000,
         channels: 1,
+        pake: pw_graph_utils::hex::hex_encode(&pake.message),
     };
     write_frame(&mut stream, &hello).ok()?;
     match read_frame(&mut stream) {
@@ -228,7 +233,7 @@ mod tests {
                 &mut stream,
                 &ControlMessage::Challenge {
                     protocol: PROTOCOL_VERSION as u32,
-                    salt: "00".into(),
+                    pake: "00".into(),
                     host_name: "phone".into(),
                 },
             )

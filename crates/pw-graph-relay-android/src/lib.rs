@@ -169,13 +169,16 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
         let mut guard = clients()
             .lock()
             .map_err(|_| "client store poisoned".to_string())?;
-        let slot = guard
-            .remove(&handle)
-            .ok_or_else(|| "unknown client handle".to_string())?;
-        let ClientSlot::Prepared(client) = slot else {
-            return Err("client is already connected".into());
+        // Clone the prepared configuration rather than consuming the stored
+        // one: a failed connect must leave the handle usable, or the Java
+        // side has to throw away its native client after every transient
+        // network error and build a new one.
+        let prepared = match guard.get(&handle) {
+            Some(ClientSlot::Prepared(client)) => client.clone(),
+            Some(ClientSlot::Connected(_)) => return Err("client is already connected".into()),
+            None => return Err("unknown client handle".into()),
         };
-        match client.connect(&target, &pin) {
+        match prepared.connect(&target, &pin) {
             Ok(client) => {
                 guard.insert(handle, ClientSlot::Connected(client));
                 Ok(json!({"type":"connected"}))
@@ -372,11 +375,12 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStart(
         let mut guard = hosts()
             .lock()
             .map_err(|_| "host store poisoned".to_string())?;
-        let slot = guard
-            .remove(&handle)
-            .ok_or_else(|| "unknown host handle".to_string())?;
-        let HostSlot::Prepared(prepared) = slot else {
-            return Err("host is already running".into());
+        // Same reasoning as the client: a host whose first `start` fails
+        // (port already in use, say) must stay startable.
+        let prepared = match guard.get(&handle) {
+            Some(HostSlot::Prepared(prepared)) => prepared.clone(),
+            Some(HostSlot::Running(_)) => return Err("host is already running".into()),
+            None => return Err("unknown host handle".into()),
         };
         match prepared.start() {
             Ok(host) => {

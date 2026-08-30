@@ -787,14 +787,17 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
+    netlink::select_links as relay_select_links,
+    normalize_frame_ms as relay_normalize_frame_ms,
     pairing::{
-        build_qr_payload as relay_build_qr_payload, parse_qr_payload as relay_parse_qr_payload,
-        QrPayload as RelayQrPayload,
+        build_qr_payload as relay_build_qr_payload, generate_pin as relay_generate_pin,
+        parse_qr_payload as relay_parse_qr_payload, QrPayload as RelayQrPayload,
     },
     qr as relay_qr, CodecKind as RelayCodecKind, DeviceKind as RelayDeviceKind,
     EngineStatus as RelayEngineStatus, LinkKind as RelayLinkKind, LocalLink as RelayLocalLink,
     PeerInfo as RelayPeerInfo, RelayEvent, Roles as RelayRoles, SessionId as RelaySessionId,
     SessionStatus as RelaySessionStatus, TransportPreference as RelayTransportPreference,
+    FRAME_DURATIONS_MS as RELAY_FRAME_DURATIONS_MS,
 };
 
 /// Parameters for starting the relay host.
@@ -846,12 +849,15 @@ pub trait RelayDriver {
 
     /// Create the virtual relay devices (if needed) and connect to a remote
     /// host as a client. Session outcome arrives via [`RelayEvent`]s.
+    /// Start a connection attempt. The handshake runs in the background;
+    /// the returned id identifies *this attempt* in later events, so a UI can
+    /// tell its own failed attempt from an unrelated session dropping.
     fn relay_connect(
         &mut self,
         _target: std::net::SocketAddr,
         _pin: &str,
         _roles: RelayRoles,
-    ) -> BackendResult<()> {
+    ) -> BackendResult<RelaySessionId> {
         Err(BackendError::Unsupported(
             "audio relay is not available for this backend".into(),
         ))

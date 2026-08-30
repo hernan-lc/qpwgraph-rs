@@ -1326,7 +1326,7 @@ impl RelayDriver for PipewireDriver {
         target: std::net::SocketAddr,
         pin: &str,
         roles: RelayRoles,
-    ) -> BackendResult<()> {
+    ) -> BackendResult<RelaySessionId> {
         self.with_loop(|driver| {
             let device_name = driver
                 .relay
@@ -1334,8 +1334,7 @@ impl RelayDriver for PipewireDriver {
                 .map(|set| set.handle().config().device_name)
                 .unwrap_or_else(|| "qpwgraph-rs".into());
             let set = driver.ensure_relay_devices_locked(&device_name)?;
-            set.handle().connect(target, pin, roles);
-            Ok(())
+            Ok(set.handle().connect(target, pin, roles))
         })
     }
 

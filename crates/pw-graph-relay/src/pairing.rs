@@ -1,16 +1,14 @@
-//! PIN pairing for relay sessions.
+//! PIN generation and the "scan to connect" payload for relay pairing.
 //!
-//! The host displays a short numeric PIN. A client proves knowledge of it by
-//! returning `HMAC-SHA256(key = PIN, msg = salt)` for a fresh random salt the
-//! host sends in its challenge. The PIN itself never crosses the wire.
+//! The host displays a short numeric PIN; the actual proof of knowledge runs
+//! as a SPAKE2 exchange in [`crate::crypto`], so the PIN never crosses the
+//! wire and a captured transcript cannot be brute-forced offline. That is why
+//! six digits remains a defensible length here: guessing is an online-only
+//! game, and [`crate::PAIRING_ATTEMPT_LIMIT`] makes each round of it costly.
 
-use hmac::{Hmac, Mac};
-use pw_graph_utils::hex::{hex_decode, hex_encode};
 use rand::Rng;
-use sha2::Sha256;
 
 pub const PIN_LENGTH: usize = 6;
-const SALT_BYTES: usize = 16;
 
 /// Scheme of the "scan to connect" QR payload.
 pub const QR_SCHEME: &str = "qpw-relay://";
@@ -77,42 +75,12 @@ fn split_host_port(text: &str) -> Option<String> {
     Some(text.to_owned())
 }
 
-type HmacSha256 = Hmac<Sha256>;
-
 /// Generate a fresh numeric PIN for display in the host UI.
 pub fn generate_pin() -> String {
     let mut rng = rand::thread_rng();
     (0..PIN_LENGTH)
         .map(|_| rng.gen_range(0..10u8).to_string())
         .collect()
-}
-
-/// Generate a random salt and return it as lowercase hex.
-pub fn generate_salt() -> String {
-    let mut rng = rand::thread_rng();
-    let mut salt = [0u8; SALT_BYTES];
-    rng.fill(&mut salt);
-    hex_encode(&salt)
-}
-
-/// The digest a client must return for a given PIN and challenge salt.
-pub fn pair_digest(pin: &str, salt: &str) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(pin.as_bytes()).expect("HMAC-SHA256 accepts any key length");
-    mac.update(salt.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-/// Constant-time verification of a client's digest on the host side.
-pub fn verify_digest(pin: &str, salt: &str, digest: &str) -> bool {
-    let Ok(provided) = hex_decode(digest) else {
-        return false;
-    };
-    let Ok(mut mac) = HmacSha256::new_from_slice(pin.as_bytes()) else {
-        return false;
-    };
-    mac.update(salt.as_bytes());
-    mac.verify_slice(&provided).is_ok()
 }
 
 #[cfg(test)]
@@ -126,31 +94,6 @@ mod tests {
             assert_eq!(pin.len(), PIN_LENGTH);
             assert!(pin.chars().all(|c| c.is_ascii_digit()));
         }
-    }
-
-    #[test]
-    fn digest_verifies_with_matching_pin() {
-        let pin = "123456";
-        let salt = generate_salt();
-        let digest = pair_digest(pin, &salt);
-        assert!(verify_digest(pin, &salt, &digest));
-    }
-
-    #[test]
-    fn digest_rejects_wrong_pin_or_salt() {
-        let salt = generate_salt();
-        let digest = pair_digest("123456", &salt);
-        assert!(!verify_digest("654321", &salt, &digest));
-        assert!(!verify_digest("123456", "other-salt", &digest));
-        assert!(!verify_digest("123456", &salt, "not-hex"));
-    }
-
-    #[test]
-    fn known_hmac_vector() {
-        // Deterministic vector so the wire format never drifts silently.
-        let digest = pair_digest("000000", "aabbcc");
-        assert_eq!(digest.len(), 64);
-        assert!(verify_digest("000000", "aabbcc", &digest));
     }
 
     #[test]
@@ -197,6 +140,7 @@ mod tests {
 
     #[test]
     fn hex_round_trip() {
+        use pw_graph_utils::hex::{hex_decode, hex_encode};
         let bytes = [0x00u8, 0x7f, 0x80, 0xff];
         assert_eq!(hex_decode(&hex_encode(&bytes)).unwrap(), bytes);
         assert!(hex_decode("abc").is_err());

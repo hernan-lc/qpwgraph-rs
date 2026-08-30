@@ -154,6 +154,10 @@ impl Default for RelayHostBuilder {
 }
 
 /// A validated host that has not started listening yet.
+/// A host configuration ready to start. Cloneable so a failed `start` does
+/// not consume the caller's only copy: retrying should not require rebuilding
+/// the configuration from scratch.
+#[derive(Clone)]
 pub struct RelayHostPrepared {
     config: EngineConfig,
 }
@@ -288,6 +292,10 @@ impl Default for RelayClientBuilder {
 }
 
 /// A validated client that has not connected yet.
+/// A client configuration ready to connect. Cloneable for the same reason as
+/// [`RelayHostPrepared`]: a refused or timed-out connect leaves the caller
+/// able to try again.
+#[derive(Clone)]
 pub struct RelayClientPrepared {
     config: EngineConfig,
     role: Role,

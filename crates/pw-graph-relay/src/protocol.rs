@@ -1,21 +1,48 @@
-//! Relay control-channel protocol (version 1).
+//! Relay control-channel protocol (version 2).
 //!
-//! The control channel is a TCP byte stream of length-prefixed JSON frames:
+//! The control channel is a TCP byte stream of length-prefixed frames:
 //!
 //! ```text
-//! magic "QPR1" (4 bytes) | version u8 | payload length u32 LE | JSON payload
+//! magic "QPR2" (4 bytes) | version u8 | payload length u32 LE | payload
 //! ```
+//!
+//! Only the handshake frames — up to and including key confirmation — carry
+//! their JSON in the clear, because there is no key yet. Every frame after
+//! that is a ChaCha20-Poly1305 sealed JSON document with the 9-byte header
+//! authenticated as associated data, so the control channel is confidential
+//! and tamper-evident rather than merely well-formed.
 //!
 //! JSON keeps third-party implementations trivial. Unknown message types are
 //! preserved as `Unknown` so newer peers can extend the protocol without
 //! breaking older ones. The full wire specification lives in
 //! `docs/relay-protocol.md`.
 
+use crate::crypto::{Opener, Sealer};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub const CONTROL_MAGIC: &[u8; 4] = b"QPR1";
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const CONTROL_MAGIC: &[u8; 4] = b"QPR2";
+pub const PROTOCOL_VERSION: u8 = 2;
+
+/// Frame durations the codec layer and the session negotiation both accept.
+///
+/// One list, used by the UI, the config layer, and the wire check alike: a
+/// hand-edited config used to be able to smuggle a value such as 7 ms past a
+/// `clamp(5, 60)` and only fail at the far end of a handshake.
+pub const FRAME_DURATIONS_MS: [u16; 5] = [5, 10, 20, 40, 60];
+
+/// Snap `frame_ms` to the nearest supported frame duration.
+pub fn normalize_frame_ms(frame_ms: u16) -> u16 {
+    FRAME_DURATIONS_MS
+        .into_iter()
+        .min_by_key(|candidate| candidate.abs_diff(frame_ms))
+        .expect("the supported frame duration list is never empty")
+}
+
+/// Whether `frame_ms` is exactly one of the supported durations.
+pub fn is_supported_frame_ms(frame_ms: u16) -> bool {
+    FRAME_DURATIONS_MS.contains(&frame_ms)
+}
 /// Refuse control frames larger than this. They are small JSON documents;
 /// a bigger frame indicates a broken or hostile peer.
 pub const MAX_CONTROL_FRAME: u32 = 64 * 1024;
@@ -101,7 +128,8 @@ impl CodecKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
-    /// C→H first message: who is calling and what they can do.
+    /// C→H first message: who is calling, what they can do, and the client's
+    /// SPAKE2 message so pairing costs one round trip rather than two.
     Hello {
         protocol: u32,
         device_name: String,
@@ -109,15 +137,21 @@ pub enum ControlMessage {
         roles: Roles,
         sample_rate: u32,
         channels: u16,
+        pake: String,
     },
-    /// H→C pairing challenge. `salt` is random hex, fresh per attempt.
+    /// H→C the host's SPAKE2 message, hex. Public: it reveals nothing about
+    /// the PIN, which is the whole point of using a PAKE here.
     Challenge {
         protocol: u32,
-        salt: String,
+        pake: String,
         host_name: String,
     },
-    /// C→H proof of the shared PIN: `HMAC-SHA256(key = PIN, msg = salt)`, hex.
-    Pair { digest: String },
+    /// C→H the client's SPAKE2 message plus its key-confirmation value, both
+    /// hex. The confirmation is what actually proves the PIN matched.
+    Pair { pake: String, confirm: String },
+    /// H→C the host's key confirmation. After this frame the channel is
+    /// encrypted in both directions.
+    PairConfirm { confirm: String },
     /// H→C pairing accepted; audio runs on `audio_port` of the host address.
     PairOk { audio_port: u16, session_id: u64 },
     /// H→C pairing rejected.
@@ -139,8 +173,9 @@ pub enum ControlMessage {
     /// [`ControlMessage::Challenge`]; the client answers with
     /// [`ControlMessage::Pair`]; the host then accepts with
     /// [`ControlMessage::ResumeOk`] or rejects with
-    /// [`ControlMessage::PairFail`]. Audio keeps flowing on UDP meanwhile.
-    Resume { session_id: u64 },
+    /// [`ControlMessage::PairFail`]. Audio keeps flowing on UDP meanwhile,
+    /// under the *original* audio keys — only the control channel is rekeyed.
+    Resume { session_id: u64, pake: String },
     /// H→C: resume accepted; keepalives continue on this stream.
     ResumeOk {},
     /// Bidirectional informational volume/mute hint.
@@ -158,14 +193,25 @@ pub enum ControlMessage {
     Unknown,
 }
 
-/// Serialize one control frame (header + JSON payload).
+const HEADER_LEN: usize = 9;
+
+fn frame_header(length: usize) -> [u8; HEADER_LEN] {
+    let mut header = [0u8; HEADER_LEN];
+    header[0..4].copy_from_slice(CONTROL_MAGIC);
+    header[4] = PROTOCOL_VERSION;
+    header[5..9].copy_from_slice(&(length as u32).to_le_bytes());
+    header
+}
+
+/// Serialize one cleartext control frame (header + JSON payload).
+///
+/// Only the pairing handshake uses this; everything after key confirmation
+/// goes through [`write_sealed_frame`].
 pub fn encode_frame(message: &ControlMessage) -> Result<Vec<u8>, io::Error> {
     let payload = serde_json::to_vec(message)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let mut frame = Vec::with_capacity(9 + payload.len());
-    frame.extend_from_slice(CONTROL_MAGIC);
-    frame.push(PROTOCOL_VERSION);
-    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+    frame.extend_from_slice(&frame_header(payload.len()));
     frame.extend_from_slice(&payload);
     Ok(frame)
 }
@@ -183,12 +229,18 @@ pub fn write_frame(stream: &mut impl Write, message: &ControlMessage) -> io::Res
 /// `io::ErrorKind::WouldBlock`/`TimedOut` so keepalive loops can distinguish
 /// idle from broken connections.
 pub fn read_frame(stream: &mut impl Read) -> io::Result<ControlMessage> {
-    let mut header = [0u8; 9];
+    let payload = read_body(stream)?;
+    decode_message(&payload)
+}
+
+/// Read a frame body: validates the header and returns the raw payload.
+fn read_body(stream: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut header = [0u8; HEADER_LEN];
     stream.read_exact(&mut header)?;
     if &header[0..4] != CONTROL_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "control frame is missing the QPR1 magic",
+            "control frame is missing the QPR2 magic",
         ));
     }
     let version = header[4];
@@ -207,12 +259,70 @@ pub fn read_frame(stream: &mut impl Read) -> io::Result<ControlMessage> {
     }
     let mut payload = vec![0u8; length as usize];
     stream.read_exact(&mut payload)?;
-    serde_json::from_slice(&payload).map_err(|error| {
+    Ok(payload)
+}
+
+fn decode_message(payload: &[u8]) -> io::Result<ControlMessage> {
+    serde_json::from_slice(payload).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("control frame is not valid protocol JSON: {error}"),
         )
     })
+}
+
+fn crypto_io(error: crate::RelayError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+/// Write one sealed control frame. The header is authenticated as associated
+/// data, so a peer cannot rewrite the length or version without detection.
+pub fn write_sealed_frame(
+    stream: &mut impl Write,
+    sealer: &mut Sealer,
+    message: &ControlMessage,
+) -> io::Result<()> {
+    let plaintext = serde_json::to_vec(message)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // The header depends on the sealed length, and the seal depends on the
+    // header, so the length is computed from the known AEAD expansion first.
+    let header = frame_header(plaintext.len() + crate::crypto::TAG_LEN);
+    let sealed = sealer.seal(&plaintext, &header).map_err(crypto_io)?;
+    debug_assert_eq!(sealed.len(), plaintext.len() + crate::crypto::TAG_LEN);
+    let mut frame = Vec::with_capacity(HEADER_LEN + sealed.len());
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&sealed);
+    stream.write_all(&frame)?;
+    stream.flush()
+}
+
+/// Read one sealed control frame, rejecting anything that does not
+/// authenticate or that arrives out of order.
+pub fn read_sealed_frame(
+    stream: &mut impl Read,
+    opener: &mut Opener,
+) -> io::Result<ControlMessage> {
+    let mut header = [0u8; HEADER_LEN];
+    stream.read_exact(&mut header)?;
+    if &header[0..4] != CONTROL_MAGIC || header[4] != PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sealed control frame has a bad header",
+        ));
+    }
+    let length = u32::from_le_bytes(header[5..9].try_into().expect("slice is 4 bytes"));
+    if length > MAX_CONTROL_FRAME || (length as usize) < crate::crypto::TAG_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("sealed control frame of {length} bytes is out of range"),
+        ));
+    }
+    let mut sealed = vec![0u8; length as usize];
+    stream.read_exact(&mut sealed)?;
+    let plaintext = opener
+        .open_sequential(&sealed, &header)
+        .map_err(crypto_io)?;
+    decode_message(&plaintext)
 }
 
 #[cfg(test)]
@@ -230,14 +340,19 @@ mod tests {
                 roles: Roles::both(),
                 sample_rate: 48_000,
                 channels: 1,
+                pake: "aa55".into(),
             },
             ControlMessage::Challenge {
                 protocol: PROTOCOL_VERSION as u32,
-                salt: "00ff".into(),
+                pake: "00ff".into(),
                 host_name: "pc".into(),
             },
             ControlMessage::Pair {
-                digest: "abcd".into(),
+                pake: "abcd".into(),
+                confirm: "ef01".into(),
+            },
+            ControlMessage::PairConfirm {
+                confirm: "2233".into(),
             },
             ControlMessage::PairOk {
                 audio_port: 48123,
@@ -255,7 +370,10 @@ mod tests {
             },
             ControlMessage::SessionReady {},
             ControlMessage::Keepalive {},
-            ControlMessage::Resume { session_id: 42 },
+            ControlMessage::Resume {
+                session_id: 42,
+                pake: "beef".into(),
+            },
             ControlMessage::ResumeOk {},
             ControlMessage::ControlHint {
                 volume: Some(0.5),
@@ -297,8 +415,73 @@ mod tests {
 
     #[test]
     fn bad_magic_is_rejected() {
-        let mut cursor = Cursor::new(b"XXXX\x01\x00\x00\x00\x00".to_vec());
+        let mut cursor = Cursor::new(b"XXXX\x02\x00\x00\x00\x00".to_vec());
         assert!(read_frame(&mut cursor).is_err());
+    }
+
+    fn sealed_pair() -> (crate::crypto::Sealer, crate::crypto::Opener) {
+        use crate::crypto::{pake_start, Side};
+        let client = pake_start(Side::Client, "123456");
+        let host = pake_start(Side::Host, "123456");
+        let client_message = client.message.clone();
+        let host_message = host.message.clone();
+        let client_keys = client.finish(&host_message).expect("client pairs");
+        let host_keys = host.finish(&client_message).expect("host pairs");
+        let (sealer, _) = client_keys.control_channel().expect("client control keys");
+        let (_, opener) = host_keys.control_channel().expect("host control keys");
+        (sealer, opener)
+    }
+
+    #[test]
+    fn sealed_frames_round_trip() {
+        let (mut sealer, mut opener) = sealed_pair();
+        let mut wire = Vec::new();
+        write_sealed_frame(&mut wire, &mut sealer, &ControlMessage::Keepalive {}).unwrap();
+        write_sealed_frame(
+            &mut wire,
+            &mut sealer,
+            &ControlMessage::Bye {
+                reason: "done".into(),
+            },
+        )
+        .unwrap();
+        let mut cursor = Cursor::new(wire);
+        assert_eq!(
+            read_sealed_frame(&mut cursor, &mut opener).unwrap(),
+            ControlMessage::Keepalive {}
+        );
+        assert_eq!(
+            read_sealed_frame(&mut cursor, &mut opener).unwrap(),
+            ControlMessage::Bye {
+                reason: "done".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_tampered_sealed_frame_is_refused() {
+        let (mut sealer, mut opener) = sealed_pair();
+        let mut wire = Vec::new();
+        write_sealed_frame(&mut wire, &mut sealer, &ControlMessage::Keepalive {}).unwrap();
+        wire[HEADER_LEN] ^= 0x01;
+        let mut cursor = Cursor::new(wire);
+        assert!(read_sealed_frame(&mut cursor, &mut opener).is_err());
+    }
+
+    #[test]
+    fn frame_durations_normalise_to_the_supported_set() {
+        for frame_ms in FRAME_DURATIONS_MS {
+            assert_eq!(normalize_frame_ms(frame_ms), frame_ms);
+            assert!(is_supported_frame_ms(frame_ms));
+        }
+        // Values a hand-edited config could hold snap to a real duration
+        // instead of failing at the far end of a handshake.
+        assert_eq!(normalize_frame_ms(7), 5);
+        assert_eq!(normalize_frame_ms(13), 10);
+        assert_eq!(normalize_frame_ms(35), 40);
+        assert_eq!(normalize_frame_ms(0), 5);
+        assert_eq!(normalize_frame_ms(9_000), 60);
+        assert!(!is_supported_frame_ms(7));
     }
 
     #[test]
