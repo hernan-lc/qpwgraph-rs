@@ -98,6 +98,7 @@ pw_graph_utils::enum_str! {
         Wifi = "wifi",
         Bluetooth = "bluetooth",
         Lan = "lan",
+        Adb = "adb",
     }
 }
 
@@ -109,6 +110,7 @@ impl TransportPreference {
             Self::Wifi => kind == LinkKind::Wifi,
             Self::Bluetooth => kind == LinkKind::BluetoothPan,
             Self::Lan => kind == LinkKind::Lan,
+            Self::Adb => false,
         }
     }
 }
@@ -123,6 +125,7 @@ impl FromStr for TransportPreference {
             "wifi" | "wlan" => Ok(Self::Wifi),
             "bluetooth" | "bt" => Ok(Self::Bluetooth),
             "lan" | "ethernet" => Ok(Self::Lan),
+            "adb" | "android-debug-bridge" => Ok(Self::Adb),
             other => Err(format!("unknown transport preference '{other}'")),
         }
     }
@@ -282,6 +285,12 @@ pub fn outbound_bind_addr(
     target: SocketAddr,
     preference: TransportPreference,
 ) -> Option<Ipv4Addr> {
+    // ADB forwarding/reverse forwarding terminates at localhost on the
+    // embedding process. Binding a physical address to a loopback target can
+    // fail before adb ever gets a chance to carry the connection over USB.
+    if preference == TransportPreference::Adb && target.ip().is_loopback() {
+        return Some(Ipv4Addr::LOCALHOST);
+    }
     let IpAddr::V4(target_v4) = target.ip() else {
         return None;
     };
@@ -485,14 +494,34 @@ mod tests {
             TransportPreference::Wifi,
             TransportPreference::Bluetooth,
             TransportPreference::Lan,
+            TransportPreference::Adb,
         ] {
             let parsed: TransportPreference = preference.as_str().parse().unwrap();
             assert_eq!(parsed, preference);
         }
         assert_eq!("bt".parse(), Ok(TransportPreference::Bluetooth));
         assert_eq!("ethernet".parse(), Ok(TransportPreference::Lan));
+        assert_eq!("android-debug-bridge".parse(), Ok(TransportPreference::Adb));
         assert_eq!("".parse(), Ok(TransportPreference::Auto));
         assert!("carrier-pigeon".parse::<TransportPreference>().is_err());
+    }
+
+    #[test]
+    fn adb_connections_bind_loopback_instead_of_a_physical_link() {
+        let links = [LocalLink {
+            name: "wlan0".into(),
+            addr: Ipv4Addr::new(192, 168, 1, 20),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            kind: LinkKind::Wifi,
+        }];
+        assert_eq!(
+            outbound_bind_addr(
+                &links,
+                "127.0.0.1:48123".parse().unwrap(),
+                TransportPreference::Adb,
+            ),
+            Some(Ipv4Addr::LOCALHOST)
+        );
     }
 
     fn fixture_links() -> Vec<LocalLink> {

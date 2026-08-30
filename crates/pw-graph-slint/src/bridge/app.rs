@@ -39,6 +39,10 @@ pub(crate) enum UiEvent {
 pub(crate) struct RelayAttempt {
     pub(crate) target: String,
     pub(crate) session: u64,
+    /// Stable peer identity, when this attempt came from discovery. Keeping
+    /// it separate from the socket address prevents a Wi-Fi/USB address
+    /// change from looking like a second unrelated connection attempt.
+    pub(crate) peer_id: Option<String>,
 }
 
 pub(crate) struct Application {
@@ -90,6 +94,11 @@ pub(crate) struct Application {
     #[cfg(feature = "relay")]
     /// Prevent a manual Stop from being undone until this USB appearance ends.
     pub(crate) relay_usb_auto_attempted: bool,
+    #[cfg(feature = "relay")]
+    /// Last trusted auto-connect attempt. A failed attempt must not spin every
+    /// UI frame, but a transient cable/link failure should be retried even if
+    /// discovery does not emit another `PeerDiscovered` event.
+    pub(crate) relay_trusted_auto_attempt_at: Option<Instant>,
 }
 
 const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);

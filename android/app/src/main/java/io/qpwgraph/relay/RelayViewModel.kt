@@ -38,16 +38,21 @@ import java.util.UUID
  */
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = application.getSharedPreferences("relay", 0)
+    /** Stable identity used by discovery and trusted handshakes. */
+    private val deviceId = preferences.getString("device_id", null)
+        ?: UUID.randomUUID().toString().also { generated ->
+            preferences.edit().putString("device_id", generated).apply()
+        }
     private val mutableState = MutableStateFlow(
         RelayUiState(settings = loadSettings(), host = loadHostSettings()),
     )
     val state: StateFlow<RelayUiState> = mutableState.asStateFlow()
-    private var clientHandle = 0L
-    private var hostHandle = 0L
-    // A stopped native host remains prepared so the same handle can be
-    // started again. Keep the configuration that was used to prepare it so
-    // edits made while it is stopped cannot accidentally restart the old
-    // native configuration.
+    @Volatile private var clientHandle = 0L
+    @Volatile private var hostHandle = 0L
+    // Keep the configuration used to prepare the current host so edits made
+    // while it is stopped can be compared before a restart. The handle is
+    // released on every stop so newly enrolled trusted peers are imported
+    // into the next native engine instance.
     private var hostPreparedSettings: HostSettings? = null
     private var discoveryHandle = 0L
     private var clientPolling: Job? = null
@@ -59,6 +64,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val discoveryMutex = Mutex()
     private var multicastLock: WifiManager.MulticastLock? = null
     private var usbWasPresent = false
+    private var lastTrustedAutoAttemptAt = 0L
 
     init {
         // Pairing PINs are credentials, not app preferences. Remove values
@@ -96,6 +102,105 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         return response.optLong("handle").also {
             require(it != 0L) { text(R.string.relay_error_native_create) }
         }
+    }
+
+    private fun trustedPeers(): List<TrustedRelayPeer> {
+        val raw = preferences.getString("trusted_peers", null).orEmpty()
+        if (raw.isBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                val peerId = item.optString("peer_id").trim()
+                val secret = item.optString("secret").trim()
+                if (peerId.isEmpty() || secret.isEmpty()) {
+                    null
+                } else {
+                    TrustedRelayPeer(
+                        peerId = peerId,
+                        secret = secret,
+                        name = item.optString("name"),
+                        address = item.optString("address"),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun trustedPeer(peerId: String): TrustedRelayPeer? =
+        trustedPeers().firstOrNull { it.peerId == peerId }
+
+    private fun saveTrustedPeer(
+        peerId: String,
+        secret: String,
+        name: String = "",
+        address: String = "",
+    ) {
+        if (peerId.isBlank() || secret.isBlank()) return
+        val peers = trustedPeers().toMutableList()
+        val current = peers.indexOfFirst { it.peerId == peerId }
+        val old = if (current >= 0) peers[current] else null
+        val merged = TrustedRelayPeer(
+            peerId = peerId,
+            secret = secret,
+            name = name.ifBlank { old?.name.orEmpty() },
+            address = address.ifBlank { old?.address.orEmpty() },
+        )
+        if (current >= 0) peers[current] = merged else peers += merged
+        val array = JSONArray()
+        peers.forEach { peer ->
+            array.put(
+                JSONObject()
+                    .put("peer_id", peer.peerId)
+                    .put("secret", peer.secret)
+                    .put("name", peer.name)
+                    .put("address", peer.address),
+            )
+        }
+        // Credential enrollment has already been acknowledged by the remote
+        // host. Commit synchronously on this IO coroutine so a process death
+        // immediately afterwards cannot leave only one side trusting it.
+        preferences.edit().putString("trusted_peers", array.toString()).commit()
+    }
+
+    private fun rememberTrustedPeerFromJson(event: JSONObject) {
+        val peerId = event.optString("peer_id").ifBlank { event.optString("id") }
+        val secret = event.optString("secret")
+        saveTrustedPeer(
+            peerId = peerId,
+            secret = secret,
+            name = event.optString("name").ifBlank { event.optString("host") },
+            address = event.optString("address"),
+        )
+    }
+
+    private fun rememberTrustedPeerFromConnected(response: JSONObject) {
+        response.optJSONObject("trusted_peer")?.let { rememberTrustedPeerFromJson(it) }
+    }
+
+    private fun trustedPeersJson(): String {
+        val array = JSONArray()
+        trustedPeers().forEach { peer ->
+            array.put(
+                JSONObject()
+                    .put("peer_id", peer.peerId)
+                    .put("secret", peer.secret),
+            )
+        }
+        return array.toString()
+    }
+
+    private fun discoveredPeersJson(peers: List<DiscoveredPeer>): String {
+        val array = JSONArray()
+        peers.forEach { peer ->
+            array.put(
+                JSONObject()
+                    .put("id", peer.id)
+                    .put("name", peer.name)
+                    .put("address", peer.address),
+            )
+        }
+        return array.toString()
     }
 
     fun setMode(mode: RelayMode) {
@@ -142,13 +247,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
-        if (mutableState.value.connection == RelayConnectionState.Connecting) return
         val settings = mutableState.value.settings
         if (clientNeedsMicrophone(settings.role) && !hasMicrophonePermission()) {
             permissionDenied(host = false)
             return
         }
-        if (settings.target.isBlank() || settings.pin.isBlank()) {
+        if (settings.target.isBlank()) {
             setState {
                 it.copy(
                     connection = RelayConnectionState.Error,
@@ -157,10 +261,59 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
+        if (settings.pin.isBlank()) {
+            setState {
+                it.copy(
+                    connection = RelayConnectionState.Error,
+                    message = text(R.string.relay_validation_missing_pin),
+                )
+            }
+            return
+        }
+        connectInternal(null)
+    }
+
+    /** Connect to a discovered peer with its previously enrolled credential. */
+    fun connectToTrustedPeer(peer: DiscoveredPeer) {
+        val trusted = trustedPeer(peer.id) ?: return
+        update(mutableState.value.settings.copy(target = peer.address))
+        setState { it.copy(mode = RelayMode.Receiver) }
+        connectInternal(trusted)
+    }
+
+    private fun connectInternal(trusted: TrustedRelayPeer?) {
+        if (mutableState.value.connection == RelayConnectionState.Connecting) return
+        val settings = mutableState.value.settings
+        if (clientNeedsMicrophone(settings.role) && !hasMicrophonePermission()) {
+            permissionDenied(host = false)
+            return
+        }
+        if (settings.target.isBlank()) {
+            setState {
+                it.copy(
+                    connection = RelayConnectionState.Error,
+                    message = text(R.string.relay_validation_missing_target),
+                )
+            }
+            return
+        }
+        if (trusted == null && settings.pin.isBlank()) {
+            setState {
+                it.copy(
+                    connection = RelayConnectionState.Error,
+                    message = text(R.string.relay_validation_missing_pin),
+                )
+            }
+            return
+        }
         setState {
             it.copy(
                 connection = RelayConnectionState.Connecting,
-                message = text(R.string.relay_connecting),
+                message = if (trusted == null) {
+                    text(R.string.relay_connecting)
+                } else {
+                    text(R.string.relay_trusted_connecting)
+                },
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -179,6 +332,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         clientHandle = createdHandle(
                             NativeBridge.create(
                                 settings.deviceName,
+                                deviceId,
+                                trustedPeersJson(),
                                 settings.role,
                                 settings.codec,
                                 settings.transport,
@@ -189,10 +344,23 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     val response = JSONObject(
-                        NativeBridge.connect(clientHandle, settings.target, settings.pin),
+                        if (trusted == null) {
+                            NativeBridge.connect(clientHandle, settings.target, settings.pin)
+                        } else {
+                            NativeBridge.connectTrusted(
+                                clientHandle,
+                                settings.target,
+                                trusted.peerId,
+                                trusted.secret,
+                            )
+                        },
                     )
                     if (response.optString("type") == "error") {
-                        clientError(response.optString("message"))
+                        val message = response.optString("message")
+                        if (message.contains("unknown client handle", ignoreCase = true)) {
+                            clientHandle = 0L
+                        }
+                        clientError(message)
                         return@withLock
                     }
                     require(response.optString("type") == "connected") {
@@ -201,6 +369,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     val session = response.optLong("session")
                     require(session != 0L) { "native connection returned no session id" }
                     val host = response.optString("host").ifBlank { "Unknown host" }
+                    rememberTrustedPeerFromConnected(response)
                     nativeConnected = true
 
                     // Do not publish Connected until the foreground audio
@@ -248,6 +417,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Discovery tap-to-connect: adopt the peer address, then connect. */
     fun connectToPeer(address: String) {
+        val discovered = mutableState.value.peers.firstOrNull { it.address == address }
+        if (discovered != null && trustedPeer(discovered.id) != null) {
+            connectToTrustedPeer(discovered)
+            return
+        }
         update(mutableState.value.settings.copy(target = address))
         setState { it.copy(mode = RelayMode.Receiver) }
         connect()
@@ -276,7 +450,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 if (clientHandle != 0L) {
                     try {
-                        consumeClientEvents(NativeBridge.pollEvents(clientHandle))
+                        if (!consumeClientEvents(NativeBridge.pollEvents(clientHandle))) {
+                            break
+                        }
                     } catch (error: Exception) {
                         clientError(error.message ?: text(R.string.relay_error_connect_failed))
                     }
@@ -286,36 +462,82 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun consumeClientEvents(raw: String) {
+    private suspend fun consumeClientEvents(raw: String): Boolean {
+        // Native returns a JSON object for an invalidated handle, while a
+        // healthy poll returns an array. Handle that shape explicitly so a
+        // service that died before its ServiceStopped event is observed still
+        // clears the stale ViewModel handle.
+        if (raw.trimStart().startsWith("{")) {
+            val response = JSONObject(raw)
+            if (response.optString("type") == "error") {
+                val message = response.optString("message")
+                val unknownHandle = message.contains("unknown client handle", ignoreCase = true)
+                if (unknownHandle) {
+                    operationMutex.withLock { clientHandle = 0L }
+                }
+                clientError(message)
+                return !unknownHandle
+            }
+        }
         val events = JSONArray(raw)
+        var sessionLost = false
         for (index in 0 until events.length()) {
             val event = events.getJSONObject(index)
             when (event.optString("type")) {
-                "connected" -> setState {
-                    it.copy(
-                        connection = RelayConnectionState.Connected,
-                        hostName = event.optString("host"),
-                        sessionId = event.optLong("session"),
-                        message = text(R.string.relay_connected),
-                    )
+                "connected" -> {
+                    rememberTrustedPeerFromConnected(event)
+                    setState {
+                        it.copy(
+                            connection = RelayConnectionState.Connected,
+                            hostName = event.optString("host"),
+                            sessionId = event.optLong("session"),
+                            message = text(R.string.relay_connected),
+                        )
+                    }
                 }
 
-                "disconnected" -> setState {
-                    it.copy(
-                        connection = RelayConnectionState.Disconnected,
-                        sessionId = null,
-                        hostName = "",
-                        message = event.optString("message"),
-                    )
+                "disconnected" -> {
+                    sessionLost = true
+                    setState {
+                        it.copy(
+                            connection = RelayConnectionState.Disconnected,
+                            sessionId = null,
+                            hostName = "",
+                            message = event.optString("message"),
+                        )
+                    }
                 }
 
                 "level" -> setState {
                     it.copy(rms = event.optDouble("rms").toFloat().coerceIn(0f, 1f))
                 }
 
+                "trusted_peer" -> rememberTrustedPeerFromJson(event)
                 "error" -> clientError(event.optString("message"))
             }
         }
+        if (!sessionLost || mutableState.value.connection != RelayConnectionState.Disconnected) {
+            return true
+        }
+
+        // A native SessionLost leaves the SDK client object in its registry
+        // until the embedding releases it. Releasing only the UI state would
+        // make a later trusted auto-connect reuse a Connected native handle
+        // and receive "client is already connected" forever. Quiesce the
+        // foreground service first, then retire the native handle. This runs
+        // on the polling coroutine, so it must not cancel-and-join itself.
+        operationMutex.withLock {
+            if (clientHandle != 0L &&
+                mutableState.value.connection == RelayConnectionState.Disconnected
+            ) {
+                stopServiceAndWait()
+                val handle = clientHandle
+                clientHandle = 0L
+                runCatching { NativeBridge.disconnect(handle) }
+                runCatching { NativeBridge.release(handle) }
+            }
+        }
+        return false
     }
 
     private fun clientError(message: String) {
@@ -399,6 +621,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         hostHandle = createdHandle(
                             NativeBridge.hostCreate(
                                 host.deviceName,
+                                deviceId,
+                                trustedPeersJson(),
                                 host.pin,
                                 host.port,
                                 host.codec,
@@ -522,6 +746,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
+                "trusted_peer" -> rememberTrustedPeerFromJson(event)
+
                 "disconnected" -> setState {
                     it.copy(hostMessage = event.optString("message"))
                 }
@@ -542,8 +768,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (!active && mutableState.value.hostState == RelayHostState.Running) {
             // The service or native host may have stopped independently
             // (for example after the process lost its foreground service).
-            // Reflect that transition and keep the prepared handle available
-            // for a later explicit start.
+            // Reflect that transition and release the prepared handle so a
+            // later explicit start imports the latest trusted credentials.
+            if (hostHandle != 0L) {
+                runCatching { NativeBridge.hostRelease(hostHandle) }
+                hostHandle = 0L
+                hostPreparedSettings = null
+            }
             setState {
                 it.copy(
                     hostState = RelayHostState.Idle,
@@ -615,10 +846,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         stopHostPollingAndWait()
         stopServiceAndWait()
         if (hostHandle != 0L) {
-            val response = JSONObject(NativeBridge.hostStop(hostHandle))
+            val handle = hostHandle
+            val response = JSONObject(NativeBridge.hostStop(handle))
             if (response.optString("type") == "error") {
                 throw IllegalStateException(response.optString("message"))
             }
+            // Recreate the prepared host next time so credentials enrolled by
+            // a client during this run are read from private preferences.
+            NativeBridge.hostRelease(handle)
+            hostHandle = 0L
+            hostPreparedSettings = null
         }
         setState {
             it.copy(
@@ -635,6 +872,42 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun handleServiceEvent(event: RelayServiceEvent) {
         operationMutex.withLock {
             when (event) {
+                is RelayServiceEvent.ServiceStopped -> if (
+                    event.mode == RelayService.MODE_CLIENT &&
+                    event.handle == clientHandle
+                ) {
+                    clientPolling?.cancel()
+                    clientPolling = null
+                    clientHandle = 0L
+                    setState {
+                        it.copy(
+                            connection = RelayConnectionState.Error,
+                            sessionId = null,
+                            hostName = "",
+                            rms = 0f,
+                            message = text(R.string.relay_error_audio_service_stopped),
+                        )
+                    }
+                } else if (
+                    event.mode == RelayService.MODE_HOST &&
+                    event.handle == hostHandle &&
+                    mutableState.value.hostState != RelayHostState.Idle
+                ) {
+                    hostPolling?.cancel()
+                    hostPolling = null
+                    runCatching { NativeBridge.hostRelease(event.handle) }
+                    hostHandle = 0L
+                    hostPreparedSettings = null
+                    setState {
+                        it.copy(
+                            hostState = RelayHostState.Error,
+                            hostActive = false,
+                            hostPort = null,
+                            hostAddress = null,
+                            hostMessage = text(R.string.relay_error_audio_service_stopped),
+                        )
+                    }
+                }
                 is RelayServiceEvent.AudioFailure -> if (event.mode == RelayService.MODE_HOST) {
                     if (event.handle == hostHandle) {
                         stopHostPollingAndWait()
@@ -747,11 +1020,39 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val peers = (0 until peersJson.length()).map { index ->
                 val peer = peersJson.getJSONObject(index)
                 DiscoveredPeer(
+                    id = peer.optString("id"),
                     name = peer.optString("name"),
                     address = peer.optString("address"),
                 )
             }
+            val activeClient = clientHandle
+            if (activeClient != 0L) {
+                // Discovery has its own native engine on Android. Keep the
+                // connected client supplied with that snapshot so its resume
+                // worker can authenticate the same host at a new USB/Wi-Fi
+                // address instead of retrying the original IP forever.
+                NativeBridge.updateClientPeers(activeClient, discoveredPeersJson(peers))
+            }
             setState { it.copy(peers = peers) }
+            val current = mutableState.value
+            val now = android.os.SystemClock.elapsedRealtime()
+            val candidate = peers.firstOrNull { peer ->
+                peer.id.isNotBlank() && trustedPeer(peer.id) != null
+            }
+            val microphoneReady = !clientNeedsMicrophone(current.settings.role) ||
+                hasMicrophonePermission()
+            if (
+                candidate != null &&
+                microphoneReady &&
+                (current.connection == RelayConnectionState.Disconnected ||
+                    current.connection == RelayConnectionState.Error) &&
+                current.hostState != RelayHostState.Starting &&
+                current.hostState != RelayHostState.Running &&
+                now - lastTrustedAutoAttemptAt >= TRUSTED_AUTO_RETRY_INTERVAL_MS
+            ) {
+                lastTrustedAutoAttemptAt = now
+                connectToTrustedPeer(candidate)
+            }
         } catch (error: Exception) {
             setState { it.copy(discoveryMessage = error.message ?: text(R.string.relay_error_discovery_failed)) }
         }
@@ -1039,5 +1340,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         const val DISCOVERY_POLL_INTERVAL_MS = 250L
         const val USB_LINK_POLL_INTERVAL_MS = 1_000L
         const val SERVICE_START_TIMEOUT_MS = 10_000L
+        const val TRUSTED_AUTO_RETRY_INTERVAL_MS = 5_000L
     }
 }

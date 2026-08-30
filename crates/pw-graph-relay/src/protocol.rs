@@ -159,6 +159,14 @@ pub enum ControlMessage {
     /// SPAKE2 message so pairing costs one round trip rather than two.
     Hello {
         protocol: u32,
+        /// Stable installation identity. Older v3 peers may omit it; the
+        /// receiver falls back to the advertised name for that case.
+        #[serde(default)]
+        device_id: String,
+        /// `adb` selects the authenticated TCP audio side channel. Empty or
+        /// any other value keeps the normal UDP audio transport.
+        #[serde(default)]
+        transport: String,
         device_name: String,
         device_kind: DeviceKind,
         roles: Roles,
@@ -172,17 +180,59 @@ pub enum ControlMessage {
         protocol: u32,
         pake: String,
         host_name: String,
+        /// Stable host identity used for trusted reconnects.
+        #[serde(default)]
+        device_id: String,
     },
     /// C→H the client's SPAKE2 message plus its key-confirmation value, both
     /// hex. The confirmation is what actually proves the PIN matched.
-    Pair { pake: String, confirm: String },
+    Pair {
+        pake: String,
+        confirm: String,
+    },
     /// H→C the host's key confirmation. After this frame the channel is
     /// encrypted in both directions.
-    PairConfirm { confirm: String },
+    PairConfirm {
+        confirm: String,
+    },
     /// H→C pairing accepted; audio runs on `audio_port` of the host address.
-    PairOk { audio_port: u16, session_id: u64 },
+    PairOk {
+        audio_port: u16,
+        session_id: u64,
+    },
     /// H→C pairing rejected.
-    PairFail { reason: String },
+    PairFail {
+        reason: String,
+    },
+    /// C→H trusted reconnect. This is only accepted when the host has a
+    /// credential previously enrolled by this client id.
+    TrustedHello {
+        protocol: u32,
+        device_id: String,
+        device_name: String,
+        device_kind: DeviceKind,
+        host_id: String,
+        #[serde(default)]
+        transport: String,
+        roles: Roles,
+        sample_rate: u32,
+        channels: u16,
+        client_nonce: String,
+    },
+    /// H→C challenge for a trusted reconnect.
+    TrustedChallenge {
+        server_nonce: String,
+        session_id: u64,
+        host_id: String,
+        #[serde(default)]
+        host_name: String,
+    },
+    /// C→H proof of the enrolled credential.
+    TrustedProof {
+        proof: String,
+    },
+    /// H→C trusted authentication accepted.
+    TrustedOk {},
     /// C→H negotiated session parameters. The host adopts them.
     SessionStart {
         roles: Roles,
@@ -193,6 +243,34 @@ pub enum ControlMessage {
     },
     /// H→C: negotiated session parameters accepted and audio may start.
     SessionReady {},
+    /// C→H enrollment of a credential generated after an explicit PIN
+    /// pairing. The surrounding control channel is already authenticated.
+    TrustEnroll {
+        peer_id: String,
+        secret: String,
+    },
+    /// H→C acknowledgement of a credential enrollment.
+    TrustAccepted {},
+    /// H→C authenticated refusal when this host is configured for PIN-only
+    /// operation or the enrollment payload is invalid.
+    TrustRejected {
+        reason: String,
+    },
+    /// Cleartext setup for the second TCP connection used by ADB. The
+    /// connection is accepted only for an already authenticated session.
+    AudioHello {
+        session_id: u64,
+        client_nonce: String,
+    },
+    AudioChallenge {
+        server_nonce: String,
+    },
+    AudioProof {
+        proof: String,
+    },
+    AudioReady {
+        proof: String,
+    },
     /// Bidirectional liveness ping, every ~2 s.
     Keepalive {},
     /// C→H: begin resuming an established session after its control link
@@ -208,7 +286,9 @@ pub enum ControlMessage {
     },
     /// C→H: proof of possession of the original session's resume secret.
     /// The proof is hex-encoded HMAC-SHA256 over the session and both nonces.
-    ResumeProof { proof: String },
+    ResumeProof {
+        proof: String,
+    },
     /// H→C: resume accepted; keepalives continue on this stream.
     ResumeOk {},
     /// Bidirectional informational volume/mute hint.
@@ -219,7 +299,9 @@ pub enum ControlMessage {
         mute: Option<bool>,
     },
     /// Bidirectional graceful shutdown.
-    Bye { reason: String },
+    Bye {
+        reason: String,
+    },
     /// Any message this implementation does not know. Kept so newer protocol
     /// versions do not kill the connection.
     #[serde(other)]
@@ -369,6 +451,8 @@ mod tests {
         let messages = [
             ControlMessage::Hello {
                 protocol: PROTOCOL_VERSION as u32,
+                device_id: "phone-id".into(),
+                transport: "wifi".into(),
                 device_name: "pixel".into(),
                 device_kind: DeviceKind::Android,
                 roles: Roles::both(),
@@ -380,6 +464,7 @@ mod tests {
                 protocol: PROTOCOL_VERSION as u32,
                 pake: "00ff".into(),
                 host_name: "pc".into(),
+                device_id: "pc-id".into(),
             },
             ControlMessage::Pair {
                 pake: "abcd".into(),

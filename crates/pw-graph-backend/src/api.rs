@@ -811,6 +811,7 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
+    generate_device_id as relay_generate_device_id,
     netlink::{listen_bind_addr as relay_listen_bind_addr, select_links as relay_select_links},
     normalize_frame_ms as relay_normalize_frame_ms,
     pairing::{
@@ -821,13 +822,17 @@ pub use pw_graph_relay::{
     EngineStatus as RelayEngineStatus, LinkKind as RelayLinkKind, LocalLink as RelayLocalLink,
     PeerInfo as RelayPeerInfo, RelayEvent, Roles as RelayRoles, SessionId as RelaySessionId,
     SessionStatus as RelaySessionStatus, TransportPreference as RelayTransportPreference,
-    FRAME_DURATIONS_MS as RELAY_FRAME_DURATIONS_MS,
+    TrustedPeer as RelayTrustedPeer, FRAME_DURATIONS_MS as RELAY_FRAME_DURATIONS_MS,
 };
 
 /// Parameters for starting the relay host.
 #[cfg(feature = "relay")]
 #[derive(Clone, Debug)]
 pub struct RelayHostRequest {
+    /// Stable identity and previously enrolled credentials for this host.
+    pub device_id: String,
+    pub trusted_peers: Vec<RelayTrustedPeer>,
+    pub trust_new_peers: bool,
     pub device_name: String,
     /// Pairing PIN clients must present.
     pub pin: String,
@@ -885,6 +890,32 @@ pub trait RelayDriver {
         Err(BackendError::Unsupported(
             "audio relay is not available for this backend".into(),
         ))
+    }
+
+    /// Connect to a discovered peer with a credential obtained from a prior
+    /// explicit pairing. Implementations that support relay should override
+    /// this; the default preserves the backend capability contract.
+    fn relay_connect_trusted(
+        &mut self,
+        _target: std::net::SocketAddr,
+        _peer_id: &str,
+        _secret: [u8; 32],
+        _roles: RelayRoles,
+    ) -> BackendResult<RelaySessionId> {
+        Err(BackendError::Unsupported(
+            "trusted relay auto-connect is not available for this backend".into(),
+        ))
+    }
+
+    /// Update the stable client identity and imported credentials before a
+    /// client connection is attempted.
+    fn relay_configure_identity(
+        &mut self,
+        _device_id: String,
+        _trusted_peers: Vec<RelayTrustedPeer>,
+        _transport: RelayTransportPreference,
+    ) -> BackendResult<()> {
+        Ok(())
     }
 
     fn relay_disconnect(&mut self, _session: RelaySessionId) -> BackendResult<()> {

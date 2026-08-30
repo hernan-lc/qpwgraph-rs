@@ -41,6 +41,12 @@ internal sealed interface RelayServiceEvent {
         val handle: Long,
         val message: String,
     ) : RelayServiceEvent
+
+    /** The service was destroyed outside the ViewModel's normal stop path. */
+    data class ServiceStopped(
+        val mode: String,
+        val handle: Long,
+    ) : RelayServiceEvent
 }
 
 /** Small in-process coordination bridge between the ViewModel and Service. */
@@ -79,6 +85,10 @@ internal object RelayServiceBridge {
 
     fun reportFatal(mode: String, handle: Long, message: String) {
         mutableEvents.tryEmit(RelayServiceEvent.AudioFailure(mode, handle, message))
+    }
+
+    fun reportStopped(mode: String, handle: Long) {
+        mutableEvents.tryEmit(RelayServiceEvent.ServiceStopped(mode, handle))
     }
 }
 
@@ -418,6 +428,10 @@ class RelayService : Service() {
                     runCatching { NativeBridge.release(request.handle) }
                 }
             }
+            // Publish only after the native teardown has completed. The
+            // ViewModel can then atomically invalidate its matching handle
+            // before a later connect attempts to reuse it.
+            RelayServiceBridge.reportStopped(request.mode, request.handle)
         }
         RelayServiceBridge.serviceDestroyed()
         super.onDestroy()

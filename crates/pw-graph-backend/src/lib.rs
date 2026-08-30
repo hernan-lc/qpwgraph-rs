@@ -273,6 +273,9 @@ mod tests {
 
         let port = driver
             .relay_start_host(RelayHostRequest {
+                device_id: "backend-test-id".into(),
+                trusted_peers: Vec::new(),
+                trust_new_peers: true,
                 device_name: "qpwgraph-rs-test".into(),
                 pin: "123456".into(),
                 port: 0,
@@ -367,6 +370,9 @@ mod tests {
             .expect("a listed endpoint is selectable");
         let port = driver
             .relay_start_host(RelayHostRequest {
+                device_id: "backend-test-id".into(),
+                trusted_peers: Vec::new(),
+                trust_new_peers: true,
                 device_name: "qpwgraph-rs-test".into(),
                 pin: "123456".into(),
                 port: 0,
@@ -636,6 +642,9 @@ mod tests {
 
         let port = driver
             .relay_start_host(RelayHostRequest {
+                device_id: "backend-test-id".into(),
+                trusted_peers: Vec::new(),
+                trust_new_peers: true,
                 device_name: "qpwgraph-rs-test".into(),
                 pin: "123456".into(),
                 port: 0,

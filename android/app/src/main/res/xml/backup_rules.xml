@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Stable installation IDs and bearer credentials must not be cloned. -->
+    <exclude domain="sharedpref" path="relay.xml" />
+</full-backup-content>

@@ -53,9 +53,10 @@
 //! repository.
 
 pub use pw_graph_relay::{
+    generate_device_id,
     netlink::{display_links, listen_bind_addr, local_links, select_links},
     CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink, PeerInfo, RelayError,
-    RelayEvent, RelayResult, Roles, SessionId, SessionStatus, TransportPreference,
+    RelayEvent, RelayResult, Roles, SessionId, SessionStatus, TransportPreference, TrustedPeer,
     FRAME_DURATIONS_MS, MAX_REALTIME_QUANTUM_SAMPLES, SAMPLE_RATES_HZ,
 };
 // `RelayHost::handle`/`RelayClient::handle` return this, so it has to be
@@ -130,6 +131,24 @@ impl RelayHostBuilder {
 
     pub fn device_name(mut self, name: impl Into<String>) -> Self {
         self.config.device_name = name.into();
+        self
+    }
+
+    /// Stable installation identity used by discovery and trusted
+    /// reconnects. Leave the generated default unless an embedding
+    /// application already has durable device identity storage.
+    pub fn device_id(mut self, id: impl Into<String>) -> Self {
+        self.config.device_id = id.into();
+        self
+    }
+
+    pub fn trusted_peers(mut self, peers: impl IntoIterator<Item = TrustedPeer>) -> Self {
+        self.config.trusted_peers = peers.into_iter().collect();
+        self
+    }
+
+    pub fn trust_new_peers(mut self, enabled: bool) -> Self {
+        self.config.trust_new_peers = enabled;
         self
     }
 
@@ -334,6 +353,21 @@ impl RelayClientBuilder {
         self
     }
 
+    pub fn device_id(mut self, id: impl Into<String>) -> Self {
+        self.config.device_id = id.into();
+        self
+    }
+
+    pub fn trusted_peers(mut self, peers: impl IntoIterator<Item = TrustedPeer>) -> Self {
+        self.config.trusted_peers = peers.into_iter().collect();
+        self
+    }
+
+    pub fn trust_new_peers(mut self, enabled: bool) -> Self {
+        self.config.trust_new_peers = enabled;
+        self
+    }
+
     pub fn device_kind(mut self, kind: DeviceKind) -> Self {
         self.config.device_kind = kind;
         self
@@ -431,15 +465,22 @@ impl RelayClientPrepared {
 
         // Wait for the handshake outcome so callers get synchronous errors.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut trusted_peer = None;
         loop {
             for event in handle.events() {
                 match event {
+                    RelayEvent::TrustedPeerAvailable {
+                        peer_id, secret, ..
+                    } => {
+                        trusted_peer = Some(TrustedPeer { peer_id, secret });
+                    }
                     RelayEvent::SessionEstablished { id, peer, .. } if id == session => {
                         return Ok(RelayClient {
                             _engine: engine,
                             handle,
                             session,
                             host_name: peer.name,
+                            trusted_peer,
                         });
                     }
                     RelayEvent::SessionLost { id, reason } if id == session => {
@@ -456,6 +497,46 @@ impl RelayClientPrepared {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+
+    /// Connect without a PIN using a credential obtained from an earlier
+    /// explicit pairing with the same stable host identity.
+    pub fn connect_trusted(
+        self,
+        target: &str,
+        peer_id: &str,
+        secret: [u8; 32],
+    ) -> RelayResult<RelayClient> {
+        let addr = resolve(target)?;
+        let engine = RelayEngine::start(self.config)?;
+        let handle = engine.handle();
+        let session = handle.connect_trusted(addr, peer_id, secret, self.role.to_roles());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            for event in handle.events() {
+                match event {
+                    RelayEvent::SessionEstablished { id, peer, .. } if id == session => {
+                        return Ok(RelayClient {
+                            _engine: engine,
+                            handle,
+                            session,
+                            host_name: peer.name,
+                            trusted_peer: None,
+                        });
+                    }
+                    RelayEvent::SessionLost { id, reason } if id == session => {
+                        return Err(RelayError::Engine(format!(
+                            "trusted connection to {addr} failed: {reason}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            if Instant::now() > deadline {
+                return Err(RelayError::Engine("trusted connection timed out".into()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 /// A connected relay client.
@@ -464,6 +545,7 @@ pub struct RelayClient {
     handle: RelayHandle,
     session: SessionId,
     host_name: String,
+    trusted_peer: Option<TrustedPeer>,
 }
 
 impl RelayClient {
@@ -473,6 +555,13 @@ impl RelayClient {
 
     pub fn host_name(&self) -> &str {
         &self.host_name
+    }
+
+    /// Credential created by an explicit PIN pairing, if enabled in the
+    /// builder. Store it in owner-only application storage and pass it to a
+    /// later trusted connect.
+    pub fn trusted_peer(&self) -> Option<TrustedPeer> {
+        self.trusted_peer.clone()
     }
 
     pub fn handle(&self) -> RelayHandle {

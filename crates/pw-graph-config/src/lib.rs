@@ -75,6 +75,16 @@ pub struct AppConfig {
     /// qpwgraph XML format, which has no portable representation for DSP
     /// modules.
     pub effects: Vec<PersistedEffect>,
+    /// Stable identity for this installation. It is not a secret; it lets a
+    /// peer recognize this device again after a Wi-Fi/USB address change.
+    #[serde(default)]
+    pub relay_device_id: String,
+    /// Owner-only trusted relay credentials created after explicit PIN
+    /// pairing. Secrets are hex encoded so the TOML remains portable.
+    #[serde(default)]
+    pub relay_trusted_peers: Vec<PersistedRelayPeer>,
+    #[serde(default = "default_relay_auto_connect")]
+    pub relay_auto_connect_trusted: bool,
     pub relay_device_name: String,
     /// Pairing PIN this machine offers when hosting.
     ///
@@ -107,6 +117,20 @@ pub struct AppConfig {
     /// settings.
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PersistedRelayPeer {
+    pub peer_id: String,
+    pub secret: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub address: String,
+}
+
+fn default_relay_auto_connect() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -164,6 +188,9 @@ impl Default for AppConfig {
             patchbay_profiles: std::collections::BTreeMap::new(),
             active_patchbay_profile: "default".into(),
             effects: Vec::new(),
+            relay_device_id: String::new(),
+            relay_trusted_peers: Vec::new(),
+            relay_auto_connect_trusted: true,
             relay_device_name: "qpwgraph-rs".into(),
             relay_host_pin: String::new(),
             // The desktop application participates in direct USB discovery.
@@ -241,6 +268,14 @@ mod tests {
             std::env::temp_dir().join(format!("pw-graph-config-{}", std::process::id()));
         let path = directory.join("config.toml");
         let expected = AppConfig {
+            relay_device_id: "studio-installation".into(),
+            relay_trusted_peers: vec![PersistedRelayPeer {
+                peer_id: "phone-installation".into(),
+                secret: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".into(),
+                name: "phone".into(),
+                address: "192.168.42.2:48123".into(),
+            }],
+            relay_auto_connect_trusted: false,
             relay_device_name: "studio-pc".into(),
             relay_host_pin: String::new(),
             relay_host_port: 0,

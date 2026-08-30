@@ -16,7 +16,7 @@ use pw_graph_backend::{
 #[cfg(feature = "relay")]
 use pw_graph_backend::{
     RelayDriver, RelayEngineStatus, RelayEvent, RelayHostRequest, RelayLocalLink, RelayPeerInfo,
-    RelayRoles, RelaySessionId,
+    RelayRoles, RelaySessionId, RelayTrustedPeer,
 };
 use pw_graph_core::{Graph, Node, NodeId, PortKey, PortType};
 use pw_graph_effects::EffectDescriptor;
@@ -326,6 +326,29 @@ impl ApplicationDriver {
         roles: RelayRoles,
     ) -> Result<RelaySessionId, String> {
         RelayDriver::relay_connect(self, target, pin, roles).map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_connect_trusted(
+        &mut self,
+        target: std::net::SocketAddr,
+        peer_id: &str,
+        secret: [u8; 32],
+        roles: RelayRoles,
+    ) -> Result<RelaySessionId, String> {
+        RelayDriver::relay_connect_trusted(self, target, peer_id, secret, roles)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_configure_identity(
+        &mut self,
+        device_id: String,
+        trusted_peers: Vec<RelayTrustedPeer>,
+        transport: pw_graph_backend::RelayTransportPreference,
+    ) -> Result<(), String> {
+        RelayDriver::relay_configure_identity(self, device_id, trusted_peers, transport)
+            .map_err(|error| error.to_string())
     }
 
     #[cfg(feature = "relay")]
@@ -675,6 +698,39 @@ impl RelayDriver for ApplicationDriver {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.relay_connect(target, pin, roles),
             BackendKind::Live(driver) => driver.relay_connect(target, pin, roles),
+        }
+    }
+
+    fn relay_connect_trusted(
+        &mut self,
+        target: std::net::SocketAddr,
+        peer_id: &str,
+        secret: [u8; 32],
+        roles: RelayRoles,
+    ) -> pw_graph_backend::BackendResult<RelaySessionId> {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => {
+                driver.relay_connect_trusted(target, peer_id, secret, roles)
+            }
+            BackendKind::Live(driver) => {
+                driver.relay_connect_trusted(target, peer_id, secret, roles)
+            }
+        }
+    }
+
+    fn relay_configure_identity(
+        &mut self,
+        device_id: String,
+        trusted_peers: Vec<RelayTrustedPeer>,
+        transport: pw_graph_backend::RelayTransportPreference,
+    ) -> pw_graph_backend::BackendResult<()> {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => {
+                driver.relay_configure_identity(device_id, trusted_peers, transport)
+            }
+            BackendKind::Live(driver) => {
+                driver.relay_configure_identity(device_id, trusted_peers, transport)
+            }
         }
     }
 

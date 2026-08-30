@@ -45,8 +45,11 @@ The app mirrors the desktop relay panel with three tabs:
   USB tether subnets directly in addition to mDNS, because mDNS often does
   not cross a USB tether.
 
-USB is not a link option: the app (like the desktop) auto-detects an active
-USB tether, shows it under the tab bar, and `Auto` prefers it.
+USB is not a manual link option: the app (like the desktop) auto-detects an
+active USB tether, shows it under the tab bar, and `Auto` prefers it. After a
+successful PIN pairing, the app stores a per-host credential in its private
+SharedPreferences. A later discovery result with the same stable peer ID can
+connect without another PIN; unknown peers are never auto-connected.
 
 ## Pair by QR code
 
@@ -58,9 +61,9 @@ automatically, then press **Connect**. Plain `host:port` QR codes work too.
 
 ## Test over USB tethering
 
-ADB USB debugging alone is only for installing and inspecting the app. For
-relay audio over USB, enable **USB tethering** on the Android device and use
-the USB network address assigned to the phone/Linux host:
+For the zero-configuration cable workflow, enable **USB tethering** on the
+Android device and use the USB network address assigned to the phone/Linux
+host:
 
 1. Enable Android **USB tethering** and keep the phone unlocked.
 2. On Linux, identify the USB/RNDIS interface, usually `usb0`, `rndis0`, or
@@ -73,15 +76,40 @@ the USB network address assigned to the phone/Linux host:
    tether and shows its address (for example `usb0 · 192.168.42.129`), and
    prefers the USB link automatically.
 5. In Android, open the **Discover** tab and start discovery — the desktop
-   host is probed over the USB tether directly. Tap **Connect**, or enter the
-   Linux USB/RNDIS address as `host:port` manually in the Receiver tab. Enter
-   the same PIN used by the desktop host and choose Emit/Receive/Both.
+   host is probed over the USB tether directly. For the first connection, tap
+   **Connect**, enter the same PIN used by the desktop host, and choose
+   Emit/Receive/Both. The successful pairing is remembered; later USB
+   appearances for that same host connect automatically.
 6. Confirm the desktop shows a relay session and that the Relay Microphone or
    Relay Speaker node carries audio.
 
-Do not use the ADB device serial or `127.0.0.1` as the relay target. If Linux
-cannot ping the phone-side USB address, USB tethering is not active; ADB
-connectivity does not prove network reachability.
+If Linux cannot ping the phone-side USB address, USB tethering is not active.
+ADB connectivity does not prove network reachability.
+
+## Relay over an ADB-only cable
+
+ADB debugging can carry relay audio when the app's transport is set to **ADB
+forwarding**. This mode uses two authenticated TCP streams (control plus a
+length-framed encrypted audio stream), so it does not need UDP or USB
+tethering. It is explicit rather than discoverable: set the target to
+`127.0.0.1:48123` and create the matching ADB tunnel before connecting.
+
+For an Android client connecting to a desktop host, run on the desktop:
+
+```bash
+adb reverse tcp:48123 tcp:48123
+```
+
+For a desktop client connecting to an Android host, run on the desktop:
+
+```bash
+adb forward tcp:48123 tcp:48123
+```
+
+Select **ADB forwarding** on the client, use `127.0.0.1:48123`, and pair
+once with the host PIN. Keep the host on port `48123` or use the same explicit
+port in the ADB command and target. ADB forwarding does not provide peer
+discovery; QR and automatic USB discovery still require a network link.
 
 ## Use
 
@@ -97,11 +125,15 @@ TCP control and UDP audio, so both devices must be able to reach each other
 on the local network. VPNs, guest Wi-Fi isolation, and firewalls can block
 the connection.
 
-The app does not auto-connect to arbitrary USB-discovered peers. A pairing
-attempt always requires the current PIN and explicit user approval; persistent
-trusted-device key auto-reconnect is not enabled yet. ADB/USB debugging alone
-is not relay networking because `adb reverse` does not carry the relay's UDP
-audio channel.
+The app never auto-connects to an arbitrary discovered peer. The first pairing
+requires the current PIN and explicit user approval; subsequent automatic
+connections are limited to the stored credential and stable identity of that
+same peer. USB tethering uses TCP plus encrypted UDP. ADB forwarding uses the
+explicit TCP audio mode described above.
+
+The stable installation ID and trusted bearer credentials live in Android's
+private relay preferences. That file is excluded from cloud backup and device
+transfer so a restored copy cannot impersonate the original installation.
 
 ## Troubleshooting
 

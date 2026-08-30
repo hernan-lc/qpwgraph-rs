@@ -2,9 +2,9 @@ use jni::objects::{JClass, JFloatArray, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use pw_graph_relay_sdk::{
-    CodecKind, DeviceKind, EngineStatus, RelayBrowser, RelayClient, RelayClientBuilder, RelayEvent,
-    RelayHandle, RelayHost, RelayHostBuilder, RelayHostPrepared, Role, SessionId,
-    TransportPreference, MAX_REALTIME_QUANTUM_SAMPLES,
+    CodecKind, DeviceKind, EngineStatus, PeerInfo, RelayBrowser, RelayClient, RelayClientBuilder,
+    RelayEvent, RelayHandle, RelayHost, RelayHostBuilder, RelayHostPrepared, Role, SessionId,
+    TransportPreference, TrustedPeer, MAX_REALTIME_QUANTUM_SAMPLES,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -67,6 +67,65 @@ fn parse_codec(value: &str) -> Result<CodecKind, String> {
 
 fn parse_transport(value: &str) -> Result<TransportPreference, String> {
     value.parse()
+}
+
+#[derive(serde::Deserialize)]
+struct StoredTrustedPeer {
+    peer_id: String,
+    secret: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DiscoveredPeerSnapshot {
+    id: String,
+    name: String,
+    address: String,
+}
+
+fn trusted_secret(value: &str) -> Result<[u8; 32], String> {
+    let bytes = pw_graph_utils::hex::hex_decode(value.trim())
+        .map_err(|_| "trusted relay secret must be 64 hexadecimal characters".to_string())?;
+    bytes
+        .try_into()
+        .map_err(|_| "trusted relay secret must be exactly 32 bytes".to_string())
+}
+
+fn parse_trusted_peers(value: &str) -> Result<Vec<TrustedPeer>, String> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str::<Vec<StoredTrustedPeer>>(value)
+        .map_err(|error| format!("invalid trusted relay credentials: {error}"))?
+        .into_iter()
+        .map(|stored| {
+            if stored.peer_id.trim().is_empty() {
+                return Err("trusted relay peer id must not be empty".into());
+            }
+            Ok(TrustedPeer {
+                peer_id: stored.peer_id,
+                secret: trusted_secret(&stored.secret)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_discovered_peers(value: &str) -> Result<Vec<PeerInfo>, String> {
+    serde_json::from_str::<Vec<DiscoveredPeerSnapshot>>(value)
+        .map_err(|error| format!("invalid discovered relay peers: {error}"))?
+        .into_iter()
+        .map(|peer| {
+            let addr = peer
+                .address
+                .parse()
+                .map_err(|error| format!("invalid discovered relay address: {error}"))?;
+            Ok(PeerInfo {
+                id: peer.id,
+                name: peer.name,
+                kind: DeviceKind::Other,
+                addr,
+            })
+        })
+        .collect()
 }
 
 fn positive_u16(name: &str, value: jint) -> Result<u16, String> {
@@ -170,12 +229,23 @@ fn local_links_json() -> serde_json::Value {
     json!({ "type": "links", "links": links })
 }
 
-fn connected_json(session: SessionId, host_name: &str) -> serde_json::Value {
-    json!({
+fn connected_json(
+    session: SessionId,
+    host_name: &str,
+    trusted_peer: Option<&TrustedPeer>,
+) -> serde_json::Value {
+    let mut value = json!({
         "type": "connected",
         "session": session.0,
         "host": host_name,
-    })
+    });
+    if let Some(peer) = trusted_peer {
+        value["trusted_peer"] = json!({
+            "peer_id": peer.peer_id,
+            "secret": pw_graph_utils::hex::hex_encode(&peer.secret),
+        });
+    }
+    value
 }
 
 fn host_display_address(handle: &RelayHandle, status: &EngineStatus) -> Option<String> {
@@ -203,7 +273,8 @@ fn link_json(link: &pw_graph_relay_sdk::LocalLink) -> serde_json::Value {
 fn event_json(event: RelayEvent) -> serde_json::Value {
     match event {
         RelayEvent::SessionEstablished { id, peer, .. } => json!({
-            "type": "connected", "session": id.0, "host": peer.name, "address": peer.addr.to_string()
+            "type": "connected", "session": id.0, "host": peer.name,
+            "id": peer.id, "address": peer.addr.to_string()
         }),
         RelayEvent::SessionLost { id, reason } => {
             json!({"type":"disconnected","session":id.0,"message":reason})
@@ -213,10 +284,22 @@ fn event_json(event: RelayEvent) -> serde_json::Value {
         }),
         RelayEvent::Error { message } => json!({"type":"error","message":message}),
         RelayEvent::PeerDiscovered { peer } => json!({
-            "type":"peer","name":peer.name,"address":peer.addr.to_string()
+            "type":"peer","id":peer.id,"name":peer.name,"address":peer.addr.to_string()
         }),
         RelayEvent::PeerLost { peer } => json!({
-            "type":"peer_lost","name":peer.name,"address":peer.addr.to_string()
+            "type":"peer_lost","id":peer.id,"name":peer.name,"address":peer.addr.to_string()
+        }),
+        RelayEvent::TrustedPeerAvailable {
+            peer_id,
+            peer,
+            secret,
+        } => json!({
+            "type": "trusted_peer",
+            "peer_id": peer_id,
+            "id": peer.id,
+            "name": peer.name,
+            "address": peer.addr.to_string(),
+            "secret": pw_graph_utils::hex::hex_encode(&secret),
         }),
         RelayEvent::HostStarted { port } => json!({"type":"host_started","port":port}),
         RelayEvent::HostStopped => json!({"type":"host_stopped"}),
@@ -228,6 +311,8 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_create(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     device_name: JString<'_>,
+    device_id: JString<'_>,
+    trusted_peers: JString<'_>,
     role: JString<'_>,
     codec: JString<'_>,
     transport: JString<'_>,
@@ -237,19 +322,27 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_create(
 ) -> jni::sys::jstring {
     let result = (|| -> Result<serde_json::Value, String> {
         let device_name = string(&mut env, device_name)?;
+        let device_id = string(&mut env, device_id)?;
+        let trusted_peers = parse_trusted_peers(&string(&mut env, trusted_peers)?)?;
         let role = parse_role(&string(&mut env, role)?)?;
         let codec = parse_codec(&string(&mut env, codec)?)?;
         let transport = parse_transport(&string(&mut env, transport)?)?;
         let sample_rate = positive_u32("sample rate", sample_rate)?;
         let channels = android_channels(channels)?;
         let frame_ms = positive_u16("frame duration", frame_ms)?;
-        let client = RelayClientBuilder::new()
+        let mut builder = RelayClientBuilder::new()
             .device_name(device_name)
             .device_kind(DeviceKind::Android)
             .role(role)
             .codec(codec)
             .transport(transport)
             .audio(sample_rate, channels, frame_ms)
+            .trusted_peers(trusted_peers);
+        if !device_id.trim().is_empty() {
+            builder = builder.device_id(device_id);
+        }
+        let client = builder
+            .trust_new_peers(true)
             .build()
             .map_err(|error| error.to_string())?;
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -317,7 +410,9 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
                     // The SDK consumed the initial SessionEstablished event
                     // while connecting, so JNI returns this snapshot directly
                     // rather than waiting for a duplicate event.
-                    let metadata = connected_json(client.session(), client.host_name());
+                    let trusted_peer = client.trusted_peer();
+                    let metadata =
+                        connected_json(client.session(), client.host_name(), trusted_peer.as_ref());
                     guard.insert(handle, ClientSlot::Connected(client));
                     Ok(metadata)
                 } else {
@@ -336,6 +431,79 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
                 ) {
                     // Keep the validated configuration reusable after a
                     // refused, timed-out, or otherwise failed connection.
+                    guard.insert(handle, ClientSlot::Prepared(prepared));
+                }
+                Err(error.to_string())
+            }
+        }
+    })();
+    match result {
+        Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
+        Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connectTrusted(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    target: JString<'_>,
+    peer_id: JString<'_>,
+    secret: JString<'_>,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let target = string(&mut env, target)?;
+        let peer_id = string(&mut env, peer_id)?;
+        let secret = trusted_secret(&string(&mut env, secret)?)?;
+        if peer_id.trim().is_empty() {
+            return Err("trusted relay peer id must not be empty".into());
+        }
+        let prepared = {
+            let mut guard = clients()
+                .lock()
+                .map_err(|_| "client store poisoned".to_string())?;
+            let prepared = match guard.get(&handle) {
+                Some(ClientSlot::Prepared(client)) => client.clone(),
+                Some(ClientSlot::Connecting { .. }) => {
+                    return Err("client connection is already in progress".into())
+                }
+                Some(ClientSlot::Connected(_)) => return Err("client is already connected".into()),
+                None => return Err("unknown client handle".into()),
+            };
+            let token = next_operation();
+            guard.insert(handle, ClientSlot::Connecting { token });
+            (token, prepared)
+        };
+
+        let (token, prepared) = prepared;
+        match prepared.clone().connect_trusted(&target, &peer_id, secret) {
+            Ok(client) => {
+                let mut guard = clients()
+                    .lock()
+                    .map_err(|_| "client store poisoned".to_string())?;
+                let same_attempt = matches!(
+                    guard.get(&handle),
+                    Some(ClientSlot::Connecting { token: current, .. }) if *current == token
+                );
+                if same_attempt {
+                    let metadata = connected_json(client.session(), client.host_name(), None);
+                    guard.insert(handle, ClientSlot::Connected(client));
+                    Ok(metadata)
+                } else {
+                    drop(guard);
+                    let _ = client.disconnect();
+                    Err("client handle changed while connecting".into())
+                }
+            }
+            Err(error) => {
+                let mut guard = clients()
+                    .lock()
+                    .map_err(|_| "client store poisoned".to_string())?;
+                if matches!(
+                    guard.get(&handle),
+                    Some(ClientSlot::Connecting { token: current, .. }) if *current == token
+                ) {
                     guard.insert(handle, ClientSlot::Prepared(prepared));
                 }
                 Err(error.to_string())
@@ -408,6 +576,41 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_pollEvents(
         Ok(events) => json_string(&mut env, json!(events)).unwrap_or(std::ptr::null_mut()),
         Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
     }
+}
+
+/// Copy the browser engine's current identity-tagged peer snapshot into the
+/// connected client engine. Android deliberately owns discovery through a
+/// separate long-lived handle, so without this handoff the client's resume
+/// worker would know only the original Wi-Fi destination and could not try a
+/// newly discovered USB address for the same authenticated host.
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_updateClientPeers(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    peers: JString<'_>,
+) -> jboolean {
+    let result = (|| -> Result<bool, String> {
+        let peers = parse_discovered_peers(&string(&mut env, peers)?)?;
+        let engine = {
+            let guard = clients()
+                .lock()
+                .map_err(|_| "client store poisoned".to_string())?;
+            match guard.get(&handle) {
+                Some(ClientSlot::Connected(client)) => Some(client.handle()),
+                // A stale service-owned handle, or a client that has not yet
+                // completed its handshake, simply has nothing to update.
+                Some(ClientSlot::Prepared(_) | ClientSlot::Connecting { .. }) | None => None,
+            }
+        };
+        if let Some(engine) = engine {
+            engine.update_discovered_peers(peers);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })();
+    u8::from(result.unwrap_or(false))
 }
 
 #[no_mangle]
@@ -515,6 +718,8 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostCreate(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     device_name: JString<'_>,
+    device_id: JString<'_>,
+    trusted_peers: JString<'_>,
     pin: JString<'_>,
     port: jint,
     codec: JString<'_>,
@@ -525,6 +730,8 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostCreate(
 ) -> jni::sys::jstring {
     let result = (|| -> Result<serde_json::Value, String> {
         let device_name = string(&mut env, device_name)?;
+        let device_id = string(&mut env, device_id)?;
+        let trusted_peers = parse_trusted_peers(&string(&mut env, trusted_peers)?)?;
         let pin = string(&mut env, pin)?;
         let codec = parse_codec(&string(&mut env, codec)?)?;
         let transport = parse_transport(&string(&mut env, transport)?)?;
@@ -532,7 +739,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostCreate(
         let sample_rate = positive_u32("sample rate", sample_rate)?;
         let channels = android_channels(channels)?;
         let frame_ms = positive_u16("frame duration", frame_ms)?;
-        let host = RelayHostBuilder::new()
+        let mut builder = RelayHostBuilder::new()
             .device_name(device_name)
             .device_kind(DeviceKind::Android)
             .pin(pin)
@@ -540,6 +747,12 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostCreate(
             .codec(codec)
             .transport(transport)
             .audio(sample_rate, channels, frame_ms)
+            .trusted_peers(trusted_peers);
+        if !device_id.trim().is_empty() {
+            builder = builder.device_id(device_id);
+        }
+        let host = builder
+            .trust_new_peers(true)
             .build()
             .map_err(|error| error.to_string())?;
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -731,6 +944,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStatus(
             .map(|session| {
                 json!({
                     "id": session.id.0,
+                    "peer_id": session.peer.id,
                     "name": session.peer.name,
                     "address": session.peer.addr.to_string(),
                     "sending": session.sending,
@@ -990,7 +1204,13 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryPeers(
         let peers = engine
             .discovered_peers()
             .into_iter()
-            .map(|peer| json!({"name": peer.name, "address": peer.addr.to_string()}))
+            .map(|peer| {
+                json!({
+                    "id": peer.id,
+                    "name": peer.name,
+                    "address": peer.addr.to_string()
+                })
+            })
             .collect::<Vec<_>>();
         Ok(json!(peers))
     })();
@@ -1111,7 +1331,7 @@ mod tests {
 
     #[test]
     fn connected_response_contains_the_consumed_session_metadata() {
-        let value = connected_json(SessionId(42), "studio-pc");
+        let value = connected_json(SessionId(42), "studio-pc", None);
         assert_eq!(
             value.get("type").and_then(|value| value.as_str()),
             Some("connected")

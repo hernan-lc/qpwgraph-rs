@@ -4084,6 +4084,7 @@ dependencies = [
  "pw-graph-effects",
  "pw-graph-i18n",
  "pw-graph-patchbay",
+ "pw-graph-utils",
  "rfd",
  "serde",
  "slint",
@@ -4204,6 +4205,8 @@ version = "0.1.0"
 dependencies = [
  "jni 0.21.1",
  "pw-graph-relay-sdk",
+ "pw-graph-utils",
+ "serde",
  "serde_json",
 ]
 

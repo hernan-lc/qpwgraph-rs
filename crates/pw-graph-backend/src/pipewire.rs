@@ -1312,12 +1312,15 @@ impl RelayDriver for PipewireDriver {
         self.with_loop(|driver| {
             let set = driver.ensure_relay_devices_locked(&request.device_name)?;
             let config = pw_graph_relay::EngineConfig {
+                device_id: request.device_id,
                 device_name: request.device_name,
                 pin: request.pin,
                 port: request.port,
                 codec: request.codec,
                 frame_ms: request.frame_ms,
                 transport: request.transport,
+                trusted_peers: request.trusted_peers,
+                trust_new_peers: request.trust_new_peers,
                 ..Default::default()
             };
             set.handle().update_config(config);
@@ -1350,6 +1353,47 @@ impl RelayDriver for PipewireDriver {
                 .unwrap_or_else(|| "qpwgraph-rs".into());
             let set = driver.ensure_relay_devices_locked(&device_name)?;
             Ok(set.handle().connect(target, pin, roles))
+        })
+    }
+
+    fn relay_connect_trusted(
+        &mut self,
+        target: std::net::SocketAddr,
+        peer_id: &str,
+        secret: [u8; 32],
+        roles: RelayRoles,
+    ) -> BackendResult<RelaySessionId> {
+        self.with_loop(|driver| {
+            let device_name = driver
+                .relay
+                .as_ref()
+                .map(|set| set.handle().config().device_name)
+                .unwrap_or_else(|| "qpwgraph-rs".into());
+            let set = driver.ensure_relay_devices_locked(&device_name)?;
+            Ok(set.handle().connect_trusted(target, peer_id, secret, roles))
+        })
+    }
+
+    fn relay_configure_identity(
+        &mut self,
+        device_id: String,
+        trusted_peers: Vec<super::api::RelayTrustedPeer>,
+        transport: RelayTransportPreference,
+    ) -> BackendResult<()> {
+        self.with_loop(|driver| {
+            let device_name = driver
+                .relay
+                .as_ref()
+                .map(|set| set.handle().config().device_name)
+                .unwrap_or_else(|| "qpwgraph-rs".into());
+            let set = driver.ensure_relay_devices_locked(&device_name)?;
+            let mut config = set.handle().config();
+            config.device_id = device_id;
+            config.trusted_peers = trusted_peers;
+            config.transport = transport;
+            config.trust_new_peers = true;
+            set.handle().update_config(config);
+            Ok(())
         })
     }
 

@@ -18,6 +18,8 @@ internal object NativeBridge {
     // Receiver (client) --------------------------------------------------
     external fun create(
         deviceName: String,
+        deviceId: String,
+        trustedPeersJson: String,
         role: String,
         codec: String,
         transport: String,
@@ -27,8 +29,16 @@ internal object NativeBridge {
     ): String
 
     external fun connect(handle: Long, target: String, pin: String): String
+    external fun connectTrusted(
+        handle: Long,
+        target: String,
+        peerId: String,
+        secret: String,
+    ): String
     external fun disconnect(handle: Long): Boolean
     external fun pollEvents(handle: Long): String
+    /** Feed the separate discovery handle's snapshot to client resume logic. */
+    external fun updateClientPeers(handle: Long, peersJson: String): Boolean
     /** Surface a fatal platform-audio failure through the relay event queue. */
     external fun reportError(handle: Long, message: String): Boolean
 
@@ -57,6 +67,8 @@ internal object NativeBridge {
     // Emitter (host) -----------------------------------------------------
     external fun hostCreate(
         deviceName: String,
+        deviceId: String,
+        trustedPeersJson: String,
         pin: String,
         port: Int,
         codec: String,

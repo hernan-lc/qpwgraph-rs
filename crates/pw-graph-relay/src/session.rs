@@ -31,16 +31,100 @@ use crate::{
 };
 use pw_graph_utils::hex::{hex_decode, hex_encode};
 use rand::RngCore;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 
 /// The two ends of an encrypted control channel, owned by one control thread.
 struct ControlCipher {
     sealer: Sealer,
     opener: Opener,
+}
+
+/// One authenticated, full-duplex TCP stream used as the audio transport for
+/// ADB. A slot rather than a stream is stored in the session so a resumed
+/// control connection can install a replacement without destroying the
+/// negotiated audio keys or queues.
+pub(crate) struct TcpAudioSlot {
+    current: Mutex<Option<Arc<TcpAudioConnection>>>,
+    changed: Condvar,
+}
+
+struct TcpAudioConnection {
+    reader: Mutex<TcpStream>,
+    writer: Mutex<TcpStream>,
+}
+
+impl TcpAudioSlot {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            current: Mutex::new(None),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn install(&self, stream: TcpStream) -> std::io::Result<()> {
+        let reader = stream.try_clone()?;
+        let connection = Arc::new(TcpAudioConnection {
+            reader: Mutex::new(reader),
+            writer: Mutex::new(stream),
+        });
+        if let Ok(mut current) = self.current.lock() {
+            if let Some(previous) = current.replace(connection) {
+                previous.shutdown();
+            }
+            self.changed.notify_all();
+        }
+        Ok(())
+    }
+
+    fn current(&self) -> Option<Arc<TcpAudioConnection>> {
+        self.current.lock().ok().and_then(|current| current.clone())
+    }
+
+    fn wait(&self, stop: &AtomicBool) -> Option<Arc<TcpAudioConnection>> {
+        let mut current = self.current.lock().ok()?;
+        while current.is_none() && !stop.load(Ordering::Relaxed) {
+            current = self
+                .changed
+                .wait_timeout(current, Duration::from_millis(250))
+                .ok()?
+                .0;
+        }
+        current.clone()
+    }
+
+    fn clear(&self, connection: &Arc<TcpAudioConnection>) {
+        if let Ok(mut current) = self.current.lock() {
+            if current
+                .as_ref()
+                .is_some_and(|installed| Arc::ptr_eq(installed, connection))
+            {
+                *current = None;
+                connection.shutdown();
+            }
+        }
+    }
+}
+
+impl TcpAudioConnection {
+    /// Wake both worker directions when a resumed connection replaces this
+    /// one. A reader may be blocked in `read_exact` while the slot already
+    /// points at the replacement; shutting down the underlying stream is what
+    /// makes that worker observe the replacement instead of waiting forever
+    /// on the stale socket.
+    fn shutdown(&self) {
+        if let Ok(reader) = self.reader.lock() {
+            let _ = reader.shutdown(Shutdown::Both);
+        }
+        if let Ok(writer) = self.writer.lock() {
+            let _ = writer.shutdown(Shutdown::Both);
+        }
+    }
 }
 
 impl ControlCipher {
@@ -135,6 +219,12 @@ fn fresh_resume_nonce() -> [u8; RESUME_NONCE_LEN] {
     nonce
 }
 
+fn fresh_trust_secret() -> [u8; 32] {
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    secret
+}
+
 fn decode_resume_nonce(value: &str) -> Option<[u8; RESUME_NONCE_LEN]> {
     hex_decode(value).ok()?.try_into().ok()
 }
@@ -165,12 +255,19 @@ fn spawn_session_workers_with(
         let stop = Arc::clone(&record.stop);
         let id = record.id;
         let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let tcp_audio = record.tcp_audio.clone();
         spawn_worker_with_report(
             &mut spawn,
             &stop,
             id,
             "RX",
-            Box::new(move || run_rx(inner, record, socket, host_side, Some(ready_tx))),
+            Box::new(move || {
+                if let Some(tcp_audio) = tcp_audio {
+                    run_tcp_rx(inner, record, tcp_audio, Some(ready_tx));
+                } else {
+                    run_rx(inner, record, socket, host_side, Some(ready_tx));
+                }
+            }),
         )?;
         wait_for_worker_startup(ready_rx, &stop, id, "RX")?;
     }
@@ -181,12 +278,19 @@ fn spawn_session_workers_with(
         let stop = Arc::clone(&record.stop);
         let id = record.id;
         let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let tcp_audio = record.tcp_audio.clone();
         spawn_worker_with_report(
             &mut spawn,
             &stop,
             id,
             "TX",
-            Box::new(move || run_tx(inner, record, socket, Some(ready_tx))),
+            Box::new(move || {
+                if let Some(tcp_audio) = tcp_audio {
+                    run_tcp_tx(inner, record, tcp_audio, Some(ready_tx));
+                } else {
+                    run_tx(inner, record, socket, Some(ready_tx));
+                }
+            }),
         )?;
         wait_for_worker_startup(ready_rx, &stop, id, "TX")?;
     }
@@ -198,12 +302,16 @@ pub(crate) struct HostRecord {
     pub port: u16,
     /// The exact address the TCP listener was bound to. `None` is the
     /// documented no-link fallback, which intentionally uses INADDR_ANY.
-    pub bind_addr: Option<Ipv4Addr>,
+    bind_addr: Arc<Mutex<Option<Ipv4Addr>>>,
     pub stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HostRecord {
+    pub(crate) fn bind_addr(&self) -> Option<Ipv4Addr> {
+        self.bind_addr.lock().ok().and_then(|addr| *addr)
+    }
+
     /// Stop the accept loop and wait for its listener to be dropped. Returning
     /// only after the join makes an immediate same-port restart deterministic
     /// and prevents callers from being tempted to hide the race by falling
@@ -222,36 +330,58 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
     // transport preference when no address is pinned, so the relay is offered
     // on the link it is meant to serve.
     let bind_ip = host_bind_addr(&inner.config());
+    let (listener, bound_addr, bound) = bind_control_listener(bind_ip, port)?;
+    let mut listeners = vec![(listener, bound_addr)];
+    // Keep a loopback listener alongside a link-specific listener so an ADB
+    // forward/reverse can reach the same host without changing the host's
+    // network exposure policy. A wildcard listener already includes loopback.
+    if bound_addr.is_some_and(|addr| addr != Ipv4Addr::LOCALHOST) {
+        if let Ok((loopback, _, _)) = bind_control_listener(Some(Ipv4Addr::LOCALHOST), bound) {
+            listeners.push((loopback, Some(Ipv4Addr::LOCALHOST)));
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let inner = Arc::clone(inner);
+    let current_addr = Arc::new(Mutex::new(bound_addr));
+    let thread_current_addr = Arc::clone(&current_addr);
+    let worker = std::thread::Builder::new()
+        .name("relay-host".into())
+        .spawn(move || accept_loop(inner, listeners, thread_stop, thread_current_addr, bound))?;
+    Ok(HostRecord {
+        port: bound,
+        bind_addr: current_addr,
+        stop,
+        worker: Some(worker),
+    })
+}
+
+fn bind_control_listener(
+    bind_ip: Option<Ipv4Addr>,
+    port: u16,
+) -> RelayResult<(TcpListener, Option<Ipv4Addr>, u16)> {
     let bind_address = bind_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
     let listener = TcpListener::bind((bind_address, port)).map_err(|error| {
         RelayError::Engine(format!(
             "could not bind relay control port {port} on {bind_address}: {error}"
         ))
     })?;
-    let listener_addr = listener.local_addr()?.ip();
-    let bound_addr = match listener_addr {
+    let local_addr = listener.local_addr()?;
+    let bound_addr = match local_addr.ip() {
         IpAddr::V4(addr) if !addr.is_unspecified() => Some(addr),
         _ => None,
     };
-    let bound = listener.local_addr()?.port();
+    let bound = local_addr.port();
     listener.set_nonblocking(true)?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread_stop = Arc::clone(&stop);
-    let inner = Arc::clone(inner);
-    let worker = std::thread::Builder::new()
-        .name("relay-host".into())
-        .spawn(move || accept_loop(inner, listener, thread_stop, bound_addr))?;
-    Ok(HostRecord {
-        port: bound,
-        bind_addr: bound_addr,
-        stop,
-        worker: Some(worker),
-    })
+    Ok((listener, bound_addr, bound))
 }
 
 /// The address a host listens on: an explicitly configured one wins, then the
 /// transport preference, and finally every interface.
 fn host_bind_addr(config: &crate::EngineConfig) -> Option<Ipv4Addr> {
+    if config.transport == crate::TransportPreference::Adb {
+        return Some(Ipv4Addr::LOCALHOST);
+    }
     config
         .bind_addr
         .or_else(|| netlink::listen_bind_addr(&netlink::local_links(), config.transport))
@@ -266,55 +396,148 @@ pub(crate) fn stop_host(inner: &EngineInner) {
 
 fn accept_loop(
     inner: Arc<EngineInner>,
-    listener: TcpListener,
+    mut listeners: Vec<(TcpListener, Option<Ipv4Addr>)>,
     stop: Arc<AtomicBool>,
-    bind_addr: Option<Ipv4Addr>,
+    current_addr: Arc<Mutex<Option<Ipv4Addr>>>,
+    port: u16,
 ) {
+    let mut bind_addr = current_addr.lock().ok().and_then(|addr| *addr);
     loop {
         if !inner.running.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
             break;
         }
-        match listener.accept() {
-            Ok((mut stream, addr)) => {
-                let _ = stream.set_nonblocking(false);
-                // Every accepted connection costs a thread that can sit in a
-                // handshake read timeout before proving anything, so refuse
-                // rather than let an unauthenticated peer spawn without bound.
-                let Some(slot) = inner.claim_handshake() else {
-                    let _ = write_frame(
-                        &mut stream,
-                        &ControlMessage::PairFail {
-                            reason: "the host is busy; try again shortly".into(),
-                        },
-                    );
-                    continue;
-                };
-                // Keep a duplicate only for the exceptional path: the
-                // worker owns the accepted stream, but a failed spawn should
-                // still get one best-effort PairFail onto the peer.
-                let mut failure_stream = stream.try_clone().ok();
-                let worker_inner = Arc::clone(&inner);
-                match spawn_named(
-                    format!("relay-peer-{addr}"),
-                    Box::new(move || host_peer_thread(worker_inner, stream, addr, slot, bind_addr)),
-                ) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        if let Some(mut stream) = failure_stream.take() {
-                            let _ = write_frame(
-                                &mut stream,
-                                &ControlMessage::PairFail {
-                                    reason: "the host could not start a handshake worker".into(),
-                                },
-                            );
-                        }
-                        inner.emit(RelayEvent::Error {
-                            message: format!("could not start peer handshake worker: {error}"),
-                        });
+        // Network interfaces can appear after the host starts (most notably
+        // USB tethering). Add the new listener before dropping the old one,
+        // preserving all session/PIN state while the control endpoint moves
+        // to the preferred address.
+        let desired = host_bind_addr(&inner.config());
+        if desired != bind_addr {
+            // A link-specific host also keeps a loopback listener for ADB.
+            // If the configured preference changes to `adb`, that secondary
+            // listener is already the desired endpoint; reuse it instead of
+            // trying to bind the same address a second time.
+            if listeners.iter().any(|(_, address)| *address == desired) {
+                listeners.retain(|(_, address)| *address != bind_addr);
+                bind_addr = desired;
+                if let Ok(mut current) = current_addr.lock() {
+                    *current = desired;
+                }
+                inner.start_advertiser(port, desired);
+                continue;
+            }
+            // A wildcard listener conflicts with every specific-address
+            // bind. Remove it only for the duration of this migration and
+            // restore the wildcard fallback if the new bind fails.
+            let replacing_wildcard = desired.is_none();
+            let replacing_current_wildcard = !replacing_wildcard && bind_addr.is_none();
+            if replacing_wildcard {
+                listeners.clear();
+            } else if replacing_current_wildcard {
+                listeners.retain(|(_, address)| *address != bind_addr);
+            }
+            match bind_control_listener(desired, port) {
+                Ok((next, next_addr, _)) => {
+                    if !replacing_wildcard && bind_addr.is_some() {
+                        listeners.retain(|(_, address)| *address != bind_addr);
                     }
+                    listeners.push((next, next_addr));
+                    if next_addr.is_some_and(|addr| addr != Ipv4Addr::LOCALHOST)
+                        && !listeners
+                            .iter()
+                            .any(|(_, address)| *address == Some(Ipv4Addr::LOCALHOST))
+                    {
+                        if let Ok((loopback, _, _)) =
+                            bind_control_listener(Some(Ipv4Addr::LOCALHOST), port)
+                        {
+                            listeners.push((loopback, Some(Ipv4Addr::LOCALHOST)));
+                        }
+                    }
+                    if next_addr.is_none() {
+                        listeners.retain(|(_, address)| *address != Some(Ipv4Addr::LOCALHOST));
+                    }
+                    bind_addr = next_addr;
+                    if let Ok(mut current) = current_addr.lock() {
+                        *current = next_addr;
+                    }
+                    inner.start_advertiser(port, next_addr);
+                }
+                Err(error) => {
+                    if replacing_wildcard || replacing_current_wildcard {
+                        if let Ok((fallback, fallback_addr, _)) =
+                            bind_control_listener(bind_addr, port)
+                        {
+                            listeners.push((fallback, fallback_addr));
+                            if fallback_addr.is_some_and(|addr| addr != Ipv4Addr::LOCALHOST) {
+                                if let Ok((loopback, _, _)) =
+                                    bind_control_listener(Some(Ipv4Addr::LOCALHOST), port)
+                                {
+                                    listeners.push((loopback, Some(Ipv4Addr::LOCALHOST)));
+                                }
+                            }
+                        }
+                    }
+                    inner.emit(RelayEvent::Error {
+                        message: format!("relay listener migration failed: {error}"),
+                    });
                 }
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+        let mut accepted = false;
+        for (listener, listener_addr) in &listeners {
+            match listener.accept() {
+                Ok((mut stream, addr)) => {
+                    accepted = true;
+                    let listener_addr = *listener_addr;
+                    let _ = stream.set_nonblocking(false);
+                    // Every accepted connection costs a thread that can sit in a
+                    // handshake read timeout before proving anything, so refuse
+                    // rather than let an unauthenticated peer spawn without bound.
+                    let Some(slot) = inner.claim_handshake() else {
+                        let _ = write_frame(
+                            &mut stream,
+                            &ControlMessage::PairFail {
+                                reason: "the host is busy; try again shortly".into(),
+                            },
+                        );
+                        continue;
+                    };
+                    // Keep a duplicate only for the exceptional path: the
+                    // worker owns the accepted stream, but a failed spawn should
+                    // still get one best-effort PairFail onto the peer.
+                    let mut failure_stream = stream.try_clone().ok();
+                    let worker_inner = Arc::clone(&inner);
+                    match spawn_named(
+                        format!("relay-peer-{addr}"),
+                        Box::new(move || {
+                            host_peer_thread(worker_inner, stream, addr, slot, listener_addr, port)
+                        }),
+                    ) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            if let Some(mut stream) = failure_stream.take() {
+                                let _ = write_frame(
+                                    &mut stream,
+                                    &ControlMessage::PairFail {
+                                        reason: "the host could not start a handshake worker"
+                                            .into(),
+                                    },
+                                );
+                            }
+                            inner.emit(RelayEvent::Error {
+                                message: format!("could not start peer handshake worker: {error}"),
+                            });
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => {}
+            }
+            if accepted {
+                break;
+            }
+        }
+        if !accepted {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -327,6 +550,27 @@ pub(crate) fn connect_peer(
     roles: Roles,
 ) {
     connect_peer_with_spawner(inner, id, target, pin, roles, spawn_named);
+}
+
+pub(crate) fn connect_trusted_peer(
+    inner: &Arc<EngineInner>,
+    id: SessionId,
+    target: SocketAddr,
+    peer_id: String,
+    secret: [u8; 32],
+    roles: Roles,
+) {
+    let worker_inner = Arc::clone(inner);
+    let failure_inner = Arc::clone(inner);
+    let worker: Worker =
+        Box::new(move || trusted_client_thread(worker_inner, id, target, peer_id, secret, roles));
+    if let Err(error) = spawn_named(format!("relay-trusted-client-{target}"), worker) {
+        fail_attempt(
+            &failure_inner,
+            id,
+            format!("could not start trusted connection worker: {error}"),
+        );
+    }
 }
 
 fn connect_peer_with_spawner(
@@ -383,7 +627,8 @@ fn host_peer_thread(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
     _slot: crate::HandshakeSlot,
-    bind_addr: Option<Ipv4Addr>,
+    _bind_addr: Option<Ipv4Addr>,
+    control_port: u16,
 ) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
@@ -404,7 +649,7 @@ fn host_peer_thread(
         Ok(message) => message,
         Err(_) => return,
     };
-    let (peer_name, peer_kind, client_pake) = match first {
+    let (peer_id, peer_name, peer_kind, client_pake, audio_over_tcp) = match first {
         ControlMessage::ResumeHello {
             session_id,
             client_nonce,
@@ -412,13 +657,61 @@ fn host_peer_thread(
             resume_peer_session(&inner, SessionId(session_id), stream, &client_nonce);
             return;
         }
+        ControlMessage::AudioHello {
+            session_id,
+            client_nonce,
+        } => {
+            host_audio_thread(&inner, stream, SessionId(session_id), &client_nonce);
+            return;
+        }
+        ControlMessage::TrustedHello {
+            protocol,
+            device_id,
+            device_name,
+            device_kind,
+            host_id,
+            transport,
+            roles,
+            sample_rate,
+            channels,
+            client_nonce,
+        } if protocol == PROTOCOL_VERSION as u32 => {
+            trusted_peer_thread(
+                &inner,
+                stream,
+                peer_addr,
+                control_port,
+                device_id,
+                device_name,
+                device_kind,
+                host_id,
+                transport,
+                roles,
+                sample_rate,
+                channels,
+                client_nonce,
+            );
+            return;
+        }
         ControlMessage::Hello {
             protocol,
+            device_id,
+            transport,
             device_name,
             device_kind,
             pake,
             ..
-        } if protocol == PROTOCOL_VERSION as u32 => (device_name, device_kind, pake),
+        } if protocol == PROTOCOL_VERSION as u32 => (
+            if device_id.trim().is_empty() {
+                device_name.clone()
+            } else {
+                device_id
+            },
+            device_name,
+            device_kind,
+            pake,
+            transport.eq_ignore_ascii_case("adb"),
+        ),
         _ => return,
     };
 
@@ -432,12 +725,239 @@ fn host_peer_thread(
         return;
     }
 
-    let host_name = inner.config().device_name;
-    let Some(keys) = host_pake_exchange(&inner, &mut stream, peer_addr, &client_pake, host_name)
-    else {
+    let host_config = inner.config();
+    let host_name = host_config.device_name;
+    let Some(keys) = host_pake_exchange(
+        &inner,
+        &mut stream,
+        peer_addr,
+        &client_pake,
+        host_name,
+        host_config.device_id,
+    ) else {
         return;
     };
     inner.clear_pairing_failures(peer_addr.ip());
+    host_session_after_auth(
+        inner,
+        stream,
+        peer_addr,
+        peer_id,
+        peer_name,
+        peer_kind,
+        keys,
+        audio_over_tcp,
+        control_port,
+        None,
+    );
+}
+
+/// Authenticate and install the secondary TCP stream opened by an ADB
+/// client. It is tied to the existing session's resume secret, so merely
+/// reaching the forwarded localhost port cannot inject audio.
+fn host_audio_thread(
+    inner: &Arc<EngineInner>,
+    mut stream: TcpStream,
+    id: SessionId,
+    client_nonce: &str,
+) {
+    let Some(record) = inner.session(id) else {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "unknown or expired audio session".into(),
+            },
+        );
+        return;
+    };
+    let Some(slot) = record.tcp_audio.clone() else {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "session does not use the TCP audio transport".into(),
+            },
+        );
+        return;
+    };
+    let Some(client_nonce) = decode_resume_nonce(client_nonce) else {
+        return;
+    };
+    let server_nonce = fresh_resume_nonce();
+    if write_frame(
+        &mut stream,
+        &ControlMessage::AudioChallenge {
+            server_nonce: hex_encode(&server_nonce),
+        },
+    )
+    .is_err()
+    {
+        return;
+    }
+    let proof = match read_frame(&mut stream) {
+        Ok(ControlMessage::AudioProof { proof }) => hex_decode(&proof).ok(),
+        _ => None,
+    };
+    let valid = proof.as_deref().is_some_and(|proof| {
+        crate::crypto::tcp_audio_proof(
+            &record.resume_secret,
+            record.wire_id,
+            &client_nonce,
+            &server_nonce,
+            Side::Client,
+        )
+        .ct_eq(proof)
+        .into()
+    });
+    if !valid {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "TCP audio authentication failed".into(),
+            },
+        );
+        return;
+    }
+    let server_proof = crate::crypto::tcp_audio_proof(
+        &record.resume_secret,
+        record.wire_id,
+        &client_nonce,
+        &server_nonce,
+        Side::Host,
+    );
+    if write_frame(
+        &mut stream,
+        &ControlMessage::AudioReady {
+            proof: hex_encode(&server_proof),
+        },
+    )
+    .is_err()
+    {
+        return;
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let _ = slot.install(stream);
+}
+
+fn trusted_peer_thread(
+    inner: &Arc<EngineInner>,
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    control_port: u16,
+    client_id: String,
+    peer_name: String,
+    peer_kind: DeviceKind,
+    host_id: String,
+    transport: String,
+    _roles: Roles,
+    _sample_rate: u32,
+    _channels: u16,
+    client_nonce: String,
+) {
+    let config = inner.config();
+    if host_id != config.device_id {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "trusted host identity did not match".into(),
+            },
+        );
+        return;
+    }
+    let Some(secret) = inner.trusted_secret(&client_id) else {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "peer is not trusted on this host".into(),
+            },
+        );
+        return;
+    };
+    let Some(client_nonce) = decode_resume_nonce(&client_nonce) else {
+        return;
+    };
+    let id = inner.next_session_id();
+    let server_nonce = fresh_resume_nonce();
+    if write_frame(
+        &mut stream,
+        &ControlMessage::TrustedChallenge {
+            server_nonce: hex_encode(&server_nonce),
+            session_id: id.0,
+            host_id: config.device_id.clone(),
+            host_name: config.device_name.clone(),
+        },
+    )
+    .is_err()
+    {
+        return;
+    }
+    let proof = match read_frame(&mut stream) {
+        Ok(ControlMessage::TrustedProof { proof }) => hex_decode(&proof).ok(),
+        _ => None,
+    };
+    let valid = proof.as_deref().is_some_and(|proof| {
+        crate::crypto::verify_trusted_proof(
+            &secret,
+            &client_id,
+            &config.device_id,
+            id.0,
+            &client_nonce,
+            &server_nonce,
+            proof,
+        )
+    });
+    if !valid {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "trusted authentication failed".into(),
+            },
+        );
+        return;
+    }
+    let keys = crate::crypto::trusted_session_keys(
+        &secret,
+        &client_id,
+        &config.device_id,
+        id.0,
+        &client_nonce,
+        &server_nonce,
+        Side::Host,
+    );
+    if write_frame(&mut stream, &ControlMessage::TrustedOk {}).is_err() {
+        return;
+    }
+    let audio_over_tcp = transport.eq_ignore_ascii_case("adb");
+    host_session_after_auth(
+        Arc::clone(inner),
+        stream,
+        peer_addr,
+        client_id,
+        peer_name,
+        peer_kind,
+        keys,
+        audio_over_tcp,
+        control_port,
+        Some(id),
+    );
+}
+
+/// Finish a fresh or trusted authentication with one common negotiated
+/// session setup. Keeping this after-auth path shared is important: a trusted
+/// reconnect must receive exactly the same role/codec validation and worker
+/// startup guarantees as a PIN pairing.
+fn host_session_after_auth(
+    inner: Arc<EngineInner>,
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    peer_id: String,
+    peer_name: String,
+    peer_kind: DeviceKind,
+    keys: SessionKeys,
+    audio_over_tcp: bool,
+    control_port: u16,
+    requested_id: Option<SessionId>,
+) {
     let Ok((control_sealer, control_opener)) = keys.control_channel() else {
         return;
     };
@@ -446,20 +966,29 @@ fn host_peer_thread(
         opener: control_opener,
     };
 
-    // The audio socket follows the listener onto the same link.
-    // Use the address captured when the TCP listener started. Re-selecting a
-    // link here could advertise one interface while the control listener is
-    // bound to another after a route change.
-    let bind_ip = bind_addr.unwrap_or(Ipv4Addr::UNSPECIFIED);
-    let socket = match UdpSocket::bind((bind_ip, 0)) {
+    // UDP sockets are still created for the normal transport. The TCP audio
+    // mode uses the same negotiated session record but carries sealed audio
+    // frames over its authenticated secondary stream.
+    let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
         Ok(socket) => socket,
-        Err(_) => return,
+        Err(error) => {
+            let _ = cipher.send(
+                &mut stream,
+                &ControlMessage::PairFail {
+                    reason: format!("could not open audio socket: {error}"),
+                },
+            );
+            return;
+        }
     };
     tune_audio_socket(&socket);
-    let Ok(audio_port) = socket.local_addr().map(|addr| addr.port()) else {
-        return;
+    let udp_audio_port = socket.local_addr().map(|addr| addr.port()).unwrap_or(0);
+    let audio_port = if audio_over_tcp {
+        control_port
+    } else {
+        udp_audio_port
     };
-    let id = inner.next_session_id();
+    let id = requested_id.unwrap_or_else(|| inner.next_session_id());
     if cipher
         .send(
             &mut stream,
@@ -519,10 +1048,12 @@ fn host_peer_thread(
         return;
     };
     let local = inner.config().local_format();
+    let tcp_audio = audio_over_tcp.then(TcpAudioSlot::new);
     let record = Arc::new(SessionRecord {
         id,
         wire_id: id.0,
         peer: PeerInfo {
+            id: peer_id,
             name: peer_name,
             kind: peer_kind,
             addr: peer_addr,
@@ -530,14 +1061,14 @@ fn host_peer_thread(
         roles,
         codec,
         format,
-        // Host perspective: it receives when the client emits, and sends
-        // when the client wants playback.
         sending: roles.receive,
         receiving: roles.emit,
         stop: Arc::new(AtomicBool::new(false)),
         bye_requested: AtomicBool::new(false),
         control_generation: AtomicU64::new(1),
         resume_secret: keys.resume_auth_key(),
+        trust_secret: Mutex::new(None),
+        tcp_audio,
         control_state: Mutex::new(ControlState::Active),
         peer_audio_addr: Mutex::new(None),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
@@ -566,15 +1097,9 @@ fn host_peer_thread(
         teardown(&inner, id, reason);
         return;
     }
-
-    // A worker can fail during its initialization (for example while
-    // constructing a codec) and tear the record down before this control
-    // thread gets here. Never send a successful handshake for a record that
-    // is no longer live.
     if !inner.session_alive(id) {
         return;
     }
-
     if cipher
         .send(&mut stream, &ControlMessage::SessionReady {})
         .is_err()
@@ -606,6 +1131,7 @@ fn host_pake_exchange(
     peer_addr: SocketAddr,
     client_pake: &str,
     host_name: String,
+    host_id: String,
 ) -> Option<SessionKeys> {
     let Ok(client_message) = hex_decode(client_pake) else {
         return None;
@@ -619,6 +1145,7 @@ fn host_pake_exchange(
             protocol: PROTOCOL_VERSION as u32,
             pake: hex_encode(&host_message),
             host_name,
+            device_id: host_id,
         },
     )
     .is_err()
@@ -910,6 +1437,156 @@ fn await_resume_grace_with_deadlines(
     }
 }
 
+fn trusted_client_thread(
+    inner: Arc<EngineInner>,
+    id: SessionId,
+    target: SocketAddr,
+    host_id: String,
+    secret: [u8; 32],
+    roles: Roles,
+) {
+    if roles.is_empty() {
+        fail_attempt(&inner, id, "no audio direction requested".into());
+        return;
+    }
+    let config = inner.config();
+    let bind = netlink::outbound_bind_addr(&netlink::local_links(), target, config.transport);
+    let mut stream = match netlink::connect_tcp(target, bind, CONNECT_TIMEOUT) {
+        Ok(stream) => stream,
+        Err(error) => {
+            fail_attempt(&inner, id, format!("trusted connection failed: {error}"));
+            return;
+        }
+    };
+    let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+    let client_nonce = fresh_resume_nonce();
+    if write_frame(
+        &mut stream,
+        &ControlMessage::TrustedHello {
+            protocol: PROTOCOL_VERSION as u32,
+            device_id: config.device_id.clone(),
+            device_name: config.device_name.clone(),
+            device_kind: config.device_kind,
+            host_id: host_id.clone(),
+            transport: config.transport.as_str().into(),
+            roles,
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            client_nonce: hex_encode(&client_nonce),
+        },
+    )
+    .is_err()
+    {
+        fail_attempt(
+            &inner,
+            id,
+            "trusted handshake failed while sending hello".into(),
+        );
+        return;
+    }
+    let (server_nonce, wire_id, returned_host_id, host_name) = match read_frame(&mut stream) {
+        Ok(ControlMessage::TrustedChallenge {
+            server_nonce,
+            session_id,
+            host_id,
+            host_name,
+        }) => match decode_resume_nonce(&server_nonce) {
+            Some(server_nonce) => (server_nonce, session_id, host_id, host_name),
+            None => {
+                fail_attempt(&inner, id, "trusted host sent a malformed challenge".into());
+                return;
+            }
+        },
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(
+                &inner,
+                id,
+                format!("host rejected trusted connection: {reason}"),
+            );
+            return;
+        }
+        Ok(_) | Err(_) => {
+            fail_attempt(
+                &inner,
+                id,
+                "trusted handshake response was malformed".into(),
+            );
+            return;
+        }
+    };
+    if returned_host_id != host_id {
+        fail_attempt(&inner, id, "trusted host identity did not match".into());
+        return;
+    }
+    let proof = crate::crypto::trusted_proof(
+        &secret,
+        &config.device_id,
+        &host_id,
+        wire_id,
+        &client_nonce,
+        &server_nonce,
+    );
+    if write_frame(
+        &mut stream,
+        &ControlMessage::TrustedProof {
+            proof: hex_encode(&proof),
+        },
+    )
+    .is_err()
+    {
+        fail_attempt(
+            &inner,
+            id,
+            "trusted handshake failed while proving credential".into(),
+        );
+        return;
+    }
+    match read_frame(&mut stream) {
+        Ok(ControlMessage::TrustedOk {}) => {}
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(
+                &inner,
+                id,
+                format!("host rejected trusted connection: {reason}"),
+            );
+            return;
+        }
+        Ok(_) | Err(_) => {
+            fail_attempt(&inner, id, "trusted handshake was not accepted".into());
+            return;
+        }
+    }
+    let keys = crate::crypto::trusted_session_keys(
+        &secret,
+        &config.device_id,
+        &host_id,
+        wire_id,
+        &client_nonce,
+        &server_nonce,
+        Side::Client,
+    );
+    let Ok((sealer, opener)) = keys.control_channel() else {
+        fail_attempt(
+            &inner,
+            id,
+            "trusted control keys could not be prepared".into(),
+        );
+        return;
+    };
+    client_session_after_auth(
+        inner,
+        id,
+        target,
+        roles,
+        config,
+        stream,
+        ControlCipher { sealer, opener },
+        host_name,
+        host_id,
+        keys,
+    );
+}
+
 /// Client side: connect, pair, negotiate, then keepalive watcher.
 fn client_thread(
     inner: Arc<EngineInner>,
@@ -941,6 +1618,8 @@ fn client_thread(
     let client = pake_start(Side::Client, &pin);
     let hello = ControlMessage::Hello {
         protocol: PROTOCOL_VERSION as u32,
+        device_id: config.device_id.clone(),
+        transport: config.transport.as_str().into(),
         device_name: config.device_name.clone(),
         device_kind: config.device_kind,
         roles,
@@ -953,12 +1632,13 @@ fn client_thread(
         return;
     }
 
-    let (host_pake, host_name) = match read_frame(&mut stream) {
+    let (host_pake, host_name, host_id) = match read_frame(&mut stream) {
         Ok(ControlMessage::Challenge {
             protocol,
             pake,
             host_name,
-        }) if protocol == PROTOCOL_VERSION as u32 => (pake, host_name),
+            device_id,
+        }) if protocol == PROTOCOL_VERSION as u32 => (pake, host_name, device_id),
         Ok(ControlMessage::PairFail { reason }) => {
             fail_attempt(&inner, id, format!("host rejected pairing: {reason}"));
             return;
@@ -1072,8 +1752,19 @@ fn client_thread(
         fail_attempt(&inner, id, "audio keys could not be prepared".into());
         return;
     };
+    let audio_over_tcp = config.transport == crate::TransportPreference::Adb;
+    // A legacy v3 host has no stable installation identity and does not know
+    // the enrollment messages. Do not turn a successful connection to one
+    // into an avoidable five-second wait for an acknowledgement that can
+    // never arrive, and never persist a name-only bearer credential.
+    let trust_secret =
+        (config.trust_new_peers && !host_id.trim().is_empty()).then(fresh_trust_secret);
 
-    let socket = match UdpSocket::bind((bind.unwrap_or(Ipv4Addr::UNSPECIFIED), 0)) {
+    // Do not pin the audio socket to the source address selected for the
+    // first TCP connection. The route may later move from Wi-Fi to USB; an
+    // unbound UDP socket lets the kernel select the correct source per
+    // destination while keeping the same authenticated session.
+    let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
         Ok(socket) => socket,
         Err(error) => {
             fail_attempt(&inner, id, format!("could not open audio socket: {error}"));
@@ -1088,13 +1779,21 @@ fn client_thread(
     let mut audio_sealer = audio_sealer;
     // Teach the host our UDP address before real audio flows. The announce is
     // sealed with the session key, so only the paired client can move it.
-    if let Ok(announce) = announce_packet(&mut audio_sealer, config.codec) {
-        let _ = socket.send_to(&announce, host_audio_addr);
+    if !audio_over_tcp {
+        if let Ok(announce) = announce_packet(&mut audio_sealer, config.codec) {
+            let _ = socket.send_to(&announce, host_audio_addr);
+        }
     }
+    let tcp_audio = audio_over_tcp.then(TcpAudioSlot::new);
     let record = Arc::new(SessionRecord {
         id,
         wire_id,
         peer: PeerInfo {
+            id: if host_id.trim().is_empty() {
+                host_name.clone()
+            } else {
+                host_id
+            },
             name: host_name,
             kind: DeviceKind::Other,
             addr: target,
@@ -1109,6 +1808,8 @@ fn client_thread(
         bye_requested: AtomicBool::new(false),
         control_generation: AtomicU64::new(1),
         resume_secret: keys.resume_auth_key(),
+        trust_secret: Mutex::new(trust_secret),
+        tcp_audio: tcp_audio.clone(),
         control_state: Mutex::new(ControlState::Active),
         peer_audio_addr: Mutex::new(Some(host_audio_addr)),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
@@ -1152,6 +1853,33 @@ fn client_thread(
         return;
     }
 
+    if audio_over_tcp {
+        let Some(tcp_audio) = tcp_audio else {
+            fail_attempt(&inner, id, "TCP audio transport was not initialized".into());
+            return;
+        };
+        if let Err(error) = open_tcp_audio(&inner, &record, &tcp_audio, target) {
+            teardown(
+                &inner,
+                id,
+                format!("could not open ADB audio channel: {error}"),
+            );
+            return;
+        }
+    }
+
+    let trusted_secret = record.trust_secret.lock().ok().and_then(|slot| *slot);
+    if let Some(secret) = trusted_secret {
+        enroll_trusted_peer(
+            &inner,
+            &record,
+            &mut stream,
+            &mut cipher,
+            &config.device_id,
+            secret,
+        );
+    }
+
     inner.emit(RelayEvent::SessionEstablished {
         id,
         peer: record.peer.clone(),
@@ -1160,6 +1888,304 @@ fn client_thread(
     });
 
     client_control_loop(inner, record, stream, cipher, socket, target);
+}
+
+/// Ask the host to retain the credential generated by an explicit PIN
+/// pairing. The embedding is notified only after the authenticated host
+/// acknowledges the write; otherwise it could persist a credential that the
+/// host never actually accepted and every later auto-connect would fail.
+fn enroll_trusted_peer(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    stream: &mut TcpStream,
+    cipher: &mut ControlCipher,
+    local_peer_id: &str,
+    secret: [u8; 32],
+) {
+    if cipher
+        .send(
+            stream,
+            &ControlMessage::TrustEnroll {
+                peer_id: local_peer_id.to_owned(),
+                secret: hex_encode(&secret),
+            },
+        )
+        .is_err()
+    {
+        return;
+    }
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    while Instant::now() < deadline {
+        match cipher.receive(stream) {
+            Ok(ControlMessage::TrustAccepted {}) => {
+                inner.emit(RelayEvent::TrustedPeerAvailable {
+                    peer_id: record.peer.id.clone(),
+                    peer: record.peer.clone(),
+                    secret,
+                });
+                return;
+            }
+            Ok(ControlMessage::TrustRejected { .. }) => return,
+            // Keepalive is legal immediately after SessionReady. It is a
+            // one-way liveness hint, so consuming it while waiting for the
+            // enrollment acknowledgement does not require a response.
+            Ok(_) => {}
+            Err(error) if is_timeout(&error) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Shared post-authentication client setup used by both PIN and trusted
+/// handshakes.
+fn client_session_after_auth(
+    inner: Arc<EngineInner>,
+    id: SessionId,
+    target: SocketAddr,
+    roles: Roles,
+    config: crate::EngineConfig,
+    mut stream: TcpStream,
+    mut cipher: ControlCipher,
+    host_name: String,
+    host_id: String,
+    keys: SessionKeys,
+) {
+    let (audio_port, wire_id) = match cipher.receive(&mut stream) {
+        Ok(ControlMessage::PairOk {
+            audio_port,
+            session_id,
+        }) => (audio_port, session_id),
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(&inner, id, format!("host rejected pairing: {reason}"));
+            return;
+        }
+        Ok(_) | Err(_) => {
+            fail_attempt(&inner, id, "pairing response was malformed".into());
+            return;
+        }
+    };
+    if cipher
+        .send(
+            &mut stream,
+            &ControlMessage::SessionStart {
+                roles,
+                codec: config.codec,
+                frame_ms: config.frame_ms,
+                sample_rate: config.sample_rate,
+                channels: config.channels,
+            },
+        )
+        .is_err()
+    {
+        fail_attempt(&inner, id, "handshake failed during session setup".into());
+        return;
+    }
+    match cipher.receive(&mut stream) {
+        Ok(ControlMessage::SessionReady {}) => {}
+        Ok(ControlMessage::PairFail { reason }) => {
+            fail_attempt(&inner, id, format!("host rejected session: {reason}"));
+            return;
+        }
+        Ok(_) | Err(_) => {
+            fail_attempt(
+                &inner,
+                id,
+                "host sent an unexpected session response".into(),
+            );
+            return;
+        }
+    }
+    let Ok((audio_sealer, audio_opener)) = keys.audio_channel() else {
+        fail_attempt(&inner, id, "audio keys could not be prepared".into());
+        return;
+    };
+    let audio_over_tcp = config.transport == crate::TransportPreference::Adb;
+    // This helper is used for an already authenticated trusted reconnect;
+    // trusted credentials are enrolled only by the explicit PIN path.
+    let trust_secret = None;
+    let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+        Ok(socket) => socket,
+        Err(error) => {
+            fail_attempt(&inner, id, format!("could not open audio socket: {error}"));
+            return;
+        }
+    };
+    tune_audio_socket(&socket);
+    let host_audio_addr = SocketAddr::new(target.ip(), audio_port);
+    let format = AudioFormat::new(config.sample_rate, config.channels, config.frame_ms);
+    let local = config.local_format();
+    let mut audio_sealer = audio_sealer;
+    if !audio_over_tcp {
+        if let Ok(announce) = announce_packet(&mut audio_sealer, config.codec) {
+            let _ = socket.send_to(&announce, host_audio_addr);
+        }
+    }
+    let tcp_audio = audio_over_tcp.then(TcpAudioSlot::new);
+    let record = Arc::new(SessionRecord {
+        id,
+        wire_id,
+        peer: PeerInfo {
+            id: if host_id.trim().is_empty() {
+                host_name.clone()
+            } else {
+                host_id
+            },
+            name: host_name,
+            kind: DeviceKind::Other,
+            addr: target,
+        },
+        roles,
+        codec: config.codec,
+        format,
+        sending: roles.emit,
+        receiving: roles.receive,
+        stop: Arc::new(AtomicBool::new(false)),
+        bye_requested: AtomicBool::new(false),
+        control_generation: AtomicU64::new(1),
+        resume_secret: keys.resume_auth_key(),
+        trust_secret: Mutex::new(trust_secret),
+        tcp_audio: tcp_audio.clone(),
+        control_state: Mutex::new(ControlState::Active),
+        peer_audio_addr: Mutex::new(Some(host_audio_addr)),
+        outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+        incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+        capture_convert: Mutex::new(prepared_capture_converter(local, format)),
+        audio_sealer: Mutex::new(audio_sealer),
+        audio_opener: Mutex::new(audio_opener),
+    });
+    if !inner.insert_session(Arc::clone(&record)) {
+        let reason = "the local session limit was reached".to_string();
+        let _ = cipher.send(
+            &mut stream,
+            &ControlMessage::Bye {
+                reason: reason.clone(),
+            },
+        );
+        fail_attempt(&inner, id, reason);
+        return;
+    }
+    let socket = Arc::new(socket);
+    if let Err(reason) = spawn_session_workers(&inner, &record, &socket, false) {
+        let _ = cipher.send(
+            &mut stream,
+            &ControlMessage::Bye {
+                reason: reason.clone(),
+            },
+        );
+        teardown(&inner, id, reason);
+        return;
+    }
+    if !inner.session_alive(id) {
+        return;
+    }
+    if let Some(tcp_audio) = tcp_audio {
+        if let Err(error) = open_tcp_audio(&inner, &record, &tcp_audio, target) {
+            teardown(
+                &inner,
+                id,
+                format!("could not open ADB audio channel: {error}"),
+            );
+            return;
+        }
+    }
+    inner.emit(RelayEvent::SessionEstablished {
+        id,
+        peer: record.peer.clone(),
+        roles,
+        codec: config.codec,
+    });
+    client_control_loop(inner, record, stream, cipher, socket, target);
+}
+
+fn open_tcp_audio(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    slot: &Arc<TcpAudioSlot>,
+    target: SocketAddr,
+) -> std::io::Result<()> {
+    let config = inner.config();
+    let bind = netlink::outbound_bind_addr(&netlink::local_links(), target, config.transport);
+    let mut stream = netlink::connect_tcp(target, bind, CONNECT_TIMEOUT)?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let client_nonce = fresh_resume_nonce();
+    write_frame(
+        &mut stream,
+        &ControlMessage::AudioHello {
+            session_id: record.wire_id,
+            client_nonce: hex_encode(&client_nonce),
+        },
+    )?;
+    let server_nonce = match read_frame(&mut stream)? {
+        ControlMessage::AudioChallenge { server_nonce } => decode_resume_nonce(&server_nonce)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed TCP audio challenge",
+                )
+            })?,
+        ControlMessage::PairFail { reason } => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                reason,
+            ))
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected TCP audio challenge",
+            ))
+        }
+    };
+    let proof = crate::crypto::tcp_audio_proof(
+        &record.resume_secret,
+        record.wire_id,
+        &client_nonce,
+        &server_nonce,
+        Side::Client,
+    );
+    write_frame(
+        &mut stream,
+        &ControlMessage::AudioProof {
+            proof: hex_encode(&proof),
+        },
+    )?;
+    let server_proof = match read_frame(&mut stream)? {
+        ControlMessage::AudioReady { proof } => hex_decode(&proof).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed TCP audio response",
+            )
+        })?,
+        ControlMessage::PairFail { reason } => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                reason,
+            ))
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected TCP audio response",
+            ))
+        }
+    };
+    let expected = crate::crypto::tcp_audio_proof(
+        &record.resume_secret,
+        record.wire_id,
+        &client_nonce,
+        &server_nonce,
+        Side::Host,
+    );
+    if !bool::from(expected.ct_eq(&server_proof)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "TCP audio host authentication failed",
+        ));
+    }
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    slot.install(stream)
 }
 
 /// Client-side control watch: on a link drop the host is re-dialed and the
@@ -1186,23 +2212,43 @@ fn client_control_loop(
                 message: format!("control link to host lost ({reason}); attempting to resume"),
             });
             match resume_client_control(&inner, &record, target) {
-                Some(resumed) => {
-                    // Re-announce our UDP address from the real audio socket:
-                    // the route may have changed link (e.g. Wi-Fi to USB
-                    // tethering), and the host must learn the new source
-                    // address. The announce is sealed with the session's
-                    // unchanged audio key, which is exactly what authorises
-                    // the host to follow us.
-                    if let (Ok(slot), Ok(mut sealer)) =
-                        (record.peer_audio_addr.lock(), record.audio_sealer.lock())
-                    {
-                        if let Some(addr) = *slot {
+                Some((resumed_stream, resumed_cipher, resumed_target)) => {
+                    if let Some(tcp_audio) = record.tcp_audio.clone() {
+                        if let Err(error) =
+                            open_tcp_audio(&inner, &record, &tcp_audio, resumed_target)
+                        {
+                            teardown(
+                                &inner,
+                                record.id,
+                                format!("could not restore ADB audio channel: {error}"),
+                            );
+                            return true;
+                        }
+                    } else {
+                        // Re-announce our UDP address from the real audio socket:
+                        // the route may have changed link (e.g. Wi-Fi to USB
+                        // tethering), and the host must learn the new source
+                        // address. The announce is sealed with the session's
+                        // unchanged audio key, which is exactly what authorises
+                        // the host to follow us.
+                        let audio_port = record
+                            .peer_audio_addr
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.map(|addr| addr.port()));
+                        if let (Some(audio_port), Ok(mut slot), Ok(mut sealer)) = (
+                            audio_port,
+                            record.peer_audio_addr.lock(),
+                            record.audio_sealer.lock(),
+                        ) {
+                            let addr = SocketAddr::new(resumed_target.ip(), audio_port);
+                            *slot = Some(addr);
                             if let Ok(announce) = announce_packet(&mut sealer, socket_codec) {
                                 let _ = socket.send_to(&announce, addr);
                             }
                         }
                     }
-                    stream = Some(resumed);
+                    stream = Some((resumed_stream, resumed_cipher));
                     false
                 }
                 None => {
@@ -1223,7 +2269,7 @@ fn resume_client_control(
     inner: &Arc<EngineInner>,
     record: &Arc<SessionRecord>,
     target: SocketAddr,
-) -> Option<(TcpStream, ControlCipher)> {
+) -> Option<(TcpStream, ControlCipher, SocketAddr)> {
     let config = inner.config();
     let mut backoff = Duration::from_millis(500);
     for _ in 0..RESUME_ATTEMPTS {
@@ -1233,11 +2279,18 @@ fn resume_client_control(
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(Duration::from_secs(4));
 
-        let links = netlink::local_links();
-        let bind = netlink::outbound_bind_addr(&links, target, config.transport);
-        let mut stream = match netlink::connect_tcp(target, bind, CONNECT_TIMEOUT) {
-            Ok(stream) => stream,
-            Err(_) => continue,
+        let targets = resume_targets(inner, record, target);
+        let mut connected = None;
+        for candidate in targets {
+            let links = netlink::local_links();
+            let bind = netlink::outbound_bind_addr(&links, candidate, config.transport);
+            if let Ok(stream) = netlink::connect_tcp(candidate, bind, CONNECT_TIMEOUT) {
+                connected = Some((stream, candidate));
+                break;
+            }
+        }
+        let Some((mut stream, resumed_target)) = connected else {
+            continue;
         };
         let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
         let client_nonce = fresh_resume_nonce();
@@ -1305,7 +2358,7 @@ fn resume_client_control(
         match cipher.receive(&mut stream) {
             Ok(ControlMessage::ResumeOk {}) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                return Some((stream, cipher));
+                return Some((stream, cipher, resumed_target));
             }
             Ok(ControlMessage::PairFail { reason }) => {
                 inner.emit(RelayEvent::Error {
@@ -1317,6 +2370,29 @@ fn resume_client_control(
         }
     }
     None
+}
+
+/// Return the original destination plus addresses discovered for the same
+/// stable peer. Discovery is deliberately identity-scoped: a nearby host
+/// appearing on USB must not become a resume target merely because its port
+/// matches.
+fn resume_targets(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    original: SocketAddr,
+) -> Vec<SocketAddr> {
+    let mut targets = vec![original];
+    for peer in inner.discovered_peers() {
+        if peer.id == record.peer.id
+            || (record.peer.id == record.peer.name && peer.name == record.peer.name)
+        {
+            let candidate = SocketAddr::new(peer.addr.ip(), original.port());
+            if !targets.contains(&candidate) {
+                targets.push(candidate);
+            }
+        }
+    }
+    targets
 }
 
 /// Build this session's transmit converter with every buffer already grown
@@ -1404,8 +2480,81 @@ fn run_rx(
     host_side: bool,
     ready: Option<SyncSender<Result<(), String>>>,
 ) {
-    request_realtime_thread();
     let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
+    run_rx_source(
+        inner,
+        record,
+        host_side,
+        ready,
+        move |datagram| match socket.recv_from(datagram) {
+            Ok((len, addr)) => Ok(Some((len, Some(addr)))),
+            Err(error) if is_timeout(&error) => Ok(None),
+            Err(error) => Err(error),
+        },
+    );
+}
+
+fn read_tcp_audio_frame(stream: &mut impl Read, output: &mut [u8]) -> std::io::Result<usize> {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length == 0 || length > output.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "TCP audio frame is out of range",
+        ));
+    }
+    stream.read_exact(&mut output[..length])?;
+    Ok(length)
+}
+
+fn write_tcp_audio_frame(stream: &mut impl Write, datagram: &[u8]) -> std::io::Result<()> {
+    let length = u32::try_from(datagram.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP audio frame is too large",
+        )
+    })?;
+    stream.write_all(&length.to_le_bytes())?;
+    stream.write_all(datagram)?;
+    stream.flush()
+}
+
+fn run_tcp_rx(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    audio: Arc<TcpAudioSlot>,
+    ready: Option<SyncSender<Result<(), String>>>,
+) {
+    let source_record = Arc::clone(&record);
+    run_rx_source(inner, record, false, ready, move |datagram| loop {
+        let Some(connection) = audio.wait(&source_record.stop) else {
+            return Ok(None);
+        };
+        let result = connection
+            .reader
+            .lock()
+            .map_err(|_| std::io::Error::other("TCP audio reader is poisoned"))
+            .and_then(|mut reader| read_tcp_audio_frame(&mut *reader, datagram));
+        match result {
+            Ok(len) => return Ok(Some((len, None))),
+            Err(error) if is_timeout(&error) => return Ok(None),
+            Err(_) => {
+                audio.clear(&connection);
+                continue;
+            }
+        }
+    });
+}
+
+fn run_rx_source(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    host_side: bool,
+    ready: Option<SyncSender<Result<(), String>>>,
+    mut receive: impl FnMut(&mut [u8]) -> std::io::Result<Option<(usize, Option<SocketAddr>)>>,
+) {
+    request_realtime_thread();
     let local = inner.config().local_format();
     // Bound what a stalled playback consumer can turn into standing delay:
     // decoded audio waiting here is latency, not safety. The depth is this
@@ -1450,13 +2599,14 @@ fn run_rx(
         if !inner.session_alive(record.id) {
             break;
         }
-        let (len, addr) = match socket.recv_from(&mut datagram) {
+        let Some((len, addr)) = (match receive(&mut datagram) {
             Ok(result) => result,
-            Err(error) if is_timeout(&error) => continue,
             Err(error) => {
                 fail_session(&inner, &record, format!("audio socket failed: {error}"));
                 return;
             }
+        }) else {
+            continue;
         };
         let Some(packet) = AudioPacket::parse(&datagram[..len]) else {
             continue;
@@ -1479,9 +2629,11 @@ fn run_rx(
             // Keep the peer's audio address current: after a link roam the
             // client may return from a different source address. Only an
             // authenticated datagram gets to move it.
-            if let Ok(mut slot) = record.peer_audio_addr.lock() {
-                if *slot != Some(addr) {
-                    *slot = Some(addr);
+            if let Some(addr) = addr {
+                if let Ok(mut slot) = record.peer_audio_addr.lock() {
+                    if *slot != Some(addr) {
+                        *slot = Some(addr);
+                    }
                 }
             }
         }
@@ -1582,6 +2734,76 @@ fn run_tx(
     socket: Arc<UdpSocket>,
     ready: Option<SyncSender<Result<(), String>>>,
 ) {
+    let ready_record = Arc::clone(&record);
+    let address_record = Arc::clone(&record);
+    run_tx_source(
+        inner,
+        record,
+        ready,
+        move || {
+            ready_record
+                .peer_audio_addr
+                .lock()
+                .ok()
+                .and_then(|slot| *slot)
+                .is_some()
+        },
+        move |datagram| {
+            let address = address_record
+                .peer_audio_addr
+                .lock()
+                .ok()
+                .and_then(|slot| *slot)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "peer audio address unknown",
+                    )
+                })?;
+            socket.send_to(datagram, address).map(|_| ())
+        },
+    );
+}
+
+fn run_tcp_tx(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    audio: Arc<TcpAudioSlot>,
+    ready: Option<SyncSender<Result<(), String>>>,
+) {
+    let send_audio = Arc::clone(&audio);
+    run_tx_source(
+        inner,
+        record,
+        ready,
+        move || send_audio.current().is_some(),
+        move |datagram| {
+            let Some(connection) = audio.current() else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "TCP audio connection is not ready",
+                ));
+            };
+            let result = connection
+                .writer
+                .lock()
+                .map_err(|_| std::io::Error::other("TCP audio writer is poisoned"))
+                .and_then(|mut writer| write_tcp_audio_frame(&mut *writer, datagram));
+            if result.is_err() {
+                audio.clear(&connection);
+            }
+            result
+        },
+    );
+}
+
+fn run_tx_source(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    ready: Option<SyncSender<Result<(), String>>>,
+    mut transport_ready: impl FnMut() -> bool,
+    mut send_datagram: impl FnMut(&[u8]) -> std::io::Result<()>,
+) {
     request_realtime_thread();
     // Same reasoning as the receive side: captured audio that cannot be sent
     // promptly is better dropped than delivered late.
@@ -1608,13 +2830,13 @@ fn run_tx(
         if !inner.session_alive(record.id) {
             break;
         }
-        // The host learns the peer address from received datagrams; wait
-        // briefly until it is known.
-        let peer_addr = record.peer_audio_addr.lock().ok().and_then(|slot| *slot);
-        let Some(peer_addr) = peer_addr else {
+        // The host learns the peer address from an authenticated announce;
+        // TCP audio waits for the authenticated secondary stream. Either
+        // transport can become ready again after a link migration.
+        if !transport_ready() {
             std::thread::sleep(Duration::from_millis(10));
             continue;
-        };
+        }
         let Some(samples) = record
             .outgoing
             .pop_exact_timeout(frame_samples, FRAME_WAIT_TIMEOUT)
@@ -1644,7 +2866,10 @@ fn run_tx(
                         }
                     }
                 };
-                if let Err(error) = socket.send_to(&datagram, peer_addr) {
+                if let Err(error) = send_datagram(&datagram) {
+                    if is_timeout(&error) {
+                        continue;
+                    }
                     fail_session(&inner, &record, format!("audio send failed: {error}"));
                     return;
                 }
@@ -1697,6 +2922,37 @@ fn watch_control(
         }
         match cipher.receive(&mut stream) {
             Ok(ControlMessage::Bye { reason }) => return ControlExit::PeerBye(reason),
+            Ok(ControlMessage::TrustEnroll { peer_id, secret }) => {
+                let rejected = if !inner.config().trust_new_peers {
+                    Some("this host requires explicit PIN pairing".to_string())
+                } else if peer_id != record.peer.id {
+                    Some("trusted peer identity did not match the session".to_string())
+                } else {
+                    match hex_decode(&secret)
+                        .ok()
+                        .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                    {
+                        Some(secret) => {
+                            inner.remember_trusted_peer(peer_id, secret);
+                            if let Ok(mut enrolled) = record.trust_secret.lock() {
+                                *enrolled = Some(secret);
+                            }
+                            inner.emit(RelayEvent::TrustedPeerAvailable {
+                                peer_id: record.peer.id.clone(),
+                                peer: record.peer.clone(),
+                                secret,
+                            });
+                            let _ = cipher.send(&mut stream, &ControlMessage::TrustAccepted {});
+                            None
+                        }
+                        None => Some("trusted credential was malformed".to_string()),
+                    }
+                };
+                if let Some(reason) = rejected {
+                    let _ = cipher.send(&mut stream, &ControlMessage::TrustRejected { reason });
+                }
+                last_seen = Instant::now();
+            }
             Ok(_) => last_seen = Instant::now(),
             Err(error) if is_timeout(&error) => {}
             Err(_) => return ControlExit::Dropped("control channel closed".into()),
@@ -1779,6 +3035,7 @@ mod tests {
                     peer,
                     &client_message,
                     "probe-host".into(),
+                    "probe-host-id".into(),
                 )
             });
 
@@ -1828,6 +3085,7 @@ mod tests {
             id: SessionId(id),
             wire_id: id,
             peer: PeerInfo {
+                id: "resume-peer-id".into(),
                 name: "resume-peer".into(),
                 kind: DeviceKind::Other,
                 addr: "127.0.0.1:1".parse().expect("peer address"),
@@ -1841,6 +3099,8 @@ mod tests {
             bye_requested: AtomicBool::new(false),
             control_generation: AtomicU64::new(1),
             resume_secret: client_keys.resume_auth_key(),
+            trust_secret: Mutex::new(None),
+            tcp_audio: None,
             control_state: Mutex::new(ControlState::Active),
             peer_audio_addr: Mutex::new(None),
             outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
@@ -1874,7 +3134,7 @@ mod tests {
             resume_peer_session(&server_inner, SessionId(session_id), stream, &client_nonce);
         });
 
-        let (stream, cipher) = resume_client_control(&inner, &record, target)
+        let (stream, cipher, _) = resume_client_control(&inner, &record, target)
             .expect("the original owner proves the session secret");
         assert_eq!(cipher.sealer.next_counter(), 0);
         assert_eq!(
@@ -1961,6 +3221,67 @@ mod tests {
             ControlState::Active
         );
         teardown(&inner, record.id, "resume replacement test complete".into());
+    }
+
+    #[test]
+    fn resume_targets_follow_the_same_stable_peer_across_addresses() {
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let record = resumable_session(7_007);
+        assert!(inner.insert_session(Arc::clone(&record)));
+        let original: SocketAddr = "192.168.1.20:48123".parse().unwrap();
+        let handle = crate::RelayHandle {
+            inner: Arc::clone(&inner),
+        };
+        handle.update_discovered_peers(vec![
+            PeerInfo {
+                id: "resume-peer-id".into(),
+                name: "resume-peer".into(),
+                kind: DeviceKind::Other,
+                addr: "192.168.42.129:48123".parse().unwrap(),
+            },
+            PeerInfo {
+                id: "unrelated-peer".into(),
+                name: "resume-peer".into(),
+                kind: DeviceKind::Other,
+                addr: "10.0.0.5:48123".parse().unwrap(),
+            },
+        ]);
+
+        assert_eq!(
+            resume_targets(&inner, &record, original),
+            vec![original, "192.168.42.129:48123".parse().unwrap(),]
+        );
+        teardown(&inner, record.id, "resume target test complete".into());
+    }
+
+    #[test]
+    fn replacing_tcp_audio_closes_the_stale_forwarded_stream() {
+        use std::io::Read as _;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = listener.local_addr().unwrap();
+        let first_client = TcpStream::connect(target).unwrap();
+        let (mut first_server, _) = listener.accept().unwrap();
+        first_server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        let slot = TcpAudioSlot::new();
+        slot.install(first_client).unwrap();
+        let first = slot.current().expect("first forwarded stream is installed");
+
+        let second_client = TcpStream::connect(target).unwrap();
+        let (_second_server, _) = listener.accept().unwrap();
+        slot.install(second_client).unwrap();
+        let second = slot.current().expect("replacement stream is installed");
+        assert!(!Arc::ptr_eq(&first, &second));
+
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            first_server.read(&mut byte).unwrap(),
+            0,
+            "installing a resumed ADB stream must wake workers on the old one"
+        );
     }
 
     #[test]

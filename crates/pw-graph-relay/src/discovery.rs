@@ -23,6 +23,7 @@ pub const TXT_VERSION: &str = "1";
 
 /// Build the TXT record for an advertised relay service.
 pub fn txt_properties(
+    device_id: &str,
     device_name: &str,
     device_kind: DeviceKind,
     caps: Roles,
@@ -37,6 +38,7 @@ pub fn txt_properties(
     }
     let mut properties = BTreeMap::new();
     properties.insert("v".into(), TXT_VERSION.into());
+    properties.insert("id".into(), device_id.to_string());
     properties.insert("name".into(), device_name.to_string());
     properties.insert("kind".into(), device_kind.as_str().into());
     properties.insert("caps".into(), caps_value.join(","));
@@ -50,6 +52,7 @@ pub fn txt_properties(
 pub struct DiscoveredMeta {
     pub version: String,
     pub name: Option<String>,
+    pub device_id: Option<String>,
     pub kind: DeviceKind,
     pub caps_emit: bool,
     pub caps_receive: bool,
@@ -66,6 +69,7 @@ pub fn parse_txt_properties(properties: &BTreeMap<String, String>) -> Discovered
     DiscoveredMeta {
         version: properties.get("v").cloned().unwrap_or_default(),
         name: properties.get("name").cloned(),
+        device_id: properties.get("id").cloned(),
         kind,
         caps_emit: caps.split(',').any(|token| token.trim() == "emit"),
         caps_receive: caps.split(',').any(|token| token.trim() == "recv"),
@@ -82,6 +86,7 @@ pub(crate) struct Advertiser {
 
 impl Advertiser {
     fn start(
+        device_id: &str,
         device_name: &str,
         device_kind: DeviceKind,
         port: u16,
@@ -92,7 +97,7 @@ impl Advertiser {
         let daemon = ServiceDaemon::new()
             .map_err(|error| RelayError::Engine(format!("mDNS daemon failed: {error}")))?;
         let properties: Vec<(String, String)> =
-            txt_properties(device_name, device_kind, caps, link)
+            txt_properties(device_id, device_name, device_kind, caps, link)
                 .into_iter()
                 .collect();
         // Advertise precisely the address selected for the listener. The
@@ -223,6 +228,11 @@ fn browse_loop(
                     .get_addresses_v4()
                     .iter()
                     .map(|addr| PeerInfo {
+                        id: meta
+                            .device_id
+                            .clone()
+                            .filter(|id| !id.trim().is_empty())
+                            .unwrap_or_else(|| service_id.clone()),
                         name: name.clone(),
                         kind: meta.kind,
                         addr: SocketAddr::new(IpAddr::V4(**addr), info.get_port()),
@@ -245,6 +255,14 @@ fn browse_loop(
 impl EngineInner {
     pub(crate) fn start_advertiser(&self, port: u16, bind_addr: Option<std::net::Ipv4Addr>) {
         let config = self.config();
+        if config.transport == crate::TransportPreference::Adb {
+            // ADB forwarding is an explicit localhost transport, not a
+            // discoverable network service. Do not publish a loopback mDNS
+            // record or leave an older advertisement behind after switching
+            // an already-running host into ADB mode.
+            self.stop_advertiser();
+            return;
+        }
         let links = crate::netlink::local_links();
         let link = bind_addr.and_then(|addr| {
             links
@@ -252,7 +270,17 @@ impl EngineInner {
                 .find(|link| link.addr == addr)
                 .map(|link| link.kind)
         });
+        // Stop the previous daemon before registering the same stable service
+        // name at a new address. This matters when a running host migrates
+        // from Wi-Fi to USB: two daemons advertising one fullname can leave
+        // stale addresses in mDNS caches or make the replacement registration
+        // fail as a name collision.
+        let previous = self.advertiser.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(previous) = previous {
+            previous.stop();
+        }
         match Advertiser::start(
+            &config.device_id,
             &config.device_name,
             config.device_kind,
             port,
@@ -262,9 +290,6 @@ impl EngineInner {
         ) {
             Ok(advertiser) => {
                 if let Ok(mut slot) = self.advertiser.lock() {
-                    if let Some(previous) = slot.take() {
-                        previous.stop();
-                    }
                     *slot = Some(advertiser);
                 }
             }
@@ -449,12 +474,14 @@ mod tests {
     #[test]
     fn txt_properties_round_trip() {
         let properties = txt_properties(
+            "studio-id",
             "studio-pc",
             DeviceKind::Linux,
             Roles::both(),
             Some(LinkKind::Wifi),
         );
         assert_eq!(properties.get("v").map(String::as_str), Some(TXT_VERSION));
+        assert_eq!(properties.get("id").map(String::as_str), Some("studio-id"));
         assert_eq!(
             properties.get("name").map(String::as_str),
             Some("studio-pc")
@@ -469,6 +496,7 @@ mod tests {
         let meta = parse_txt_properties(&properties);
         assert_eq!(meta.version, TXT_VERSION);
         assert_eq!(meta.name.as_deref(), Some("studio-pc"));
+        assert_eq!(meta.device_id.as_deref(), Some("studio-id"));
         assert_eq!(meta.kind, DeviceKind::Linux);
         assert!(meta.caps_emit);
         assert!(meta.caps_receive);
@@ -488,11 +516,13 @@ mod tests {
         let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
         let inner = &engine.inner;
         let first = PeerInfo {
+            id: "host-id".into(),
             name: "host".into(),
             kind: DeviceKind::Linux,
             addr: "192.168.1.10:48123".parse().unwrap(),
         };
         let second = PeerInfo {
+            id: "host-id".into(),
             name: "host".into(),
             kind: DeviceKind::Linux,
             addr: "192.168.1.11:48123".parse().unwrap(),
@@ -509,6 +539,7 @@ mod tests {
         let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
         let inner = &engine.inner;
         let peer = PeerInfo {
+            id: "usb-host-id".into(),
             name: "usb-host".into(),
             kind: DeviceKind::Linux,
             addr: "192.168.42.1:48123".parse().unwrap(),
@@ -583,11 +614,13 @@ mod tests {
         let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
         let inner = &engine.inner;
         let mdns_peer = PeerInfo {
+            id: "wifi-host-id".into(),
             name: "wifi-host".into(),
             kind: DeviceKind::Linux,
             addr: "192.168.1.20:48123".parse().unwrap(),
         };
         let usb_peer = PeerInfo {
+            id: "usb-host-id".into(),
             name: "usb-host".into(),
             kind: DeviceKind::Linux,
             addr: "192.168.42.1:48123".parse().unwrap(),
@@ -602,6 +635,7 @@ mod tests {
     #[test]
     fn emit_only_caps_omit_recv() {
         let properties = txt_properties(
+            "phone-id",
             "phone",
             DeviceKind::Android,
             Roles::emit_only(),

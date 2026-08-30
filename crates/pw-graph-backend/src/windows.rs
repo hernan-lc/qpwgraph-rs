@@ -270,8 +270,12 @@ impl WindowsAudioDriver {
         frame_ms: u16,
         transport: super::api::RelayTransportPreference,
         roles: super::api::RelayRoles,
+        device_id: String,
+        trusted_peers: Vec<super::api::RelayTrustedPeer>,
+        trust_new_peers: bool,
     ) -> pw_graph_relay::EngineConfig {
         pw_graph_relay::EngineConfig {
+            device_id,
             device_name,
             device_kind: super::api::RelayDeviceKind::Other,
             pin,
@@ -282,6 +286,8 @@ impl WindowsAudioDriver {
             channels: crate::windows_relay::RELAY_CHANNELS,
             client_roles: roles,
             transport,
+            trusted_peers,
+            trust_new_peers,
             // The WASAPI relay endpoints run 48 kHz stereo, so that is this
             // machine's local geometry; sessions negotiating anything else are
             // converted rather than misinterpreted.
@@ -532,6 +538,9 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             // A host serves whatever a peer asks for; the client's own roles
             // only matter when this machine is the one connecting out.
             super::api::RelayRoles::both(),
+            request.device_id,
+            request.trusted_peers,
+            request.trust_new_peers,
         );
         let devices = self.ensure_relay(config)?;
         devices
@@ -561,22 +570,81 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         // the render stream. What Windows cannot do is expose the received
         // audio to *other applications* as a microphone -- a routing limit, not
         // a role limit -- so neither role is refused here.
-        let device_name = self
-            .relay
-            .as_ref()
-            .map(|devices| devices.handle().config().device_name)
-            .unwrap_or_else(|| "qpwgraph-rs".into());
-        let config = Self::relay_config(
-            device_name,
-            pin.to_owned(),
-            0,
-            super::api::RelayCodecKind::Opus,
-            10,
-            super::api::RelayTransportPreference::Auto,
-            roles,
-        );
-        let devices = self.ensure_relay(config)?;
+        if self.relay.is_none() {
+            let config = Self::relay_config(
+                "qpwgraph-rs".into(),
+                pin.to_owned(),
+                0,
+                super::api::RelayCodecKind::Opus,
+                10,
+                super::api::RelayTransportPreference::Auto,
+                roles,
+                pw_graph_relay::generate_device_id(),
+                Vec::new(),
+                true,
+            );
+            self.ensure_relay(config)?;
+        }
+        let devices = self.relay.as_ref().expect("relay was just created");
         Ok(devices.handle().connect(target, pin, roles))
+    }
+
+    fn relay_connect_trusted(
+        &mut self,
+        target: std::net::SocketAddr,
+        peer_id: &str,
+        secret: [u8; 32],
+        roles: super::api::RelayRoles,
+    ) -> BackendResult<super::api::RelaySessionId> {
+        if self.relay.is_none() {
+            let config = Self::relay_config(
+                "qpwgraph-rs".into(),
+                String::new(),
+                0,
+                super::api::RelayCodecKind::Opus,
+                10,
+                super::api::RelayTransportPreference::Auto,
+                roles,
+                pw_graph_relay::generate_device_id(),
+                Vec::new(),
+                false,
+            );
+            self.ensure_relay(config)?;
+        }
+        let devices = self.relay.as_ref().expect("relay was just created");
+        Ok(devices
+            .handle()
+            .connect_trusted(target, peer_id, secret, roles))
+    }
+
+    fn relay_configure_identity(
+        &mut self,
+        device_id: String,
+        trusted_peers: Vec<super::api::RelayTrustedPeer>,
+        transport: super::api::RelayTransportPreference,
+    ) -> BackendResult<()> {
+        if let Some(devices) = self.relay.as_ref() {
+            let mut config = devices.handle().config();
+            config.device_id = device_id;
+            config.trusted_peers = trusted_peers;
+            config.transport = transport;
+            devices.handle().update_config(config);
+        } else {
+            let config = Self::relay_config(
+                "qpwgraph-rs".into(),
+                String::new(),
+                0,
+                super::api::RelayCodecKind::Opus,
+                10,
+                transport,
+                super::api::RelayRoles::both(),
+                device_id,
+                trusted_peers,
+                true,
+            );
+            let _ = self.ensure_relay(config)?;
+        }
+        Ok(())
     }
 
     fn relay_disconnect(&mut self, session: super::api::RelaySessionId) -> BackendResult<()> {
@@ -599,16 +667,22 @@ impl super::api::RelayDriver for WindowsAudioDriver {
     }
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {
-        let config = Self::relay_config(
-            "qpwgraph-rs".into(),
-            String::new(),
-            0,
-            super::api::RelayCodecKind::Opus,
-            10,
-            super::api::RelayTransportPreference::Auto,
-            super::api::RelayRoles::both(),
-        );
-        let devices = self.ensure_relay(config)?;
+        if self.relay.is_none() {
+            let config = Self::relay_config(
+                "qpwgraph-rs".into(),
+                String::new(),
+                0,
+                super::api::RelayCodecKind::Opus,
+                10,
+                super::api::RelayTransportPreference::Auto,
+                super::api::RelayRoles::both(),
+                pw_graph_relay::generate_device_id(),
+                Vec::new(),
+                true,
+            );
+            self.ensure_relay(config)?;
+        }
+        let devices = self.relay.as_ref().expect("relay was just created");
         devices
             .handle()
             .discovery_start()

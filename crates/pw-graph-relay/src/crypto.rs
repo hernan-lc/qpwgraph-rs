@@ -63,6 +63,8 @@ const HKDF_INFO_RESUME_CONTROL_C2H: &[u8] = b"qpw-relay resume control client->h
 const HKDF_INFO_RESUME_CONTROL_H2C: &[u8] = b"qpw-relay resume control host->client v1";
 const RESUME_PROOF_DOMAIN: &[u8] = b"qpw-relay resume proof v1";
 const RESUME_CONTROL_DOMAIN: &[u8] = b"qpw-relay resume control context v1";
+const TRUSTED_PROOF_DOMAIN: &[u8] = b"qpw-relay trusted proof v1";
+const TRUSTED_KEYS_DOMAIN: &[u8] = b"qpw-relay trusted session keys v1";
 
 /// Which end of the session a key set belongs to. Every derived key is
 /// directional, so a reflected packet never decrypts.
@@ -309,6 +311,109 @@ pub(crate) fn resume_control_channel(
             Opener::new(&client_to_host, Side::Client)?,
         )),
     }
+}
+
+/// Authenticate a trusted reconnect challenge. The stable client and host
+/// identities are included so a stored bearer credential cannot be replayed
+/// against a different installation.
+pub(crate) fn trusted_proof(
+    secret: &[u8; 32],
+    client_id: &str,
+    host_id: &str,
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+) -> [u8; CONFIRM_LEN] {
+    let mut message = Vec::with_capacity(
+        TRUSTED_PROOF_DOMAIN.len() + client_id.len() + host_id.len() + 2 * RESUME_NONCE_LEN + 2,
+    );
+    message.extend_from_slice(TRUSTED_PROOF_DOMAIN);
+    message.extend_from_slice(&(client_id.len() as u16).to_le_bytes());
+    message.extend_from_slice(client_id.as_bytes());
+    message.extend_from_slice(&(host_id.len() as u16).to_le_bytes());
+    message.extend_from_slice(host_id.as_bytes());
+    message.extend_from_slice(&session_id.to_le_bytes());
+    message.extend_from_slice(client_nonce);
+    message.extend_from_slice(server_nonce);
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts a 32-byte key");
+    mac.update(&message);
+    mac.finalize().into_bytes().into()
+}
+
+pub(crate) fn verify_trusted_proof(
+    secret: &[u8; 32],
+    client_id: &str,
+    host_id: &str,
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+    provided: &[u8],
+) -> bool {
+    if provided.len() != CONFIRM_LEN {
+        return false;
+    }
+    trusted_proof(
+        secret,
+        client_id,
+        host_id,
+        session_id,
+        client_nonce,
+        server_nonce,
+    )
+    .ct_eq(provided)
+    .into()
+}
+
+/// Derive fresh directional channels for a trusted connection. The stored
+/// credential is only the root; every connection still gets fresh nonce-bound
+/// transport keys and a resume secret.
+pub(crate) fn trusted_session_keys(
+    secret: &[u8; 32],
+    client_id: &str,
+    host_id: &str,
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+    side: Side,
+) -> SessionKeys {
+    let mut context = Vec::with_capacity(
+        TRUSTED_KEYS_DOMAIN.len() + client_id.len() + host_id.len() + 2 * RESUME_NONCE_LEN + 2,
+    );
+    context.extend_from_slice(TRUSTED_KEYS_DOMAIN);
+    context.extend_from_slice(&(client_id.len() as u16).to_le_bytes());
+    context.extend_from_slice(client_id.as_bytes());
+    context.extend_from_slice(&(host_id.len() as u16).to_le_bytes());
+    context.extend_from_slice(host_id.as_bytes());
+    context.extend_from_slice(&session_id.to_le_bytes());
+    context.extend_from_slice(client_nonce);
+    context.extend_from_slice(server_nonce);
+    SessionKeys::derive(secret, &context, side)
+}
+
+/// Proofs for the authenticated secondary TCP audio connection used by ADB.
+/// `side` is included in the domain so the two peers' responses cannot be
+/// reflected into one another.
+pub(crate) fn tcp_audio_proof(
+    secret: &[u8; 32],
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+    side: Side,
+) -> [u8; CONFIRM_LEN] {
+    let mut message = Vec::with_capacity(64);
+    message.extend_from_slice(b"qpw-relay tcp audio proof v1");
+    message.push(match side {
+        Side::Client => 0,
+        Side::Host => 1,
+    });
+    message.extend_from_slice(&session_id.to_le_bytes());
+    message.extend_from_slice(client_nonce);
+    message.extend_from_slice(server_nonce);
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts a 32-byte key");
+    mac.update(&message);
+    mac.finalize().into_bytes().into()
 }
 
 /// Nonce prefix keeping the two directions in separate nonce spaces even if
@@ -676,6 +781,134 @@ mod tests {
         .unwrap();
         assert_eq!(next_client.next_counter(), 0);
         let next_frame = next_client.seal(b"next", b"header").unwrap();
+        assert!(host_open.open_sequential(&next_frame, b"header").is_err());
+    }
+
+    #[test]
+    fn trusted_proofs_are_bound_to_both_installations_and_the_challenge() {
+        let secret = [0x5a; 32];
+        let client_nonce = [0x11; RESUME_NONCE_LEN];
+        let server_nonce = [0x22; RESUME_NONCE_LEN];
+        let proof = trusted_proof(
+            &secret,
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+        );
+
+        assert!(verify_trusted_proof(
+            &secret,
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+            &proof,
+        ));
+        assert!(!verify_trusted_proof(
+            &secret,
+            "another-client",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+            &proof,
+        ));
+        assert!(!verify_trusted_proof(
+            &secret,
+            "client-installation",
+            "another-host",
+            41,
+            &client_nonce,
+            &server_nonce,
+            &proof,
+        ));
+        assert!(!verify_trusted_proof(
+            &secret,
+            "client-installation",
+            "host-installation",
+            42,
+            &client_nonce,
+            &server_nonce,
+            &proof,
+        ));
+        assert!(!verify_trusted_proof(
+            &secret,
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &[0x33; RESUME_NONCE_LEN],
+            &proof,
+        ));
+        assert!(!verify_trusted_proof(
+            &[0x6b; 32],
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+            &proof,
+        ));
+        assert!(!verify_trusted_proof(
+            &secret,
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+            &proof[..proof.len() - 1],
+        ));
+    }
+
+    #[test]
+    fn trusted_connections_derive_matching_fresh_directional_keys() {
+        let secret = [0x5a; 32];
+        let client_nonce = [0x11; RESUME_NONCE_LEN];
+        let server_nonce = [0x22; RESUME_NONCE_LEN];
+        let client = trusted_session_keys(
+            &secret,
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+            Side::Client,
+        );
+        let host = trusted_session_keys(
+            &secret,
+            "client-installation",
+            "host-installation",
+            41,
+            &client_nonce,
+            &server_nonce,
+            Side::Host,
+        );
+        assert_eq!(client.resume_auth_key(), host.resume_auth_key());
+        assert!(host.verify_confirmation(&client.confirmation()));
+        assert!(client.verify_confirmation(&host.confirmation()));
+
+        let (mut client_seal, _) = client.control_channel().unwrap();
+        let (_, mut host_open) = host.control_channel().unwrap();
+        let frame = client_seal.seal(b"trusted", b"header").unwrap();
+        assert_eq!(
+            host_open.open_sequential(&frame, b"header").unwrap(),
+            b"trusted"
+        );
+
+        let next = trusted_session_keys(
+            &secret,
+            "client-installation",
+            "host-installation",
+            42,
+            &client_nonce,
+            &server_nonce,
+            Side::Client,
+        );
+        let (mut next_seal, _) = next.control_channel().unwrap();
+        let next_frame = next_seal.seal(b"new session", b"header").unwrap();
         assert!(host_open.open_sequential(&next_frame, b"header").is_err());
     }
 }

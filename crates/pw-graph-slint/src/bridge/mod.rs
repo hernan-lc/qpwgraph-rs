@@ -132,6 +132,8 @@ impl UiBridge {
             relay_usb_last_poll: None,
             #[cfg(feature = "relay")]
             relay_usb_auto_attempted: false,
+            #[cfg(feature = "relay")]
+            relay_trusted_auto_attempt_at: None,
         }));
 
         let window = MainWindow::new()?;
@@ -263,6 +265,7 @@ impl UiBridge {
                 application.i18n.text("relay.transport_wifi"),
                 application.i18n.text("relay.transport_bluetooth_pan"),
                 application.i18n.text("relay.transport_lan"),
+                application.i18n.text("relay.transport_adb"),
             ]));
             window.window().set_minimized(args.minimized);
         }
@@ -470,6 +473,8 @@ mod tests {
             relay_usb_last_poll: None,
             #[cfg(feature = "relay")]
             relay_usb_auto_attempted: false,
+            #[cfg(feature = "relay")]
+            relay_trusted_auto_attempt_at: None,
         }
     }
 

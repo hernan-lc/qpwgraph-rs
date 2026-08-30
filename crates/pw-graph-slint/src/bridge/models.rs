@@ -208,6 +208,7 @@ pub(crate) fn sync_models(
         application.i18n.text("relay.transport_wifi"),
         application.i18n.text("relay.transport_bluetooth_pan"),
         application.i18n.text("relay.transport_lan"),
+        application.i18n.text("relay.transport_adb"),
     ]));
     #[cfg(all(feature = "relay", target_os = "windows"))]
     {

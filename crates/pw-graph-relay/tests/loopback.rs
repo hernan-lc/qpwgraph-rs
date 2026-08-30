@@ -3,6 +3,7 @@
 
 use pw_graph_relay::{
     CodecKind, EngineConfig, RelayEngine, RelayEvent, RelayHandle, Roles, SessionId,
+    TransportPreference, TrustedPeer,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -37,24 +38,30 @@ fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
 }
 
 fn host_engine(pin: &str) -> (RelayEngine, RelayHandle, u16) {
-    let engine = RelayEngine::start(EngineConfig {
+    host_engine_with(EngineConfig {
         pin: pin.into(),
         bind_addr: Some(Ipv4Addr::LOCALHOST),
         ..EngineConfig::default()
     })
-    .expect("host engine starts");
+}
+
+fn host_engine_with(config: EngineConfig) -> (RelayEngine, RelayHandle, u16) {
+    let engine = RelayEngine::start(config).expect("host engine starts");
     let handle = engine.handle();
     let port = handle.host_start().expect("host listens");
     (engine, handle, port)
 }
 
 fn client_engine() -> (RelayEngine, RelayHandle) {
-    let engine = RelayEngine::start(EngineConfig {
+    client_engine_with(EngineConfig {
         codec: CodecKind::Pcm,
         device_name: "loopback-client".into(),
         ..EngineConfig::default()
     })
-    .expect("client engine starts");
+}
+
+fn client_engine_with(config: EngineConfig) -> (RelayEngine, RelayHandle) {
+    let engine = RelayEngine::start(config).expect("client engine starts");
     let handle = engine.handle();
     (engine, handle)
 }
@@ -349,6 +356,205 @@ fn status_reflects_host_and_sessions() {
 
     host_handle.host_stop().unwrap();
     assert!(!host_handle.status().host_active);
+}
+
+#[test]
+fn trusted_pairing_allows_a_later_pinless_connection() {
+    let (_host, host_handle, port) = host_engine_with(EngineConfig {
+        pin: "123456".into(),
+        device_id: "host-installation".into(),
+        bind_addr: Some(Ipv4Addr::LOCALHOST),
+        ..EngineConfig::default()
+    });
+    let (_first_client, first_handle) = client_engine_with(EngineConfig {
+        codec: CodecKind::Pcm,
+        device_name: "first-client".into(),
+        device_id: "client-installation".into(),
+        trust_new_peers: true,
+        ..EngineConfig::default()
+    });
+    let target: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let first_session = first_handle.connect(target, "123456", Roles::emit_only());
+
+    let mut client_established = false;
+    let mut trusted = None;
+    assert!(wait_until(|| {
+        for event in first_handle.events() {
+            match event {
+                RelayEvent::TrustedPeerAvailable {
+                    peer_id, secret, ..
+                } => trusted = Some(TrustedPeer { peer_id, secret }),
+                RelayEvent::SessionEstablished { id, .. } if id == first_session => {
+                    client_established = true
+                }
+                _ => {}
+            }
+        }
+        client_established && trusted.is_some()
+    }));
+    let trusted = trusted.expect("explicit PIN pairing should produce a credential");
+    assert_eq!(trusted.peer_id, "host-installation");
+
+    // Wait until the host has accepted and stored the encrypted enrollment;
+    // the second connection must be able to authenticate without its PIN.
+    let mut host_established = false;
+    let mut host_enrolled = false;
+    assert!(wait_until(|| {
+        for event in host_handle.events() {
+            match event {
+                RelayEvent::SessionEstablished { .. } => host_established = true,
+                RelayEvent::TrustedPeerAvailable { peer_id, .. }
+                    if peer_id == "client-installation" =>
+                {
+                    host_enrolled = true
+                }
+                _ => {}
+            }
+        }
+        host_established && host_enrolled
+    }));
+
+    first_handle.disconnect(first_session).unwrap();
+    assert!(wait_until(|| {
+        host_handle
+            .events()
+            .into_iter()
+            .any(|event| matches!(event, RelayEvent::SessionLost { .. }))
+    }));
+
+    let (_second_client, second_handle) = client_engine_with(EngineConfig {
+        codec: CodecKind::Pcm,
+        device_name: "second-client".into(),
+        device_id: "client-installation".into(),
+        trust_new_peers: false,
+        ..EngineConfig::default()
+    });
+    let second_session = second_handle.connect_trusted(
+        target,
+        "host-installation",
+        trusted.secret,
+        Roles::emit_only(),
+    );
+    assert!(await_event(&second_handle, |event| matches!(
+        event,
+        RelayEvent::SessionEstablished { id, .. } if *id == second_session
+    ))
+    .is_some());
+    assert!(await_event(&host_handle, |event| matches!(
+        event,
+        RelayEvent::SessionEstablished { peer, .. } if peer.id == "client-installation"
+    ))
+    .is_some());
+}
+
+#[test]
+fn pin_only_host_rejects_trusted_enrollment_without_delaying_the_session() {
+    let (_host, host_handle, port) = host_engine_with(EngineConfig {
+        pin: "123456".into(),
+        device_id: "pin-only-host".into(),
+        bind_addr: Some(Ipv4Addr::LOCALHOST),
+        trust_new_peers: false,
+        ..EngineConfig::default()
+    });
+    let (_client, client_handle) = client_engine_with(EngineConfig {
+        codec: CodecKind::Pcm,
+        device_id: "would-be-trusted-client".into(),
+        trust_new_peers: true,
+        ..EngineConfig::default()
+    });
+    let target: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let session = client_handle.connect(target, "123456", Roles::emit_only());
+    let started = Instant::now();
+    let mut established = false;
+    let mut credential_offered = false;
+    assert!(wait_until(|| {
+        for event in client_handle.events() {
+            match event {
+                RelayEvent::SessionEstablished { id, .. } if id == session => established = true,
+                RelayEvent::TrustedPeerAvailable { .. } => credential_offered = true,
+                _ => {}
+            }
+        }
+        established
+    }));
+    assert!(!credential_offered);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "an authenticated rejection should not wait for the handshake timeout"
+    );
+
+    let mut host_enrolled = false;
+    assert!(wait_until(|| {
+        let mut host_established = false;
+        for event in host_handle.events() {
+            match event {
+                RelayEvent::SessionEstablished { .. } => host_established = true,
+                RelayEvent::TrustedPeerAvailable { .. } => host_enrolled = true,
+                _ => {}
+            }
+        }
+        host_established
+    }));
+    assert!(!host_enrolled);
+}
+
+#[test]
+fn adb_forwarding_uses_the_authenticated_tcp_audio_channel() {
+    let (_host, host_handle, port) = host_engine_with(EngineConfig {
+        pin: "123456".into(),
+        device_id: "adb-host".into(),
+        bind_addr: Some(Ipv4Addr::LOCALHOST),
+        ..EngineConfig::default()
+    });
+    let (_client, client_handle) = client_engine_with(EngineConfig {
+        codec: CodecKind::Pcm,
+        device_name: "adb-client".into(),
+        device_id: "adb-client-id".into(),
+        transport: TransportPreference::Adb,
+        trust_new_peers: false,
+        ..EngineConfig::default()
+    });
+    let session = establish(
+        &host_handle,
+        &client_handle,
+        port,
+        "123456",
+        Roles::emit_only(),
+    );
+    let signal = ramp(FRAME * 6);
+    let received = stream_frames(
+        |frame| client_handle.push_capture(frame),
+        &host_handle,
+        &signal,
+    );
+    assert!(received.len() >= signal.len());
+    assert_eq!(&received[..signal.len()], &signal[..]);
+
+    client_handle.disconnect(session).unwrap();
+}
+
+#[test]
+fn a_running_host_rebinds_when_its_configured_link_changes() {
+    let initial_addr = Ipv4Addr::new(127, 0, 0, 2);
+    let next_addr = Ipv4Addr::new(127, 0, 0, 3);
+    let (_host, host_handle, port) = host_engine_with(EngineConfig {
+        pin: "123456".into(),
+        bind_addr: Some(initial_addr),
+        ..EngineConfig::default()
+    });
+    let old_target = SocketAddr::new(initial_addr.into(), port);
+    assert!(std::net::TcpStream::connect_timeout(&old_target, Duration::from_secs(1)).is_ok());
+
+    let mut config = host_handle.config();
+    config.bind_addr = Some(next_addr);
+    host_handle.update_config(config);
+    assert!(wait_until(
+        || host_handle.status().host_addr == Some(next_addr)
+    ));
+
+    let new_target = SocketAddr::new(next_addr.into(), port);
+    assert!(std::net::TcpStream::connect_timeout(&new_target, Duration::from_secs(1)).is_ok());
+    assert!(std::net::TcpStream::connect_timeout(&old_target, Duration::from_millis(100)).is_err());
 }
 
 #[test]

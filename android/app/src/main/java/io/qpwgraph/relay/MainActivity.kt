@@ -65,14 +65,15 @@ import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Link options offered in the UI. USB is deliberately absent: the relay
- * auto-detects an active USB tether and prefers it under `auto`. */
-private val LINK_OPTIONS = listOf("auto", "wifi", "bluetooth", "lan")
+/** Link options offered in the UI. USB is auto-detected; ADB is an explicit
+ * localhost TCP-forwarding mode and requires `adb reverse`/`adb forward`. */
+private val LINK_OPTIONS = listOf("auto", "wifi", "bluetooth", "lan", "adb")
 private val LINK_DISPLAY = mapOf(
     "auto" to "Auto",
     "wifi" to "Wi-Fi",
     "bluetooth" to "Bluetooth PAN",
     "lan" to "LAN",
+    "adb" to "ADB forwarding",
 )
 
 class MainActivity : ComponentActivity() {
@@ -233,7 +234,7 @@ private fun UsbStatus(link: UsbLinkInfo?) {
         )
     } else {
         Text(
-            "No USB tether network detected. An ADB/debugging cable alone is not relay networking; enable USB tethering or use Wi-Fi/LAN.",
+            "No USB tether network detected. For an ADB-only cable, select ADB forwarding and configure adb reverse/forward; otherwise use Wi-Fi/LAN.",
             style = MaterialTheme.typography.bodySmall,
         )
     }

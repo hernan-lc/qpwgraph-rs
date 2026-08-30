@@ -15,4 +15,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 jni = "0.21"
 pw-graph-relay-sdk = { path = "../pw-graph-relay-sdk" }
+pw-graph-utils = { path = "../pw-graph-utils" }
+serde.workspace = true
 serde_json.workspace = true

@@ -91,6 +91,8 @@ fn probe_target_with_cancel(
     let pake = crate::crypto::pake_start(crate::crypto::Side::Client, "probe");
     let hello = ControlMessage::Hello {
         protocol: PROTOCOL_VERSION as u32,
+        device_id: "probe".into(),
+        transport: String::new(),
         device_name: "qpw-relay-probe".into(),
         device_kind: DeviceKind::Other,
         roles: Roles::emit_only(),
@@ -103,8 +105,14 @@ fn probe_target_with_cancel(
         Ok(ControlMessage::Challenge {
             protocol,
             host_name,
+            device_id,
             ..
         }) if protocol == PROTOCOL_VERSION as u32 => Some(PeerInfo {
+            id: if device_id.trim().is_empty() {
+                format!("USB {}", target.ip())
+            } else {
+                device_id
+            },
             name: if host_name.trim().is_empty() {
                 format!("USB {}", target.ip())
             } else {
@@ -381,6 +389,7 @@ mod tests {
                     protocol: PROTOCOL_VERSION as u32,
                     pake: "00".into(),
                     host_name: "phone".into(),
+                    device_id: "phone-id".into(),
                 },
             )
             .unwrap();
@@ -408,6 +417,7 @@ mod tests {
                     protocol: PROTOCOL_VERSION as u32 + 1,
                     pake: "00".into(),
                     host_name: "not-relay-v3".into(),
+                    device_id: "not-relay-id".into(),
                 },
             )
             .unwrap();

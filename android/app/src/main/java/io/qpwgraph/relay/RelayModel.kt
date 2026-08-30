@@ -142,8 +142,17 @@ fun parseRelayQr(raw: String): Pair<String, String?>? {
 
 /** A relay host seen on the local network during discovery. */
 data class DiscoveredPeer(
+    val id: String,
     val name: String,
     val address: String,
+)
+
+/** Durable credential created after a successful explicit PIN pairing. */
+data class TrustedRelayPeer(
+    val peerId: String,
+    val secret: String,
+    val name: String = "",
+    val address: String = "",
 )
 
 /** One live session on the local host. */

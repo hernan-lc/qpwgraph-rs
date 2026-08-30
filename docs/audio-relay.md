@@ -26,17 +26,28 @@ port, but a USB direct scan cannot discover an ephemeral listener. If
 explicit port and use its address manually.
 
 `Auto` selects the best active local network link in this order: USB/RNDIS/NCM
-tether, Wi-Fi, Bluetooth PAN, then LAN. It does not silently connect to an
-untrusted peer. While discovery is active, mDNS and the bounded direct USB
-probe run independently; either one may find a host, and stopping discovery
-terminates both workers and clears transient peers.
+tether, Wi-Fi, Bluetooth PAN, then LAN. The host listener follows that choice
+while it is running: if a preferred interface appears or disappears, the
+control listener is rebound on the same port and existing sessions/PIN state
+remain intact. It does not silently connect to an untrusted peer. While
+discovery is active, mDNS and the bounded direct USB probe run independently;
+either one may find a host, and stopping discovery terminates both workers and
+clears transient peers.
 
-A plain USB debugging/ADB cable is not a relay network link. The current relay
-uses TCP control plus authenticated/encrypted UDP audio, so ADB detection or
-`adb reverse` alone does not provide working audio transport. Enable USB
-tethering, or use Wi-Fi/LAN/Bluetooth PAN. Pairing still requires the current
-PIN and an explicit user action; trusted-device key auto-reconnect is not
-enabled by default.
+After a successful explicit PIN pairing, both sides receive a random
+per-peer credential. Applications store it in owner-only storage together
+with the peer's stable device ID. A later mDNS/USB result for that same ID can
+auto-connect without another PIN; an unknown or mismatched peer is never
+auto-connected. The client also associates resume with that stable ID and can
+try newly discovered addresses when a host moves from Wi-Fi to USB.
+
+ADB-only cables are supported through the explicit **ADB** transport. The
+client uses the normal TCP listener for control and opens a second authenticated
+TCP connection for encrypted, length-framed audio. Android client → desktop
+host uses `adb reverse tcp:48123 tcp:48123`; desktop client → Android host uses
+`adb forward tcp:48123 tcp:48123`. Select ADB, target `127.0.0.1:48123`, and
+create the tunnel first. ADB forwarding is not peer discovery; USB tethering
+remains the zero-configuration network workflow.
 
 On Android, the platform audio endpoints currently run mono PCM16. Android
 rejects stereo relay geometry until stereo `AudioRecord`/`AudioTrack` I/O is
