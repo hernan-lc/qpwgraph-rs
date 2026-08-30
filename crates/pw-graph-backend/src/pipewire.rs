@@ -925,17 +925,28 @@ impl PipewireDriver {
                 let (output, input) = self.effect_restore_endpoints(&source, &destination)?;
                 self.restore_direct_connection_locked(output, input)
             })();
+
+            // Both rollback directions are independent. Preserve every
+            // failure so a caller can distinguish a cleanly rolled-back
+            // operation from a graph that still contains a partial effect.
+            let mut rollback_errors = Vec::new();
             if let Err(restore_error) = restore {
-                return Err(BackendError::Native(format!(
-                    "{error}; additionally failed to restore the original link: {restore_error}"
-                )));
+                rollback_errors.push(format!(
+                    "failed to restore the original link: {restore_error}"
+                ));
             }
             if let Err(cleanup_error) = cleanup {
-                return Err(BackendError::Native(format!(
-                    "{error}; additionally failed to clean up the effect node: {cleanup_error}"
-                )));
+                rollback_errors.push(format!(
+                    "failed to clean up the effect node: {cleanup_error}"
+                ));
             }
-            return Err(error);
+            if rollback_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(BackendError::Native(format!(
+                "{error}; additionally, {}",
+                rollback_errors.join("; ")
+            )));
         }
         result
     }
@@ -959,7 +970,11 @@ impl PipewireDriver {
 
         self.destroy_effect_node_locked(instance_id)?;
         if let Some((output, input)) = endpoints {
-            self.restore_direct_connection_locked(output, input)?;
+            if let Err(error) = self.restore_direct_connection_locked(output, input) {
+                return Err(BackendError::Native(format!(
+                    "effect {instance_id} was removed but the original direct connection could not be restored: {error}"
+                )));
+            }
         }
         Ok(())
     }

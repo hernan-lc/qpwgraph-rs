@@ -16,7 +16,8 @@
 //! # What the exchange produces
 //!
 //! The SPAKE2 output plus the handshake transcript are run through
-//! HKDF-SHA256 to derive four independent keys:
+//! HKDF-SHA256 to derive independent directional transport keys, confirmation
+//! keys, and a dedicated resume-authentication key:
 //!
 //! - two directional ChaCha20-Poly1305 keys for the TCP control channel,
 //! - two directional ChaCha20-Poly1305 keys for the UDP audio channel.
@@ -36,6 +37,7 @@ use crate::RelayError;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use subtle::ConstantTimeEq;
@@ -44,16 +46,23 @@ use subtle::ConstantTimeEq;
 pub const TAG_LEN: usize = 16;
 /// Length of a key-confirmation MAC on the wire (raw bytes, sent as hex).
 pub const CONFIRM_LEN: usize = 32;
+/// Length of each fresh nonce in the resume challenge exchange.
+pub const RESUME_NONCE_LEN: usize = 32;
 
 /// Domain separator so a SPAKE2 transcript from this protocol can never be
 /// replayed into a different one that happens to share a PIN.
-const PAKE_IDENTITY: &[u8] = b"qpwgraph-rs/relay/v2";
+const PAKE_IDENTITY: &[u8] = b"qpwgraph-rs/relay/v3";
 const HKDF_INFO_CONTROL_C2H: &[u8] = b"qpw-relay control client->host";
 const HKDF_INFO_CONTROL_H2C: &[u8] = b"qpw-relay control host->client";
 const HKDF_INFO_AUDIO_C2H: &[u8] = b"qpw-relay audio client->host";
 const HKDF_INFO_AUDIO_H2C: &[u8] = b"qpw-relay audio host->client";
 const HKDF_INFO_CONFIRM_C: &[u8] = b"qpw-relay confirm client";
 const HKDF_INFO_CONFIRM_H: &[u8] = b"qpw-relay confirm host";
+const HKDF_INFO_RESUME_AUTH: &[u8] = b"qpw-relay resume authentication v1";
+const HKDF_INFO_RESUME_CONTROL_C2H: &[u8] = b"qpw-relay resume control client->host v1";
+const HKDF_INFO_RESUME_CONTROL_H2C: &[u8] = b"qpw-relay resume control host->client v1";
+const RESUME_PROOF_DOMAIN: &[u8] = b"qpw-relay resume proof v1";
+const RESUME_CONTROL_DOMAIN: &[u8] = b"qpw-relay resume control context v1";
 
 /// Which end of the session a key set belongs to. Every derived key is
 /// directional, so a reflected packet never decrypts.
@@ -128,6 +137,9 @@ pub struct SessionKeys {
     audio_recv: [u8; 32],
     confirm_send: [u8; CONFIRM_LEN],
     confirm_recv: [u8; CONFIRM_LEN],
+    /// Dedicated resume authentication material. It is never used directly
+    /// as a control or audio key and is never sent on the wire.
+    resume_auth: [u8; 32],
     side: Side,
 }
 
@@ -146,6 +158,7 @@ impl SessionKeys {
         let audio_h2c = expand(HKDF_INFO_AUDIO_H2C);
         let confirm_c = expand(HKDF_INFO_CONFIRM_C);
         let confirm_h = expand(HKDF_INFO_CONFIRM_H);
+        let resume_auth = expand(HKDF_INFO_RESUME_AUTH);
         match side {
             Side::Client => Self {
                 control_send: control_c2h,
@@ -154,6 +167,7 @@ impl SessionKeys {
                 audio_recv: audio_h2c,
                 confirm_send: confirm_c,
                 confirm_recv: confirm_h,
+                resume_auth,
                 side,
             },
             Side::Host => Self {
@@ -163,6 +177,7 @@ impl SessionKeys {
                 audio_recv: audio_c2h,
                 confirm_send: confirm_h,
                 confirm_recv: confirm_c,
+                resume_auth,
                 side,
             },
         }
@@ -188,6 +203,13 @@ impl SessionKeys {
         self.confirm_recv.ct_eq(provided).into()
     }
 
+    /// Dedicated key for authenticating a resume challenge. This key is
+    /// derived from the original PAKE and is independent of every transport
+    /// encryption key.
+    pub(crate) fn resume_auth_key(&self) -> [u8; 32] {
+        self.resume_auth
+    }
+
     /// Sealer/opener pair for this side's control channel.
     pub fn control_channel(&self) -> Result<(Sealer, Opener), RelayError> {
         Ok((
@@ -202,6 +224,90 @@ impl SessionKeys {
             Sealer::new(&self.audio_send, self.side)?,
             Opener::new(&self.audio_recv, self.side.peer())?,
         ))
+    }
+}
+
+/// Compute the proof for one server challenge. The session id, protocol
+/// version, generation, and both nonces are all bound to the MAC so a proof
+/// cannot be moved to another session, challenge, or protocol context.
+pub(crate) fn resume_proof(
+    secret: &[u8; 32],
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+    generation: u64,
+) -> [u8; CONFIRM_LEN] {
+    let mut message = Vec::with_capacity(
+        RESUME_PROOF_DOMAIN.len() + 1 + 8 + 8 + RESUME_NONCE_LEN + RESUME_NONCE_LEN,
+    );
+    message.extend_from_slice(RESUME_PROOF_DOMAIN);
+    message.push(crate::protocol::PROTOCOL_VERSION);
+    message.extend_from_slice(&session_id.to_le_bytes());
+    message.extend_from_slice(&generation.to_le_bytes());
+    message.extend_from_slice(client_nonce);
+    message.extend_from_slice(server_nonce);
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts a 32-byte key");
+    mac.update(&message);
+    mac.finalize().into_bytes().into()
+}
+
+/// Constant-time verification of a resume proof received from the peer.
+pub(crate) fn verify_resume_proof(
+    secret: &[u8; 32],
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+    generation: u64,
+    provided: &[u8],
+) -> bool {
+    if provided.len() != CONFIRM_LEN {
+        return false;
+    }
+    resume_proof(secret, session_id, client_nonce, server_nonce, generation)
+        .ct_eq(provided)
+        .into()
+}
+
+/// Derive a brand-new pair of directional control channels for a successful
+/// resume. The original audio/control keys are deliberately not reused, and
+/// the nonce counters therefore start at zero only under these new keys.
+pub(crate) fn resume_control_channel(
+    secret: &[u8; 32],
+    side: Side,
+    session_id: u64,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
+    server_nonce: &[u8; RESUME_NONCE_LEN],
+    generation: u64,
+) -> Result<(Sealer, Opener), RelayError> {
+    let mut context = Vec::with_capacity(
+        RESUME_CONTROL_DOMAIN.len() + 1 + 8 + 8 + RESUME_NONCE_LEN + RESUME_NONCE_LEN,
+    );
+    context.extend_from_slice(RESUME_CONTROL_DOMAIN);
+    context.push(crate::protocol::PROTOCOL_VERSION);
+    context.extend_from_slice(&session_id.to_le_bytes());
+    context.extend_from_slice(&generation.to_le_bytes());
+    context.extend_from_slice(client_nonce);
+    context.extend_from_slice(server_nonce);
+
+    let hkdf = Hkdf::<Sha256>::new(Some(&context), secret);
+    let expand = |info: &[u8]| {
+        let mut key = [0u8; 32];
+        hkdf.expand(info, &mut key)
+            .expect("HKDF-SHA256 always produces 32 bytes");
+        key
+    };
+    let client_to_host = expand(HKDF_INFO_RESUME_CONTROL_C2H);
+    let host_to_client = expand(HKDF_INFO_RESUME_CONTROL_H2C);
+    match side {
+        Side::Client => Ok((
+            Sealer::new(&client_to_host, Side::Client)?,
+            Opener::new(&host_to_client, Side::Host)?,
+        )),
+        Side::Host => Ok((
+            Sealer::new(&host_to_client, Side::Host)?,
+            Opener::new(&client_to_host, Side::Client)?,
+        )),
     }
 }
 
@@ -455,5 +561,121 @@ mod tests {
         assert!(open.open_sequential(&second, b"").is_err());
         assert!(open.open_sequential(&first, b"").is_ok());
         assert!(open.open_sequential(&second, b"").is_ok());
+    }
+
+    fn resume_inputs() -> ([u8; 32], [u8; RESUME_NONCE_LEN], [u8; RESUME_NONCE_LEN]) {
+        let (client, host) = paired("000000", "000000");
+        assert_eq!(client.resume_auth_key(), host.resume_auth_key());
+        (
+            client.resume_auth_key(),
+            [0x11; RESUME_NONCE_LEN],
+            [0x22; RESUME_NONCE_LEN],
+        )
+    }
+
+    #[test]
+    fn resume_proof_requires_the_original_session_and_challenge() {
+        let (secret, client_nonce, server_nonce) = resume_inputs();
+        let proof = resume_proof(&secret, 7, &client_nonce, &server_nonce, 2);
+        assert!(verify_resume_proof(
+            &secret,
+            7,
+            &client_nonce,
+            &server_nonce,
+            2,
+            &proof,
+        ));
+
+        let wrong_secret = [0x44; 32];
+        assert!(!verify_resume_proof(
+            &wrong_secret,
+            7,
+            &client_nonce,
+            &server_nonce,
+            2,
+            &proof,
+        ));
+        assert!(!verify_resume_proof(
+            &secret,
+            8,
+            &client_nonce,
+            &server_nonce,
+            2,
+            &proof,
+        ));
+        assert!(!verify_resume_proof(
+            &secret,
+            7,
+            &client_nonce,
+            &server_nonce,
+            3,
+            &proof,
+        ));
+
+        let (other_client, _) = paired("000000", "000000");
+        let other_secret = other_client.resume_auth_key();
+        assert!(!verify_resume_proof(
+            &other_secret,
+            7,
+            &client_nonce,
+            &server_nonce,
+            2,
+            &proof,
+        ));
+
+        // A proof is challenge- and generation-specific. A later resume can
+        // never accept material captured from this challenge.
+        assert!(!verify_resume_proof(
+            &secret,
+            7,
+            &client_nonce,
+            &server_nonce,
+            3,
+            &proof,
+        ));
+        assert!(!verify_resume_proof(
+            &secret,
+            7,
+            &client_nonce,
+            &[0x33; RESUME_NONCE_LEN],
+            2,
+            &proof,
+        ));
+    }
+
+    #[test]
+    fn successful_resume_uses_fresh_control_keys() {
+        let (secret, client_nonce, server_nonce) = resume_inputs();
+        let (mut client_seal, _) =
+            resume_control_channel(&secret, Side::Client, 7, &client_nonce, &server_nonce, 2)
+                .unwrap();
+        let (_, mut host_open) =
+            resume_control_channel(&secret, Side::Host, 7, &client_nonce, &server_nonce, 2)
+                .unwrap();
+        let resumed = client_seal.seal(b"resume", b"header").unwrap();
+        assert_eq!(
+            host_open.open_sequential(&resumed, b"header").unwrap(),
+            b"resume"
+        );
+
+        let (old_client, old_host) = paired("000000", "000000");
+        let (mut old_seal, _) = old_client.control_channel().unwrap();
+        let (_, mut old_open) = old_host.control_channel().unwrap();
+        let old_frame = old_seal.seal(b"old", b"header").unwrap();
+        assert!(host_open.open_sequential(&old_frame, b"header").is_err());
+        assert!(old_open.open_sequential(&old_frame, b"header").is_ok());
+
+        let (mut next_client, _) = resume_control_channel(
+            &secret,
+            Side::Client,
+            7,
+            &client_nonce,
+            &[0x33; RESUME_NONCE_LEN],
+            3,
+        )
+        .unwrap();
+        assert_eq!(next_client.next_counter(), 0);
+        let next_frame = next_client.seal(b"next", b"header").unwrap();
+        assert!(host_open.open_sequential(&next_frame, b"header").is_err());
     }
 }

@@ -1,16 +1,19 @@
-//! Relay control-channel protocol (version 2).
+//! Relay control-channel protocol (version 3).
 //!
 //! The control channel is a TCP byte stream of length-prefixed frames:
 //!
 //! ```text
-//! magic "QPR2" (4 bytes) | version u8 | payload length u32 LE | payload
+//! magic "QPR3" (4 bytes) | version u8 | payload length u32 LE | payload
 //! ```
 //!
-//! Only the handshake frames — up to and including key confirmation — carry
-//! their JSON in the clear, because there is no key yet. Every frame after
-//! that is a ChaCha20-Poly1305 sealed JSON document with the 9-byte header
-//! authenticated as associated data, so the control channel is confidential
-//! and tamper-evident rather than merely well-formed.
+//! The original pairing handshake frames — up to and including key
+//! confirmation — carry their JSON in the clear, because there is no key yet.
+//! A reconnecting peer then uses the explicit cleartext
+//! `ResumeHello`/`ResumeChallenge`/`ResumeProof` exchange below; after proof
+//! succeeds, `ResumeOk` and subsequent frames are sealed. Every other
+//! post-pairing frame is a ChaCha20-Poly1305 sealed JSON document with the
+//! 9-byte header authenticated as associated data, so the control channel is
+//! confidential and tamper-evident rather than merely well-formed.
 //!
 //! JSON keeps third-party implementations trivial. Unknown message types are
 //! preserved as `Unknown` so newer peers can extend the protocol without
@@ -21,8 +24,8 @@ use crate::crypto::{Opener, Sealer};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub const CONTROL_MAGIC: &[u8; 4] = b"QPR2";
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const CONTROL_MAGIC: &[u8; 4] = b"QPR3";
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Frame durations the codec layer and the session negotiation both accept.
 ///
@@ -192,14 +195,20 @@ pub enum ControlMessage {
     SessionReady {},
     /// Bidirectional liveness ping, every ~2 s.
     Keepalive {},
-    /// C→H: request to resume an established session after the control link
-    /// dropped (e.g. the Wi-Fi link roamed). The host replies with a fresh
-    /// [`ControlMessage::Challenge`]; the client answers with
-    /// [`ControlMessage::Pair`]; the host then accepts with
-    /// [`ControlMessage::ResumeOk`] or rejects with
-    /// [`ControlMessage::PairFail`]. Audio keeps flowing on UDP meanwhile,
-    /// under the *original* audio keys — only the control channel is rekeyed.
-    Resume { session_id: u64, pake: String },
+    /// C→H: begin resuming an established session after its control link
+    /// dropped. `client_nonce` is fresh for this attempt and is not secret.
+    ResumeHello {
+        session_id: u64,
+        client_nonce: String,
+    },
+    /// H→C: challenge bound to the session's current resume generation.
+    ResumeChallenge {
+        server_nonce: String,
+        generation: u64,
+    },
+    /// C→H: proof of possession of the original session's resume secret.
+    /// The proof is hex-encoded HMAC-SHA256 over the session and both nonces.
+    ResumeProof { proof: String },
     /// H→C: resume accepted; keepalives continue on this stream.
     ResumeOk {},
     /// Bidirectional informational volume/mute hint.
@@ -229,8 +238,9 @@ fn frame_header(length: usize) -> [u8; HEADER_LEN] {
 
 /// Serialize one cleartext control frame (header + JSON payload).
 ///
-/// Only the pairing handshake uses this; everything after key confirmation
-/// goes through [`write_sealed_frame`].
+/// Only the clear pairing and resume exchanges use this; authenticated
+/// session traffic after key confirmation or successful resume goes through
+/// [`write_sealed_frame`].
 pub fn encode_frame(message: &ControlMessage) -> Result<Vec<u8>, io::Error> {
     let payload = serde_json::to_vec(message)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -264,7 +274,7 @@ fn read_body(stream: &mut impl Read) -> io::Result<Vec<u8>> {
     if &header[0..4] != CONTROL_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "control frame is missing the QPR2 magic",
+            "control frame is missing the QPR3 magic",
         ));
     }
     let version = header[4];
@@ -394,9 +404,16 @@ mod tests {
             },
             ControlMessage::SessionReady {},
             ControlMessage::Keepalive {},
-            ControlMessage::Resume {
+            ControlMessage::ResumeHello {
                 session_id: 42,
-                pake: "beef".into(),
+                client_nonce: "beef".into(),
+            },
+            ControlMessage::ResumeChallenge {
+                server_nonce: "cafe".into(),
+                generation: 2,
+            },
+            ControlMessage::ResumeProof {
+                proof: "deadbeef".into(),
             },
             ControlMessage::ResumeOk {},
             ControlMessage::ControlHint {

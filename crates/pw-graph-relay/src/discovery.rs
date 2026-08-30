@@ -5,7 +5,7 @@
 //! records are small and versioned (`v=1`) so third-party browsers can list
 //! relay hosts without speaking the control protocol.
 
-use crate::netlink::{select_links, LinkKind, LocalLink};
+use crate::netlink::LinkKind;
 use crate::protocol::{DeviceKind, Roles};
 use crate::{EngineInner, PeerInfo, RelayError, RelayResult};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -86,25 +86,36 @@ impl Advertiser {
         device_kind: DeviceKind,
         port: u16,
         caps: Roles,
-        links: &[LocalLink],
+        bind_addr: Option<std::net::Ipv4Addr>,
+        link: Option<LinkKind>,
     ) -> RelayResult<Self> {
         let daemon = ServiceDaemon::new()
             .map_err(|error| RelayError::Engine(format!("mDNS daemon failed: {error}")))?;
-        let link = links.first().map(|link| link.kind);
         let properties: Vec<(String, String)> =
             txt_properties(device_name, device_kind, caps, link)
                 .into_iter()
                 .collect();
-        // `()` lets the daemon announce every suitable interface address,
-        // so peers on USB, Wi-Fi, or LAN all resolve the same instance.
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            device_name,
-            &format!("{device_name}.local."),
-            (),
-            port,
-            properties.as_slice(),
-        )
+        // Advertise precisely the address selected for the listener. The
+        // empty-address form is reserved for the documented no-link fallback
+        // where the TCP listener really does bind every IPv4 interface.
+        let info = match bind_addr {
+            Some(addr) => ServiceInfo::new(
+                SERVICE_TYPE,
+                device_name,
+                &format!("{device_name}.local."),
+                IpAddr::V4(addr),
+                port,
+                properties.as_slice(),
+            ),
+            None => ServiceInfo::new(
+                SERVICE_TYPE,
+                device_name,
+                &format!("{device_name}.local."),
+                (),
+                port,
+                properties.as_slice(),
+            ),
+        }
         .map_err(|error| RelayError::Engine(format!("mDNS service info invalid: {error}")))?;
         let fullname = info.get_fullname().to_string();
         daemon
@@ -197,21 +208,22 @@ fn browse_loop(
 
 /// Engine-side discovery state and event plumbing.
 impl EngineInner {
-    pub(crate) fn start_advertiser(&self, port: u16) {
+    pub(crate) fn start_advertiser(&self, port: u16, bind_addr: Option<std::net::Ipv4Addr>) {
         let config = self.config();
         let links = crate::netlink::local_links();
-        let selected = select_links(&links, config.transport);
-        let advertised_links = if selected.is_empty() {
-            &links
-        } else {
-            &selected
-        };
+        let link = bind_addr.and_then(|addr| {
+            links
+                .iter()
+                .find(|link| link.addr == addr)
+                .map(|link| link.kind)
+        });
         match Advertiser::start(
             &config.device_name,
             config.device_kind,
             port,
             Roles::both(),
-            advertised_links,
+            bind_addr,
+            link,
         ) {
             Ok(advertiser) => {
                 if let Ok(mut slot) = self.advertiser.lock() {

@@ -1,4 +1,4 @@
-# Relay wire protocol, version 2
+# Relay wire protocol, version 3
 
 The relay carries audio between this machine and a peer (typically a phone)
 over the local network. It uses two channels:
@@ -7,13 +7,18 @@ over the local network. It uses two channels:
 - an **audio channel** over UDP, carrying one encoded codec frame per
   datagram.
 
-Version 2 replaced version 1 wholesale. Version 1 is not accepted and there is
-no downgrade path, because the changes are the security model: version 1
+Version 3 replaces version 2 wholesale. Versions 1 and 2 are not accepted and
+there is no downgrade path, because the changes are part of the security model:
+version 1
 authenticated only the TCP handshake, and its UDP audio channel had no session
 identifier, no MAC, and no encryption at all. Anyone who could reach the audio
 port could inject audio into a session and — because the host adopted the
 source address of any syntactically valid datagram — redirect the session's
 outbound audio to themselves, without ever knowing the PIN.
+
+Version 3 also changes the control-channel resume format. A host-wide PIN and a
+session id are not enough to resume an existing session; resume additionally
+proves possession of a secret derived from that session's original pairing.
 
 ## Threat model
 
@@ -33,6 +38,9 @@ What the protocol guarantees against such an attacker:
   sequential nonces; the audio channel enforces a sliding replay window.
 - **They cannot redirect a session's audio.** The peer's audio address is
   updated only from a datagram that authenticated under the session key.
+- **They cannot take over an established session with only the PIN.** Resume
+  requires the session-specific secret from the original pairing, a fresh
+  challenge, and a proof bound to the session and resume generation.
 
 What it does not defend against: an attacker who learns the PIN, and denial of
 service by flooding (the connection and handshake limits bound the cost, they
@@ -43,7 +51,7 @@ do not eliminate it).
 The host displays a six-digit PIN. Both ends run a symmetric
 [SPAKE2](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-spake2)
 exchange over the Ed25519 group with that PIN as the password and the
-domain-separating identity `qpwgraph-rs/relay/v2`.
+domain-separating identity `qpwgraph-rs/relay/v3`.
 
 Six digits is a small space, which is exactly why the PIN is never used as a
 raw key or MAC key. With a PAKE, an observer of the exchange learns nothing
@@ -64,7 +72,7 @@ to two round trips.
 
 Each side derives the shared SPAKE2 output, then runs HKDF-SHA256 over it with
 the transcript (`client_message || host_message`, in that fixed order on both
-sides) as salt to produce six independent 32-byte values:
+sides) as salt to produce seven independent 32-byte values:
 
 | Info string                      | Purpose                            |
 | -------------------------------- | ---------------------------------- |
@@ -74,6 +82,7 @@ sides) as salt to produce six independent 32-byte values:
 | `qpw-relay audio host->client`   | Audio channel, host to client      |
 | `qpw-relay confirm client`       | Client's key confirmation value    |
 | `qpw-relay confirm host`         | Host's key confirmation value      |
+| `qpw-relay resume authentication v1` | Session-bound resume proof key |
 
 The confirmation values are what turn a completed SPAKE2 run into an
 *authenticated* one. A wrong PIN does not make SPAKE2 fail; it makes the two
@@ -82,12 +91,15 @@ end can independently compute and compares the received one in constant time.
 A mismatch is a wrong PIN, and the host counts it against the source's
 attempt budget.
 
-Every frame after `PairConfirm` is sealed.
+Every frame on the original post-pairing control channel after `PairConfirm`
+is sealed. A reconnecting peer first uses the explicit cleartext resume
+challenge flow below; after the proof succeeds, the new control channel is
+sealed with freshly derived keys.
 
 ## Control channel
 
 ```text
-magic "QPR2" (4 bytes) | version u8 = 2 | payload length u32 LE | payload
+magic "QPR3" (4 bytes) | version u8 = 3 | payload length u32 LE | payload
 ```
 
 Before key confirmation the payload is JSON. After it, the payload is the
@@ -104,8 +116,9 @@ Frames larger than 64 KiB are refused; these are small JSON documents.
 Message types after pairing: `PairOk` (audio port and session id),
 `SessionStart` / `SessionReady` (negotiated codec and geometry), `Keepalive`
 (every 2 s, with a 6 s timeout), `ControlHint` (volume and mute hints),
-`Resume` / `ResumeOk`, and `Bye`. An unrecognised `type` decodes as `Unknown`
-rather than killing the connection, so a newer peer can add messages.
+`ResumeHello` / `ResumeChallenge` / `ResumeProof` / `ResumeOk`, and `Bye`.
+An unrecognised `type` decodes as `Unknown` rather than killing the
+connection, so a newer peer can add messages.
 
 ### Negotiated parameters
 
@@ -160,11 +173,43 @@ only perturbs the stream's timing.
 
 ## Resume
 
-If the control link drops, the client re-dials and sends `Resume` with the
-session id and a fresh SPAKE2 message. The host answers with `Challenge`, and
-the two ends run the full pairing exchange again — so the resumed control
-channel gets **new** keys and a captured earlier transcript is useless against
-it.
+If the control link drops, the host marks the session resume-eligible for a
+15-second grace period. The client re-dials and sends a cleartext
+`ResumeHello` containing the session id and a fresh 32-byte client nonce. The
+host answers with a fresh 32-byte server nonce and the next resume generation:
+
+```text
+C → H  ResumeHello      session_id, client_nonce (hex)
+H → C  ResumeChallenge  server_nonce (hex), generation
+C → H  ResumeProof      proof (hex)
+H → C  ResumeOk         encrypted under fresh control keys
+```
+
+The proof is:
+
+```text
+HMAC-SHA256(
+    resume_authentication_key,
+    "qpw-relay resume proof v1"
+    || protocol_version
+    || session_id
+    || generation
+    || client_nonce
+    || server_nonce
+)
+```
+
+The `resume_authentication_key` is derived from the original PAKE transcript,
+stored only in the session record, and never sent on the wire. The host refuses
+resume while the old control watch is still active and allows only one
+challenge in flight. A challenge is consumed by the state transition; a proof
+from an earlier nonce, generation, or session is invalid, and a successful
+resume returns the session to `Active` with a new control generation.
+
+After proof verification both ends derive fresh directional control keys from
+the resume secret, session id, generation, and both nonces. Control nonce
+counters therefore restart only with genuinely new keys. The old control keys
+are not reused, and a host-wide PIN alone cannot resume the session.
 
 Audio keys are *not* rederived: the UDP workers never stopped, and their
 nonce counters and replay windows carry on unbroken. The host holds a dropped
@@ -186,6 +231,9 @@ unauthenticated peer.
 | Control frame size          | 64 KiB  | Allocation per control frame               |
 | Event queue                 | 256     | Events held for a slow UI consumer         |
 
-The host binds `0.0.0.0` by default but honours a configured bind address, so
-the relay can be confined to one link rather than offered on the LAN, every
-VPN, and whatever else happens to be up.
+The host honours an explicit bind address first. Otherwise it binds the highest-
+ranked active relay-capable local link under the preference order USB, Wi-Fi,
+Bluetooth PAN, then LAN. This selected address is also used for host audio
+binding, mDNS, QR payloads, and endpoint display. Only when no usable local-link
+information is available does the host use the documented all-IPv4 fallback
+(`0.0.0.0`); an explicit wildcard bind has the same all-interface semantics.

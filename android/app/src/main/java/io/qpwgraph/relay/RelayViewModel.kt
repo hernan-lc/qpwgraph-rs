@@ -30,6 +30,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<RelayUiState> = mutableState.asStateFlow()
     private var clientHandle = 0L
     private var hostHandle = 0L
+    // A stopped native host remains prepared so the same handle can be
+    // started again. Keep the configuration that was used to prepare it so
+    // edits made while it is stopped cannot accidentally restart the old
+    // native configuration.
+    private var hostPreparedSettings: HostSettings? = null
     private var discoveryHandle = 0L
     private var clientPolling: Job? = null
     private var hostPolling: Job? = null
@@ -37,6 +42,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var usbPolling: Job? = null
 
     init {
+        // Pairing PINs are credentials, not app preferences. Remove values
+        // written by older builds so upgrading does not leave a usable host
+        // or client PIN in SharedPreferences.
+        preferences.edit().remove("pin").remove("host_pin").apply()
         startUsbPolling()
     }
 
@@ -46,6 +55,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun text(id: Int, vararg args: Any): String =
         getApplication<Application>().getString(id, *args)
+
+    private fun createdHandle(raw: String): Long {
+        val response = JSONObject(raw)
+        if (response.optString("type") == "error") {
+            throw IllegalStateException(response.optString("message"))
+        }
+        require(response.optString("type") == "created") {
+            "native creation returned an unexpected response"
+        }
+        return response.optLong("handle").also {
+            require(it != 0L) { text(R.string.relay_error_native_create) }
+        }
+    }
 
     fun setMode(mode: RelayMode) {
         setState { it.copy(mode = mode) }
@@ -59,7 +81,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         setState { it.copy(settings = settings) }
         preferences.edit()
             .putString("target", settings.target)
-            .putString("pin", settings.pin)
             .putString("role", settings.role)
             .putString("codec", settings.codec)
             .putString("transport", settings.transport)
@@ -87,17 +108,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                clientHandle = NativeBridge.create(
-                    settings.deviceName,
-                    settings.role,
-                    settings.codec,
-                    settings.transport,
-                    settings.sampleRate,
-                    settings.channels,
-                    settings.frameMs,
-                )
-                require(clientHandle != 0L) {
-                    text(R.string.relay_error_native_create)
+                if (clientHandle == 0L) {
+                    clientHandle = createdHandle(
+                        NativeBridge.create(
+                            settings.deviceName,
+                            settings.role,
+                            settings.codec,
+                            settings.transport,
+                            settings.sampleRate,
+                            settings.channels,
+                            settings.frameMs,
+                        ),
+                    )
                 }
                 val response =
                     JSONObject(NativeBridge.connect(clientHandle, settings.target, settings.pin))
@@ -202,7 +224,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         setState { it.copy(host = host) }
         preferences.edit()
             .putString("host_device_name", host.deviceName)
-            .putString("host_pin", host.pin)
             .putInt("host_port", host.port)
             .putString("host_codec", host.codec)
             .putString("host_transport", host.transport)
@@ -233,18 +254,25 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                hostHandle = NativeBridge.hostCreate(
-                    host.deviceName,
-                    host.pin,
-                    host.port,
-                    host.codec,
-                    host.transport,
-                    host.sampleRate,
-                    host.channels,
-                    host.frameMs,
-                )
-                require(hostHandle != 0L) {
-                    text(R.string.relay_error_native_create)
+                if (hostHandle != 0L && hostPreparedSettings != host) {
+                    NativeBridge.hostRelease(hostHandle)
+                    hostHandle = 0L
+                    hostPreparedSettings = null
+                }
+                if (hostHandle == 0L) {
+                    hostHandle = createdHandle(
+                        NativeBridge.hostCreate(
+                            host.deviceName,
+                            host.pin,
+                            host.port,
+                            host.codec,
+                            host.transport,
+                            host.sampleRate,
+                            host.channels,
+                            host.frameMs,
+                        ),
+                    )
+                    hostPreparedSettings = host
                 }
                 val response = JSONObject(NativeBridge.hostStart(hostHandle))
                 if (response.optString("type") != "host_started") {
@@ -270,16 +298,24 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun stopHost() {
         viewModelScope.launch(Dispatchers.IO) {
             stopHostPolling()
-            stopService()
             if (hostHandle != 0L) {
-                NativeBridge.hostStop(hostHandle)
-                NativeBridge.hostRelease(hostHandle)
-                hostHandle = 0L
+                val response = JSONObject(NativeBridge.hostStop(hostHandle))
+                if (response.optString("type") == "error") {
+                    hostError(response.optString("message"))
+                    return@launch
+                }
             }
+            // Stop the native host before asking the audio service to tear
+            // down. Service.onDestroy() also performs an idempotent hostStop;
+            // doing this first avoids racing its Running -> Stopping
+            // transition and reporting a spurious failure to the UI.
+            stopService()
             setState {
                 it.copy(
                     hostState = RelayHostState.Idle,
                     hostPort = null,
+                    hostActive = false,
+                    hostAddress = null,
                     hostMessage = text(R.string.relay_host_stopped),
                     hostRms = 0f,
                     sessions = emptyList(),
@@ -336,6 +372,23 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshHostStatus() {
         val status = JSONObject(NativeBridge.hostStatus(hostHandle))
         if (status.optString("type") != "status") return
+        val active = status.optBoolean("host_active")
+        if (!active && mutableState.value.hostState == RelayHostState.Running) {
+            // The service or native host may have stopped independently
+            // (for example after the process lost its foreground service).
+            // Reflect that transition and keep the prepared handle available
+            // for a later explicit start.
+            setState {
+                it.copy(
+                    hostState = RelayHostState.Idle,
+                    hostPort = null,
+                    hostActive = false,
+                    hostAddress = null,
+                    sessions = emptyList(),
+                )
+            }
+            return
+        }
         val sessionsJson = status.optJSONArray("sessions") ?: JSONArray()
         val sessions = (0 until sessionsJson.length()).map { index ->
             val session = sessionsJson.getJSONObject(index)
@@ -350,7 +403,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         setState {
             it.copy(
                 sessions = sessions,
-                hostActive = status.optBoolean("host_active"),
+                hostActive = active,
+                hostAddress = status.optString("address").takeIf { address -> address.isNotBlank() },
             )
         }
     }
@@ -368,30 +422,35 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun startDiscovery() {
         if (mutableState.value.discoveryActive) return
         viewModelScope.launch(Dispatchers.IO) {
-            if (discoveryHandle == 0L) {
-                discoveryHandle = NativeBridge.discoveryCreate(
-                    mutableState.value.settings.deviceName,
-                )
-            }
-            if (discoveryHandle == 0L) {
-                setState {
-                    it.copy(discoveryMessage = text(R.string.relay_error_discovery_failed))
+            try {
+                if (discoveryHandle == 0L) {
+                    discoveryHandle = createdHandle(
+                        NativeBridge.discoveryCreate(
+                            mutableState.value.settings.deviceName,
+                        ),
+                    )
                 }
-                return@launch
+                val response = JSONObject(NativeBridge.discoveryStart(discoveryHandle))
+                if (response.optString("type") != "discovery_started") {
+                    setState { it.copy(discoveryMessage = response.optString("message")) }
+                    return@launch
+                }
+                setState {
+                    it.copy(
+                        discoveryActive = true,
+                        peers = emptyList(),
+                        discoveryMessage = text(R.string.relay_discovery_started),
+                    )
+                }
+                startDiscoveryPolling()
+            } catch (error: Exception) {
+                setState {
+                    it.copy(
+                        discoveryMessage = error.message
+                            ?: text(R.string.relay_error_discovery_failed),
+                    )
+                }
             }
-            val response = JSONObject(NativeBridge.discoveryStart(discoveryHandle))
-            if (response.optString("type") != "discovery_started") {
-                setState { it.copy(discoveryMessage = response.optString("message")) }
-                return@launch
-            }
-            setState {
-                it.copy(
-                    discoveryActive = true,
-                    peers = emptyList(),
-                    discoveryMessage = text(R.string.relay_discovery_started),
-                )
-            }
-            startDiscoveryPolling()
         }
     }
 
@@ -498,13 +557,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startService(mode: String, handle: Long, role: String) {
         val current = mutableState.value
+        val audio = if (mode == RelayService.MODE_HOST) current.host else current.settings
         val intent = Intent(getApplication(), RelayService::class.java)
             .putExtra(RelayService.EXTRA_MODE, mode)
             .putExtra(RelayService.EXTRA_HANDLE, handle)
             .putExtra(RelayService.EXTRA_ROLE, role)
-            .putExtra(RelayService.EXTRA_SAMPLE_RATE, current.settings.sampleRate)
-            .putExtra(RelayService.EXTRA_CHANNELS, current.settings.channels)
-            .putExtra(RelayService.EXTRA_FRAME_MS, current.settings.frameMs)
+            .putExtra(RelayService.EXTRA_SAMPLE_RATE, audio.sampleRate)
+            .putExtra(RelayService.EXTRA_CHANNELS, audio.channels)
+            .putExtra(RelayService.EXTRA_FRAME_MS, audio.frameMs)
         getApplication<Application>().startForegroundService(intent)
     }
 
@@ -530,7 +590,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadSettings(): RelaySettings = RelaySettings(
         target = preferences.getString("target", "") ?: "",
-        pin = preferences.getString("pin", "123456") ?: "123456",
+        // PINs are deliberately not persisted; the caller enters one for
+        // each pairing session (or scans the current host QR code).
+        pin = "",
         role = preferences.getString("role", "emit") ?: "emit",
         codec = preferences.getString("codec", "opus") ?: "opus",
         transport = migrateTransport(preferences.getString("transport", "auto") ?: "auto"),
@@ -540,7 +602,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadHostSettings(): HostSettings = HostSettings(
         deviceName = preferences.getString("host_device_name", "android-relay")
             ?: "android-relay",
-        pin = preferences.getString("host_pin", "123456") ?: "123456",
+        // Android hosts use an explicitly entered caller-owned PIN. It is
+        // retained only in the in-memory UI state until this ViewModel ends.
+        pin = "",
         port = preferences.getInt("host_port", DEFAULT_HOST_PORT),
         codec = preferences.getString("host_codec", "opus") ?: "opus",
         transport = migrateTransport(preferences.getString("host_transport", "auto") ?: "auto"),
@@ -556,8 +620,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         stopDiscoveryPolling()
         usbPolling?.cancel()
         usbPolling = null
-        stopService()
         if (clientHandle != 0L) {
+            NativeBridge.disconnect(clientHandle)
             NativeBridge.release(clientHandle)
             clientHandle = 0L
         }
@@ -565,7 +629,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             NativeBridge.hostStop(hostHandle)
             NativeBridge.hostRelease(hostHandle)
             hostHandle = 0L
+            hostPreparedSettings = null
         }
+        // Native state is quiescent before the service is asked to stop. Its
+        // onDestroy cleanup is intentionally idempotent for this ordering.
+        stopService()
         if (discoveryHandle != 0L) {
             NativeBridge.discoveryRelease(discoveryHandle)
             discoveryHandle = 0L

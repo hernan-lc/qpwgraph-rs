@@ -10,6 +10,9 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 /// Write `contents` to `path` atomically.
 ///
@@ -25,30 +28,32 @@ pub fn atomic_write(path: &Path, contents: &[u8], private: bool) -> io::Result<(
         std::fs::create_dir_all(parent)?;
     }
     let temporary = temporary_sibling(path);
-    // Scope the handle so it is closed before the rename: Windows refuses to
-    // rename a file that is still open.
-    {
+    let result = (|| {
+        // Scope the handle so it is closed before the rename: Windows refuses
+        // to rename a file that is still open.
         let mut file = create(&temporary, private)?;
         file.write_all(contents)?;
         // Without the flush-to-disk the rename can land before the data does,
         // which on a crash leaves a correctly named but empty file.
         file.flush()?;
-        let _ = file.sync_all();
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        sync_parent_directory(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    match std::fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            Err(error)
-        }
-    }
+    result
 }
 
 fn temporary_sibling(path: &Path) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    // The process id keeps two instances of the app from colliding on the
-    // same temporary while both save.
-    name.push(format!(".{}.tmp", std::process::id()));
+    // The process id avoids collisions between app instances; the atomic
+    // sequence makes concurrent writes from one process distinct as well.
+    let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+    name.push(format!(".{}.{}.tmp", std::process::id(), sequence));
     path.with_file_name(name)
 }
 
@@ -56,7 +61,7 @@ fn temporary_sibling(path: &Path) -> std::path::PathBuf {
 fn create(path: &Path, private: bool) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     options.mode(if private { 0o600 } else { 0o644 });
     options.open(path)
 }
@@ -65,12 +70,30 @@ fn create(path: &Path, private: bool) -> io::Result<File> {
 fn create(path: &Path, _private: bool) -> io::Result<File> {
     // Windows has no umask; a file in the user's roaming profile is already
     // protected by the directory's ACL.
-    File::create(path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     /// A directory of this test's own. Tests run in parallel and this module
     /// asserts on directory *contents*, so a shared scratch directory would
@@ -105,6 +128,46 @@ mod tests {
     fn leaves_no_temporary_behind() {
         let path = scratch("clean", "clean.txt");
         atomic_write(&path, b"value", false).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files were left behind");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn temporary_sibling_names_are_unique_within_one_process() {
+        let path = scratch("unique", "same.txt");
+        let first = temporary_sibling(&path);
+        let second = temporary_sibling(&path);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn concurrent_writes_to_one_target_are_complete_and_clean() {
+        let path = scratch("concurrent", "atomic.txt");
+        let barrier = Arc::new(Barrier::new(2));
+        let first_path = path.clone();
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            atomic_write(&first_path, b"first-complete-value", false).unwrap();
+        });
+        let second_path = path.clone();
+        let second_barrier = Arc::clone(&barrier);
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            atomic_write(&second_path, b"second-complete-value", false).unwrap();
+        });
+        first.join().unwrap();
+        second.join().unwrap();
+        let value = std::fs::read(&path).unwrap();
+        assert!(
+            value == b"first-complete-value" || value == b"second-complete-value",
+            "replacement was not one complete write: {value:?}"
+        );
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .filter_map(Result::ok)

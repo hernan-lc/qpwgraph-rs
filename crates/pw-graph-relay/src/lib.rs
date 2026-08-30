@@ -70,11 +70,18 @@ pub const PAIRING_ATTEMPT_LIMIT: u32 = 5;
 /// How long a source stays locked out. With a PAKE, guessing a six-digit PIN
 /// is an online-only game; at five tries per lockout it would take centuries.
 pub const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
+/// Maximum number of source addresses retained in the pairing rate limiter.
+///
+/// This is deliberately a hard cap, rather than a cleanup threshold: a flood
+/// of distinct source addresses must not turn the limiter itself into an
+/// unbounded allocation.
+const MAX_PAIRING_FAILURE_RECORDS: usize = 1024;
 
 /// Pairing failures recorded against one source address.
 struct FailureRecord {
     count: u32,
     locked_until: Instant,
+    last_seen: Instant,
 }
 
 #[derive(Debug, Error)]
@@ -177,9 +184,10 @@ pub struct EngineConfig {
     pub local_sample_rate: u32,
     /// Channel count of this machine's own audio endpoints.
     pub local_channels: u16,
-    /// Local address the host listens on. `None` binds every IPv4 interface,
-    /// which is the widest possible exposure — set it to the address of the
-    /// link the relay is actually meant to serve.
+    /// Local address the host listens on. When `None`, the best active
+    /// relay-capable link selected by [`TransportPreference::Auto`] is used;
+    /// only a machine with no usable link information falls back to every
+    /// IPv4 interface.
     pub bind_addr: Option<Ipv4Addr>,
     /// Concurrent connections allowed to sit in the pairing handshake. Each
     /// costs a thread and a five-second read timeout before it has proven
@@ -235,7 +243,35 @@ pub struct SessionStatus {
 pub struct EngineStatus {
     pub host_active: bool,
     pub host_port: Option<u16>,
+    /// The exact IPv4 address selected for the active listener. `None` means
+    /// the documented no-link fallback is listening on all IPv4 interfaces.
+    pub host_addr: Option<Ipv4Addr>,
     pub sessions: Vec<SessionStatus>,
+}
+
+/// State of the control connection relevant to session resumption.
+///
+/// This is deliberately separate from the generation counter: the counter
+/// identifies one set of control keys, while this state prevents a second
+/// connection from taking over while the original control owner is still
+/// active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlState {
+    Active,
+    ResumeEligible { generation: u64 },
+    Resuming { generation: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeGraceResult {
+    /// The grace period expired without an in-flight resume.
+    Expired,
+    /// A different control generation already owns the session, or the
+    /// session is otherwise no longer waiting for this grace period.
+    Resumed,
+    /// A resume challenge is being authenticated. The watcher must not turn
+    /// this into an apparently active session with no control owner.
+    InProgress,
 }
 
 /// Internal session bookkeeping shared with worker threads.
@@ -254,13 +290,14 @@ pub(crate) struct SessionRecord {
     pub stop: Arc<AtomicBool>,
     /// Set by `disconnect`; the control thread sends `bye` and tears down.
     pub bye_requested: AtomicBool,
-    /// Bumped each time a control thread takes over the session (initial
-    /// handshake and every successful resume). Host-side grace waits compare
-    /// generations to notice a replacement.
+    /// Identifies the control-key generation currently in use. Host-side
+    /// grace waits compare generations to notice a replacement.
     pub control_generation: AtomicU64,
-    /// One resume takeover at a time; racing reconnects are rejected while
-    /// it is set.
-    pub resuming: AtomicBool,
+    /// Derived from the original PAKE shared secret. It is never transmitted
+    /// and is used only for challenge-response resumption.
+    pub resume_secret: [u8; 32],
+    /// Explicitly gates resume takeover and serializes racing attempts.
+    pub control_state: Mutex<ControlState>,
     /// UDP address of the peer's audio socket.
     ///
     /// Only ever updated from a datagram that authenticated against this
@@ -285,6 +322,105 @@ pub(crate) struct SessionRecord {
     pub audio_sealer: Mutex<Sealer>,
     /// Opens this session's incoming datagrams and tracks its replay window.
     pub audio_opener: Mutex<Opener>,
+}
+
+impl SessionRecord {
+    /// Mark the current control owner as gone. Calling this more than once is
+    /// harmless while the grace period is in progress.
+    pub(crate) fn mark_control_dropped(&self) -> bool {
+        let Ok(mut state) = self.control_state.lock() else {
+            return false;
+        };
+        match *state {
+            ControlState::Active => {
+                let generation = self.control_generation.load(Ordering::Acquire);
+                *state = ControlState::ResumeEligible { generation };
+                true
+            }
+            ControlState::ResumeEligible { .. } => true,
+            ControlState::Resuming { .. } => false,
+        }
+    }
+
+    /// Claim one eligible resume generation. A session whose old control
+    /// channel is active cannot be claimed, and only one challenge may be in
+    /// flight at once.
+    pub(crate) fn begin_resume(&self) -> Option<u64> {
+        let Ok(mut state) = self.control_state.lock() else {
+            return None;
+        };
+        let ControlState::ResumeEligible { generation } = *state else {
+            return None;
+        };
+        let next = generation.checked_add(1)?;
+        *state = ControlState::Resuming { generation: next };
+        Some(next)
+    }
+
+    /// Return a failed resume attempt to the eligible state without rotating
+    /// the live control generation.
+    pub(crate) fn cancel_resume(&self, generation: u64) {
+        if let Ok(mut state) = self.control_state.lock() {
+            if *state == (ControlState::Resuming { generation }) {
+                let current = self.control_generation.load(Ordering::Acquire);
+                *state = ControlState::ResumeEligible {
+                    generation: current,
+                };
+            }
+        }
+    }
+
+    /// Commit a successful resume and rotate the control-key generation.
+    pub(crate) fn finish_resume(&self, generation: u64) -> bool {
+        let Ok(mut state) = self.control_state.lock() else {
+            return false;
+        };
+        if *state != (ControlState::Resuming { generation }) {
+            return false;
+        }
+        self.control_generation.store(generation, Ordering::Release);
+        *state = ControlState::Active;
+        true
+    }
+
+    /// End a grace period without allowing its old control watcher to tear
+    /// down a session that has already been resumed. The state transition is
+    /// serialized with `finish_resume`, so the watcher and the new owner
+    /// cannot both decide the session's fate. An in-flight challenge remains
+    /// in progress until it succeeds or cancels itself.
+    pub(crate) fn expire_resume_grace(&self, generation: u64) -> ResumeGraceResult {
+        let Ok(mut state) = self.control_state.lock() else {
+            return ResumeGraceResult::InProgress;
+        };
+        if self.control_generation.load(Ordering::Acquire) != generation {
+            return ResumeGraceResult::Resumed;
+        }
+        match *state {
+            ControlState::ResumeEligible {
+                generation: current,
+            } if current == generation => {
+                *state = ControlState::Active;
+                ResumeGraceResult::Expired
+            }
+            ControlState::Resuming { .. } => ResumeGraceResult::InProgress,
+            _ => ResumeGraceResult::Resumed,
+        }
+    }
+
+    /// Abort a challenge that has remained in flight beyond the bounded
+    /// handshake timeout. The caller will tear down the session; a successful
+    /// finisher racing this method wins or loses under the same state lock.
+    pub(crate) fn abort_resume(&self, generation: u64) -> bool {
+        let Ok(mut state) = self.control_state.lock() else {
+            return false;
+        };
+        if *state == (ControlState::Resuming { generation }) {
+            *state = ControlState::Active;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub(crate) struct EngineInner {
@@ -392,18 +528,32 @@ impl EngineInner {
         let Ok(mut failures) = self.pairing_failures.lock() else {
             return;
         };
-        // Keep the table from growing without bound if many addresses probe.
-        if failures.len() > 1024 {
-            let now = Instant::now();
+        let now = Instant::now();
+        // Keep the table bounded if many addresses probe. Expired records are
+        // discarded first; if a hostile burst has filled the table with
+        // active lockouts, evict the least recently seen source so a new
+        // address cannot grow the map past the limit.
+        if !failures.contains_key(&addr) && failures.len() >= MAX_PAIRING_FAILURE_RECORDS {
             failures.retain(|_, record| record.locked_until > now);
+            if failures.len() >= MAX_PAIRING_FAILURE_RECORDS {
+                let oldest = failures
+                    .iter()
+                    .min_by_key(|(_, record)| record.last_seen)
+                    .map(|(address, _)| *address);
+                if let Some(oldest) = oldest {
+                    failures.remove(&oldest);
+                }
+            }
         }
         let record = failures.entry(addr).or_insert(FailureRecord {
             count: 0,
-            locked_until: Instant::now(),
+            locked_until: now,
+            last_seen: now,
         });
         record.count += 1;
+        record.last_seen = now;
         if record.count >= PAIRING_ATTEMPT_LIMIT {
-            record.locked_until = Instant::now() + PAIRING_LOCKOUT;
+            record.locked_until = now + PAIRING_LOCKOUT;
         }
     }
 
@@ -432,10 +582,19 @@ impl EngineInner {
         SessionId(self.next_session.fetch_add(1, Ordering::Relaxed))
     }
 
-    fn insert_session(&self, record: Arc<SessionRecord>) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.insert(record.id, record);
+    fn insert_session(&self, record: Arc<SessionRecord>) -> bool {
+        let limit = self.config().max_sessions;
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return false;
+        };
+        // Session IDs are allocated monotonically, but rejecting a duplicate
+        // here also prevents a test/backend mistake from replacing a live
+        // record and bypassing the bound.
+        if sessions.contains_key(&record.id) || sessions.len() >= limit {
+            return false;
         }
+        sessions.insert(record.id, record);
+        true
     }
 
     fn session(&self, id: SessionId) -> Option<Arc<SessionRecord>> {
@@ -504,7 +663,9 @@ impl EngineInner {
             sessions
         };
         let mut accepted = true;
+        let mut found = false;
         for record in sessions.values().filter(|record| record.sending) {
+            found = true;
             let converted = if realtime {
                 record.capture_convert.try_lock().ok()
             } else {
@@ -533,7 +694,7 @@ impl EngineInner {
                 true
             };
         }
-        accepted
+        found && accepted
     }
 
     /// Sum every receiving session's decoded audio into `out`.
@@ -627,7 +788,6 @@ impl EngineInner {
         produced
     }
 
-
     fn remove_session(&self, id: SessionId) -> Option<Arc<SessionRecord>> {
         let record = self.sessions.lock().ok()?.remove(&id);
         if let Some(record) = &record {
@@ -637,11 +797,14 @@ impl EngineInner {
     }
 
     fn status(&self) -> EngineStatus {
-        let host_port = self
+        let host = self
             .host
             .lock()
             .ok()
-            .and_then(|host| host.as_ref().map(|record| record.port));
+            .and_then(|host| host.as_ref().map(|record| (record.port, record.bind_addr)));
+        let (host_port, host_addr) = host
+            .map(|(port, addr)| (Some(port), addr))
+            .unwrap_or((None, None));
         let sessions = self
             .sessions
             .lock()
@@ -662,6 +825,7 @@ impl EngineInner {
         EngineStatus {
             host_active: host_port.is_some(),
             host_port,
+            host_addr,
             sessions,
         }
     }
@@ -773,10 +937,11 @@ impl RelayHandle {
         }
         let record = session::start_host(&self.inner, config.port)?;
         let port = record.port;
+        let bind_addr = record.bind_addr;
         *host = Some(record);
         drop(host);
         // Advertise over mDNS so peers can find us (best-effort).
-        self.inner.start_advertiser(port);
+        self.inner.start_advertiser(port, bind_addr);
         self.inner.emit(RelayEvent::HostStarted { port });
         Ok(port)
     }
@@ -858,7 +1023,16 @@ impl RelayHandle {
     }
 
     /// Realtime-safe variant of [`Self::push_capture`].
+    ///
+    /// Returns `false` without touching the input when `samples` exceeds
+    /// [`MAX_REALTIME_QUANTUM_SAMPLES`], when a realtime lock is busy, or
+    /// when no session accepts capture. A successful call enqueues the whole
+    /// quantum for each available session; bounded queues may drop their
+    /// oldest samples when full.
     pub fn try_push_capture(&self, samples: &[f32]) -> bool {
+        if samples.len() > MAX_REALTIME_QUANTUM_SAMPLES {
+            return false;
+        }
         self.inner.broadcast_capture(samples, true)
     }
 
@@ -870,8 +1044,13 @@ impl RelayHandle {
     }
 
     /// Realtime-safe variant of [`Self::pull_playback`].
+    ///
+    /// Returns zero when a realtime lock is busy or no audio is available.
+    /// At most [`MAX_REALTIME_QUANTUM_SAMPLES`] samples are produced; an
+    /// oversized output slice is short-served and its tail is untouched.
     pub fn try_pull_playback(&self, out: &mut [f32]) -> usize {
-        self.inner.mix_playback(out, true)
+        let usable = out.len().min(MAX_REALTIME_QUANTUM_SAMPLES);
+        self.inner.mix_playback(&mut out[..usable], true)
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -882,6 +1061,7 @@ impl RelayHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv6Addr;
 
     #[test]
     fn default_config_is_usable() {
@@ -900,6 +1080,111 @@ mod tests {
         assert!(handle.host_start().is_err());
     }
 
+    #[test]
+    fn resume_is_only_eligible_after_control_drop_and_consumes_generations() {
+        let record = mixing_session(1, false);
+
+        // A live control owner cannot be replaced by a connection that merely
+        // knows the session id.
+        assert_eq!(record.begin_resume(), None);
+        assert_eq!(*record.control_state.lock().unwrap(), ControlState::Active);
+
+        assert!(record.mark_control_dropped());
+        let first = record.begin_resume().expect("dropped control is resumable");
+        assert_eq!(first, 2);
+        // One challenge can be in flight at a time.
+        assert_eq!(record.begin_resume(), None);
+
+        // A failed challenge returns to eligibility. The next challenge uses
+        // a fresh server nonce, so an old proof cannot be replayed even though
+        // the live control-key generation has not changed yet.
+        record.cancel_resume(first);
+        let second = record.begin_resume().expect("retry remains eligible");
+        assert_eq!(second, 2);
+        assert!(record.finish_resume(second));
+        assert_eq!(*record.control_state.lock().unwrap(), ControlState::Active);
+        assert_eq!(record.begin_resume(), None);
+    }
+
+    #[test]
+    fn resume_grace_expiry_cannot_race_a_successful_resume() {
+        let record = mixing_session(2, false);
+        assert!(record.mark_control_dropped());
+        let generation = record.begin_resume().expect("resume is eligible");
+        assert_eq!(record.expire_resume_grace(1), ResumeGraceResult::InProgress);
+        assert_eq!(
+            *record.control_state.lock().unwrap(),
+            ControlState::Resuming { generation }
+        );
+        assert!(record.finish_resume(generation));
+        // The old watcher's generation is stale after the successful resume.
+        assert_eq!(record.expire_resume_grace(1), ResumeGraceResult::Resumed);
+
+        let record = mixing_session(3, false);
+        assert!(record.mark_control_dropped());
+        let generation = record.begin_resume().expect("resume is eligible");
+        record.cancel_resume(generation);
+        assert_eq!(record.expire_resume_grace(1), ResumeGraceResult::Expired);
+        // Expiry wins only while the old generation is still current.
+        assert!(!record.finish_resume(generation));
+    }
+
+    #[test]
+    fn realtime_push_reports_no_acceptor_when_no_session_exists() {
+        let handle = RelayHandle {
+            inner: mixing_engine(Vec::new()),
+        };
+        assert!(!handle.try_push_capture(&[]));
+    }
+
+    #[test]
+    fn realtime_push_rejects_oversized_quantum_before_converter_work() {
+        let session = mixing_session(1, false);
+        let inner = mixing_engine(vec![Arc::clone(&session)]);
+        let before = session.capture_convert.lock().unwrap().1.capacity();
+        let oversized = vec![0.0f32; MAX_REALTIME_QUANTUM_SAMPLES + 1];
+
+        let handle = RelayHandle { inner };
+        assert!(!handle.try_push_capture(&oversized));
+        assert_eq!(session.capture_convert.lock().unwrap().1.capacity(), before);
+    }
+
+    #[test]
+    fn established_session_admission_is_atomically_bounded() {
+        let inner = EngineInner::new(EngineConfig {
+            max_sessions: 1,
+            ..EngineConfig::default()
+        });
+        assert!(inner.insert_session(mixing_session(1, false)));
+        assert!(!inner.insert_session(mixing_session(2, false)));
+        assert_eq!(inner.session_count(), 1);
+    }
+
+    #[test]
+    fn pairing_failure_table_has_a_hard_bound() {
+        let inner = EngineInner::new(EngineConfig::default());
+        let now = Instant::now();
+        {
+            let mut failures = inner.pairing_failures.lock().unwrap();
+            for index in 0..MAX_PAIRING_FAILURE_RECORDS {
+                failures.insert(
+                    IpAddr::V6(Ipv6Addr::from(index as u128)),
+                    FailureRecord {
+                        count: PAIRING_ATTEMPT_LIMIT,
+                        locked_until: now + PAIRING_LOCKOUT,
+                        last_seen: now,
+                    },
+                );
+            }
+        }
+
+        inner.note_pairing_failure(IpAddr::V6(Ipv6Addr::from(99_999u128)));
+        assert_eq!(
+            inner.pairing_failures.lock().unwrap().len(),
+            MAX_PAIRING_FAILURE_RECORDS
+        );
+    }
+
     /// A session record with just enough filled in to exercise mixing. The
     /// crypto halves are real, because `SessionRecord` has nowhere to put a
     /// placeholder, but nothing in the mix path touches them.
@@ -914,6 +1199,10 @@ mod tests {
         let (sealer, _) = keys.audio_channel().expect("audio keys");
         let (_, opener) = peer_keys.audio_channel().expect("peer audio keys");
         let format = AudioFormat::new(48_000, 1, 10);
+        let capture_converter =
+            Converter::with_capacity(48_000, 1, 48_000, 1, MAX_REALTIME_QUANTUM_SAMPLES);
+        let capture_destination =
+            Vec::with_capacity(capture_converter.output_capacity_for(MAX_REALTIME_QUANTUM_SAMPLES));
         Arc::new(SessionRecord {
             id: SessionId(id),
             wire_id: id,
@@ -929,12 +1218,13 @@ mod tests {
             receiving,
             stop: Arc::new(AtomicBool::new(false)),
             bye_requested: AtomicBool::new(false),
-            control_generation: AtomicU64::new(0),
-            resuming: AtomicBool::new(false),
+            control_generation: AtomicU64::new(1),
+            resume_secret: keys.resume_auth_key(),
+            control_state: Mutex::new(ControlState::Active),
             peer_audio_addr: Mutex::new(None),
             outgoing: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
             incoming: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
-            capture_convert: Mutex::new((Converter::new(48_000, 1, 48_000, 1), Vec::new())),
+            capture_convert: Mutex::new((capture_converter, capture_destination)),
             audio_sealer: Mutex::new(sealer),
             audio_opener: Mutex::new(opener),
         })

@@ -31,8 +31,8 @@ the Android SDK configured:
 
 The app requests microphone permission because Emit and Both capture audio.
 Android 13+ notification permission is requested for the foreground audio
-service. The default PIN is `123456`; change it directly in the Pairing PIN
-field whenever you need a different PIN.
+service. Pairing PINs are entered for the current client or host lifetime and
+are not persisted; there is no insecure app-wide default.
 
 The app mirrors the desktop relay panel with three tabs:
 
@@ -65,15 +65,15 @@ the USB network address assigned to the phone/Linux host:
 2. On Linux, identify the USB/RNDIS interface, usually `usb0`, `rndis0`, or
    an `enx...` address; the desktop relay panel shows the detected link and
    its address automatically.
-3. Start the desktop relay host with PIN `123456`; use a fixed TCP port such
+3. Start the desktop relay host with a PIN such as `123456`; use a fixed TCP port such
    as `48123` so the address is easy to enter.
 4. Keep the preferred link on **Auto**: the relay panel auto-detects the USB
    tether and shows its address (for example `usb0 · 192.168.42.129`), and
    prefers the USB link automatically.
 5. In Android, open the **Discover** tab and start discovery — the desktop
    host is probed over the USB tether directly. Tap **Connect**, or enter the
-   Linux USB/RNDIS address as `host:port` manually in the Receiver tab. Keep
-   PIN `123456` and choose Emit/Receive/Both.
+   Linux USB/RNDIS address as `host:port` manually in the Receiver tab. Enter
+   the same PIN used by the desktop host and choose Emit/Receive/Both.
 6. Confirm the desktop shows a relay session and that the Relay Microphone or
    Relay Speaker node carries audio.
 

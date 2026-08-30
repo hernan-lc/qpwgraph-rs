@@ -279,17 +279,20 @@ pub fn outbound_bind_addr(
 }
 
 /// Choose the local address a host should listen on for a transport
-/// preference. `Auto` returns `None`, meaning every interface.
+/// preference. `Auto` selects the highest-ranked active relay link. If an
+/// explicit preference has no matching link, the best active link is used as
+/// a safe fallback. `None` means that no usable link information exists; the
+/// caller may then use its documented all-interface fallback.
 ///
 /// Selecting "USB tether" used to change only which link outbound
 /// connections preferred, while the listener still accepted pairing on the
 /// LAN, on every VPN, and on anything else that happened to be up. Honouring
 /// the preference here makes the choice mean what it says.
 pub fn listen_bind_addr(links: &[LocalLink], preference: TransportPreference) -> Option<Ipv4Addr> {
-    if preference == TransportPreference::Auto {
-        return None;
+    if let Some(link) = select_links(links, preference).first() {
+        return Some(link.addr);
     }
-    select_links(links, preference)
+    select_links(links, TransportPreference::Auto)
         .first()
         .map(|link| link.addr)
 }
@@ -478,10 +481,10 @@ mod tests {
     #[test]
     fn a_transport_preference_constrains_the_listener() {
         let links = fixture_links();
-        // "Auto" is the only setting that means every interface.
-        assert_eq!(listen_bind_addr(&links, TransportPreference::Auto), None);
-        // A specific preference binds the listener to that link, rather than
-        // offering pairing on every interface the machine happens to have.
+        assert_eq!(
+            listen_bind_addr(&links, TransportPreference::Auto),
+            Some(Ipv4Addr::new(192, 168, 42, 129))
+        );
         let usb = listen_bind_addr(&links, TransportPreference::Usb);
         assert!(usb.is_some());
         assert_eq!(
@@ -490,6 +493,46 @@ mod tests {
                 .first()
                 .map(|link| link.addr)
         );
+    }
+
+    #[test]
+    fn listener_selection_uses_the_best_available_link_and_safe_fallbacks() {
+        let mk = |kind: LinkKind, addr: Ipv4Addr| LocalLink {
+            name: kind.as_str().into(),
+            addr,
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            kind,
+        };
+        let wifi = mk(LinkKind::Wifi, Ipv4Addr::new(192, 168, 1, 2));
+        let bluetooth = mk(LinkKind::BluetoothPan, Ipv4Addr::new(10, 0, 0, 2));
+        let lan = mk(LinkKind::Lan, Ipv4Addr::new(172, 16, 0, 2));
+        assert_eq!(
+            listen_bind_addr(
+                &[
+                    wifi.clone(),
+                    mk(LinkKind::Usb, Ipv4Addr::new(192, 168, 42, 2))
+                ],
+                TransportPreference::Auto
+            ),
+            Some(Ipv4Addr::new(192, 168, 42, 2))
+        );
+        assert_eq!(
+            listen_bind_addr(&[wifi.clone()], TransportPreference::Auto),
+            Some(wifi.addr)
+        );
+        assert_eq!(
+            listen_bind_addr(&[lan.clone(), bluetooth.clone()], TransportPreference::Auto),
+            Some(bluetooth.addr)
+        );
+        assert_eq!(
+            listen_bind_addr(&[lan.clone(), wifi.clone()], TransportPreference::Wifi),
+            Some(wifi.addr)
+        );
+        assert_eq!(
+            listen_bind_addr(&[lan, wifi.clone()], TransportPreference::Usb),
+            Some(wifi.addr)
+        );
+        assert_eq!(listen_bind_addr(&[], TransportPreference::Auto), None);
     }
 
     #[test]

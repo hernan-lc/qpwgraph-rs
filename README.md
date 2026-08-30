@@ -44,9 +44,9 @@ Every article lives in [`docs/`](docs). This page is the index.
 | --- | --- |
 | [Workspace architecture](docs/architecture.md) | Crate layout, layering, backend namespacing |
 | [Slint UI structure](docs/ui-components.md) | How the bridge feeds the Slint shell |
-| [Relay wire protocol, version 2](docs/relay-protocol.md) | Control and audio channels, pairing, crypto |
+| [Relay wire protocol, version 3](docs/relay-protocol.md) | Control and audio channels, pairing, crypto |
 | [Adaptive noise reduction report](docs/adaptive-noise-reduction.md) | Why the four-band suppressor was removed |
-| [Audit follow-ups](docs/audit-follow-ups.md) | Known open issues, with the shape of each fix |
+| [Audit follow-ups](docs/audit-follow-ups.md) | Resolved audit items and regression coverage |
 
 ## Contributing
 

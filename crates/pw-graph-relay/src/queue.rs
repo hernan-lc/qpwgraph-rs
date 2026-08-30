@@ -107,10 +107,11 @@ impl PcmQueue {
     /// Realtime-safe variant: never blocks. Returns `false` when the lock was
     /// busy and this quantum had to be skipped.
     ///
-    /// The `notify_one` after the push is a futex wake only when a consumer is
-    /// actually parked, and it happens with the lock already released; that
-    /// bounded syscall is what lets the sender transmit without a polling
-    /// delay, and it cannot block the caller.
+    /// `notify_one` is issued only after the queue lock is released. On the
+    /// supported standard-library platforms it is a bounded wake/handoff and
+    /// does not wait for the consumer; this queue therefore offers a
+    /// nonblocking best-effort realtime path, not a hard-realtime guarantee
+    /// about the platform's condition-variable implementation.
     pub fn try_push(&self, samples: &[f32]) -> bool {
         let limit = self.limit();
         {
@@ -179,6 +180,11 @@ impl PcmQueue {
             queue.clear();
         }
     }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.inner.lock().map(|queue| queue.capacity()).unwrap_or(0)
+    }
 }
 
 fn drain_into(queue: &mut VecDeque<f32>, out: &mut [f32]) -> usize {
@@ -190,16 +196,28 @@ fn drain_into(queue: &mut VecDeque<f32>, out: &mut [f32]) -> usize {
 }
 
 fn push_locked(queue: &mut VecDeque<f32>, samples: &[f32], limit: usize) {
+    if limit == 0 {
+        queue.clear();
+        return;
+    }
     if samples.len() >= limit {
         // An oversized write keeps only its tail; history would be stale.
         queue.clear();
         queue.extend(samples.iter().copied().skip(samples.len() - limit));
         return;
     }
-    queue.extend(samples.iter().copied());
-    while queue.len() > limit {
+    // Remove old samples before extending. Since `limit` is never larger than
+    // the VecDeque's initial capacity, this makes capacity growth impossible
+    // even when a push straddles the ring-buffer's physical end.
+    let drop_count = queue
+        .len()
+        .saturating_add(samples.len())
+        .saturating_sub(limit);
+    for _ in 0..drop_count {
         queue.pop_front();
     }
+    queue.extend(samples.iter().copied());
+    debug_assert!(queue.len() <= limit);
 }
 
 #[cfg(test)]
@@ -276,6 +294,34 @@ mod tests {
         queue.set_target_depth(0);
         queue.push(&[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(queue.len(), 4);
+    }
+
+    #[test]
+    fn realtime_push_never_grows_the_ring_buffer() {
+        let queue = PcmQueue::new(8);
+        let initial = queue.capacity();
+        let quantum = [0.0f32; 3];
+        for _ in 0..32 {
+            assert!(queue.try_push(&quantum));
+        }
+        assert_eq!(queue.capacity(), initial);
+
+        queue.set_target_depth(4);
+        for _ in 0..32 {
+            assert!(queue.try_push(&quantum));
+        }
+        assert_eq!(queue.capacity(), initial);
+
+        // Exercise a full queue, an oversized write, and the wrapped ring
+        // layout without ever allowing VecDeque to extend itself.
+        let oversized = [1.0f32; 32];
+        assert!(queue.try_push(&oversized));
+        let mut out = [0.0f32; 2];
+        assert_eq!(queue.try_pull(&mut out), 2);
+        for _ in 0..32 {
+            assert!(queue.try_push(&quantum));
+        }
+        assert_eq!(queue.capacity(), initial);
     }
 
     #[test]

@@ -306,8 +306,9 @@ fn relay_transport(value: &str) -> RelayTransportPreference {
 
 #[cfg(feature = "relay")]
 pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
-    let port = application.source.relay_status().host_port?;
-    let addr = host_link_addr(application)?;
+    let status = application.source.relay_status();
+    let port = status.host_port?;
+    let addr = status.host_addr?;
     Some(relay_build_qr_payload(
         addr,
         port,
@@ -322,13 +323,7 @@ pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
 /// an address nothing is listening on.
 #[cfg(feature = "relay")]
 fn host_link_addr(application: &Application) -> Option<std::net::Ipv4Addr> {
-    let links = application.source.relay_local_links();
-    let preference = relay_transport(&application.config.relay_transport);
-    pw_graph_backend::relay_select_links(&links, preference)
-        .into_iter()
-        .next()
-        .or_else(|| links.into_iter().next())
-        .map(|link| link.addr)
+    application.source.relay_status().host_addr
 }
 
 #[cfg(not(feature = "relay"))]

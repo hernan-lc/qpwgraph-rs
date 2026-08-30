@@ -67,9 +67,9 @@ class RelayService : Service() {
     }
 
     /** Push one frame of captured PCM into whichever engine owns the handle. */
-    private fun pushCapture(samples: FloatArray): Int = when (mode) {
-        MODE_HOST -> NativeBridge.hostPushCapture(handle, samples)
-        else -> NativeBridge.pushCapture(handle, samples)
+    private fun pushCapture(samples: FloatArray, length: Int): Int = when (mode) {
+        MODE_HOST -> NativeBridge.hostPushCapture(handle, samples, length)
+        else -> NativeBridge.pushCapture(handle, samples, length)
     }
 
     /** Pull one frame of playback PCM from whichever engine owns the handle. */
@@ -106,7 +106,10 @@ class RelayService : Service() {
                         val count = recorder.read(pcm, 0, pcm.size)
                         if (count <= 0) continue
                         for (index in 0 until count) floats[index] = pcm[index] / 32768f
-                        pushCapture(if (count == floats.size) floats else floats.copyOf(count))
+                        // The native side copies only the valid prefix into a
+                        // reusable thread-local buffer; avoid allocating a
+                        // trimmed FloatArray for every AudioRecord read.
+                        pushCapture(floats, count)
                     }
                 } finally {
                     recorder.stop()
@@ -172,7 +175,6 @@ class RelayService : Service() {
             when (mode) {
                 MODE_HOST -> {
                     NativeBridge.hostStop(handle)
-                    NativeBridge.hostRelease(handle)
                 }
 
                 else -> {

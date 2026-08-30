@@ -3,7 +3,7 @@
 Carrying audio between this machine and a peer — typically a phone — over the
 local network. This page covers the feature as the desktop application exposes
 it; the wire format is documented separately in
-[Relay wire protocol, version 2](relay-protocol.md).
+[Relay wire protocol, version 3](relay-protocol.md).
 
 ## The panel
 
@@ -48,6 +48,7 @@ Geometries outside the negotiable set (16/24/48 kHz, mono or stereo,
 
 ## Related
 
-- [Relay wire protocol, version 2](relay-protocol.md) — frames, pairing, crypto.
-- [Audit follow-ups](audit-follow-ups.md) — known open issues, including
-  session resume authentication and default interface binding.
+- [Relay wire protocol, version 3](relay-protocol.md) — frames, pairing,
+  resume authentication, and crypto.
+- [Audit follow-ups](audit-follow-ups.md) — resolved audit items and regression
+  coverage.

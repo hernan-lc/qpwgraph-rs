@@ -28,33 +28,75 @@ pub enum PatchbayError {
     XmlAttributes,
     #[error(transparent)]
     Backend(#[from] BackendError),
-    /// Activation failed and the connections it had already removed could not
-    /// all be put back. The graph is in neither the previous nor the saved
-    /// state, and the user has to be told rather than shown a bare error.
-    #[error("activation failed ({cause}) and {stranded} connection(s) could not be restored")]
-    ActivationNotRolledBack { cause: String, stranded: usize },
+    /// Activation failed and one or both mutation directions could not be
+    /// restored. The graph is in neither the previous nor the saved state, and
+    /// the user has to be told rather than shown a bare error.
+    #[error(
+        "activation failed ({cause}); {created_links_left} created link(s) remain and {removed_links_not_restored} removed link(s) could not be restored"
+    )]
+    ActivationNotRolledBack {
+        cause: String,
+        created_links_left: usize,
+        removed_links_not_restored: usize,
+    },
 }
 
-/// Put back everything a failed activation had disconnected, and describe the
-/// outcome.
-fn rollback(
+/// Undo the complete mutation made by one activation. Created links are
+/// removed first, in reverse order; links removed by exclusive or
+/// auto-disconnect policy are then restored, also in reverse order. Both loops
+/// deliberately continue after an error so the final report says which side
+/// of the original graph remains stranded.
+fn rollback_activation(
     driver: &mut dyn GraphDriver,
-    undone: &[(PortKey, PortKey)],
+    created_by_activation: &[(PortKey, PortKey)],
+    removed_by_activation: &[(PortKey, PortKey)],
     cause: BackendError,
 ) -> PatchbayError {
-    let mut stranded = 0;
-    for (output, input) in undone.iter().rev() {
-        if driver.connect_by_key_if_missing(output, input).is_err() {
-            stranded += 1;
+    let mut created_links_left = 0;
+    for (output, input) in created_by_activation.iter().rev() {
+        match driver.disconnect_by_key_if_present_without_suppression(output, input) {
+            Ok(Some(_)) => driver.allow_connection(output, input),
+            Ok(None) => {}
+            Err(_) => created_links_left += 1,
         }
     }
-    if stranded == 0 {
+
+    let mut removed_links_not_restored = 0;
+    for (output, input) in removed_by_activation.iter().rev() {
+        if driver.connect_by_key_if_missing(output, input).is_err() {
+            removed_links_not_restored += 1;
+        }
+    }
+    if created_links_left == 0 && removed_links_not_restored == 0 {
         PatchbayError::Backend(cause)
     } else {
         PatchbayError::ActivationNotRolledBack {
             cause: cause.to_string(),
-            stranded,
+            created_links_left,
+            removed_links_not_restored,
         }
+    }
+}
+
+/// Record a successful removal in the activation transaction. A route that
+/// this same activation created and then removed is not part of the original
+/// graph, so it must be forgotten from the created set rather than restored as
+/// though it had existed before activation.
+fn record_activation_removal(
+    removed_by_activation: &mut Vec<(PortKey, PortKey)>,
+    created_by_activation: &mut Vec<(PortKey, PortKey)>,
+    output: PortKey,
+    input: PortKey,
+) {
+    if let Some(index) = created_by_activation
+        .iter()
+        .position(|(created_output, created_input)| {
+            created_output == &output && created_input == &input
+        })
+    {
+        created_by_activation.remove(index);
+    } else {
+        removed_by_activation.push((output, input));
     }
 }
 
@@ -310,6 +352,9 @@ impl Patchbay {
 
     /// Connect all saved edges. Name-based rules are resolved against the
     /// current registry snapshot, allowing IDs to change between sessions.
+    /// Backend mutations are atomic: a fatal connect/disconnect error rolls
+    /// back every mutation made by this invocation. Unresolved rules are
+    /// skipped as before and are not mutations.
     pub fn activate(
         &self,
         driver: &mut dyn GraphDriver,
@@ -343,12 +388,8 @@ impl Patchbay {
             })
             .collect();
 
-        // Everything this activation takes down is recorded first, so a
-        // failure part-way can put the graph back. Disconnecting live routes
-        // and *then* discovering the desired ones cannot be made would
-        // otherwise leave the user with neither — the audible symptom being
-        // that activating a patchbay silently kills working audio.
-        let mut undone: Vec<(PortKey, PortKey)> = Vec::new();
+        let mut removed_by_activation: Vec<(PortKey, PortKey)> = Vec::new();
+        let mut created_by_activation: Vec<(PortKey, PortKey)> = Vec::new();
 
         if exclusive {
             let live: Vec<_> = driver
@@ -374,14 +415,26 @@ impl Patchbay {
                 if saved {
                     continue;
                 }
-                match driver.disconnect_by_key_if_present(&live_output, &live_input) {
+                match driver
+                    .disconnect_by_key_if_present_without_suppression(&live_output, &live_input)
+                {
                     Ok(Some(_)) => {
                         report.disconnected += 1;
-                        undone.push((live_output, live_input));
+                        record_activation_removal(
+                            &mut removed_by_activation,
+                            &mut created_by_activation,
+                            live_output,
+                            live_input,
+                        );
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        return Err(rollback(driver, &undone, error));
+                        return Err(rollback_activation(
+                            driver,
+                            &created_by_activation,
+                            &removed_by_activation,
+                            error,
+                        ));
                     }
                 }
             }
@@ -410,44 +463,45 @@ impl Patchbay {
                     })
                     .collect();
                 for (stale_output, stale_input) in stale {
-                    match driver.disconnect_by_key_if_present(&stale_output, &stale_input) {
+                    match driver.disconnect_by_key_if_present_without_suppression(
+                        &stale_output,
+                        &stale_input,
+                    ) {
                         Ok(Some(_)) => {
                             report.disconnected += 1;
-                            undone.push((stale_output, stale_input));
+                            record_activation_removal(
+                                &mut removed_by_activation,
+                                &mut created_by_activation,
+                                stale_output,
+                                stale_input,
+                            );
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            return Err(rollback(driver, &undone, error));
+                            return Err(rollback_activation(
+                                driver,
+                                &created_by_activation,
+                                &removed_by_activation,
+                                error,
+                            ));
                         }
                     }
                 }
             }
 
             match driver.connect_by_key_if_missing(&output, &input) {
-                Ok(Some(_)) => report.connected += 1,
+                Ok(Some(_)) => {
+                    report.connected += 1;
+                    created_by_activation.push((output, input));
+                }
                 Ok(None) => report.already_present += 1,
                 Err(error) => {
-                    // A route that cannot be made is reported, not fatal: the
-                    // rest of the patchbay is still worth applying. What must
-                    // not happen is losing the links taken down on its behalf,
-                    // so the ones this iteration removed go back.
-                    report.failed.push(error.to_string());
-                    for (removed_output, removed_input) in undone.drain(..).rev() {
-                        if driver
-                            .connect_by_key_if_missing(&removed_output, &removed_input)
-                            .is_err()
-                        {
-                            report.failed.push(format!(
-                                "could not restore {}:{} → {}:{}",
-                                removed_output.node_name,
-                                removed_output.port_name,
-                                removed_input.node_name,
-                                removed_input.port_name
-                            ));
-                        } else {
-                            report.disconnected = report.disconnected.saturating_sub(1);
-                        }
-                    }
+                    return Err(rollback_activation(
+                        driver,
+                        &created_by_activation,
+                        &removed_by_activation,
+                        error,
+                    ));
                 }
             }
         }
@@ -630,6 +684,13 @@ mod tests {
         graph
     }
 
+    fn key(driver: &InMemoryDriver, port: u64) -> PortKey {
+        driver
+            .graph()
+            .port_key(PortId(port))
+            .expect("demo port exists")
+    }
+
     #[test]
     fn activates_and_is_idempotent() {
         let mut patchbay = Patchbay::new("demo");
@@ -663,10 +724,10 @@ mod tests {
         let mut patchbay = Patchbay::default();
         patchbay.add_graph_connection(driver.graph(), PortId(2), PortId(3), false);
 
-        let report = patchbay
+        let error = patchbay
             .activate(&mut driver, false, true)
-            .expect("activation reports rather than fails");
-        assert_eq!(report.failed.len(), 1, "the refused route is reported");
+            .expect_err("a fatal mutation failure must abort activation");
+        assert!(matches!(error, PatchbayError::Backend(_)), "{error:?}");
         assert!(
             driver.graph().link(existing.id).is_some()
                 || driver
@@ -678,6 +739,162 @@ mod tests {
                     .is_some(),
             "the pre-existing route must survive a failed activation"
         );
+    }
+
+    #[test]
+    fn exclusive_activation_rolls_back_created_and_removed_links_as_one_transaction() {
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap(); // A
+        driver.fail_connect_of(PortId(2), PortId(3)); // Y fails after X
+        let mut patchbay = Patchbay::default();
+        patchbay.add_connection(PortId(1), PortId(4), false); // X
+        patchbay.add_connection(PortId(2), PortId(3), false); // Y
+
+        let error = patchbay
+            .activate(&mut driver, true, false)
+            .expect_err("the later desired route fails");
+        assert!(matches!(error, PatchbayError::Backend(_)), "{error:?}");
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 3))
+            .is_some());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 4))
+            .is_none());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 2), &key(&driver, 3))
+            .is_none());
+    }
+
+    #[test]
+    fn rollback_does_not_restore_a_route_created_and_removed_by_this_activation() {
+        // X is created for the first desired route, then auto-disconnected
+        // while attempting the second route. X never belonged to the graph
+        // before activation and must not come back alongside the original C.
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(4)).unwrap(); // C: original graph
+        driver.fail_connect_of(PortId(2), PortId(3)); // Y fails after X
+
+        let mut patchbay = Patchbay::default();
+        patchbay.add_connection(PortId(1), PortId(3), false); // X
+        patchbay.add_connection(PortId(2), PortId(3), false); // Y
+
+        assert!(patchbay.activate(&mut driver, false, true).is_err());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 4))
+            .is_some());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 3))
+            .is_none());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 2), &key(&driver, 3))
+            .is_none());
+    }
+
+    #[test]
+    fn auto_disconnect_failure_leaves_the_stale_route_intact() {
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.fail_disconnect_of_pair(PortId(1), PortId(3));
+        let mut patchbay = Patchbay::default();
+        patchbay.add_connection(PortId(2), PortId(3), false);
+
+        let error = patchbay
+            .activate(&mut driver, false, true)
+            .expect_err("stale-route removal fails");
+        assert!(matches!(error, PatchbayError::Backend(_)), "{error:?}");
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 3))
+            .is_some());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 2), &key(&driver, 3))
+            .is_none());
+    }
+
+    #[test]
+    fn exclusive_removal_failure_leaves_the_original_graph_intact() {
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.fail_disconnect_of_pair(PortId(1), PortId(3));
+        let mut patchbay = Patchbay::default();
+        patchbay.add_connection(PortId(2), PortId(4), false);
+
+        let error = patchbay
+            .activate(&mut driver, true, false)
+            .expect_err("exclusive removal fails");
+        assert!(matches!(error, PatchbayError::Backend(_)), "{error:?}");
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 3))
+            .is_some());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 2), &key(&driver, 4))
+            .is_none());
+    }
+
+    #[test]
+    fn activation_reports_created_and_removed_stranding_separately() {
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap(); // removed A
+        driver.fail_connect_of(PortId(2), PortId(3)); // primary failure Y
+        driver.fail_disconnect_of_pair(PortId(1), PortId(4)); // X cannot roll back
+        driver.fail_connect_of(PortId(1), PortId(3)); // A cannot be restored
+        let mut patchbay = Patchbay::default();
+        patchbay.add_connection(PortId(1), PortId(4), false);
+        patchbay.add_connection(PortId(2), PortId(3), false);
+
+        let error = patchbay
+            .activate(&mut driver, true, false)
+            .expect_err("both rollback directions fail");
+        match error {
+            PatchbayError::ActivationNotRolledBack {
+                created_links_left,
+                removed_links_not_restored,
+                ..
+            } => {
+                assert_eq!(created_links_left, 1);
+                assert_eq!(removed_links_not_restored, 1);
+            }
+            other => panic!("expected separate rollback counts, got {other:?}"),
+        }
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 4))
+            .is_some());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 3))
+            .is_none());
+    }
+
+    #[test]
+    fn immutable_and_already_present_links_are_never_rolled_back_as_new() {
+        let mut driver = InMemoryDriver::demo();
+        let immutable = driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.mark_link_observed(immutable.id);
+        driver.connect(PortId(1), PortId(4)).unwrap();
+        driver.fail_connect_of(PortId(2), PortId(3));
+        let mut patchbay = Patchbay::default();
+        patchbay.add_connection(PortId(1), PortId(4), false);
+        patchbay.add_connection(PortId(2), PortId(3), false);
+
+        assert!(patchbay.activate(&mut driver, true, false).is_err());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 3))
+            .is_some());
+        assert!(driver
+            .graph()
+            .find_link_by_keys(&key(&driver, 1), &key(&driver, 4))
+            .is_some());
     }
 
     #[test]

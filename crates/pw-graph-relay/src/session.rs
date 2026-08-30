@@ -15,17 +15,25 @@ use crate::audio::{
 };
 use crate::codec::{make_decoder, make_encoder, AudioFormat};
 use crate::convert::Converter;
-use crate::crypto::{pake_start, Opener, Sealer, SessionKeys, Side};
+use crate::crypto::{
+    pake_start, resume_control_channel, resume_proof, verify_resume_proof, Opener, Sealer,
+    SessionKeys, Side, RESUME_NONCE_LEN,
+};
 use crate::netlink;
 use crate::protocol::{
     is_supported_frame_ms, read_frame, read_sealed_frame, write_frame, write_sealed_frame,
     CodecKind, ControlMessage, DeviceKind, Roles, PROTOCOL_VERSION,
 };
 use crate::realtime::{request_realtime_thread, tune_audio_socket};
-use crate::{EngineInner, PeerInfo, RelayError, RelayEvent, RelayResult, SessionId, SessionRecord};
+use crate::{
+    ControlState, EngineInner, PeerInfo, RelayError, RelayEvent, RelayResult, ResumeGraceResult,
+    SessionId, SessionRecord,
+};
 use pw_graph_utils::hex::{hex_decode, hex_encode};
+use rand::RngCore;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,9 +74,131 @@ const MAX_DATAGRAM: usize = 8192;
 /// be noticed.
 const FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(250);
 
+type Worker = Box<dyn FnOnce() + Send + 'static>;
+type WorkerSpawner = fn(String, Worker) -> std::io::Result<std::thread::JoinHandle<()>>;
+
+fn spawn_named(name: String, worker: Worker) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().name(name).spawn(worker)
+}
+
+fn spawn_worker_with_report(
+    spawn: &mut impl FnMut(String, Worker) -> std::io::Result<std::thread::JoinHandle<()>>,
+    stop: &AtomicBool,
+    id: SessionId,
+    direction: &str,
+    worker: Worker,
+) -> Result<(), String> {
+    if let Err(error) = spawn(format!("relay-{direction}-{id}"), worker) {
+        stop.store(true, Ordering::Relaxed);
+        return Err(format!(
+            "could not start {direction} worker for {id}: {error}"
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_worker_startup(
+    ready: Receiver<Result<(), String>>,
+    stop: &AtomicBool,
+    id: SessionId,
+    direction: &str,
+) -> Result<(), String> {
+    match ready.recv_timeout(HANDSHAKE_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(reason)) => {
+            stop.store(true, Ordering::Relaxed);
+            Err(format!(
+                "{direction} worker for {id} failed during startup: {reason}"
+            ))
+        }
+        Err(error) => {
+            stop.store(true, Ordering::Relaxed);
+            Err(format!(
+                "{direction} worker for {id} did not become ready: {error}"
+            ))
+        }
+    }
+}
+
+fn report_worker_startup(
+    ready: Option<SyncSender<Result<(), String>>>,
+    result: Result<(), String>,
+) {
+    if let Some(ready) = ready {
+        let _ = ready.send(result);
+    }
+}
+
+fn fresh_resume_nonce() -> [u8; RESUME_NONCE_LEN] {
+    let mut nonce = [0u8; RESUME_NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    nonce
+}
+
+fn decode_resume_nonce(value: &str) -> Option<[u8; RESUME_NONCE_LEN]> {
+    hex_decode(value).ok()?.try_into().ok()
+}
+
+/// Start every worker required by a session before advertising it as
+/// established. If a later worker fails, the caller removes the session and
+/// the already-started worker observes that removal and exits.
+fn spawn_session_workers(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    socket: &Arc<UdpSocket>,
+    host_side: bool,
+) -> Result<(), String> {
+    spawn_session_workers_with(inner, record, socket, host_side, spawn_named)
+}
+
+fn spawn_session_workers_with(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    socket: &Arc<UdpSocket>,
+    host_side: bool,
+    mut spawn: impl FnMut(String, Worker) -> std::io::Result<std::thread::JoinHandle<()>>,
+) -> Result<(), String> {
+    if host_side || record.receiving {
+        let inner = Arc::clone(inner);
+        let record = Arc::clone(record);
+        let socket = Arc::clone(socket);
+        let stop = Arc::clone(&record.stop);
+        let id = record.id;
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        spawn_worker_with_report(
+            &mut spawn,
+            &stop,
+            id,
+            "RX",
+            Box::new(move || run_rx(inner, record, socket, host_side, Some(ready_tx))),
+        )?;
+        wait_for_worker_startup(ready_rx, &stop, id, "RX")?;
+    }
+    if record.sending {
+        let inner = Arc::clone(inner);
+        let record = Arc::clone(record);
+        let socket = Arc::clone(socket);
+        let stop = Arc::clone(&record.stop);
+        let id = record.id;
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        spawn_worker_with_report(
+            &mut spawn,
+            &stop,
+            id,
+            "TX",
+            Box::new(move || run_tx(inner, record, socket, Some(ready_tx))),
+        )?;
+        wait_for_worker_startup(ready_rx, &stop, id, "TX")?;
+    }
+    Ok(())
+}
+
 /// Bookkeeping for a running host listener.
 pub(crate) struct HostRecord {
     pub port: u16,
+    /// The exact address the TCP listener was bound to. `None` is the
+    /// documented no-link fallback, which intentionally uses INADDR_ANY.
+    pub bind_addr: Option<Ipv4Addr>,
     pub stop: Arc<AtomicBool>,
 }
 
@@ -79,6 +209,11 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
     // on the link it is meant to serve.
     let bind_ip = host_bind_addr(&inner.config());
     let listener = TcpListener::bind((bind_ip.unwrap_or(Ipv4Addr::UNSPECIFIED), port))?;
+    let listener_addr = listener.local_addr()?.ip();
+    let bound_addr = match listener_addr {
+        IpAddr::V4(addr) if !addr.is_unspecified() => Some(addr),
+        _ => None,
+    };
     let bound = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -86,8 +221,12 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
     let inner = Arc::clone(inner);
     std::thread::Builder::new()
         .name("relay-host".into())
-        .spawn(move || accept_loop(inner, listener, thread_stop))?;
-    Ok(HostRecord { port: bound, stop })
+        .spawn(move || accept_loop(inner, listener, thread_stop, bound_addr))?;
+    Ok(HostRecord {
+        port: bound,
+        bind_addr: bound_addr,
+        stop,
+    })
 }
 
 /// The address a host listens on: an explicitly configured one wins, then the
@@ -105,7 +244,12 @@ pub(crate) fn stop_host(inner: &EngineInner) {
     }
 }
 
-fn accept_loop(inner: Arc<EngineInner>, listener: TcpListener, stop: Arc<AtomicBool>) {
+fn accept_loop(
+    inner: Arc<EngineInner>,
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    bind_addr: Option<Ipv4Addr>,
+) {
     loop {
         if !inner.running.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
             break;
@@ -125,15 +269,29 @@ fn accept_loop(inner: Arc<EngineInner>, listener: TcpListener, stop: Arc<AtomicB
                     );
                     continue;
                 };
-                let inner = Arc::clone(&inner);
-                if std::thread::Builder::new()
-                    .name(format!("relay-peer-{addr}"))
-                    .spawn(move || host_peer_thread(inner, stream, addr, slot))
-                    .is_err()
-                {
-                    // The slot guard was moved into the closure only on
-                    // success; a failed spawn drops it here.
-                    continue;
+                // Keep a duplicate only for the exceptional path: the
+                // worker owns the accepted stream, but a failed spawn should
+                // still get one best-effort PairFail onto the peer.
+                let mut failure_stream = stream.try_clone().ok();
+                let worker_inner = Arc::clone(&inner);
+                match spawn_named(
+                    format!("relay-peer-{addr}"),
+                    Box::new(move || host_peer_thread(worker_inner, stream, addr, slot, bind_addr)),
+                ) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        if let Some(mut stream) = failure_stream.take() {
+                            let _ = write_frame(
+                                &mut stream,
+                                &ControlMessage::PairFail {
+                                    reason: "the host could not start a handshake worker".into(),
+                                },
+                            );
+                        }
+                        inner.emit(RelayEvent::Error {
+                            message: format!("could not start peer handshake worker: {error}"),
+                        });
+                    }
                 }
             }
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -148,10 +306,27 @@ pub(crate) fn connect_peer(
     pin: String,
     roles: Roles,
 ) {
-    let inner = Arc::clone(inner);
-    let _ = std::thread::Builder::new()
-        .name(format!("relay-client-{target}"))
-        .spawn(move || client_thread(inner, id, target, pin, roles));
+    connect_peer_with_spawner(inner, id, target, pin, roles, spawn_named);
+}
+
+fn connect_peer_with_spawner(
+    inner: &Arc<EngineInner>,
+    id: SessionId,
+    target: SocketAddr,
+    pin: String,
+    roles: Roles,
+    spawn: WorkerSpawner,
+) {
+    let worker_inner = Arc::clone(inner);
+    let failure_inner = Arc::clone(inner);
+    let worker: Worker = Box::new(move || client_thread(worker_inner, id, target, pin, roles));
+    if let Err(error) = spawn(format!("relay-client-{target}"), worker) {
+        fail_attempt(
+            &failure_inner,
+            id,
+            format!("could not start relay connection worker: {error}"),
+        );
+    }
 }
 
 /// Ask a session's control thread to send `bye` and tear down. Only the
@@ -188,6 +363,7 @@ fn host_peer_thread(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
     _slot: crate::HandshakeSlot,
+    bind_addr: Option<Ipv4Addr>,
 ) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
@@ -209,8 +385,11 @@ fn host_peer_thread(
         Err(_) => return,
     };
     let (peer_name, peer_kind, client_pake) = match first {
-        ControlMessage::Resume { session_id, pake } => {
-            resume_peer_session(&inner, SessionId(session_id), stream, peer_addr, &pake);
+        ControlMessage::ResumeHello {
+            session_id,
+            client_nonce,
+        } => {
+            resume_peer_session(&inner, SessionId(session_id), stream, &client_nonce);
             return;
         }
         ControlMessage::Hello {
@@ -248,7 +427,10 @@ fn host_peer_thread(
     };
 
     // The audio socket follows the listener onto the same link.
-    let bind_ip = host_bind_addr(&inner.config()).unwrap_or(Ipv4Addr::UNSPECIFIED);
+    // Use the address captured when the TCP listener started. Re-selecting a
+    // link here could advertise one interface while the control listener is
+    // bound to another after a route change.
+    let bind_ip = bind_addr.unwrap_or(Ipv4Addr::UNSPECIFIED);
     let socket = match UdpSocket::bind((bind_ip, 0)) {
         Ok(socket) => socket,
         Err(_) => return,
@@ -316,12 +498,6 @@ fn host_peer_thread(
     let Ok((audio_sealer, audio_opener)) = keys.audio_channel() else {
         return;
     };
-    if cipher
-        .send(&mut stream, &ControlMessage::SessionReady {})
-        .is_err()
-    {
-        return;
-    }
     let local = inner.config().local_format();
     let record = Arc::new(SessionRecord {
         id,
@@ -340,8 +516,9 @@ fn host_peer_thread(
         receiving: roles.emit,
         stop: Arc::new(AtomicBool::new(false)),
         bye_requested: AtomicBool::new(false),
-        control_generation: AtomicU64::new(0),
-        resuming: AtomicBool::new(false),
+        control_generation: AtomicU64::new(1),
+        resume_secret: keys.resume_auth_key(),
+        control_state: Mutex::new(ControlState::Active),
         peer_audio_addr: Mutex::new(None),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
         incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
@@ -349,33 +526,52 @@ fn host_peer_thread(
         audio_sealer: Mutex::new(audio_sealer),
         audio_opener: Mutex::new(audio_opener),
     });
-    inner.insert_session(Arc::clone(&record));
+    if !inner.insert_session(Arc::clone(&record)) {
+        let _ = cipher.send(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "the host is already at its session limit".into(),
+            },
+        );
+        return;
+    }
+    let socket = Arc::new(socket);
+    if let Err(reason) = spawn_session_workers(&inner, &record, &socket, true) {
+        let _ = cipher.send(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: reason.clone(),
+            },
+        );
+        teardown(&inner, id, reason);
+        return;
+    }
+
+    // A worker can fail during its initialization (for example while
+    // constructing a codec) and tear the record down before this control
+    // thread gets here. Never send a successful handshake for a record that
+    // is no longer live.
+    if !inner.session_alive(id) {
+        return;
+    }
+
+    if cipher
+        .send(&mut stream, &ControlMessage::SessionReady {})
+        .is_err()
+    {
+        teardown(
+            &inner,
+            id,
+            "handshake failed while starting the session".into(),
+        );
+        return;
+    }
     inner.emit(RelayEvent::SessionEstablished {
         id,
         peer: record.peer.clone(),
         roles,
         codec,
     });
-
-    let socket = Arc::new(socket);
-    {
-        let inner = Arc::clone(&inner);
-        let record = Arc::clone(&record);
-        let socket = Arc::clone(&socket);
-        let _ = std::thread::Builder::new()
-            .name(format!("relay-rx-{id}"))
-            .spawn(move || run_rx(inner, record, socket, true));
-    }
-    if record.sending {
-        let inner = Arc::clone(&inner);
-        let record = Arc::clone(&record);
-        let socket = Arc::clone(&socket);
-        let _ = std::thread::Builder::new()
-            .name(format!("relay-tx-{id}"))
-            .spawn(move || run_tx(inner, record, socket));
-    }
-
-    record.control_generation.fetch_add(1, Ordering::Relaxed);
     host_control_loop(inner, record, stream, cipher);
 }
 
@@ -453,16 +649,16 @@ fn reject_pairing(inner: &Arc<EngineInner>, stream: &mut TcpStream, addr: IpAddr
     );
 }
 
-/// Host-side resume of a session whose control link dropped. Re-authenticates
-/// the client with a fresh SPAKE2 exchange, then takes over the control
-/// watch. Only the control channel is rekeyed: the UDP audio workers never
-/// stopped, so their keys and replay windows carry on untouched.
+/// Host-side resume of a session whose control link dropped. A resume is
+/// challenge-response authenticated with the secret derived during the
+/// original PAKE; the host-wide PIN is deliberately not sufficient here.
+/// Only the control channel is rekeyed: the UDP audio workers never stopped,
+/// so their keys and replay windows carry on untouched.
 fn resume_peer_session(
     inner: &Arc<EngineInner>,
     id: SessionId,
     mut stream: TcpStream,
-    peer_addr: SocketAddr,
-    client_pake: &str,
+    client_nonce: &str,
 ) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
@@ -477,41 +673,105 @@ fn resume_peer_session(
         return;
     };
 
-    let host_name = inner.config().device_name;
-    let Some(keys) = host_pake_exchange(inner, &mut stream, peer_addr, client_pake, host_name)
-    else {
+    let Some(client_nonce) = decode_resume_nonce(client_nonce) else {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "malformed resume nonce".into(),
+            },
+        );
         return;
     };
-    inner.clear_pairing_failures(peer_addr.ip());
-    let Ok((sealer, opener)) = keys.control_channel() else {
+
+    // The old control owner must have actually dropped before this state can
+    // be claimed. This also consumes the one in-flight challenge, so racing
+    // reconnects and a proof replay cannot both take over the session.
+    let Some(generation) = record.begin_resume() else {
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "the session control channel is still active".into(),
+            },
+        );
+        return;
+    };
+
+    let server_nonce = fresh_resume_nonce();
+    if write_frame(
+        &mut stream,
+        &ControlMessage::ResumeChallenge {
+            server_nonce: hex_encode(&server_nonce),
+            generation,
+        },
+    )
+    .is_err()
+    {
+        record.cancel_resume(generation);
+        return;
+    }
+
+    let proof = match read_frame(&mut stream) {
+        Ok(ControlMessage::ResumeProof { proof }) => hex_decode(&proof).ok(),
+        _ => None,
+    };
+    let valid = proof
+        .as_deref()
+        .map(|proof| {
+            verify_resume_proof(
+                &record.resume_secret,
+                record.wire_id,
+                &client_nonce,
+                &server_nonce,
+                generation,
+                proof,
+            )
+        })
+        .unwrap_or(false);
+    if !valid {
+        record.cancel_resume(generation);
+        let _ = write_frame(
+            &mut stream,
+            &ControlMessage::PairFail {
+                reason: "resume authentication failed".into(),
+            },
+        );
+        return;
+    }
+
+    if !inner.session_alive(record.id) {
+        record.cancel_resume(generation);
+        return;
+    }
+
+    let Ok((sealer, opener)) = resume_control_channel(
+        &record.resume_secret,
+        Side::Host,
+        record.wire_id,
+        &client_nonce,
+        &server_nonce,
+        generation,
+    ) else {
+        record.cancel_resume(generation);
         return;
     };
     let mut cipher = ControlCipher { sealer, opener };
-
-    // One takeover at a time: a racing reconnect loses cleanly.
-    if record
-        .resuming
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        let _ = cipher.send(
-            &mut stream,
-            &ControlMessage::PairFail {
-                reason: "a resume is already in progress".into(),
-            },
-        );
+    // Commit the state transition before acknowledging success. The grace
+    // watcher may win the deadline race while this worker is deriving keys;
+    // in that case the old control owner has already been declared gone and
+    // this challenge must not produce a false-positive ResumeOk.
+    if !record.finish_resume(generation) {
         return;
     }
     if cipher
         .send(&mut stream, &ControlMessage::ResumeOk {})
         .is_err()
     {
-        record.resuming.store(false, Ordering::Relaxed);
+        // The old grace watcher has exited after the generation transition.
+        // Re-enter the normal grace state so a failed response does not leave
+        // the session permanently marked Active without a control owner.
+        let _ = await_resume_grace(inner, &record);
         return;
     }
-
-    record.control_generation.fetch_add(1, Ordering::Relaxed);
-    record.resuming.store(false, Ordering::Relaxed);
     let inner = Arc::clone(inner);
     host_control_loop(inner, record, stream, cipher);
 }
@@ -559,17 +819,32 @@ fn host_control_loop(
 /// Wait for a client resume to replace this control watch. Returns `true`
 /// when somebody else now owns the session (no teardown by the caller).
 fn await_resume_grace(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>) -> bool {
+    let _ = record.mark_control_dropped();
     let generation = record.control_generation.load(Ordering::Relaxed);
     let deadline = Instant::now() + RESUME_GRACE;
+    let mut in_flight_deadline = None;
     loop {
         if record.stop.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
             return true;
         }
-        if record.control_generation.load(Ordering::Relaxed) != generation {
+        if record.control_generation.load(Ordering::Acquire) != generation {
             return true;
         }
         if Instant::now() >= deadline {
-            return false;
+            // Expiry and a successful resume serialize on the record state
+            // lock. A stale watcher must not tear down a session after the
+            // new control owner has completed its handshake.
+            match record.expire_resume_grace(generation) {
+                ResumeGraceResult::Expired => return false,
+                ResumeGraceResult::Resumed => return true,
+                ResumeGraceResult::InProgress => {
+                    let challenge_deadline = *in_flight_deadline
+                        .get_or_insert_with(|| Instant::now() + HANDSHAKE_TIMEOUT);
+                    if Instant::now() >= challenge_deadline && record.abort_resume(generation) {
+                        return false;
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -772,8 +1047,9 @@ fn client_thread(
         receiving: roles.receive,
         stop: Arc::new(AtomicBool::new(false)),
         bye_requested: AtomicBool::new(false),
-        control_generation: AtomicU64::new(0),
-        resuming: AtomicBool::new(false),
+        control_generation: AtomicU64::new(1),
+        resume_secret: keys.resume_auth_key(),
+        control_state: Mutex::new(ControlState::Active),
         peer_audio_addr: Mutex::new(Some(host_audio_addr)),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
         incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
@@ -781,7 +1057,41 @@ fn client_thread(
         audio_sealer: Mutex::new(audio_sealer),
         audio_opener: Mutex::new(audio_opener),
     });
-    inner.insert_session(Arc::clone(&record));
+    if !inner.insert_session(Arc::clone(&record)) {
+        let reason = "the local session limit was reached".to_string();
+        let _ = cipher.send(
+            &mut stream,
+            &ControlMessage::Bye {
+                reason: reason.clone(),
+            },
+        );
+        fail_attempt(&inner, id, reason);
+        return;
+    }
+    let socket = Arc::new(socket);
+    if let Err(reason) = spawn_session_workers(&inner, &record, &socket, false) {
+        let _ = cipher.send(
+            &mut stream,
+            &ControlMessage::Bye {
+                reason: reason.clone(),
+            },
+        );
+        // `spawn_worker_with_report` has already raised the stop flag so a
+        // worker that did start will exit. Startup failure still needs an
+        // explicit removal: `fail_session` treats an already-set stop flag as
+        // an orderly shutdown and would otherwise leave this record in the
+        // session map without a SessionLost event.
+        inner.emit(RelayEvent::Error {
+            message: reason.clone(),
+        });
+        teardown(&inner, id, reason);
+        return;
+    }
+
+    if !inner.session_alive(id) {
+        return;
+    }
+
     inner.emit(RelayEvent::SessionEstablished {
         id,
         peer: record.peer.clone(),
@@ -789,25 +1099,7 @@ fn client_thread(
         codec: config.codec,
     });
 
-    let socket = Arc::new(socket);
-    if record.receiving {
-        let inner = Arc::clone(&inner);
-        let record = Arc::clone(&record);
-        let socket = Arc::clone(&socket);
-        let _ = std::thread::Builder::new()
-            .name(format!("relay-rx-{id}"))
-            .spawn(move || run_rx(inner, record, socket, false));
-    }
-    if record.sending {
-        let inner = Arc::clone(&inner);
-        let record = Arc::clone(&record);
-        let socket = Arc::clone(&socket);
-        let _ = std::thread::Builder::new()
-            .name(format!("relay-tx-{id}"))
-            .spawn(move || run_tx(inner, record, socket));
-    }
-
-    client_control_loop(inner, record, stream, cipher, socket, target, pin);
+    client_control_loop(inner, record, stream, cipher, socket, target);
 }
 
 /// Client-side control watch: on a link drop the host is re-dialed and the
@@ -819,7 +1111,6 @@ fn client_control_loop(
     cipher: ControlCipher,
     socket: Arc<UdpSocket>,
     target: SocketAddr,
-    pin: String,
 ) {
     let socket_codec = record.codec;
     let mut stream = Some((stream, cipher));
@@ -834,7 +1125,7 @@ fn client_control_loop(
             inner.emit(RelayEvent::Error {
                 message: format!("control link to host lost ({reason}); attempting to resume"),
             });
-            match resume_client_control(&inner, &record, target, &pin) {
+            match resume_client_control(&inner, &record, target) {
                 Some(resumed) => {
                     // Re-announce our UDP address from the real audio socket:
                     // the route may have changed link (e.g. Wi-Fi to USB
@@ -872,7 +1163,6 @@ fn resume_client_control(
     inner: &Arc<EngineInner>,
     record: &Arc<SessionRecord>,
     target: SocketAddr,
-    pin: &str,
 ) -> Option<(TcpStream, ControlCipher)> {
     let config = inner.config();
     let mut backoff = Duration::from_millis(500);
@@ -890,27 +1180,30 @@ fn resume_client_control(
             Err(_) => continue,
         };
         let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-        // A resume re-runs the full PAKE: the control channel gets fresh keys
-        // so a captured earlier transcript is useless against it.
-        let client = pake_start(Side::Client, pin);
+        let client_nonce = fresh_resume_nonce();
         if write_frame(
             &mut stream,
-            &ControlMessage::Resume {
+            &ControlMessage::ResumeHello {
                 session_id: record.wire_id,
-                pake: hex_encode(&client.message),
+                client_nonce: hex_encode(&client_nonce),
             },
         )
         .is_err()
         {
             continue;
         }
-        let host_pake = match read_frame(&mut stream) {
-            Ok(ControlMessage::Challenge { protocol, pake, .. })
-                if protocol == PROTOCOL_VERSION as u32 =>
-            {
-                pake
-            }
+        let (server_nonce, generation) = match read_frame(&mut stream) {
+            Ok(ControlMessage::ResumeChallenge {
+                server_nonce,
+                generation,
+            }) => (server_nonce, generation),
             Ok(ControlMessage::PairFail { reason }) => {
+                if reason == "the session control channel is still active" {
+                    // A previous control watcher may not have observed the
+                    // drop yet. Treat this as a retryable race, not as a
+                    // terminal failure for the reconnecting client.
+                    continue;
+                }
                 inner.emit(RelayEvent::Error {
                     message: format!("host rejected resume: {reason}"),
                 });
@@ -918,44 +1211,34 @@ fn resume_client_control(
             }
             _ => continue,
         };
-        let Ok(host_message) = hex_decode(&host_pake) else {
+        let Some(server_nonce) = decode_resume_nonce(&server_nonce) else {
             continue;
         };
-        let Ok(keys) = client.finish(&host_message) else {
-            continue;
-        };
+        let proof = resume_proof(
+            &record.resume_secret,
+            record.wire_id,
+            &client_nonce,
+            &server_nonce,
+            generation,
+        );
         if write_frame(
             &mut stream,
-            &ControlMessage::Pair {
-                pake: String::new(),
-                confirm: hex_encode(&keys.confirmation()),
+            &ControlMessage::ResumeProof {
+                proof: hex_encode(&proof),
             },
         )
         .is_err()
         {
             continue;
         }
-        match read_frame(&mut stream) {
-            Ok(ControlMessage::PairConfirm { confirm }) => {
-                let matched = hex_decode(&confirm)
-                    .map(|confirm| keys.verify_confirmation(&confirm))
-                    .unwrap_or(false);
-                if !matched {
-                    inner.emit(RelayEvent::Error {
-                        message: "the host failed key confirmation on resume".into(),
-                    });
-                    return None;
-                }
-            }
-            Ok(ControlMessage::PairFail { reason }) => {
-                inner.emit(RelayEvent::Error {
-                    message: format!("host rejected resume: {reason}"),
-                });
-                return None;
-            }
-            _ => continue,
-        }
-        let Ok((sealer, opener)) = keys.control_channel() else {
+        let Ok((sealer, opener)) = resume_control_channel(
+            &record.resume_secret,
+            Side::Client,
+            record.wire_id,
+            &client_nonce,
+            &server_nonce,
+            generation,
+        ) else {
             continue;
         };
         let mut cipher = ControlCipher { sealer, opener };
@@ -1059,6 +1342,7 @@ fn run_rx(
     record: Arc<SessionRecord>,
     socket: Arc<UdpSocket>,
     host_side: bool,
+    ready: Option<SyncSender<Result<(), String>>>,
 ) {
     request_realtime_thread();
     let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
@@ -1075,7 +1359,9 @@ fn run_rx(
     let mut decoder = match make_decoder(record.codec, record.format) {
         Ok(decoder) => decoder,
         Err(error) => {
-            fail_session(&inner, &record, format!("decoder init failed: {error}"));
+            let reason = format!("decoder init failed: {error}");
+            report_worker_startup(ready, Err(reason.clone()));
+            fail_session(&inner, &record, reason);
             return;
         }
     };
@@ -1093,7 +1379,9 @@ fn run_rx(
     let mut jitter = JitterBuffer::new(JITTER_DEPTH_FRAMES);
     let mut datagram = vec![0u8; MAX_DATAGRAM];
     let mut frame_buf = vec![0.0f32; record.format.frame_samples()];
-    let mut converted = Vec::with_capacity(converter.output_capacity_for(record.format.frame_samples()));
+    let mut converted =
+        Vec::with_capacity(converter.output_capacity_for(record.format.frame_samples()));
+    report_worker_startup(ready, Ok(()));
     let mut sumsq = 0.0f64;
     let mut level_samples = 0usize;
     let mut frames_since_level = 0u32;
@@ -1228,7 +1516,12 @@ fn fail_session(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>, reason: S
 /// instead of up to a poll interval later; the wait timeout exists only so
 /// teardown is noticed promptly. The peer address is re-read per frame so a
 /// roaming client (new source address) is followed without a restart.
-fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSocket>) {
+fn run_tx(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    socket: Arc<UdpSocket>,
+    ready: Option<SyncSender<Result<(), String>>>,
+) {
     request_realtime_thread();
     // Same reasoning as the receive side: captured audio that cannot be sent
     // promptly is better dropped than delivered late.
@@ -1238,12 +1531,15 @@ fn run_tx(inner: Arc<EngineInner>, record: Arc<SessionRecord>, socket: Arc<UdpSo
     let mut encoder = match make_encoder(record.codec, record.format) {
         Ok(encoder) => encoder,
         Err(error) => {
-            fail_session(&inner, &record, format!("encoder init failed: {error}"));
+            let reason = format!("encoder init failed: {error}");
+            report_worker_startup(ready, Err(reason.clone()));
+            fail_session(&inner, &record, reason);
             return;
         }
     };
 
     let frame_samples = record.format.frame_samples();
+    report_worker_startup(ready, Ok(()));
     let mut sequence = 0u32;
     let mut timestamp_ms = 0u32;
     let mut payload = Vec::with_capacity(4096);
@@ -1368,6 +1664,36 @@ mod tests {
     use crate::audio::{seal_datagram, AudioHeader};
     use crate::crypto::{pake_start, Side};
 
+    fn reject_worker_spawn(
+        _name: String,
+        _worker: Worker,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "worker spawn rejected by test",
+        ))
+    }
+
+    #[test]
+    fn outgoing_worker_spawn_failure_emits_session_lost() {
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let id = SessionId(7_001);
+        connect_peer_with_spawner(
+            &inner,
+            id,
+            "127.0.0.1:48123".parse().unwrap(),
+            "123456".into(),
+            Roles::emit_only(),
+            reject_worker_spawn,
+        );
+
+        assert!(matches!(
+            inner.drain_events().as_slice(),
+            [RelayEvent::SessionLost { id: lost, reason }] if *lost == id
+                && reason.contains("could not start relay connection worker")
+        ));
+    }
+
     fn audio_keys() -> (crate::crypto::Sealer, crate::crypto::Opener) {
         let client = pake_start(Side::Client, "123456");
         let host = pake_start(Side::Host, "123456");
@@ -1378,6 +1704,129 @@ mod tests {
         let (sealer, _) = client_keys.audio_channel().expect("client audio keys");
         let (_, opener) = host_keys.audio_channel().expect("host audio keys");
         (sealer, opener)
+    }
+
+    fn resumable_session(id: u64) -> Arc<SessionRecord> {
+        let client = pake_start(Side::Client, "123456");
+        let host = pake_start(Side::Host, "123456");
+        let client_message = client.message.clone();
+        let host_message = host.message.clone();
+        let client_keys = client.finish(&host_message).expect("client pairs");
+        let host_keys = host.finish(&client_message).expect("host pairs");
+        let (audio_sealer, _) = client_keys.audio_channel().expect("audio sealer");
+        let (_, audio_opener) = host_keys.audio_channel().expect("audio opener");
+        let format = AudioFormat::new(48_000, 1, 10);
+        let capture_converter =
+            Converter::with_capacity(48_000, 1, 48_000, 1, crate::MAX_REALTIME_QUANTUM_SAMPLES);
+        let capture_destination = Vec::with_capacity(
+            capture_converter.output_capacity_for(crate::MAX_REALTIME_QUANTUM_SAMPLES),
+        );
+        Arc::new(SessionRecord {
+            id: SessionId(id),
+            wire_id: id,
+            peer: PeerInfo {
+                name: "resume-peer".into(),
+                kind: DeviceKind::Other,
+                addr: "127.0.0.1:1".parse().expect("peer address"),
+            },
+            roles: Roles::both(),
+            codec: CodecKind::Pcm,
+            format,
+            sending: true,
+            receiving: true,
+            stop: Arc::new(AtomicBool::new(false)),
+            bye_requested: AtomicBool::new(false),
+            control_generation: AtomicU64::new(1),
+            resume_secret: client_keys.resume_auth_key(),
+            control_state: Mutex::new(ControlState::Active),
+            peer_audio_addr: Mutex::new(None),
+            outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+            incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
+            capture_convert: Mutex::new((capture_converter, capture_destination)),
+            audio_sealer: Mutex::new(audio_sealer),
+            audio_opener: Mutex::new(audio_opener),
+        })
+    }
+
+    #[test]
+    fn original_session_owner_can_resume_over_the_challenge_flow() {
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let record = resumable_session(7_004);
+        assert!(inner.insert_session(Arc::clone(&record)));
+        assert!(record.mark_control_dropped());
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("resume listener");
+        let target = listener.local_addr().expect("resume address");
+        let server_inner = Arc::clone(&inner);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("resume client connects");
+            let first = read_frame(&mut stream).expect("resume hello");
+            let ControlMessage::ResumeHello {
+                session_id,
+                client_nonce,
+            } = first
+            else {
+                panic!("resume client sent the wrong first message");
+            };
+            resume_peer_session(&server_inner, SessionId(session_id), stream, &client_nonce);
+        });
+
+        let (stream, cipher) = resume_client_control(&inner, &record, target)
+            .expect("the original owner proves the session secret");
+        assert_eq!(cipher.sealer.next_counter(), 0);
+        assert_eq!(
+            *record.control_state.lock().expect("control state"),
+            ControlState::Active
+        );
+        drop(stream);
+        teardown(&inner, record.id, "resume test complete".into());
+        server.join().expect("resume worker exits");
+        assert_eq!(record.control_generation.load(Ordering::Acquire), 2);
+        assert!(!inner.session_alive(record.id));
+    }
+
+    #[test]
+    fn session_worker_spawn_failures_are_reported_and_stop_the_record() {
+        let stop = AtomicBool::new(false);
+        let mut reject = reject_worker_spawn;
+        let error =
+            spawn_worker_with_report(&mut reject, &stop, SessionId(7_002), "RX", Box::new(|| {}))
+                .expect_err("RX spawn is refused");
+        assert!(error.contains("RX worker"));
+        assert!(stop.load(Ordering::Relaxed));
+
+        let stop = AtomicBool::new(false);
+        let mut calls = 0;
+        let mut spawn = |name, worker| {
+            calls += 1;
+            if calls == 2 {
+                reject_worker_spawn(name, worker)
+            } else {
+                Ok(std::thread::Builder::new()
+                    .name(name)
+                    .spawn(worker)
+                    .unwrap())
+            }
+        };
+        spawn_worker_with_report(&mut spawn, &stop, SessionId(7_003), "RX", Box::new(|| {}))
+            .expect("RX spawn succeeds");
+        let error =
+            spawn_worker_with_report(&mut spawn, &stop, SessionId(7_003), "TX", Box::new(|| {}))
+                .expect_err("TX spawn is refused after RX starts");
+        assert!(error.contains("TX worker"));
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn handshake_slot_is_released_when_worker_ownership_ends() {
+        let inner = EngineInner::new(crate::EngineConfig {
+            max_pending_handshakes: 1,
+            ..crate::EngineConfig::default()
+        });
+        let slot = inner.claim_handshake().expect("first slot is available");
+        assert!(inner.claim_handshake().is_none());
+        drop(slot);
+        assert!(inner.claim_handshake().is_some());
     }
 
     /// Seal a frame with the given header metadata, then take it back apart
@@ -1404,7 +1853,10 @@ mod tests {
         .expect("frame seals");
         let packet = AudioPacket::parse(&datagram).expect("parses");
         let payload = packet.open(&mut opener).expect("authenticates");
-        assert!(!payload.is_empty(), "this is an audio frame, not an announce");
+        assert!(
+            !payload.is_empty(),
+            "this is an audio frame, not an announce"
+        );
         packet_matches_negotiation(&packet, negotiated_codec, negotiated)
     }
 

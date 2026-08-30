@@ -414,17 +414,16 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
         }
     }
     val hostPort = state.hostPort
+    val hostAddress = state.hostAddress
     if (state.hostState == RelayHostState.Running &&
         hostPort != null &&
-        state.localLinks.isNotEmpty()
+        hostAddress != null
     ) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Reachable at", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(6.dp))
-                state.localLinks.forEach { link ->
-                    Text("${link.addr}:$hostPort (${link.name})")
-                }
+                Text("$hostAddress:$hostPort")
             }
         }
     }

@@ -4,7 +4,7 @@
 use pw_graph_relay::{
     CodecKind, EngineConfig, RelayEngine, RelayEvent, RelayHandle, Roles, SessionId,
 };
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -39,6 +39,7 @@ fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
 fn host_engine(pin: &str) -> (RelayEngine, RelayHandle, u16) {
     let engine = RelayEngine::start(EngineConfig {
         pin: pin.into(),
+        bind_addr: Some(Ipv4Addr::LOCALHOST),
         ..EngineConfig::default()
     })
     .expect("host engine starts");
@@ -331,6 +332,7 @@ fn status_reflects_host_and_sessions() {
     let status = host_handle.status();
     assert!(status.host_active);
     assert_eq!(status.host_port, Some(port));
+    assert_eq!(status.host_addr, Some(Ipv4Addr::LOCALHOST));
     assert!(status.sessions.is_empty());
 
     establish(

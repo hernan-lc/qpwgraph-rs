@@ -528,10 +528,14 @@ pub trait GraphDriver: EffectDriver {
         input: &PortKey,
     ) -> BackendResult<Option<Link>> {
         self.refresh()?;
-        self.allow_connection(output, input);
         if self.graph().find_link_by_keys(output, input).is_some() {
             return Ok(None);
         }
+        // Clearing a stale manual-disconnect rule is part of an actual new
+        // connection attempt. Do it only after the existing-link check so a
+        // no-op command cannot alter suppression state belonging to a pair
+        // that was already present before the command ran.
+        self.allow_connection(output, input);
         let output_id = self.graph().resolve_port_key(output).ok_or_else(|| {
             BackendError::Native(format!(
                 "source port {}:{} is no longer available",
@@ -578,6 +582,26 @@ pub trait GraphDriver: EffectDriver {
                 self.suppress_connection(output, input);
                 Ok(None)
             }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Rollback variant of [`Self::disconnect_by_key_if_present`]. A missing
+    /// link is not an intentional user disconnect during rollback, so it must
+    /// not create a new suppression rule as a side effect. This keeps a race
+    /// with another graph owner from changing the pair's pre-existing policy.
+    fn disconnect_by_key_if_present_without_suppression(
+        &mut self,
+        output: &PortKey,
+        input: &PortKey,
+    ) -> BackendResult<Option<Link>> {
+        self.refresh()?;
+        let Some(link) = self.graph().find_link_by_keys(output, input) else {
+            return Ok(None);
+        };
+        match self.disconnect(link.id) {
+            Ok(link) => Ok(Some(link)),
+            Err(BackendError::Graph(GraphError::MissingLink(_))) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -787,7 +811,7 @@ pub trait GraphDriver: EffectDriver {
 /// engine for transport.
 #[cfg(feature = "relay")]
 pub use pw_graph_relay::{
-    netlink::select_links as relay_select_links,
+    netlink::{listen_bind_addr as relay_listen_bind_addr, select_links as relay_select_links},
     normalize_frame_ms as relay_normalize_frame_ms,
     pairing::{
         build_qr_payload as relay_build_qr_payload, generate_pin as relay_generate_pin,

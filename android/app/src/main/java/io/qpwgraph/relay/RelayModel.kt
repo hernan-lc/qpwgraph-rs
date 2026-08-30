@@ -3,7 +3,9 @@ package io.qpwgraph.relay
 /** Settings for connecting to a relay host as a receiver. */
 data class RelaySettings(
     val target: String = "",
-    val pin: String = "123456",
+    // Pairing credentials are entered for the current session and are not
+    // persisted or supplied as an insecure app-wide default.
+    val pin: String = "",
     val role: String = "emit",
     val codec: String = "opus",
     val transport: String = "auto",
@@ -16,7 +18,8 @@ data class RelaySettings(
 /** Settings for broadcasting this device's audio as a relay host. */
 data class HostSettings(
     val deviceName: String = "android-relay",
-    val pin: String = "123456",
+    // The Android API requires an explicit caller-owned pairing PIN.
+    val pin: String = "",
     // Fixed default port: desktop USB probing scans for hosts on 48123, so
     // an ephemeral port would make this host undiscoverable over USB.
     val port: Int = DEFAULT_HOST_PORT,
@@ -115,6 +118,7 @@ data class RelayUiState(
     val hostState: RelayHostState = RelayHostState.Idle,
     val hostActive: Boolean = false,
     val hostPort: Int? = null,
+    val hostAddress: String? = null,
     val hostMessage: String = "",
     val hostRms: Float = 0f,
     val sessions: List<RelaySessionInfo> = emptyList(),

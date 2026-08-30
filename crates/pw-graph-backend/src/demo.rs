@@ -8,7 +8,8 @@ use super::api::{
     NodeCapabilities,
 };
 use pw_graph_core::{
-    Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortType,
+    Direction, Graph, GraphError, Link, LinkId, Node, NodeId, NodeType, Port, PortId, PortKey,
+    PortType,
 };
 use pw_graph_effects::{AudioSpec, EffectHost, EffectInstanceConfig, EffectProcessor};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +30,10 @@ pub struct DemoDriver {
     effect_host: EffectHost,
     effect_processors: BTreeMap<String, Box<dyn EffectProcessor>>,
     next_effect_id: u64,
+    /// Suppression state used by backends that remember an explicit manual
+    /// disconnect. Keeping it in the demo driver makes command rollback tests
+    /// able to verify that unrelated pairs are not accidentally unsuppressed.
+    suppressed_connections: Vec<(PortKey, PortKey)>,
     /// Operations forced to fail. Boxed and absent by default so the common
     /// driver stays small; see [`DemoDriver::fail_connect_of`].
     forced_failures: Option<Box<ForcedFailures>>,
@@ -47,6 +52,10 @@ struct ForcedFailures {
     /// Disconnects refused by endpoint rather than by link id, so a test can
     /// arm a failure for a link a command has not created yet.
     disconnect_pairs: BTreeSet<(PortId, PortId)>,
+    /// Position writes refused for an exact node/coordinate pair. The bit
+    /// representation keeps the test hook deterministic without imposing an
+    /// ordering on `f32`.
+    positions: Vec<(NodeId, [u32; 2])>,
 }
 
 impl DemoDriver {
@@ -61,6 +70,7 @@ impl DemoDriver {
             effect_host: EffectHost::new(),
             effect_processors: BTreeMap::new(),
             next_effect_id: 1000,
+            suppressed_connections: Vec::new(),
             forced_failures: None,
         }
     }
@@ -180,6 +190,33 @@ impl DemoDriver {
         }
     }
 
+    /// Seed the backend's connection-suppression state for a rollback test.
+    pub fn mark_connection_suppressed(&mut self, output: PortKey, input: PortKey) {
+        if !self
+            .suppressed_connections
+            .contains(&(output.clone(), input.clone()))
+        {
+            self.suppressed_connections.push((output, input));
+        }
+    }
+
+    /// Inspect whether a stable pair remains suppressed.
+    pub fn is_connection_suppressed(&self, output: &PortKey, input: &PortKey) -> bool {
+        self.suppressed_connections
+            .contains(&(output.clone(), input.clone()))
+    }
+
+    /// Make a future node-position write fail for an exact coordinate. This
+    /// is used to exercise transactional layout rollback, including a failed
+    /// restoration of an earlier node.
+    pub fn fail_position_at(&mut self, node: NodeId, position: [f32; 2]) {
+        let forced = self.forced_failures.get_or_insert_with(Default::default);
+        let key = (node, [position[0].to_bits(), position[1].to_bits()]);
+        if !forced.positions.contains(&key) {
+            forced.positions.push(key);
+        }
+    }
+
     fn allocate_link_id(&mut self) -> LinkId {
         let id = LinkId(self.next_link_id);
         self.next_link_id += 1;
@@ -285,16 +322,45 @@ impl DemoDriver {
 
     /// Remove an effect node and all links touching it without restoring an
     /// original connection. Used for standalone-node removal and insertion
-    /// rollback after a graph mutation fails.
-    fn remove_effect_node_internal(&mut self, instance: &EffectInstance) {
+    /// rollback after a graph mutation fails. Every link-removal error is
+    /// retained so a failed cleanup is never silently reported as complete.
+    fn remove_effect_node_internal(&mut self, instance: &EffectInstance) -> BackendResult<()> {
+        let mut errors = Vec::new();
         for link in self.links_touching(instance) {
-            let _ = self.graph.remove_link(link);
+            if let Err(error) = self.graph.remove_link(link) {
+                errors.push(error.into());
+            }
         }
         self.graph.ports.remove(&instance.input_port);
         self.graph.ports.remove(&instance.output_port);
         self.graph.nodes.remove(&instance.node_id);
         self.effects.remove(&instance.config.instance_id);
         self.effect_processors.remove(&instance.config.instance_id);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::rollback_error(
+                BackendError::native("effect-node cleanup failed"),
+                errors,
+            ))
+        }
+    }
+
+    /// Preserve the primary failure while making incomplete graph cleanup
+    /// explicit to callers. The demo backend is used by the command and
+    /// patchbay tests, so it must model the same partial-rollback semantics
+    /// as a real backend rather than hiding GraphError values.
+    fn rollback_error(cause: BackendError, errors: Vec<BackendError>) -> BackendError {
+        if errors.is_empty() {
+            cause
+        } else {
+            let details = errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            BackendError::native(format!("{cause}; rollback incomplete: {details}"))
+        }
     }
 }
 
@@ -373,6 +439,15 @@ impl GraphDriver for DemoDriver {
     }
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
+        if self.forced_failures.as_ref().is_some_and(|forced| {
+            forced
+                .positions
+                .contains(&(node, [position[0].to_bits(), position[1].to_bits()]))
+        }) {
+            return Err(BackendError::native(
+                "node position refused by the test driver",
+            ));
+        }
         self.graph
             .nodes
             .get_mut(&node)
@@ -431,6 +506,21 @@ impl GraphDriver for DemoDriver {
     fn graph(&self) -> &Graph {
         &self.graph
     }
+
+    fn allow_connection(&mut self, output: &PortKey, input: &PortKey) {
+        self.suppressed_connections
+            .retain(|pair| pair != &(output.clone(), input.clone()));
+    }
+
+    fn suppress_connection(&mut self, output: &PortKey, input: &PortKey) {
+        if !self
+            .suppressed_connections
+            .contains(&(output.clone(), input.clone()))
+        {
+            self.suppressed_connections
+                .push((output.clone(), input.clone()));
+        }
+    }
 }
 
 #[cfg(feature = "relay")]
@@ -463,19 +553,40 @@ impl EffectDriver for DemoDriver {
         // Commit the link rewrite only after the free node has been fully
         // created. Every failure below removes that node and restores the
         // original direct connection.
-        self.graph.remove_link(original.id)?;
+        if let Err(error) = self.graph.remove_link(original.id) {
+            // The effect node was already inserted, so a failed removal of
+            // the original route must not leave that new node behind while
+            // the original graph is still connected. Cleanup is best effort,
+            // but every cleanup failure is part of the returned error.
+            let mut rollback_errors = Vec::new();
+            if let Err(cleanup) = self.remove_effect_node_internal(&instance) {
+                rollback_errors.push(cleanup);
+            }
+            return Err(Self::rollback_error(error.into(), rollback_errors));
+        }
         let first = self.allocate_link_id();
         let second = self.allocate_link_id();
         if let Err(error) = self.graph.add_link(first, output, instance.input_port) {
-            self.remove_effect_node_internal(&instance);
-            self.graph.add_link(original.id, output, input).ok();
-            return Err(error.into());
+            let mut rollback_errors = Vec::new();
+            if let Err(cleanup) = self.remove_effect_node_internal(&instance) {
+                rollback_errors.push(cleanup);
+            }
+            if let Err(restore) = self.graph.add_link(original.id, output, input) {
+                rollback_errors.push(restore.into());
+            }
+            return Err(Self::rollback_error(error.into(), rollback_errors));
         }
         if let Err(error) = self.graph.add_link(second, instance.output_port, input) {
-            self.graph.remove_link(first).ok();
-            self.remove_effect_node_internal(&instance);
-            self.graph.add_link(original.id, output, input).ok();
-            return Err(error.into());
+            let mut rollback_errors = Vec::new();
+            // Removing the effect node also removes every route created for
+            // it, including `first`, and reports every failure.
+            if let Err(cleanup) = self.remove_effect_node_internal(&instance) {
+                rollback_errors.push(cleanup);
+            }
+            if let Err(restore) = self.graph.add_link(original.id, output, input) {
+                rollback_errors.push(restore.into());
+            }
+            return Err(Self::rollback_error(error.into(), rollback_errors));
         }
         instance.source = Some(source);
         instance.destination = Some(destination);
@@ -529,23 +640,33 @@ impl EffectDriver for DemoDriver {
             _ => return Err(BackendError::effect_routing_incomplete()),
         };
         let links = self.links_touching(&instance);
-        let removed_links: Vec<_> = links
-            .iter()
-            .filter_map(|link| self.graph.link(*link).cloned())
-            .collect();
+        let mut removed_links = Vec::with_capacity(links.len());
         for link in links {
-            self.graph.remove_link(link)?;
+            match self.graph.remove_link(link) {
+                Ok(removed) => removed_links.push(removed),
+                Err(error) => {
+                    let mut rollback_errors = Vec::new();
+                    for removed in removed_links.into_iter().rev() {
+                        if let Err(restore) = self.graph.insert_existing_link(removed) {
+                            rollback_errors.push(restore.into());
+                        }
+                    }
+                    return Err(Self::rollback_error(error.into(), rollback_errors));
+                }
+            }
         }
         if let Some((source, destination)) = restored_endpoints {
             let link_id = self.allocate_link_id();
             if let Err(error) = self.graph.add_link(link_id, source, destination) {
+                let mut rollback_errors = Vec::new();
                 for link in removed_links {
-                    self.graph.insert_existing_link(link).ok();
+                    if let Err(restore) = self.graph.insert_existing_link(link) {
+                        rollback_errors.push(restore.into());
+                    }
                 }
-                return Err(error.into());
+                return Err(Self::rollback_error(error.into(), rollback_errors));
             }
         }
-        self.remove_effect_node_internal(&instance);
-        Ok(())
+        self.remove_effect_node_internal(&instance)
     }
 }

@@ -99,9 +99,8 @@ impl Converter {
     /// headroom covers the boundary case.
     pub fn output_capacity_for(&self, max_input_samples: usize) -> usize {
         let in_frames = max_input_samples / self.in_channels + 1;
-        let out_frames = (in_frames as u64 * self.out_rate as u64)
-            .div_ceil(self.in_rate as u64) as usize
-            + 1;
+        let out_frames =
+            (in_frames as u64 * self.out_rate as u64).div_ceil(self.in_rate as u64) as usize + 1;
         out_frames * self.out_channels
     }
 
@@ -318,6 +317,7 @@ mod tests {
         blocks: usize,
     ) {
         let mapped_capacity = converter.mapped.capacity();
+        let previous_capacity = converter.previous.capacity();
         let out_capacity = out.capacity();
         let input = vec![0.25f32; input_samples];
         for block in 0..blocks {
@@ -326,6 +326,11 @@ mod tests {
                 converter.mapped.capacity(),
                 mapped_capacity,
                 "internal buffer grew on block {block}"
+            );
+            assert_eq!(
+                converter.previous.capacity(),
+                previous_capacity,
+                "carried-frame buffer grew on block {block}"
             );
             assert_eq!(
                 out.capacity(),
@@ -367,7 +372,7 @@ mod tests {
         // The session-setup path sizes from one global maximum quantum; this
         // pins that the bound really does hold for every pair it can be
         // asked to serve, including the fractional 48 -> 24 and 24 -> 48 ones.
-        let quantum = 1_024;
+        let quantum = crate::MAX_REALTIME_QUANTUM_SAMPLES;
         for in_rate in crate::SAMPLE_RATES_HZ {
             for out_rate in crate::SAMPLE_RATES_HZ {
                 for in_channels in [1u16, 2] {
@@ -382,8 +387,7 @@ mod tests {
                         if converter.is_identity() {
                             continue;
                         }
-                        let mut out =
-                            Vec::with_capacity(converter.output_capacity_for(quantum));
+                        let mut out = Vec::with_capacity(converter.output_capacity_for(quantum));
                         // Also exercise short blocks: the carried fractional
                         // position is what makes an occasional block emit one
                         // frame more than the nominal ratio.

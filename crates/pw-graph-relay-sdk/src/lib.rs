@@ -55,7 +55,7 @@
 pub use pw_graph_relay::{
     netlink::local_links, CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink,
     PeerInfo, RelayError, RelayEvent, RelayResult, Roles, SessionId, SessionStatus,
-    TransportPreference, FRAME_DURATIONS_MS, SAMPLE_RATES_HZ,
+    TransportPreference, FRAME_DURATIONS_MS, MAX_REALTIME_QUANTUM_SAMPLES, SAMPLE_RATES_HZ,
 };
 // `RelayHost::handle`/`RelayClient::handle` return this, so it has to be
 // nameable by callers holding one.
@@ -138,7 +138,9 @@ impl RelayHostBuilder {
         self
     }
 
-    /// Pairing PIN clients must present. Required before [`Self::start`].
+    /// Pairing PIN clients must present. Required before [`Self::start`]. The
+    /// SDK treats this as caller-owned configuration: it is neither persisted
+    /// nor silently regenerated across starts.
     pub fn pin(mut self, pin: impl Into<String>) -> Self {
         self.config.pin = pin.into();
         self
@@ -272,7 +274,11 @@ impl RelayHost {
         self.handle.pull_playback(out)
     }
 
-    /// Realtime-safe variant of [`Self::pull_playback`].
+    /// Realtime-safe variant of [`Self::pull_playback`]. It returns zero when
+    /// an engine lock is busy or no audio is available, may return a partial
+    /// quantum, and never produces more than
+    /// [`MAX_REALTIME_QUANTUM_SAMPLES`] samples. An oversized output slice is
+    /// short-served and its tail is untouched.
     pub fn try_pull_playback(&self, out: &mut [f32]) -> usize {
         self.handle.try_pull_playback(out)
     }
@@ -282,7 +288,10 @@ impl RelayHost {
         self.handle.push_capture(samples);
     }
 
-    /// Realtime-safe variant of [`Self::push_capture`].
+    /// Realtime-safe variant of [`Self::push_capture`]. It returns `false`
+    /// when the input exceeds [`MAX_REALTIME_QUANTUM_SAMPLES`], a realtime
+    /// lock is busy, or no accepting session is available; otherwise the
+    /// complete input quantum is offered to each bounded session queue.
     pub fn try_push_capture(&self, samples: &[f32]) -> bool {
         self.handle.try_push_capture(samples)
     }
@@ -409,7 +418,8 @@ pub struct RelayClientPrepared {
 }
 
 impl RelayClientPrepared {
-    /// Connect to a host. Blocks until the handshake completes or fails.
+    /// Connect to a host. Blocks until the handshake completes or fails. The
+    /// caller owns the PIN lifetime; the SDK does not persist or regenerate it.
     pub fn connect(self, target: &str, pin: &str) -> RelayResult<RelayClient> {
         let addr = resolve(target)?;
         let engine = RelayEngine::start(self.config)?;
@@ -471,7 +481,10 @@ impl RelayClient {
         self.handle.push_capture(samples);
     }
 
-    /// Realtime-safe variant of [`Self::send_capture`].
+    /// Realtime-safe variant of [`Self::send_capture`]. It returns `false`
+    /// when the input exceeds [`MAX_REALTIME_QUANTUM_SAMPLES`], a realtime
+    /// lock is busy, or no accepting session is available; it never reports a
+    /// partial input acceptance.
     pub fn try_send_capture(&self, samples: &[f32]) -> bool {
         self.handle.try_push_capture(samples)
     }
@@ -481,7 +494,9 @@ impl RelayClient {
         self.handle.pull_playback(out)
     }
 
-    /// Realtime-safe variant of [`Self::pull_playback`].
+    /// Realtime-safe variant of [`Self::pull_playback`]. It returns zero on a
+    /// busy lock or no data, may return partial output, and caps production at
+    /// [`MAX_REALTIME_QUANTUM_SAMPLES`] samples.
     pub fn try_pull_playback(&self, out: &mut [f32]) -> usize {
         self.handle.try_pull_playback(out)
     }
@@ -545,6 +560,13 @@ impl RelayBrowser {
         let engine = RelayEngine::start(config)?;
         let handle = engine.handle();
         Ok(Self { engine, handle })
+    }
+
+    /// Clone the lightweight engine handle. Platform registries can copy this
+    /// under their registry mutex and perform discovery work after releasing
+    /// that process-wide lock.
+    pub fn handle(&self) -> RelayHandle {
+        self.handle.clone()
     }
 
     /// Begin browsing `_qpw-relay._udp`. Idempotent.
