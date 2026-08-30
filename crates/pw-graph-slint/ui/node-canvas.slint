@@ -112,7 +112,12 @@ component GraphNode inherits Rectangle {
         height: 40px;
         background: #354456;
         border-radius: 6px;
+        // Accent stripe down the left edge of the header. The explicit x
+        // matters: an element with no x is *centred* in its parent, which put
+        // this 4px bar through the middle of the title text.
         Rectangle {
+            x: 0px;
+            y: 0px;
             width: 4px;
             height: parent.height;
             background: data.accent;

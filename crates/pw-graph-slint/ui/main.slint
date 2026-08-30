@@ -60,6 +60,10 @@ component RailButton inherits Rectangle {
     in property <bool> enabled: true;
     out property <bool> hovered: touch.has-hover;
     callback clicked();
+    // Reports hover along with the label and the button's window-space
+    // position. A shared tooltip needs both because a button inside an `if`
+    // cannot be reached by id from outside it.
+    callback hover-changed(bool, string, length);
 
     height: 42px;
     background: active ? #245777 : touch.has-hover && enabled ? #2d3844 : transparent;
@@ -79,6 +83,9 @@ component RailButton inherits Rectangle {
         clicked => {
             if (root.enabled) { root.clicked(); }
         }
+    }
+    changed hovered => {
+        root.hover-changed(root.hovered, root.label, root.absolute-position.y);
     }
 }
 
@@ -275,6 +282,23 @@ export component MainWindow inherits Window {
     out property <float> canvas-height_: canvas.height / 1px;
     out property <bool> graph-node-dragging: canvas.interacting;
     property <length> rail-width: 76px;
+    // Shared rail-tooltip state, written by whichever button reports hover.
+    property <string> tip-text;
+    property <length> tip-anchor-y;
+    property <bool> tip-shown: false;
+
+    // A pointer moving straight from one button to the next can deliver the
+    // new button's enter before the old one's leave, so a leave only hides
+    // the tooltip when it comes from the button currently being shown.
+    function rail-hover(entered: bool, label: string, anchor: length) {
+        if (entered) {
+            root.tip-text = label;
+            root.tip-anchor-y = anchor;
+            root.tip-shown = true;
+        } else if (root.tip-text == label) {
+            root.tip-shown = false;
+        }
+    }
     property <length> status-height: root.show-statusbar ? 34px * root.ui-text-scale : 0px;
 
     callback action(string);
@@ -336,46 +360,50 @@ export component MainWindow inherits Window {
                     icon: @image-url("../../../assets/icons/settings.svg");
                     label: UiI18n.localized("nav.preferences"); active: root.show-preferences;
                     clicked => { root.action("preferences"); }
+                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
                 appearance_button := RailButton {
                     width: 42px;
-                    icon: @image-url("../../../assets/icons/settings.svg");
+                    icon: @image-url("../../../assets/icons/appearance.svg");
                     label: UiI18n.localized("inspector.node_appearance"); active: root.show-node-editor;
                     clicked => { root.action("node-appearance"); }
+                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
                 relay_button := RailButton {
                     width: 42px;
                     icon: @image-url("../../../assets/icons/relay.svg");
                     label: UiI18n.localized("nav.relay"); active: root.show-relay;
                     clicked => { root.action("relay"); }
+                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
                 shortcuts_button := RailButton {
                     width: 42px;
                     icon: @image-url("../../../assets/icons/help.svg");
                     label: UiI18n.localized("nav.shortcuts"); active: root.show-shortcuts;
                     clicked => { root.action("shortcuts"); }
+                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
 
                 Rectangle { width: 52px; x: -5px; height: 1px; background: #35414d; }
                 Rectangle { width: 42px; height: 7px; background: transparent; }
-                minimap_button := RailButton { width: 42px; icon: @image-url("../../../assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } }
-                refresh_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } }
-                undo_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } }
-                redo_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } }
-                history_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } }
-                connect_button := RailButton { visible: root.show-common-actions; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } }
-                arrange_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } }
-                sort_type_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } }
-                sort_order_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } }
-                disconnect_selected_button := RailButton { visible: root.show-common-actions && root.has-selected-link; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } }
-                disconnect_all_button := RailButton { visible: root.show-common-actions && root.links.length > 0; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } }
-                disconnect_node_button := RailButton { visible: root.show-common-actions && root.has-selected-node; enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/delete.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } }
-                effects_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } }
-                save_button := RailButton { visible: root.show-patchbay-toolbar; width: 42px; icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } }
-                load_button := RailButton { visible: root.show-patchbay-toolbar; width: 42px; icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } }
-                snapshot_button := RailButton { visible: root.show-patchbay-toolbar; width: 42px; icon: @image-url("../../../assets/icons/snapshot.svg"); label: UiI18n.localized("toolbar.snapshot"); clicked => { root.action("snapshot-patchbay"); } }
-                activate_button := RailButton { visible: root.show-patchbay-toolbar; width: 42px; icon: @image-url("../../../assets/icons/activate.svg"); label: UiI18n.localized("toolbar.activate"); active: root.patchbay-activated; clicked => { root.action("activate-patchbay"); } }
-                filter_button := RailButton { visible: root.show-common-actions; width: 42px; icon: @image-url("../../../assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } }
+                minimap_button := RailButton { width: 42px; icon: @image-url("../../../assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions && root.has-selected-link : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/disconnect_link.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions && root.links.length > 0 : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/disconnect_all.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions && root.has-selected-node : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/disconnect_node.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/snapshot.svg"); label: UiI18n.localized("toolbar.snapshot"); clicked => { root.action("snapshot-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/activate.svg"); label: UiI18n.localized("toolbar.activate"); active: root.patchbay-activated; clicked => { root.action("activate-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
 
                 Rectangle {
                     width: 42px;
@@ -819,26 +847,15 @@ export component MainWindow inherits Window {
         error: root.toast-error;
     }
 
-    RailTooltip { x: root.rail-width + 8px; y: preferences_button.y + 6px; text: preferences_button.label; shown: preferences_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: appearance_button.y + 6px; text: appearance_button.label; shown: appearance_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: relay_button.y + 6px; text: relay_button.label; shown: relay_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: shortcuts_button.y + 6px; text: shortcuts_button.label; shown: shortcuts_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: minimap_button.y + 6px; text: minimap_button.label; shown: minimap_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: refresh_button.y + 6px; text: refresh_button.label; shown: refresh_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: undo_button.y + 6px; text: undo_button.label; shown: undo_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: redo_button.y + 6px; text: redo_button.label; shown: redo_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: history_button.y + 6px; text: history_button.label; shown: history_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: connect_button.y + 6px; text: connect_button.label; shown: connect_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: arrange_button.y + 6px; text: arrange_button.label; shown: arrange_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: sort_type_button.y + 6px; text: sort_type_button.label; shown: sort_type_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: sort_order_button.y + 6px; text: sort_order_button.label; shown: sort_order_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: disconnect_selected_button.y + 6px; text: disconnect_selected_button.label; shown: disconnect_selected_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: disconnect_all_button.y + 6px; text: disconnect_all_button.label; shown: disconnect_all_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: disconnect_node_button.y + 6px; text: disconnect_node_button.label; shown: disconnect_node_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: effects_button.y + 6px; text: effects_button.label; shown: effects_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: save_button.y + 6px; text: save_button.label; shown: save_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: load_button.y + 6px; text: load_button.label; shown: load_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: snapshot_button.y + 6px; text: snapshot_button.label; shown: snapshot_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: activate_button.y + 6px; text: activate_button.label; shown: activate_button.hovered; }
-    RailTooltip { x: root.rail-width + 8px; y: filter_button.y + 6px; text: filter_button.label; shown: filter_button.hovered; }
+    // One tooltip for the whole rail. Per-button tooltips could not survive
+    // the buttons moving inside `if` blocks, because Slint does not expose
+    // ids declared inside a conditional. The buttons report their own hover
+    // instead, which also keeps this correct while the rail is scrolled: the
+    // reported position is window-space, not scrolled-content space.
+    RailTooltip {
+        x: root.rail-width + 8px;
+        y: clamp(root.tip-anchor-y + 6px, 8px, root.height - root.status-height - 38px);
+        text: root.tip-text;
+        shown: root.tip-shown;
+    }
 }

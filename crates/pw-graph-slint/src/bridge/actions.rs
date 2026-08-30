@@ -111,6 +111,15 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
                 .iter()
                 .map(|(node, position)| (*node, defaults.get(node).copied().unwrap_or(*position)))
                 .collect();
+            // How many nodes the arrange actually moves. Reporting the whole
+            // graph's node count put a number on screen that contradicted the
+            // status bar beside it, which counts only the nodes the current
+            // media filter leaves visible.
+            let moved = before
+                .iter()
+                .zip(after.iter())
+                .filter(|((_, from), (_, to))| from != to)
+                .count();
             if before != after {
                 match application.commands.execute(
                     Box::new(MoveNodesCommand::new(before, after)),
@@ -121,10 +130,8 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
                         application
                             .view
                             .adopt_backend_positions(application.source.graph());
-                        application.status = application.tf(
-                            "status.arranged",
-                            &[("count", application.source.graph().nodes.len().to_string())],
-                        );
+                        application.status =
+                            application.tf("status.arranged", &[("count", moved.to_string())]);
                     }
                     Err(error) => {
                         application.status =
