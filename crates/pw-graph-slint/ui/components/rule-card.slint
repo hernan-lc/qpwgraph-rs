@@ -1,0 +1,82 @@
+import { UiTheme } from "../foundation/theme.slint";
+import { UiI18n } from "../foundation/i18n.slint";
+import { AppTokens } from "../foundation/tokens.slint";
+import { RuleRow } from "../foundation/structs.slint";
+import { IconButton } from "icon-button.slint";
+
+export component RuleCard inherits Rectangle {
+    in property <RuleRow> rule;
+    callback edit();
+    callback toggle-pin();
+    callback delete();
+    // For shared tooltip handling: report hover with tooltip text
+    callback hover-tooltip(string, bool);
+
+    height: 72px;
+    background: AppTokens.panel-bg;
+    border-color: AppTokens.border-panel;
+    border-width: 1px;
+    border-radius: AppTokens.radius-md;
+
+    // Text area: enough room, actions fixed on right
+    Text {
+        x: 12px;
+        y: 8px;
+        width: parent.width - 120px;
+        height: 16px;
+        text: root.rule.output;
+        color: #e4ecf2;
+        font-size: 10px * UiTheme.panel-scale;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    Text {
+        x: 12px;
+        y: 28px;
+        width: parent.width - 120px;
+        height: 14px;
+        text: "→ " + root.rule.input;
+        color: #aebdca;
+        font-size: 9px * UiTheme.panel-scale;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    Text {
+        x: 12px;
+        y: 48px;
+        width: 90px;
+        height: 14px;
+        text: root.rule.pinned ? UiI18n.localized("inspector.pinned") : UiI18n.localized("patchbay.rule");
+        color: root.rule.pinned ? AppTokens.accent-green : #9fadb8;
+        font-size: 8px * UiTheme.panel-scale;
+        vertical-alignment: center;
+    }
+
+    // Action buttons: fixed compact, never truncated
+    edit-btn := IconButton {
+        x: parent.width - 100px;
+        y: 10px;
+        icon: @image-url("../../../../assets/icons/edit.svg");
+        tooltip: UiI18n.localized("patchbay.edit_rule");
+        hover-changed(entered, tip, ax, ay) => { root.hover-tooltip(tip, entered); }
+        clicked => { root.edit(); }
+    }
+    pin-btn := IconButton {
+        x: parent.width - 66px;
+        y: 10px;
+        icon: @image-url("../../../../assets/icons/pin.svg");
+        tooltip: root.rule.pinned ? UiI18n.localized("patchbay.unpin") : UiI18n.localized("patchbay.pin");
+        selected: root.rule.pinned;
+        hover-changed(entered, tip, ax, ay) => { root.hover-tooltip(tip, entered); }
+        clicked => { root.toggle-pin(); }
+    }
+    delete-btn := IconButton {
+        x: parent.width - 32px;
+        y: 10px;
+        icon: @image-url("../../../../assets/icons/delete.svg");
+        tooltip: UiI18n.localized("effects.remove");
+        danger: true;
+        hover-changed(entered, tip, ax, ay) => { root.hover-tooltip(tip, entered); }
+        clicked => { root.delete(); }
+    }
+}

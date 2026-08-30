@@ -1,28 +1,9 @@
 import { UiTheme } from "../foundation/theme.slint";
+import { AppTokens } from "../foundation/tokens.slint";
+import { Tooltip } from "tooltip.slint";
 
-export component RailTooltip inherits Rectangle {
-    in property <string> text;
-    in property <bool> shown: false;
-
-    visible: root.shown;
-    width: 184px;
-    height: 30px;
-    z: 1000;
-    background: #11161cf2;
-    border-color: #4b5a69;
-    border-width: 1px;
-    border-radius: 4px;
-    Text {
-        x: 9px;
-        width: parent.width - 18px;
-        height: parent.height;
-        text: root.text;
-        color: #edf3f8;
-        font-size: 11px * UiTheme.ui-scale;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-}
+// Single visual implementation lives in tooltip.slint; keep rail name as alias.
+export component RailTooltip inherits Tooltip { }
 
 export component ConnectionToast inherits Rectangle {
     in property <string> message;
@@ -33,7 +14,7 @@ export component ConnectionToast inherits Rectangle {
     background: root.error ? #6d3030f2 : #245777f2;
     border-color: root.error ? #c76b6b : #68a8d5;
     border-width: 1px;
-    border-radius: 5px;
+    border-radius: AppTokens.radius-md;
     z: 1000;
 
     Text {

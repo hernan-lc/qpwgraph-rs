@@ -1,0 +1,43 @@
+import { AppTokens } from "../foundation/tokens.slint";
+
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> tooltip: "";
+    in property <bool> enabled: true;
+    in property <bool> selected: false;
+    in property <bool> danger: false;
+
+    callback clicked();
+    callback hover-changed(bool, string, length, length);
+
+    width: 30px;
+    height: 30px;
+    border-radius: AppTokens.radius-sm;
+    border-width: 1px;
+    border-color: root.selected ? AppTokens.border-button-selected : root.danger ? (touch.has-hover && root.enabled ? #c76b6b : #7a4040) : AppTokens.border-button;
+    background: root.selected ? AppTokens.accent-blue : touch.has-hover && root.enabled ? (root.danger ? #5a2f2f : #344252) : root.danger ? #3d2c2c : #27313c;
+    opacity: root.enabled ? 1 : 0.45;
+
+    out property <bool> hovered: touch.has-hover;
+
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        source: root.icon;
+        opacity: root.enabled ? (root.selected ? 1.0 : 0.88) : 0.4;
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        enabled: root.enabled;
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+
+    changed hovered => {
+        root.hover-changed(root.hovered, root.tooltip, root.absolute-position.x, root.absolute-position.y);
+    }
+}
