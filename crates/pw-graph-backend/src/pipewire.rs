@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod effects;
@@ -103,8 +103,8 @@ pub struct PipewireDriver {
     core: Option<pw::core::Core>,
     registry: Option<pw::registry::Registry>,
     registry_listener: Option<pw::registry::Listener>,
-    state: Rc<RefCell<RegistryState>>,
-    registry_dirty: Rc<Cell<bool>>,
+    state: Arc<Mutex<RegistryState>>,
+    registry_dirty: Arc<AtomicBool>,
     meters: BTreeMap<NodeId, MeterHandle>,
     meter_policy: MeterPolicy,
     /// Nodes the UI asked to measure, with the time of the last request so a
@@ -144,8 +144,8 @@ impl PipewireDriver {
         let registry = core
             .get_registry()
             .map_err(|error| native_error("PipeWire registry creation", error))?;
-        let state = Rc::new(RefCell::new(RegistryState::default()));
-        let registry_dirty = Rc::new(Cell::new(true));
+        let state = Arc::new(Mutex::new(RegistryState::default()));
+        let registry_dirty = Arc::new(AtomicBool::new(true));
 
         let state_for_globals = state.clone();
         let state_for_removals = state.clone();
@@ -157,7 +157,7 @@ impl PipewireDriver {
                 let Some(props) = global.props else {
                     return;
                 };
-                let mut state = state_for_globals.borrow_mut();
+                let mut state = state_for_globals.lock().unwrap();
                 match &global.type_ {
                     pw::types::ObjectType::Node => {
                         let name = props
@@ -223,14 +223,14 @@ impl PipewireDriver {
                     }
                     _ => {}
                 }
-                dirty_for_globals.set(true);
+                dirty_for_globals.store(true, Ordering::Relaxed);
             })
             .global_remove(move |id| {
-                let mut state = state_for_removals.borrow_mut();
+                let mut state = state_for_removals.lock().unwrap();
                 state.nodes.remove(&id);
                 state.ports.remove(&id);
                 state.links.remove(&id);
-                dirty_for_removals.set(true);
+                dirty_for_removals.store(true, Ordering::Relaxed);
             })
             .register();
 
@@ -364,7 +364,7 @@ impl PipewireDriver {
     /// The caller must hold the ThreadLoop lock because `runtime_node_id`
     /// touches the raw `pw_filter` object.
     fn reconcile_effects_locked(&mut self) {
-        let state = self.state.borrow().clone();
+        let state = self.state.lock().unwrap().clone();
         let resolutions: Vec<(String, NodeId, PortId, PortId)> = self
             .effects
             .iter()
@@ -514,7 +514,7 @@ impl PipewireDriver {
         // make a refresh loop forever.
         for pass in 0..3 {
             self.reconcile_effects_locked();
-            let state = self.state.borrow().clone();
+            let state = self.state.lock().unwrap().clone();
             self.graph = self.build_graph_from_state(state)?;
             let suppressed: Vec<LinkId> = self
                 .graph
@@ -596,7 +596,7 @@ impl PipewireDriver {
     /// `stream.capture.sink`. The rule itself lives in [`crate::api`] so it can
     /// be unit-tested without a PipeWire daemon.
     fn measurable_nodes(&self) -> BTreeSet<NodeId> {
-        let state = self.state.borrow();
+        let state = self.state.lock().unwrap().clone();
         self.graph
             .nodes
             .values()
@@ -658,7 +658,7 @@ impl PipewireDriver {
         self.meters.retain(|node_id, _| wanted.contains(node_id));
 
         let missing: Vec<(NodeId, NodeRecord)> = {
-            let state = self.state.borrow();
+            let state = self.state.lock().unwrap().clone();
             wanted
                 .into_iter()
                 .filter(|node_id| !self.meters.contains_key(node_id))
@@ -1015,7 +1015,7 @@ impl GraphDriver for PipewireDriver {
     fn refresh(&mut self) -> BackendResult<Vec<Node>> {
         self.with_loop(|driver| {
             driver.sync()?;
-            driver.registry_dirty.set(false);
+            driver.registry_dirty.store(false, Ordering::Relaxed);
             Ok(driver.graph.nodes.values().cloned().collect())
         })
     }
@@ -1130,7 +1130,7 @@ impl GraphDriver for PipewireDriver {
     }
 
     fn graph_dirty(&self) -> bool {
-        self.registry_dirty.get()
+        self.registry_dirty.load(Ordering::Relaxed)
     }
 
     /// The registry listener fires for every global added or removed, so the

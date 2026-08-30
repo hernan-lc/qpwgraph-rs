@@ -55,7 +55,8 @@ impl PipewireDriver {
 
         let link_id = self
             .state
-            .borrow()
+            .lock()
+            .unwrap()
             .links
             .iter()
             .find(|(_, link)| {
