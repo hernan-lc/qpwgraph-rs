@@ -1,7 +1,8 @@
-import { CheckBox, ComboBox, LineEdit, ScrollView, VerticalBox } from "std-widgets.slint";
+import { CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { UiTheme } from "../foundation/theme.slint";
 import { UiI18n } from "../foundation/i18n.slint";
 import { ActionButton } from "../components/button.slint";
+import { FormRow, FormSection, TabStrip } from "../components/form.slint";
 import { RelayRow } from "../foundation/structs.slint";
 
 export component RelayPanel inherits Rectangle {
@@ -31,96 +32,157 @@ export component RelayPanel inherits Rectangle {
     callback action(string);
     callback close();
 
-    background: #20262df7;
+    background: #20262d;
     border-color: #506171;
     border-width: 1px;
 
-    Text { x: 18px; y: 14px; text: UiI18n.localized("relay.title"); color: #f0f4f7; font-size: 18px * UiTheme.ui-scale; }
+    Text {
+        x: 18px; y: 14px; width: parent.width - 76px; height: 28px;
+        text: UiI18n.localized("relay.title");
+        color: #f0f4f7;
+        font-size: 18px * UiTheme.ui-scale;
+        vertical-alignment: center;
+        overflow: elide;
+    }
     ActionButton { x: parent.width - 47px; y: 12px; width: 30px; text: "×"; clicked => { root.close(); } }
     Rectangle { x: 16px; y: 49px; width: parent.width - 32px; height: 1px; background: #3d4a56; }
-    ActionButton { x: 16px; y: 62px; width: 110px; text: UiI18n.localized("relay.tab_connections"); selected: root.relay-tab == 0; clicked => { root.relay-tab = 0; } }
-    ActionButton { x: 134px; y: 62px; width: 80px; text: UiI18n.localized("relay.tab_host"); selected: root.relay-tab == 1; clicked => { root.relay-tab = 1; } }
-    ActionButton { x: 222px; y: 62px; width: 80px; text: UiI18n.localized("relay.advanced"); selected: root.relay-tab == 2; clicked => { root.relay-tab = 2; } }
+    TabStrip {
+        x: 16px; y: 62px; width: parent.width - 32px;
+        first: UiI18n.localized("relay.tab_connections");
+        second: UiI18n.localized("relay.tab_host");
+        third: UiI18n.localized("relay.tab_advanced");
+        current-index <=> root.relay-tab;
+    }
 
-    if root.relay-tab == 0: ScrollView {
-        x: 16px; y: 106px; width: parent.width - 32px; height: parent.height - 124px;
-        VerticalBox {
-            spacing: 7px;
-            Rectangle {
-                height: 82px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
-                LineEdit { x: 8px; y: 8px; width: parent.width - 112px; height: 29px; placeholder-text: UiI18n.localized("relay.target"); text <=> root.relay-client-target; }
-                LineEdit { x: 8px; y: 45px; width: parent.width - 200px; height: 29px; placeholder-text: UiI18n.localized("relay.pin"); text <=> root.relay-client-pin; }
-                ActionButton { x: parent.width - 96px; y: 27px; width: 82px; text: UiI18n.localized("relay.connect"); enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
-            }
-            Text { text: UiI18n.localized("relay.group_available"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
-            for row in root.relay-rows: Rectangle {
-                height: 51px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
-                Text { x: 9px; y: 5px; width: 185px; height: 17px; text: row.name; color: #edf3f7; font-size: 11px * UiTheme.panel-scale; overflow: elide; }
-                Text { x: 9px; y: 26px; width: 185px; height: 16px; text: row.state + " · " + row.address; color: #aebdca; font-size: 9px * UiTheme.panel-scale; overflow: elide; }
-                Rectangle { x: parent.width - 80px; y: 21px; width: 42px; height: 5px; background: #151a20; border-radius: 3px; }
-                Rectangle { x: parent.width - 80px; y: 21px; width: row.level * 42px; height: 5px; background: #57c785; border-radius: 3px; }
-                ActionButton {
-                    x: parent.width - 31px; y: 12px; width: 22px;
-                    text: row.connected ? "−" : row.connecting ? "…" : "+";
-                   
-                    enabled: root.relay-available && row.id != "" && !row.connecting;
-                    clicked => {
-                        if (row.connected) {
-                            root.action("relay-disconnect:" + row.id);
-                        } else {
-                            root.action("relay-connect:" + row.id);
-                        }
+    body := ScrollView {
+        x: 16px; y: 106px; width: parent.width - 32px; height: parent.height - 122px;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        viewport-width: self.visible-width;
+        viewport-height: max(self.visible-height, body-layout.min-height);
+
+        body-layout := VerticalLayout {
+            width: body.visible-width;
+            padding: 0px;
+            padding-bottom: 12px;
+            spacing: 9px;
+
+            if root.relay-tab == 0: FormSection {
+                VerticalLayout {
+                    spacing: 8px;
+                    LineEdit { height: 31px; placeholder-text: UiI18n.localized("relay.target"); text <=> root.relay-client-target; }
+                    HorizontalLayout {
+                        height: 31px; spacing: 8px;
+                        LineEdit { horizontal-stretch: 1; placeholder-text: UiI18n.localized("relay.pin"); text <=> root.relay-client-pin; }
+                        ActionButton { width: 92px; text: UiI18n.localized("relay.connect"); enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
                     }
                 }
-                if row.trusted : ActionButton {
-                    x: parent.width - 58px; y: 12px; width: 22px;
-                    text: "×";
-                   
-                    enabled: root.relay-available && row.peer-id != "";
-                    clicked => { root.action("relay-forget:" + row.peer-id); }
+            }
+
+            if root.relay-tab == 0: Text {
+                height: 22px;
+                text: UiI18n.localized("relay.group_available");
+                color: #aebdca;
+                font-size: 11px * UiTheme.panel-scale;
+                vertical-alignment: center;
+            }
+
+            if root.relay-tab == 0: VerticalLayout {
+                spacing: 7px;
+                for row in root.relay-rows: Rectangle {
+                    height: 51px;
+                    background: #29323c;
+                    border-color: #40505f;
+                    border-width: 1px;
+                    border-radius: 5px;
+                    Text { x: 9px; y: 5px; width: parent.width - 112px; height: 17px; text: row.name; color: #edf3f7; font-size: 11px * UiTheme.panel-scale; overflow: elide; }
+                    Text { x: 9px; y: 26px; width: parent.width - 112px; height: 16px; text: row.state + " · " + row.address; color: #aebdca; font-size: 9px * UiTheme.panel-scale; overflow: elide; }
+                    Rectangle { x: parent.width - 80px; y: 21px; width: 42px; height: 5px; background: #151a20; border-radius: 3px; }
+                    Rectangle { x: parent.width - 80px; y: 21px; width: row.level * 42px; height: 5px; background: #57c785; border-radius: 3px; }
+                    ActionButton {
+                        x: parent.width - 31px; y: 12px; width: 22px;
+                        text: row.connected ? "−" : row.connecting ? "…" : "+";
+                        enabled: root.relay-available && row.id != "" && !row.connecting;
+                        clicked => {
+                            if (row.connected) { root.action("relay-disconnect:" + row.id); }
+                            else { root.action("relay-connect:" + row.id); }
+                        }
+                    }
+                    if row.trusted : ActionButton {
+                        x: parent.width - 58px; y: 12px; width: 22px; text: "×";
+                        enabled: root.relay-available && row.peer-id != "";
+                        clicked => { root.action("relay-forget:" + row.peer-id); }
+                    }
+                }
+            }
+
+            if root.relay-tab == 1: FormSection {
+                title: UiI18n.localized("relay.title");
+                summary: UiI18n.localized("relay.emitter_hint");
+
+                if root.relay-windows-endpoints: FormRow {
+                    label: UiI18n.localized("relay.capture_endpoint");
+                    ComboBox { width: parent.width; height: 31px; model: root.relay-endpoint-options; current-index <=> root.relay-capture-endpoint-index; }
+                }
+                if root.relay-windows-endpoints: FormRow {
+                    label: UiI18n.localized("relay.playback_endpoint");
+                    ComboBox { width: parent.width; height: 31px; model: root.relay-endpoint-options; current-index <=> root.relay-playback-endpoint-index; }
+                }
+                if root.relay-windows-endpoints: Text {
+                    min-height: 28px;
+                    text: UiI18n.localized("relay.windows_endpoint_help");
+                    color: #8393a0;
+                    font-size: 8px * UiTheme.panel-scale;
+                    wrap: word-wrap;
+                }
+                FormRow { label: UiI18n.localized("relay.device_name"); LineEdit { width: parent.width; height: 31px; text <=> root.relay-device-name; } }
+                FormRow { label: UiI18n.localized("relay.pin"); LineEdit { width: parent.width; height: 31px; text <=> root.relay-host-pin; } }
+                FormRow { label: UiI18n.localized("relay.port"); LineEdit { width: parent.width; height: 31px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; } }
+                HorizontalLayout {
+                    height: 31px; spacing: 8px;
+                    ActionButton { horizontal-stretch: 1; text: root.relay-host-active ? UiI18n.localized("relay.stop_host") : UiI18n.localized("relay.start_host"); enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
+                    ActionButton { horizontal-stretch: 1; text: UiI18n.localized("relay.show_qr"); enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
+                }
+                Text {
+                    min-height: 28px;
+                    text: root.relay-host-active ? UiI18n.formatted-one("relay.listening", root.relay-host-endpoint) : UiI18n.localized("relay.host_stopped");
+                    color: root.relay-host-active ? #57c785 : #aebdca;
+                    font-size: 10px * UiTheme.panel-scale;
+                    wrap: word-wrap;
+                }
+                Text {
+                    min-height: 32px;
+                    text: root.relay-host-active ? UiI18n.formatted-one("relay.qr_pin", root.relay-host-pin) : UiI18n.localized("relay.advanced_help");
+                    color: #aebdca;
+                    font-size: 10px * UiTheme.panel-scale;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.relay-tab == 2: FormSection {
+                title: UiI18n.localized("relay.advanced");
+                FormRow {
+                    label: UiI18n.localized("relay.role");
+                    ComboBox { width: parent.width; height: 31px; model: [UiI18n.localized("relay.role_emit"), UiI18n.localized("relay.role_receive"), UiI18n.localized("relay.role_both")]; current-index <=> root.relay-role-index; }
+                }
+                FormRow { label: UiI18n.localized("relay.codec"); ComboBox { width: parent.width; height: 31px; model: root.relay-codec-options; current-index <=> root.relay-codec-index; } }
+                FormRow { label: UiI18n.localized("relay.frame_ms"); ComboBox { width: parent.width; height: 31px; model: root.relay-frame-options; current-index <=> root.relay-frame-index; } }
+                FormRow { label: UiI18n.localized("relay.transport"); ComboBox { width: parent.width; height: 31px; model: root.relay-transport-options; current-index <=> root.relay-transport-index; } }
+                CheckBox { height: 31px; text: UiI18n.localized("relay.auto_connect_trusted"); checked <=> root.relay-auto-connect-trusted; }
+                Text {
+                    min-height: 44px;
+                    text: UiI18n.localized("relay.auto_connect_trusted_help");
+                    color: #aebdca;
+                    font-size: 10px * UiTheme.panel-scale;
+                    wrap: word-wrap;
+                }
+                Text {
+                    min-height: 44px;
+                    text: UiI18n.localized("relay.advanced_help");
+                    color: #aebdca;
+                    font-size: 10px * UiTheme.panel-scale;
+                    wrap: word-wrap;
                 }
             }
         }
-    }
-
-    if root.relay-tab == 1: Rectangle {
-        x: 16px; y: 108px; width: parent.width - 32px; height: root.relay-windows-endpoints ? 424px : 330px; background: #29323c; border-radius: 5px;
-        Text { x: 12px; y: 12px; text: UiI18n.localized("relay.title"); color: #edf3f7; font-size: 14px * UiTheme.panel-scale; }
-        Text { x: 12px; y: 40px; width: parent.width - 24px; text: UiI18n.localized("relay.emitter_hint"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; wrap: word-wrap; }
-        if root.relay-windows-endpoints: Rectangle {
-            x: 12px; y: 68px; width: parent.width - 24px; height: 82px;
-            Text { x: 0px; y: 2px; text: UiI18n.localized("relay.capture_endpoint"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-            ComboBox { x: 112px; y: 0px; width: parent.width - 112px; model: root.relay-endpoint-options; current-index <=> root.relay-capture-endpoint-index; }
-            Text { x: 0px; y: 39px; text: UiI18n.localized("relay.playback_endpoint"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-            ComboBox { x: 112px; y: 37px; width: parent.width - 112px; model: root.relay-endpoint-options; current-index <=> root.relay-playback-endpoint-index; }
-            Text { x: 0px; y: 65px; width: parent.width; height: 16px; text: UiI18n.localized("relay.windows_endpoint_help"); color: #8393a0; font-size: 8px * UiTheme.panel-scale; overflow: elide; }
-        }
-        property <length> relay-fields-offset: root.relay-windows-endpoints ? 96px : 0px;
-        Text { x: 12px; y: 78px + relay-fields-offset; text: UiI18n.localized("relay.device_name"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-        LineEdit { x: 100px; y: 68px + relay-fields-offset; width: parent.width - 112px; height: 29px; text <=> root.relay-device-name; }
-        Text { x: 12px; y: 115px + relay-fields-offset; text: UiI18n.localized("relay.pin"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-        LineEdit { x: 100px; y: 105px + relay-fields-offset; width: parent.width - 112px; height: 29px; text <=> root.relay-host-pin; }
-        Text { x: 12px; y: 152px + relay-fields-offset; text: UiI18n.localized("relay.port"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-        LineEdit { x: 100px; y: 142px + relay-fields-offset; width: 110px; height: 29px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; }
-        ActionButton { x: 12px; y: 190px + relay-fields-offset; width: 112px; text: root.relay-host-active ? UiI18n.localized("relay.stop_host") : UiI18n.localized("relay.start_host"); enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
-        ActionButton { x: 132px; y: 190px + relay-fields-offset; width: 112px; text: UiI18n.localized("relay.show_qr"); enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
-        Text { x: 12px; y: 237px + relay-fields-offset; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.listening", root.relay-host-endpoint) : UiI18n.localized("relay.host_stopped"); color: root.relay-host-active ? #57c785 : #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
-        Text { x: 12px; y: 263px + relay-fields-offset; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.qr_pin", root.relay-host-pin) : UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
-    }
-
-    if root.relay-tab == 2: Rectangle {
-        x: 16px; y: 108px; width: parent.width - 32px; height: 350px; background: #29323c; border-radius: 5px;
-        Text { x: 12px; y: 12px; text: UiI18n.localized("relay.advanced"); color: #edf3f7; font-size: 14px * UiTheme.panel-scale; }
-        Text { x: 12px; y: 45px; text: UiI18n.localized("relay.role"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
-        ComboBox { x: 98px; y: 34px; width: 140px; model: [UiI18n.localized("relay.role_emit"), UiI18n.localized("relay.role_receive"), UiI18n.localized("relay.role_both")]; current-index <=> root.relay-role-index; }
-        Text { x: 12px; y: 89px; text: UiI18n.localized("relay.codec"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
-        ComboBox { x: 98px; y: 78px; width: 140px; model: root.relay-codec-options; current-index <=> root.relay-codec-index; }
-        Text { x: 12px; y: 133px; text: UiI18n.localized("relay.frame_ms"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
-        ComboBox { x: 98px; y: 122px; width: 140px; model: root.relay-frame-options; current-index <=> root.relay-frame-index; }
-        Text { x: 12px; y: 177px; text: UiI18n.localized("relay.transport"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
-        ComboBox { x: 98px; y: 166px; width: 140px; model: root.relay-transport-options; current-index <=> root.relay-transport-index; }
-        CheckBox { x: 12px; y: 214px; text: "Automatically reconnect trusted devices"; checked <=> root.relay-auto-connect-trusted; }
-        Text { x: 12px; y: 256px; width: parent.width - 24px; text: "Unknown peers never reconnect automatically. PIN pairing remains explicit."; color: #aebdca; font-size: 10px * UiTheme.panel-scale; wrap: word-wrap; }
-        Text { x: 12px; y: 304px; width: parent.width - 24px; text: UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; wrap: word-wrap; }
     }
 }

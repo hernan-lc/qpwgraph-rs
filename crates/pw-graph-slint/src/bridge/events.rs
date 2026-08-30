@@ -1,3 +1,4 @@
+use crate::model::resolve_drag_delta;
 use pw_graph_command::MoveNodesCommand;
 use slint::VecModel;
 use std::cell::{Cell, RefCell};
@@ -150,9 +151,20 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
                 .filter(|node| selected.contains(&node.node_id))
                 .map(|node| (node.node_id, node.position))
                 .collect();
+            let resolved = resolve_drag_delta(
+                &application.snapshot,
+                &selected,
+                [dx, dy],
+                application.config.repel_overlapping_nodes,
+            );
             let after: Vec<_> = before
                 .iter()
-                .map(|(node, position)| (*node, [position[0] + dx, position[1] + dy]))
+                .map(|(node, position)| {
+                    (
+                        *node,
+                        [position[0] + resolved[0], position[1] + resolved[1]],
+                    )
+                })
                 .collect();
             if before == after {
                 return;
@@ -162,9 +174,12 @@ pub(crate) fn process_event(window: &MainWindow, application: &mut Application, 
                 &mut application.source,
             ) {
                 Ok(()) => {
-                    application
-                        .view
-                        .move_selected(id, dx, dy, &application.snapshot);
+                    application.view.move_selected(
+                        id,
+                        resolved[0],
+                        resolved[1],
+                        &application.snapshot,
+                    );
                     application.status = application.t("status.node_moved");
                 }
                 Err(error) => {

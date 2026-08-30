@@ -354,7 +354,7 @@ impl UiGraphState {
             .retain(|id| graph.links.contains_key(id));
 
         let appearances = configured_appearances(graph, config);
-        let positions = self.effective_positions(graph, config, &appearances);
+        let positions = self.effective_positions(graph, config);
         let mut pin_groups = HashMap::<PortId, i32>::new();
         let mut nodes = Vec::new();
 
@@ -622,7 +622,7 @@ impl UiGraphState {
     /// application configuration using the same stable keys as the desktop UI.
     pub(crate) fn write_to_config(&self, graph: &Graph, config: &mut AppConfig) {
         let configured_appearances = configured_appearances(graph, config);
-        let effective_positions = self.effective_positions(graph, config, &configured_appearances);
+        let effective_positions = self.effective_positions(graph, config);
         let mut key_counts = BTreeMap::<String, usize>::new();
         for node in graph.nodes.values() {
             *key_counts.entry(node_layout_key(node)).or_default() += 1;
@@ -672,23 +672,14 @@ impl UiGraphState {
             .collect();
     }
 
-    fn effective_positions(
-        &self,
-        graph: &Graph,
-        config: &AppConfig,
-        appearances: &BTreeMap<NodeId, NodeAppearance>,
-    ) -> BTreeMap<NodeId, [f32; 2]> {
+    fn effective_positions(&self, graph: &Graph, config: &AppConfig) -> BTreeMap<NodeId, [f32; 2]> {
         let mut positions = configured_positions(graph, config);
         positions.extend(
             self.local_positions
                 .iter()
                 .map(|(id, position)| (*id, *position)),
         );
-        if config.repel_overlapping_nodes {
-            repel_positions(graph, positions, appearances, self.thumbnail_mode)
-        } else {
-            positions
-        }
+        positions
     }
 
     pub(crate) fn visible_counts(&self, snapshot: &GraphSnapshot) -> (usize, usize, usize) {
@@ -1058,67 +1049,86 @@ fn configured_appearances(graph: &Graph, config: &AppConfig) -> BTreeMap<NodeId,
         .collect()
 }
 
-/// Produce a stable non-overlapping projection of the configured layout.
-/// User movement remains an explicit `MoveNodesCommand`; this operation only
-/// applies the preference to the rendered/persisted layout.
-fn repel_positions(
-    graph: &Graph,
-    positions: BTreeMap<NodeId, [f32; 2]>,
-    appearances: &BTreeMap<NodeId, NodeAppearance>,
-    thumbnail: bool,
-) -> BTreeMap<NodeId, [f32; 2]> {
-    const GAP: f32 = 18.0;
-    let mut result = BTreeMap::new();
-    let mut placed = Vec::<([f32; 2], [f32; 2])>::new();
+const COLLISION_GAP: f32 = 18.0;
 
-    for node in graph.nodes.values() {
-        let mut position = positions.get(&node.id).copied().unwrap_or(node.position);
-        let appearance = appearances.get(&node.id).cloned().unwrap_or_default();
-        let height = node_height(
-            thumbnail,
-            appearance.collapsed,
-            node.ports.iter().any(|port_id| {
-                graph
-                    .port(*port_id)
-                    .is_some_and(|port| port.port_type == PortType::Audio)
-            }),
-            node.ports.len(),
-        );
-        let size = [NODE_WIDTH, height];
-
-        let mut attempts = 0;
-        while placed.iter().any(|(other, other_size)| {
-            intersects(
-                position,
-                size,
-                other[0] - GAP,
-                other[1] - GAP,
-                other_size[0] + GAP * 2.0,
-                other_size[1] + GAP * 2.0,
-            )
-        }) && attempts < graph.nodes.len().saturating_mul(2).max(1)
-        {
-            let rightmost = placed
-                .iter()
-                .filter(|(other, other_size)| {
-                    intersects(
-                        position,
-                        size,
-                        other[0] - GAP,
-                        other[1] - GAP,
-                        other_size[0] + GAP * 2.0,
-                        other_size[1] + GAP * 2.0,
-                    )
-                })
-                .map(|(other, other_size)| other[0] + other_size[0] + GAP)
-                .fold(position[0], f32::max);
-            position[0] = rightmost;
-            attempts += 1;
-        }
-        result.insert(node.id, position);
-        placed.push((position, size));
+/// Resolve a user-requested drag against the exact visible card rectangles.
+///
+/// Every selected node receives the same returned delta, preserving the group
+/// as a rigid object. Candidate positions come from all four edges of every
+/// visible stationary card and are ranked by distance from the requested drop,
+/// with a stable coordinate tie-breaker.
+pub(crate) fn resolve_drag_delta(
+    snapshot: &GraphSnapshot,
+    selected: &BTreeSet<NodeId>,
+    desired: [f32; 2],
+    repel: bool,
+) -> [f32; 2] {
+    if !repel || selected.is_empty() {
+        return desired;
     }
-    result
+
+    let dragged = snapshot
+        .nodes
+        .iter()
+        .filter(|node| selected.contains(&node.node_id))
+        .collect::<Vec<_>>();
+    let stationary = snapshot
+        .nodes
+        .iter()
+        .filter(|node| !selected.contains(&node.node_id))
+        .collect::<Vec<_>>();
+    if dragged.is_empty() || stationary.is_empty() || drag_is_clear(&dragged, &stationary, desired)
+    {
+        return desired;
+    }
+
+    let mut xs = vec![desired[0]];
+    let mut ys = vec![desired[1]];
+    for moving in &dragged {
+        for obstacle in &stationary {
+            xs.push(obstacle.position[0] - COLLISION_GAP - moving.width - moving.position[0]);
+            xs.push(obstacle.position[0] + obstacle.width + COLLISION_GAP - moving.position[0]);
+            ys.push(obstacle.position[1] - COLLISION_GAP - moving.height - moving.position[1]);
+            ys.push(obstacle.position[1] + obstacle.height + COLLISION_GAP - moving.position[1]);
+        }
+    }
+    xs.sort_by(f32::total_cmp);
+    xs.dedup_by(|left, right| left.total_cmp(right).is_eq());
+    ys.sort_by(f32::total_cmp);
+    ys.dedup_by(|left, right| left.total_cmp(right).is_eq());
+
+    xs.into_iter()
+        .flat_map(|x| ys.iter().copied().map(move |y| [x, y]))
+        .filter(|candidate| drag_is_clear(&dragged, &stationary, *candidate))
+        .min_by(|left, right| {
+            drag_distance_squared(*left, desired)
+                .total_cmp(&drag_distance_squared(*right, desired))
+                .then_with(|| left[1].total_cmp(&right[1]))
+                .then_with(|| left[0].total_cmp(&right[0]))
+        })
+        .unwrap_or(desired)
+}
+
+fn drag_is_clear(dragged: &[&NodeView], stationary: &[&NodeView], delta: [f32; 2]) -> bool {
+    dragged.iter().all(|moving| {
+        let position = [moving.position[0] + delta[0], moving.position[1] + delta[1]];
+        stationary.iter().all(|obstacle| {
+            !intersects(
+                position,
+                [moving.width, moving.height],
+                obstacle.position[0] - COLLISION_GAP,
+                obstacle.position[1] - COLLISION_GAP,
+                obstacle.width + COLLISION_GAP * 2.0,
+                obstacle.height + COLLISION_GAP * 2.0,
+            )
+        })
+    })
+}
+
+fn drag_distance_squared(candidate: [f32; 2], desired: [f32; 2]) -> f32 {
+    let dx = candidate[0] - desired[0];
+    let dy = candidate[1] - desired[1];
+    dx * dx + dy * dy
 }
 
 pub(crate) fn node_layout_key(node: &Node) -> String {
@@ -1344,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn repel_preference_separates_configured_overlapping_cards() {
+    fn projection_does_not_rewrite_configured_overlaps() {
         let graph = graph();
         let mut config = AppConfig::default();
         config.node_positions.insert("1".into(), [0.0, 0.0]);
@@ -1352,18 +1362,120 @@ mod tests {
         config.repel_overlapping_nodes = true;
         let mut state = UiGraphState::from_config(&config);
         let snapshot = state.snapshot(&graph, &config);
-        let first = snapshot
-            .nodes
-            .iter()
-            .find(|node| node.node_id == NodeId(1))
-            .unwrap();
-        let second = snapshot
-            .nodes
-            .iter()
-            .find(|node| node.node_id == NodeId(2))
-            .unwrap();
 
-        assert!(second.position[0] >= first.position[0] + first.width + 18.0);
+        assert!(snapshot
+            .nodes
+            .iter()
+            .all(|node| node.position == [0.0, 0.0]));
+    }
+
+    #[test]
+    fn overlapping_drop_chooses_the_nearest_card_edge() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let mut snapshot = state.snapshot(&graph, &config);
+        snapshot.nodes[0].position = [0.0, 0.0];
+        snapshot.nodes[0].width = 100.0;
+        snapshot.nodes[0].height = 100.0;
+        snapshot.nodes[1].position = [100.0, 100.0];
+        snapshot.nodes[1].width = 100.0;
+        snapshot.nodes[1].height = 100.0;
+        let selected = BTreeSet::from([snapshot.nodes[0].node_id]);
+
+        let resolved = resolve_drag_delta(&snapshot, &selected, [100.0, 100.0], true);
+
+        // Above and left are equally near; the stable tie-breaker picks above.
+        assert_eq!(resolved, [100.0, -18.0]);
+        assert!(drag_is_clear(
+            &[&snapshot.nodes[0]],
+            &[&snapshot.nodes[1]],
+            resolved
+        ));
+    }
+
+    #[test]
+    fn selected_nodes_resolve_as_one_rigid_group() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let mut snapshot = state.snapshot(&graph, &config);
+        let mut obstacle = snapshot.nodes[1].clone();
+        snapshot.nodes[0].position = [0.0, 0.0];
+        snapshot.nodes[1].position = [150.0, 0.0];
+        obstacle.node_id = NodeId(99);
+        obstacle.id = 99;
+        obstacle.position = [300.0, 0.0];
+        snapshot.nodes[0].width = 100.0;
+        snapshot.nodes[0].height = 100.0;
+        snapshot.nodes[1].width = 100.0;
+        snapshot.nodes[1].height = 100.0;
+        obstacle.width = 100.0;
+        obstacle.height = 100.0;
+        snapshot.nodes.push(obstacle);
+        let selected = BTreeSet::from([NodeId(1), NodeId(2)]);
+
+        let resolved = resolve_drag_delta(&snapshot, &selected, [200.0, 0.0], true);
+
+        assert_eq!(resolved, [200.0, -118.0]);
+        let moved = snapshot
+            .nodes
+            .iter()
+            .filter(|node| selected.contains(&node.node_id))
+            .map(|node| {
+                [
+                    node.position[0] + resolved[0],
+                    node.position[1] + resolved[1],
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(moved[1][0] - moved[0][0], 150.0);
+        assert_eq!(moved[1][1] - moved[0][1], 0.0);
+    }
+
+    #[test]
+    fn filtered_nodes_are_not_drag_obstacles() {
+        let mut graph = graph();
+        let mut hidden = Node::new(NodeId(3), "Hidden MIDI", NodeType::AlsaMidi);
+        hidden.position = [300.0, 0.0];
+        graph.add_node(hidden).unwrap();
+        graph
+            .add_port(Port::new(
+                PortId(3),
+                NodeId(3),
+                "midi",
+                Direction::Source,
+                PortType::MidiAlsa,
+            ))
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.node_positions.insert("1".into(), [0.0, 0.0]);
+        config.node_positions.insert("2".into(), [1000.0, 0.0]);
+        config.node_positions.insert("3".into(), [300.0, 0.0]);
+        let mut state = UiGraphState::from_config(&config);
+        state.media_filter = MediaFilter::Audio;
+        let snapshot = state.snapshot(&graph, &config);
+        assert!(!snapshot.nodes.iter().any(|node| node.node_id == NodeId(3)));
+        let selected = BTreeSet::from([NodeId(1)]);
+
+        assert_eq!(
+            resolve_drag_delta(&snapshot, &selected, [300.0, 0.0], true),
+            [300.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn disabled_repulsion_preserves_the_exact_requested_delta() {
+        let graph = graph();
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        let snapshot = state.snapshot(&graph, &config);
+        let selected = BTreeSet::from([snapshot.nodes[0].node_id]);
+
+        assert_eq!(
+            resolve_drag_delta(&snapshot, &selected, [123.0, -45.0], false),
+            [123.0, -45.0]
+        );
     }
 
     #[test]
@@ -1781,6 +1893,44 @@ mod tests {
 
         assert_eq!(group.label, "capture");
         assert_eq!(group.ports, vec![PortId(1), PortId(2)]);
+    }
+
+    #[test]
+    fn drag_collision_uses_the_projected_easy_mode_height() {
+        let graph = stereo_graph();
+        let mut config = AppConfig {
+            connect_mode: "easy".into(),
+            ..AppConfig::default()
+        };
+        config.node_positions.insert("1".into(), [0.0, 0.0]);
+        config.node_positions.insert("2".into(), [0.0, 400.0]);
+        let mut state = UiGraphState::from_config(&config);
+        let mut snapshot = state.snapshot(&graph, &config);
+        let moving = snapshot
+            .nodes
+            .iter()
+            .position(|node| node.node_id == NodeId(1))
+            .unwrap();
+        let obstacle = snapshot
+            .nodes
+            .iter()
+            .position(|node| node.node_id == NodeId(2))
+            .unwrap();
+        let projected_height = snapshot.nodes[moving].height;
+        let raw_height = node_height(
+            false,
+            false,
+            true,
+            graph.node(NodeId(1)).unwrap().ports.len(),
+        );
+        assert!(raw_height > projected_height);
+        snapshot.nodes[obstacle].position = [0.0, projected_height + COLLISION_GAP + 1.0];
+        let selected = BTreeSet::from([NodeId(1)]);
+
+        assert_eq!(
+            resolve_drag_delta(&snapshot, &selected, [0.0, 0.0], true),
+            [0.0, 0.0]
+        );
     }
 
     #[test]

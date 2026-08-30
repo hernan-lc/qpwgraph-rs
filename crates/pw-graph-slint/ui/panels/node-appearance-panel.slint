@@ -3,6 +3,7 @@ import { UiTheme } from "../foundation/theme.slint";
 import { UiI18n } from "../foundation/i18n.slint";
 import { ActionButton } from "../components/button.slint";
 import { DialogShell } from "../components/dialog-shell.slint";
+import { FormRow } from "../components/form.slint";
 
 export component NodeAppearancePanel inherits DialogShell {
     title: UiI18n.localized("inspector.node_appearance");
@@ -14,11 +15,21 @@ export component NodeAppearancePanel inherits DialogShell {
     in-out property <string> node-editor-custom-name: "";
     in-out property <string> node-editor-color: "";
     callback action(string);
-    Text { x: 20px; y: 60px; text: root.node-editor-node-name; color: #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
-    Text { x: 20px; y: 92px; text: UiI18n.localized("inspector.custom_name"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-    LineEdit { x: 142px; y: 84px; width: parent.width - 162px; height: 29px; text <=> root.node-editor-custom-name; placeholder-text: root.node-editor-node-name; }
-    Text { x: 20px; y: 132px; text: UiI18n.localized("inspector.custom_color"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
-    LineEdit { x: 142px; y: 124px; width: parent.width - 162px; height: 29px; text <=> root.node-editor-color; placeholder-text: "#RRGGBB"; }
+    VerticalLayout {
+        x: 20px;
+        y: 60px;
+        width: parent.width - 40px;
+        spacing: 4px;
+        Text { height: 20px; text: root.node-editor-node-name; color: #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
+        FormRow {
+            label: UiI18n.localized("inspector.custom_name");
+            LineEdit { width: parent.width; height: 29px; text <=> root.node-editor-custom-name; placeholder-text: root.node-editor-node-name; }
+        }
+        FormRow {
+            label: UiI18n.localized("inspector.custom_color");
+            LineEdit { width: parent.width; height: 29px; text <=> root.node-editor-color; placeholder-text: "#RRGGBB"; }
+        }
+    }
     ActionButton { x: 20px; y: 176px; width: 135px; text: UiI18n.localized("inspector.reset_name"); clicked => { root.action("node-appearance-reset-name"); } }
     ActionButton { x: 164px; y: 176px; width: 135px; text: UiI18n.localized("inspector.reset_color"); clicked => { root.action("node-appearance-reset-color"); } }
     ActionButton { x: parent.width - 190px; y: 236px; width: 78px; text: UiI18n.localized("shortcuts.close"); clicked => { root.action("node-appearance-close"); } }

@@ -1,0 +1,109 @@
+import { UiTheme } from "../foundation/theme.slint";
+import { ActionButton } from "button.slint";
+
+// Semantic label/control row used by settings panels. The label owns a
+// bounded share of the row and the control stretches into all remaining room.
+export component FormRow inherits Rectangle {
+    in property <string> label;
+    in property <string> help: "";
+    in property <length> row-height: root.help == "" ? 40px : 58px;
+
+    height: root.row-height;
+
+    HorizontalLayout {
+        spacing: 10px;
+
+        VerticalLayout {
+            width: min(150px, parent.width * 0.43);
+            spacing: 2px;
+            Text {
+                text: root.label;
+                color: #aebdca;
+                font-size: 10px * UiTheme.panel-scale;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+            if root.help != "": Text {
+                text: root.help;
+                color: #8393a0;
+                font-size: 8px * UiTheme.panel-scale;
+                wrap: word-wrap;
+            }
+        }
+
+        content := Rectangle {
+            horizontal-stretch: 1;
+            @children
+        }
+    }
+}
+
+// A content-sized panel section. Wrapped summary text participates in layout,
+// so every following row moves down instead of overlapping it.
+export component FormSection inherits Rectangle {
+    in property <string> title: "";
+    in property <string> summary: "";
+
+    min-height: section-layout.min-height + 24px;
+    preferred-height: self.min-height;
+    vertical-stretch: 0;
+    background: #29323c;
+    border-color: #40505f;
+    border-width: 1px;
+    border-radius: 5px;
+
+    section-layout := VerticalLayout {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        spacing: 8px;
+
+        if root.title != "": Text {
+            height: 22px;
+            text: root.title;
+            color: #edf3f7;
+            font-size: 14px * UiTheme.panel-scale;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.summary != "": Text {
+            min-height: 36px;
+            text: root.summary;
+            color: #aebdca;
+            font-size: 10px * UiTheme.panel-scale;
+            wrap: word-wrap;
+        }
+        @children
+    }
+}
+
+// Equal-width tabs consume the available panel width in every locale.
+export component TabStrip inherits Rectangle {
+    in property <string> first;
+    in property <string> second;
+    in property <string> third;
+    in-out property <int> current-index: 0;
+
+    height: 31px;
+    HorizontalLayout {
+        spacing: 8px;
+        ActionButton {
+            horizontal-stretch: 1;
+            text: root.first;
+            selected: root.current-index == 0;
+            clicked => { root.current-index = 0; }
+        }
+        ActionButton {
+            horizontal-stretch: 1;
+            text: root.second;
+            selected: root.current-index == 1;
+            clicked => { root.current-index = 1; }
+        }
+        ActionButton {
+            horizontal-stretch: 1;
+            text: root.third;
+            selected: root.current-index == 2;
+            clicked => { root.current-index = 2; }
+        }
+    }
+}

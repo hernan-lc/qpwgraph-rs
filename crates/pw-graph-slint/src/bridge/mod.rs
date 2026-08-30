@@ -424,7 +424,7 @@ mod tests {
     };
     use super::*;
     use crate::canvas::{self, HIT_NODE, HIT_NODE_BODY};
-    use crate::model::ConnectMode;
+    use crate::model::{resolve_drag_delta, ConnectMode};
     use pw_graph_core::Direction;
     use slint::platform::{PointerEventButton, WindowEvent};
     use slint::{LogicalPosition, ModelRc};
@@ -965,6 +965,89 @@ mod tests {
                 .expect("the demo graph has an input port on another card");
             (output.1, input)
         }
+    }
+
+    #[test]
+    fn resolved_drop_is_the_command_position_and_round_trips_through_history() {
+        let mut harness = CanvasHarness::new(ConnectMode::Advanced);
+        let moving = harness.application.snapshot.nodes[0].clone();
+        let obstacle = harness.application.snapshot.nodes[1].clone();
+        let desired = [
+            obstacle.position[0] - moving.position[0],
+            obstacle.position[1] - moving.position[1],
+        ];
+        let selected = std::collections::BTreeSet::from([moving.node_id]);
+        let resolved = resolve_drag_delta(&harness.application.snapshot, &selected, desired, true);
+        assert_ne!(resolved, desired, "the requested drop overlaps an obstacle");
+        let expected = [
+            moving.position[0] + resolved[0],
+            moving.position[1] + resolved[1],
+        ];
+
+        process_event(
+            &harness.window,
+            &mut harness.application,
+            UiEvent::DragCommitted(moving.id, desired[0], desired[1]),
+        );
+
+        assert_eq!(
+            harness
+                .application
+                .source
+                .graph()
+                .node(moving.node_id)
+                .unwrap()
+                .position,
+            expected
+        );
+        harness.sync();
+        let rendered = harness.node_row(moving.id);
+        assert_eq!([rendered.x, rendered.y], expected);
+
+        process_event(
+            &harness.window,
+            &mut harness.application,
+            UiEvent::Action("undo".into()),
+        );
+        assert_eq!(
+            harness
+                .application
+                .source
+                .graph()
+                .node(moving.node_id)
+                .unwrap()
+                .position,
+            moving.position
+        );
+
+        process_event(
+            &harness.window,
+            &mut harness.application,
+            UiEvent::Action("redo".into()),
+        );
+        assert_eq!(
+            harness
+                .application
+                .source
+                .graph()
+                .node(moving.node_id)
+                .unwrap()
+                .position,
+            expected
+        );
+    }
+
+    #[test]
+    fn relay_sidebar_reserves_space_from_the_canvas() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        let full_width = harness.window.get_canvas_width_();
+
+        harness.window.set_show_relay(true);
+        slint::platform::update_timers_and_animations();
+
+        let sidebar_width = full_width - harness.window.get_canvas_width_();
+        assert!(sidebar_width >= 320.0);
+        assert!(sidebar_width <= 380.0);
     }
 
     #[test]
