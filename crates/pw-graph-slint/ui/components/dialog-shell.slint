@@ -1,0 +1,62 @@
+import { UiTheme } from "../foundation/theme.slint";
+import { AppButton } from "button.slint";
+
+// Reusable centered dialog frame. History, Effects, QR, node appearance and
+// the preference/shortcut dialogs all share this outer rectangle, border
+// and close affordance. Feature dialogs provide only their inner content.
+export component DialogShell inherits Rectangle {
+    in property <string> title: "";
+    in property <color> bg: #222a33fa;
+    in property <color> border-col: #617080;
+    callback close();
+
+    background: root.bg;
+    border-color: root.border-col;
+    border-width: 1px;
+    border-radius: 8px;
+
+    // Header – only shown when a title is supplied. Callers that need a
+    // custom header (e.g. centered preferences title) leave `title` empty
+    // and draw their own Text inside @children.
+    if root.title != "": Text {
+        x: 20px;
+        y: 18px;
+        width: parent.width - 80px;
+        height: 24px;
+        text: root.title;
+        color: #f0f4f7;
+        font-size: 19px * UiTheme.ui-scale;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    AppButton {
+        x: parent.width - 47px;
+        y: 14px;
+        width: 30px;
+        text: "×";
+        text-scale: UiTheme.ui-scale;
+        clicked => { root.close(); }
+    }
+
+    // Content area – callers place their dialog body here.
+    content := Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        @children
+    }
+}
+
+// Variant that already positions a centered header like Preferences/Shortcuts.
+// Kept lightweight: it is just DialogShell with a different default bg.
+export component PreferencesShell inherits Rectangle {
+    in property <color> bg: #202833fa;
+    callback close();
+    background: root.bg;
+    border-color: #607080;
+    border-width: 1px;
+    border-radius: 7px;
+    @children
+}

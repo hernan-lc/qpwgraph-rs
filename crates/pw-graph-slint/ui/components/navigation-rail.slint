@@ -1,0 +1,37 @@
+// RailButton and the hover plumbing were duplicated for every entry in MainWindow.
+// Centralizing here keeps the hover-changed contract in one place.
+export component RailButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked();
+    // Reports hover along with the label and the button's window-space
+    // position. A shared tooltip needs both because a button inside an `if`
+    // cannot be reached by id from outside it.
+    callback hover-changed(bool, string, length);
+
+    height: 42px;
+    background: root.active ? #245777 : touch.has-hover && root.enabled ? #2d3844 : transparent;
+    border-radius: 5px;
+
+    Image {
+        x: 11px;
+        y: 9px;
+        width: 22px;
+        height: 22px;
+        source: root.icon;
+        opacity: root.enabled ? 1 : 0.42;
+    }
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            if (root.enabled) { root.clicked(); }
+        }
+    }
+    changed hovered => {
+        root.hover-changed(root.hovered, root.label, root.absolute-position.y);
+    }
+}

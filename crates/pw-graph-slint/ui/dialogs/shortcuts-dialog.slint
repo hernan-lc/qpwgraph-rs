@@ -1,0 +1,42 @@
+import { LineEdit, ScrollView, VerticalBox } from "std-widgets.slint";
+import { UiTheme } from "../foundation/theme.slint";
+import { UiI18n } from "../foundation/i18n.slint";
+import { DialogButton } from "../components/button.slint";
+import { ShortcutRow } from "../foundation/structs.slint";
+
+export component ShortcutsDialog inherits Rectangle {
+    in property <[ShortcutRow]> entries;
+    in-out property <string> search-text;
+    callback close();
+
+    background: #202833fa;
+    border-color: #607080;
+    border-width: 1px;
+    border-radius: 7px;
+
+    Text { x: 18px; y: 12px; width: parent.width - 76px; height: 28px; text: UiI18n.localized("shortcuts.title"); color: #eef3f7; font-size: 18px * UiTheme.panel-scale; horizontal-alignment: center; vertical-alignment: center; }
+    DialogButton { x: parent.width - 43px; y: 10px; width: 30px; text: "×"; clicked => { root.close(); } }
+    Rectangle { x: 0px; y: 48px; width: parent.width; height: 1px; background: #3d4a56; }
+    Text { x: 12px; y: 56px; width: parent.width - 24px; height: 18px; text: UiI18n.localized("shortcuts.hint"); color: #b9c7d1; font-size: 10px * UiTheme.panel-scale; }
+    Text { x: 12px; y: 82px; width: 45px; height: 31px; text: UiI18n.localized("shortcuts.search"); color: #e1e8ed; font-size: 11px * UiTheme.panel-scale; vertical-alignment: center; }
+    search := LineEdit { x: 61px; y: 82px; width: parent.width - 73px; height: 31px; placeholder-text: UiI18n.localized("shortcuts.search_hint"); text <=> root.search-text; }
+    Text { x: 12px; y: 117px; width: parent.width - 24px; height: 18px; text: UiI18n.formatted-one("shortcuts.result_count", root.entries.length); color: #93a4b1; font-size: 9px * UiTheme.panel-scale; }
+
+    ScrollView {
+        x: 12px; y: 137px; width: parent.width - 24px; height: parent.height - 183px;
+        VerticalBox {
+            spacing: 2px;
+            for entry in root.entries: Rectangle {
+                height: 25px;
+                Text { x: 0px; width: 190px; height: parent.height; text: entry.keys; color: #edf3f7; font-family: "monospace"; font-weight: 600; font-size: 10px * UiTheme.panel-scale; vertical-alignment: center; overflow: elide; }
+                Text { x: 203px; width: parent.width - 203px; height: parent.height; text: entry.description; color: #cad4dc; font-size: 10px * UiTheme.panel-scale; vertical-alignment: center; overflow: elide; }
+            }
+            if root.entries.length == 0: Text { height: 42px; text: UiI18n.localized("shortcuts.no_results"); color: #93a4b1; font-size: 10px * UiTheme.panel-scale; vertical-alignment: center; horizontal-alignment: center; }
+        }
+    }
+    DialogButton { x: parent.width - 94px; y: parent.height - 39px; width: 82px; text: UiI18n.localized("shortcuts.close"); clicked => { root.close(); } }
+
+    public function focus-search() {
+        search.focus();
+    }
+}

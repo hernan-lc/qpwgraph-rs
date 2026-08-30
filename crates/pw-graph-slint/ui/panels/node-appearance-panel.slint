@@ -1,0 +1,28 @@
+import { LineEdit } from "std-widgets.slint";
+import { UiTheme } from "../foundation/theme.slint";
+import { UiI18n } from "../foundation/i18n.slint";
+import { AppButton } from "../components/button.slint";
+
+export component NodeAppearancePanel inherits Rectangle {
+    in-out property <string> node-editor-node-name: "";
+    in-out property <string> node-editor-custom-name: "";
+    in-out property <string> node-editor-color: "";
+    callback action(string);
+
+    background: #222a33fa;
+    border-color: #617080;
+    border-width: 1px;
+    border-radius: 8px;
+
+    Text { x: 18px; y: 16px; text: UiI18n.localized("inspector.node_appearance"); color: #f0f4f7; font-size: 18px * UiTheme.ui-scale; }
+    AppButton { x: parent.width - 47px; y: 12px; width: 30px; text: "×"; text-scale: UiTheme.ui-scale; clicked => { root.action("node-appearance-close"); } }
+    Text { x: 20px; y: 60px; text: root.node-editor-node-name; color: #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
+    Text { x: 20px; y: 92px; text: UiI18n.localized("inspector.custom_name"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
+    LineEdit { x: 142px; y: 84px; width: parent.width - 162px; height: 29px; text <=> root.node-editor-custom-name; placeholder-text: root.node-editor-node-name; }
+    Text { x: 20px; y: 132px; text: UiI18n.localized("inspector.custom_color"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
+    LineEdit { x: 142px; y: 124px; width: parent.width - 162px; height: 29px; text <=> root.node-editor-color; placeholder-text: "#RRGGBB"; }
+    AppButton { x: 20px; y: 176px; width: 135px; text: UiI18n.localized("inspector.reset_name"); text-scale: UiTheme.ui-scale; clicked => { root.action("node-appearance-reset-name"); } }
+    AppButton { x: 164px; y: 176px; width: 135px; text: UiI18n.localized("inspector.reset_color"); text-scale: UiTheme.ui-scale; clicked => { root.action("node-appearance-reset-color"); } }
+    AppButton { x: parent.width - 190px; y: 236px; width: 78px; text: UiI18n.localized("shortcuts.close"); text-scale: UiTheme.ui-scale; clicked => { root.action("node-appearance-close"); } }
+    AppButton { x: parent.width - 104px; y: 236px; width: 84px; text: UiI18n.localized("inspector.save"); text-scale: UiTheme.ui-scale; clicked => { root.action("node-appearance-save"); } }
+}

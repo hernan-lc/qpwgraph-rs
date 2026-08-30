@@ -1,0 +1,122 @@
+// Central struct definitions. All row/link/node types used across dialogs,
+// panels and the canvas are defined here so leaf modules (components,
+// dialogs, canvas) can import them without creating import cycles via the
+// compatibility facades (parity-components.slint / node-canvas.slint).
+
+export struct ShortcutRow {
+    keys: string,
+    description: string,
+}
+
+export struct RuleRow {
+    index: int,
+    output: string,
+    input: string,
+    output-node: string,
+    output-port: string,
+    input-node: string,
+    input-port: string,
+    pinned: bool,
+}
+
+export struct EffectParameterRow {
+    id: string,
+    name: string,
+    minimum: float,
+    maximum: float,
+    default-value: float,
+    value: float,
+    unit: string,
+    boolean: bool,
+}
+
+export struct EffectRow {
+    instance-id: string,
+    name: string,
+    vendor: string,
+    description: string,
+    enabled: bool,
+    parameters: [EffectParameterRow],
+}
+
+export struct RelayRow {
+    id: string,
+    name: string,
+    address: string,
+    state: string,
+    level: float,
+    connected: bool,
+    connecting: bool,
+    trusted: bool,
+    peer-id: string,
+}
+
+export struct HistoryRow {
+    description: string,
+}
+
+export struct PortRow {
+    id: int,
+    label: string,
+    direction: int,
+    color: color,
+    row-y: float,
+    pin-x: float,
+    pin-y: float,
+}
+
+export struct NodeRow {
+    id: int,
+    node-title: string,
+    node-subtitle: string,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    selected: bool,
+    collapsed: bool,
+    thumbnail: bool,
+    font-scale: float,
+    accent: color,
+    has-audio-controls: bool,
+    has-audio-panel: bool,
+    has-meter: bool,
+    meter-rms: float,
+    meter-peak: float,
+    meter-peak-position: float,
+    meter-rms-position: float,
+    meter-peak-supported: bool,
+    meter-rms-supported: bool,
+    meter-available: bool,
+    meter-label: string,
+    audio-volume-position: float,
+    audio-volume-known: bool,
+    audio-muted: bool,
+    audio-mute-known: bool,
+    audio-volume-enabled: bool,
+    audio-mute-enabled: bool,
+    ports: [PortRow],
+}
+
+export struct LinkRow {
+    id: int,
+    color: color,
+    selected: bool,
+}
+
+export struct MinimapNode {
+    id: int,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    color: color,
+}
+
+export struct HitResult {
+    kind: int,
+    id: int,
+    x: float,
+    y: float,
+    selected: bool,
+}

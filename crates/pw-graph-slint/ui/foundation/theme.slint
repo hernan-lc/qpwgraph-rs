@@ -1,0 +1,9 @@
+// Shared typography values are updated by the application bridge whenever
+// configuration is synchronized. Components consume the global values so a
+// preference change affects already-open panels as well as the canvas.
+
+export global UiTheme {
+    in-out property <float> ui-scale: 1.1;
+    in-out property <float> panel-scale: 1.2;
+    in-out property <float> node-scale: 1.15;
+}

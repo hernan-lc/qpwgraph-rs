@@ -1,0 +1,107 @@
+import { CheckBox, ComboBox, Slider, VerticalBox } from "std-widgets.slint";
+import { UiTheme } from "../foundation/theme.slint";
+
+// Shared description line used by switch/select rows – avoids repeating
+// the icon + title + help triple in two places.
+component SettingDescription inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> help;
+    in property <length> help-height: 27px;
+    in property <length> content-width: 240px;
+
+    Image { x: 4px; y: 19px; width: 16px; height: 16px; source: root.icon; opacity: 0.76; }
+    Text {
+        x: 32px; y: 5px; width: root.content-width; height: 18px;
+        text: root.title; color: #e6edf2; font-size: 11px * UiTheme.panel-scale;
+        vertical-alignment: center; overflow: elide;
+    }
+    Text {
+        x: 32px; y: 26px; width: root.content-width; height: root.help-height;
+        text: root.help; color: #8393a0; font-size: 8px * UiTheme.panel-scale;
+        wrap: word-wrap; overflow: elide;
+    }
+}
+
+export component SettingsSection inherits Rectangle {
+    in property <string> title;
+    in property <string> summary: "";
+    in property <length> section-height: 120px;
+
+    height: root.section-height;
+    background: #252e38;
+    border-color: #42505e;
+    border-width: 1px;
+    border-radius: 5px;
+
+    Text {
+        x: 12px; y: 9px; width: parent.width - 24px; height: 21px;
+        text: root.title; color: #edf3f7; font-size: 13px * UiTheme.panel-scale;
+        font-weight: 600; vertical-alignment: center;
+    }
+    if root.summary != "": Text {
+        x: 12px; y: 31px; width: parent.width - 24px; height: 24px;
+        text: root.summary; color: #8999a7; font-size: 9px * UiTheme.panel-scale;
+        wrap: word-wrap; overflow: elide;
+    }
+    content := Rectangle {
+        x: 10px;
+        y: root.summary == "" ? 38px : 59px;
+        width: parent.width - 20px;
+        height: parent.height - self.y - 8px;
+        @children
+    }
+}
+
+export component SwitchSettingRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> help;
+    in-out property <bool> checked;
+
+    height: 55px;
+    background: touch.has-hover ? #2b3540 : transparent;
+    border-radius: 4px;
+
+    SettingDescription {
+        icon: root.icon;
+        title: root.title;
+        help: root.help;
+        content-width: parent.width - 84px;
+        help-height: 19px;
+    }
+    CheckBox { x: parent.width - 37px; y: 18px; width: 22px; checked <=> root.checked; }
+    touch := TouchArea { x: 0px; y: 0px; width: parent.width - 48px; height: parent.height; clicked => { root.checked = !root.checked; } }
+}
+
+export component SelectSettingRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> help;
+    in property <[string]> options;
+    in-out property <int> current-index;
+
+    height: 62px;
+    SettingDescription {
+        icon: root.icon;
+        title: root.title;
+        help: root.help;
+    }
+    ComboBox { x: parent.width - 204px; y: 13px; width: 194px; model: root.options; current-index <=> root.current-index; }
+}
+
+export component ScaleSettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> help;
+    in-out property <float> value;
+
+    height: 59px;
+    Text { x: 4px; y: 4px; width: 170px; height: 18px; text: root.title; color: #e6edf2; font-size: 11px * UiTheme.panel-scale; vertical-alignment: center; }
+    Text { x: 4px; y: 25px; width: parent.width - 250px; height: 23px; text: root.help; color: #8393a0; font-size: 8px * UiTheme.panel-scale; wrap: word-wrap; overflow: elide; }
+    Slider { x: parent.width - 224px; y: 13px; width: 164px; height: 24px; minimum: 0.8; maximum: 2.0; step: 0.05; value <=> root.value; }
+    Rectangle {
+        x: parent.width - 53px; y: 10px; width: 45px; height: 29px;
+        background: #1d242c; border-color: #445361; border-width: 1px; border-radius: 4px;
+        Text { width: parent.width; height: parent.height; text: root.value; color: #e7edf2; font-size: 9px * UiTheme.panel-scale; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}

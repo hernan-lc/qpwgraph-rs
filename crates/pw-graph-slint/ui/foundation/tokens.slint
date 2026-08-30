@@ -1,0 +1,45 @@
+// Central design tokens. Components should prefer these values over ad-hoc
+// literals so repeated colors, borders, radii and spacing stay consistent.
+// The file is intentionally dependency-free (foundation level).
+
+export global AppTokens {
+    // Dialog / panel backgrounds
+    out property <color> dialog-bg: #222a33fa;
+    out property <color> dialog-bg-alt: #202833fa;
+    out property <color> panel-bg: #29323c;
+    out property <color> section-bg: #252e38;
+    out property <color> card-bg: #242a31;
+    out property <color> card-bg-selected: #293d58;
+    out property <color> rail-bg: #20262d;
+    out property <color> workspace-bg: #191d24;
+    out property <color> overlay-bg: #05070a99;
+
+    // Borders
+    out property <color> border-dialog: #617080;
+    out property <color> border-panel: #40505f;
+    out property <color> border-section: #42505e;
+    out property <color> border-rail: #36414c;
+    out property <color> border-button: #455464;
+    out property <color> border-button-selected: #68a8d5;
+    out property <color> border-card: #536273;
+    out property <color> border-card-selected: #62a8ff;
+
+    // Accents
+    out property <color> accent-blue: #2b6187;
+    out property <color> accent-green: #57c785;
+    out property <color> text-primary: #f0f4f7;
+    out property <color> text-secondary: #aebdca;
+    out property <color> text-muted: #8798a7;
+
+    // Radii
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 5px;
+    out property <length> radius-lg: 7px;
+    out property <length> radius-xl: 8px;
+
+    // Spacing
+    out property <length> space-xs: 4px;
+    out property <length> space-sm: 8px;
+    out property <length> space-md: 12px;
+    out property <length> space-lg: 18px;
+}

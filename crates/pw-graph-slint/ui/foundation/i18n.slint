@@ -1,0 +1,23 @@
+// Localization is owned by the Rust bridge. `version` is deliberately part
+// of the helper's dependency graph so changing the language invalidates all
+// translated bindings, including bindings in already-open dialogs.
+
+export global UiI18n {
+    in-out property <int> version: 0;
+    pure callback text(string) -> string;
+    pure callback format-one(string, string) -> string;
+
+    pure public function localized(key: string) -> string {
+        if self.version >= 0 {
+            return self.text(key);
+        }
+        return "";
+    }
+
+    pure public function formatted-one(key: string, value: string) -> string {
+        if self.version >= 0 {
+            return self.format-one(key, value);
+        }
+        return "";
+    }
+}

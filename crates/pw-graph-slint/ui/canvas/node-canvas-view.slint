@@ -1,0 +1,398 @@
+import { GraphNode } from "graph-node.slint";
+import { CanvasMinimap } from "minimap.slint";
+import { NodeRow, LinkRow, MinimapNode, HitResult } from "../foundation/structs.slint";
+
+export component NodeCanvas inherits Rectangle {
+    in property <[NodeRow]> nodes: [];
+    in property <[LinkRow]> links: [];
+    in property <[MinimapNode]> minimap-nodes: [];
+    in property <bool> minimap-enabled: false;
+    in property <float> graph-min-x: 0;
+    in property <float> graph-min-y: 0;
+    in property <float> graph-max-x: 1600;
+    in property <float> graph-max-y: 1200;
+    in property <bool> easy-connect: false;
+    in property <bool> connect-through: false;
+    in property <bool> connections-enabled: true;
+    in property <int> geometry-version: 0;
+    in property <string> grid-commands: "";
+
+    in-out property <length> pan-x: 24px;
+    in-out property <length> pan-y: 24px;
+    in-out property <float> zoom: 1.0;
+    in property <float> min-zoom: 0.35;
+    in property <float> max-zoom: 2.5;
+    in property <color> grid-color: #27313a;
+    in property <length> world-size: 100000px;
+
+    out property <bool> interacting: root.gesture != 0;
+    out property <int> hovered-link: -1;
+
+    pure callback hit-test(float, float, float) -> HitResult;
+    pure callback link-path(int, int, float, float) -> string;
+    pure callback pin-preview-path(int, float, float) -> string;
+    pure callback node-preview-path(int, float, float) -> string;
+    callback request-grid();
+
+    callback node-selected(int, bool);
+    callback link-selected(int, bool);
+    callback selection-cleared();
+    callback box-selected(float, float, float, float, bool);
+    callback drag-committed(int, float, float);
+    callback link-requested(int, int);
+    callback link-rerouted(int, int);
+    pure callback link-drag-anchor(int, float, float) -> int;
+    pure callback pin-connectable(int) -> bool;
+    callback link-dropped(int, float, float);
+    callback link-cancelled();
+    callback node-connect-dropped(int, float, float);
+    callback node-double-clicked(int);
+    callback audio-volume-changed(int, float);
+    callback audio-mute-toggled(int);
+    callback collapse-toggled(int);
+
+    property <int> gesture: 0;
+    property <int> reroute-anchor: 0;
+    property <bool> passed-threshold: false;
+    property <length> press-x: 0px;
+    property <length> press-y: 0px;
+    property <length> current-x: 0px;
+    property <length> current-y: 0px;
+    property <length> pan-origin-x: 0px;
+    property <length> pan-origin-y: 0px;
+    property <bool> extend-selection: false;
+    property <int> active-id: 0;
+    property <int> pending-pin: 0;
+    property <float> drag-dx: 0;
+    property <float> drag-dy: 0;
+    property <length> drag-threshold: 4px;
+
+    background: #191d24;
+    clip: true;
+
+    public function cancel-gesture() {
+        if (root.gesture == 4 || root.gesture == 5 || root.pending-pin != 0) {
+            root.link-cancelled();
+        }
+        root.gesture = 0;
+        root.pending-pin = 0;
+        root.reroute-anchor = 0;
+        root.drag-dx = 0;
+        root.drag-dy = 0;
+    }
+
+    pure function to-world-x(screen: length) -> float {
+        return (screen - root.pan-x) / root.zoom / 1px;
+    }
+    pure function to-world-y(screen: length) -> float {
+        return (screen - root.pan-y) / root.zoom / 1px;
+    }
+
+    function zoom-at(factor: float, at-x: length, at-y: length) {
+        let target = clamp(root.zoom * factor, root.min-zoom, root.max-zoom);
+        let world-x = root.to-world-x(at-x);
+        let world-y = root.to-world-y(at-y);
+        root.zoom = target;
+        root.pan-x = at-x - world-x * target * 1px;
+        root.pan-y = at-y - world-y * target * 1px;
+    }
+
+    changed pan-x => { root.request-grid(); }
+    changed pan-y => { root.request-grid(); }
+    changed zoom => { root.request-grid(); }
+    changed width => { root.request-grid(); }
+    changed height => { root.request-grid(); }
+    init => { root.request-grid(); }
+
+    Path {
+        width: 100%; height: 100%;
+        commands: root.grid-commands;
+        stroke: root.grid-color; stroke-width: 1px; fill: transparent;
+        viewbox-x: 0; viewbox-y: 0;
+        viewbox-width: max(self.width / 1px, 1);
+        viewbox-height: max(self.height / 1px, 1);
+    }
+
+    surface := TouchArea {
+        width: 100%; height: 100%;
+        mouse-cursor: root.gesture == 1 ? MouseCursor.grabbing
+            : root.gesture == 3 ? MouseCursor.move
+            : root.gesture == 4 || root.gesture == 5 ? MouseCursor.crosshair
+            : MouseCursor.default;
+
+        scroll-event(event) => {
+            if ((event.modifiers.control || event.modifiers.meta) && abs(event.delta-x) < 1px) {
+                root.zoom-at(1.0 + (event.delta-y / 1px) * 0.002, self.mouse-x, self.mouse-y);
+            } else if (event.modifiers.shift) {
+                root.pan-x += abs(event.delta-x) > abs(event.delta-y) ? event.delta-x : event.delta-y;
+            } else {
+                root.pan-x += event.delta-x;
+                root.pan-y += event.delta-y;
+            }
+            accept
+        }
+
+        double-clicked => {
+            let hit = root.hit-test(root.to-world-x(self.mouse-x), root.to-world-y(self.mouse-y), root.zoom);
+            if (hit.kind == 2 || hit.kind == 4) {
+                root.node-double-clicked(hit.id);
+            }
+        }
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.press-x = self.mouse-x;
+                root.press-y = self.mouse-y;
+                root.current-x = self.mouse-x;
+                root.current-y = self.mouse-y;
+                root.passed-threshold = false;
+                root.extend-selection = event.modifiers.shift;
+                if (event.button == PointerEventButton.middle) {
+                    root.gesture = 1;
+                    root.pan-origin-x = root.pan-x;
+                    root.pan-origin-y = root.pan-y;
+                } else if (event.button == PointerEventButton.left) {
+                    root.begin-left-press(event.modifiers.shift, event.modifiers.control || event.modifiers.meta);
+                }
+            } else if (event.kind == PointerEventKind.up) {
+                if (event.button == PointerEventButton.left || event.button == PointerEventButton.middle) {
+                    root.finish-gesture();
+                }
+            } else if (event.kind == PointerEventKind.move && root.gesture == 0) {
+                root.hovered-link = root.hit-link-at(self.mouse-x, self.mouse-y);
+            }
+        }
+
+        moved => {
+            root.current-x = self.mouse-x;
+            root.current-y = self.mouse-y;
+            if (abs(self.mouse-x - root.press-x) > root.drag-threshold
+                || abs(self.mouse-y - root.press-y) > root.drag-threshold) {
+                root.passed-threshold = true;
+            }
+            if (root.gesture == 1) {
+                root.pan-x = root.pan-origin-x + (self.mouse-x - root.press-x);
+                root.pan-y = root.pan-origin-y + (self.mouse-y - root.press-y);
+            } else if (root.gesture == 3) {
+                root.drag-dx = (self.mouse-x - root.press-x) / root.zoom / 1px;
+                root.drag-dy = (self.mouse-y - root.press-y) / root.zoom / 1px;
+            }
+        }
+    }
+
+    pure function hit-link-at(screen-x: length, screen-y: length) -> int {
+        let hit = root.hit-test(root.to-world-x(screen-x), root.to-world-y(screen-y), root.zoom);
+        return hit.kind == 3 ? hit.id : -1;
+    }
+
+    function begin-left-press(shift: bool, ctrl: bool) {
+        let hit = root.hit-test(root.to-world-x(root.press-x), root.to-world-y(root.press-y), root.zoom);
+        if (ctrl) {
+            if (root.pending-pin != 0) {
+                root.link-cancelled();
+                root.pending-pin = 0;
+            }
+            root.gesture = 2;
+            if (!shift) { root.selection-cleared(); }
+            return;
+        }
+        if (hit.kind == 1 && root.connections-enabled && root.pin-connectable(hit.id)) {
+            root.gesture = 4;
+            root.active-id = hit.id;
+        } else if (hit.kind == 4 && root.connections-enabled) {
+            root.gesture = 5;
+            root.active-id = hit.id;
+        } else if (hit.kind == 2) {
+            if (root.connections-enabled && root.pending-pin != 0 && !root.connect-through) {
+                root.link-cancelled();
+                root.pending-pin = 0;
+                root.gesture = 0;
+                return;
+            }
+            root.gesture = root.connections-enabled
+                && root.connect-through && root.pending-pin != 0 ? 5 : 3;
+            root.active-id = hit.id;
+            root.drag-dx = 0;
+            root.drag-dy = 0;
+            if (shift || !hit.selected) {
+                root.node-selected(hit.id, shift);
+            }
+        } else if (hit.kind == 3) {
+            root.link-selected(hit.id, shift);
+            root.reroute-anchor = root.connections-enabled
+                ? root.link-drag-anchor(hit.id, hit.x, hit.y)
+                : 0;
+            if (root.reroute-anchor != 0 && !root.pin-connectable(root.reroute-anchor)) {
+                root.reroute-anchor = 0;
+            }
+            root.gesture = root.reroute-anchor != 0 ? 6 : 0;
+            root.active-id = hit.id;
+        } else {
+            if (root.pending-pin != 0) {
+                root.link-cancelled();
+                root.pending-pin = 0;
+            }
+            root.gesture = 2;
+            if (!shift) { root.selection-cleared(); }
+        }
+    }
+
+    function finish-gesture() {
+        if (root.gesture == 6) {
+            if (root.passed-threshold) {
+                let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y), root.zoom);
+                if (target.kind == 1 && target.id != root.reroute-anchor) {
+                    root.link-rerouted(root.active-id, target.id);
+                }
+            }
+            root.gesture = 0;
+            root.reroute-anchor = 0;
+            return;
+        }
+        if (root.gesture == 2) {
+            if (root.passed-threshold) {
+                root.box-selected(
+                    root.to-world-x(min(root.press-x, root.current-x)),
+                    root.to-world-y(min(root.press-y, root.current-y)),
+                    abs(root.current-x - root.press-x) / root.zoom / 1px,
+                    abs(root.current-y - root.press-y) / root.zoom / 1px,
+                    root.extend-selection);
+            }
+        } else if (root.gesture == 3) {
+            if (root.passed-threshold) {
+                root.drag-committed(root.active-id, root.drag-dx, root.drag-dy);
+            }
+        } else if (root.gesture == 4) {
+            if (root.passed-threshold) {
+                let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y), root.zoom);
+                if (target.kind == 1 && target.id != root.active-id) {
+                    root.link-requested(root.active-id, target.id);
+                    root.pending-pin = 0;
+                } else {
+                    root.link-dropped(
+                        root.active-id,
+                        root.to-world-x(root.current-x),
+                        root.to-world-y(root.current-y));
+                    root.pending-pin = 0;
+                }
+            } else {
+                if (root.pending-pin != 0 && root.pending-pin != root.active-id) {
+                    root.link-requested(root.pending-pin, root.active-id);
+                    root.pending-pin = 0;
+                } else if (root.pending-pin == root.active-id) {
+                    root.link-requested(root.active-id, root.active-id);
+                    root.pending-pin = 0;
+                } else {
+                    root.link-requested(root.active-id, root.active-id);
+                    root.pending-pin = root.active-id;
+                }
+            }
+        } else if (root.gesture == 5) {
+            if (root.passed-threshold) {
+                if (root.pending-pin != 0) {
+                    let target = root.hit-test(root.to-world-x(root.current-x), root.to-world-y(root.current-y), root.zoom);
+                    if (target.kind == 1 && target.id != root.pending-pin) {
+                        root.link-requested(root.pending-pin, target.id);
+                    } else {
+                        root.link-dropped(
+                            root.pending-pin,
+                            root.to-world-x(root.current-x),
+                            root.to-world-y(root.current-y));
+                    }
+                    root.pending-pin = 0;
+                } else {
+                    root.node-connect-dropped(
+                        root.active-id,
+                        root.to-world-x(root.current-x),
+                        root.to-world-y(root.current-y));
+                }
+            } else {
+                if (root.pending-pin != 0) {
+                    root.link-dropped(
+                        root.pending-pin,
+                        root.to-world-x(root.current-x),
+                        root.to-world-y(root.current-y));
+                    root.pending-pin = 0;
+                } else {
+                    root.node-selected(root.active-id, root.extend-selection);
+                }
+            }
+        }
+        root.gesture = 0;
+        root.drag-dx = 0;
+        root.drag-dy = 0;
+    }
+
+    Rectangle {
+        x: root.pan-x; y: root.pan-y;
+        width: root.world-size; height: root.world-size;
+        transform-origin: { x: 0, y: 0 };
+        transform-scale: root.zoom;
+        background: transparent; clip: false;
+
+        for link in root.links: Path {
+            width: 100%; height: 100%;
+            commands: root.link-path(link.id, root.geometry-version, root.drag-dx, root.drag-dy);
+            stroke: link.selected ? link.color.brighter(60%)
+                : root.hovered-link == link.id ? link.color.brighter(30%)
+                : link.color;
+            stroke-width: link.selected ? 3px : 2px;
+            fill: transparent;
+            viewbox-x: 0; viewbox-y: 0;
+            viewbox-width: max(self.width / 1px, 1);
+            viewbox-height: max(self.height / 1px, 1);
+        }
+
+        if (root.gesture == 4 || root.gesture == 5)
+            || (root.gesture == 6 && root.passed-threshold): Path {
+            width: 100%; height: 100%;
+            commands: root.gesture == 4
+                ? root.pin-preview-path(root.active-id, root.to-world-x(root.current-x), root.to-world-y(root.current-y))
+                : root.gesture == 6
+                ? root.pin-preview-path(root.reroute-anchor, root.to-world-x(root.current-x), root.to-world-y(root.current-y))
+                : root.node-preview-path(root.active-id, root.to-world-x(root.current-x), root.to-world-y(root.current-y));
+            stroke: #cfe4ff; stroke-width: 2px; fill: transparent;
+            viewbox-x: 0; viewbox-y: 0;
+            viewbox-width: max(self.width / 1px, 1);
+            viewbox-height: max(self.height / 1px, 1);
+        }
+
+        for node in root.nodes: GraphNode {
+            data: node;
+            offset-x: root.gesture == 3 && node.selected ? root.drag-dx * 1px : 0px;
+            offset-y: root.gesture == 3 && node.selected ? root.drag-dy * 1px : 0px;
+            audio-volume-changed(id, value) => { root.audio-volume-changed(id, value); }
+            audio-mute-toggled(id) => { root.audio-mute-toggled(id); }
+            collapse-toggled(id) => { root.collapse-toggled(id); }
+        }
+    }
+
+    if root.gesture == 2 && root.passed-threshold: Rectangle {
+        x: min(root.press-x, root.current-x);
+        y: min(root.press-y, root.current-y);
+        width: abs(root.current-x - root.press-x);
+        height: abs(root.current-y - root.press-y);
+        background: #62a8ff20;
+        border-color: #62a8ff;
+        border-width: 1px;
+    }
+
+    if root.minimap-enabled: CanvasMinimap {
+        x: root.width - self.width - 22px;
+        y: root.height - self.height - 22px;
+        nodes: root.minimap-nodes;
+        viewport-pan-x: root.pan-x;
+        viewport-pan-y: root.pan-y;
+        viewport-zoom: root.zoom;
+        viewport-width: root.width;
+        viewport-height: root.height;
+        graph-min-x: root.graph-min-x * 1px;
+        graph-min-y: root.graph-min-y * 1px;
+        graph-max-x: root.graph-max-x * 1px;
+        graph-max-y: root.graph-max-y * 1px;
+        navigate(world-x, world-y) => {
+            root.pan-x = -world-x * root.zoom + root.width / 2;
+            root.pan-y = -world-y * root.zoom + root.height / 2;
+        }
+    }
+}

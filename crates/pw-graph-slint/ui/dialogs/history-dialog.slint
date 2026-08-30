@@ -1,0 +1,34 @@
+import { ScrollView, VerticalBox } from "std-widgets.slint";
+import { UiTheme } from "../foundation/theme.slint";
+import { UiI18n } from "../foundation/i18n.slint";
+import { AppButton } from "../components/button.slint";
+import { HistoryRow } from "../foundation/structs.slint";
+
+export component HistoryDialog inherits Rectangle {
+    in property <[HistoryRow]> undo-history;
+    in property <[HistoryRow]> redo-history;
+    callback close();
+
+    background: #222a33fa;
+    border-color: #617080;
+    border-width: 1px;
+    border-radius: 8px;
+
+    Text { x: 20px; y: 18px; text: UiI18n.localized("history.title"); color: #f0f4f7; font-size: 19px * UiTheme.ui-scale; }
+    AppButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; text-scale: UiTheme.ui-scale; clicked => { root.close(); } }
+    Text { x: 20px; y: 62px; width: parent.width - 40px; text: UiI18n.localized("history.hint"); color: #aebdca; font-size: 12px * UiTheme.panel-scale; wrap: word-wrap; }
+    Text { x: 20px; y: 103px; text: UiI18n.localized("history.undo"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
+    ScrollView { x: 20px; y: 124px; width: parent.width / 2 - 28px; height: parent.height - 148px;
+        VerticalBox { spacing: 4px;
+            if root.undo-history.length == 0: Text { text: UiI18n.localized("history.empty"); color: #9eafbc; font-size: 10px * UiTheme.panel-scale; }
+            for item in root.undo-history: Text { text: item.description; color: #d7e0e7; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
+        }
+    }
+    Text { x: parent.width / 2 + 8px; y: 103px; text: UiI18n.localized("history.redo"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
+    ScrollView { x: parent.width / 2 + 8px; y: 124px; width: parent.width / 2 - 28px; height: parent.height - 148px;
+        VerticalBox { spacing: 4px;
+            if root.redo-history.length == 0: Text { text: UiI18n.localized("history.empty"); color: #9eafbc; font-size: 10px * UiTheme.panel-scale; }
+            for item in root.redo-history: Text { text: item.description; color: #d7e0e7; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
+        }
+    }
+}
