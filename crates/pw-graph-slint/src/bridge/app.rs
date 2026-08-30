@@ -77,6 +77,19 @@ pub(crate) struct Application {
     /// `SessionLost` for *this* attempt clears it and one for an unrelated
     /// session does not.
     pub(crate) relay_connecting: Option<RelayAttempt>,
+    #[cfg(feature = "relay")]
+    /// Whether relay discovery is currently running in the application.
+    pub(crate) relay_discovery_active: bool,
+    #[cfg(feature = "relay")]
+    /// Current active USB tether state used by the hotplug watcher.
+    pub(crate) relay_usb_present: bool,
+    #[cfg(feature = "relay")]
+    /// Last native interface enumeration performed by the fallback hotplug
+    /// watcher. The UI pump runs much faster than a link can change.
+    pub(crate) relay_usb_last_poll: Option<Instant>,
+    #[cfg(feature = "relay")]
+    /// Prevent a manual Stop from being undone until this USB appearance ends.
+    pub(crate) relay_usb_auto_attempted: bool,
 }
 
 const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);

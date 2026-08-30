@@ -1354,6 +1354,17 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         }
     }
 
+    fn relay_discovery_usb_link_lost(&mut self) {
+        if let Some(driver) = self.relay_backend_mut() {
+            driver.relay_discovery_usb_link_lost();
+        }
+    }
+
+    fn relay_usb_link_present(&self) -> bool {
+        self.relay_backend()
+            .is_some_and(|driver| driver.relay_usb_link_present())
+    }
+
     fn relay_peers(&self) -> Vec<pw_graph_backend::RelayPeerInfo> {
         self.relay_backend()
             .map(|driver| driver.relay_peers())

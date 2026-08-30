@@ -86,13 +86,28 @@ class MainActivity : ComponentActivity() {
 private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
-    var permissionRequested by remember { mutableStateOf(false) }
     var showScanner by remember { mutableStateOf(false) }
+    var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingMicrophonePermission by remember { mutableStateOf(false) }
+    var pendingHostAction by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissions ->
-        val granted = permissions[Manifest.permission.RECORD_AUDIO] == true
-        if (granted) viewModel.connect()
+        val microphoneGranted = permissions[Manifest.permission.RECORD_AUDIO] != false
+        val action = pendingPermissionAction
+        val needsMicrophone = pendingMicrophonePermission
+        val hostAction = pendingHostAction
+        pendingPermissionAction = null
+        pendingMicrophonePermission = false
+        pendingHostAction = false
+        if (needsMicrophone && !microphoneGranted) {
+            viewModel.permissionDenied(hostAction)
+        } else {
+            // Notification permission is intentionally non-fatal: foreground
+            // service startup is still attempted on API 33+ when the user
+            // declines notifications.
+            action?.invoke()
+        }
     }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -100,17 +115,23 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
         if (granted) showScanner = true
     }
 
-    fun connectWithPermission() {
+    fun runWithServicePermissions(
+        requiresMicrophone: Boolean,
+        host: Boolean,
+        action: () -> Unit,
+    ) {
         val permissions = buildList {
-            add(Manifest.permission.RECORD_AUDIO)
+            if (requiresMicrophone) add(Manifest.permission.RECORD_AUDIO)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         }
         val missing = permissions.filter {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) viewModel.connect()
-        else if (!permissionRequested) {
-            permissionRequested = true
+        if (missing.isEmpty()) action()
+        else {
+            pendingPermissionAction = action
+            pendingMicrophonePermission = requiresMicrophone
+            pendingHostAction = host
             permissionLauncher.launch(missing.toTypedArray())
         }
     }
@@ -137,9 +158,40 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
             RelayTabs(mode = state.mode, onSelected = viewModel::setMode)
             UsbStatus(link = state.usbLink)
             when (state.mode) {
-                RelayMode.Receiver -> ReceiverTab(state, viewModel, ::connectWithPermission, ::openScanner)
-                RelayMode.Emitter -> EmitterTab(state, viewModel)
-                RelayMode.Discover -> DiscoverTab(state, viewModel)
+                RelayMode.Receiver -> ReceiverTab(
+                    state,
+                    viewModel,
+                    connectWithPermission = {
+                        runWithServicePermissions(
+                            clientNeedsMicrophone(state.settings.role),
+                            host = false,
+                            action = viewModel::connect,
+                        )
+                    },
+                    openScanner = ::openScanner,
+                )
+                RelayMode.Emitter -> EmitterTab(
+                    state,
+                    viewModel,
+                    startHost = {
+                        runWithServicePermissions(
+                            requiresMicrophone = true,
+                            host = true,
+                            action = viewModel::startHost,
+                        )
+                    },
+                )
+                RelayMode.Discover -> DiscoverTab(
+                    state,
+                    viewModel,
+                    connectToPeer = { address ->
+                        runWithServicePermissions(
+                            clientNeedsMicrophone(state.settings.role),
+                            host = false,
+                            action = { viewModel.connectToPeer(address) },
+                        )
+                    },
+                )
             }
         }
     }
@@ -177,6 +229,11 @@ private fun UsbStatus(link: UsbLinkInfo?) {
     if (link != null) {
         Text(
             stringResource(R.string.relay_usb_detected, link.name, link.addr),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    } else {
+        Text(
+            "No USB tether network detected. An ADB/debugging cable alone is not relay networking; enable USB tethering or use Wi-Fi/LAN.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -351,10 +408,17 @@ private fun ReceiverTab(
 }
 
 @Composable
-private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
+private fun EmitterTab(
+    state: RelayUiState,
+    viewModel: RelayViewModel,
+    startHost: () -> Unit,
+) {
+    val hostEditable = state.hostState != RelayHostState.Starting &&
+        state.hostState != RelayHostState.Running
     OutlinedTextField(
         value = state.host.deviceName,
         onValueChange = { viewModel.updateHost(state.host.copy(deviceName = it)) },
+        enabled = hostEditable,
         label = { Text("Device name") },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
@@ -362,6 +426,7 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
     OutlinedTextField(
         value = state.host.pin,
         onValueChange = { viewModel.updateHost(state.host.copy(pin = it)) },
+        enabled = hostEditable,
         label = { Text("Pairing PIN") },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
@@ -371,6 +436,7 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
         onValueChange = { value ->
             value.toIntOrNull()?.let { viewModel.updateHost(state.host.copy(port = it)) }
         },
+        enabled = hostEditable,
         label = { Text("Control port") },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
@@ -381,6 +447,7 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
             value = state.host.codec,
             options = listOf("opus", "pcm"),
             onSelected = { viewModel.updateHost(state.host.copy(codec = it)) },
+            enabled = hostEditable,
             modifier = Modifier.weight(1f),
         )
         DropdownField(
@@ -389,6 +456,7 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
             options = LINK_OPTIONS,
             display = LINK_DISPLAY,
             onSelected = { viewModel.updateHost(state.host.copy(transport = it)) },
+            enabled = hostEditable,
             modifier = Modifier.weight(1f),
         )
     }
@@ -398,7 +466,7 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
                 Text("Stop host")
             }
         } else {
-            Button(onClick = viewModel::startHost, modifier = Modifier.weight(1f)) {
+            Button(onClick = startHost, modifier = Modifier.weight(1f)) {
                 Text("Start host")
             }
         }
@@ -449,7 +517,11 @@ private fun EmitterTab(state: RelayUiState, viewModel: RelayViewModel) {
 }
 
 @Composable
-private fun DiscoverTab(state: RelayUiState, viewModel: RelayViewModel) {
+private fun DiscoverTab(
+    state: RelayUiState,
+    viewModel: RelayViewModel,
+    connectToPeer: (String) -> Unit,
+) {
     Button(
         onClick = {
             if (state.discoveryActive) viewModel.stopDiscovery() else viewModel.startDiscovery()
@@ -473,7 +545,7 @@ private fun DiscoverTab(state: RelayUiState, viewModel: RelayViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text("${peer.name} — ${peer.address}")
-            Button(onClick = { viewModel.connectToPeer(peer.address) }) {
+            Button(onClick = { connectToPeer(peer.address) }) {
                 Text("Connect")
             }
         }
@@ -487,24 +559,29 @@ private fun DropdownField(
     value: String,
     options: List<String>,
     onSelected: (String) -> Unit,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
     display: Map<String, String> = emptyMap(),
 ) {
     var expanded by remember { mutableStateOf(false) }
     ExposedDropdownMenuBox(
         expanded = expanded,
-        onExpandedChange = { expanded = !expanded },
+        onExpandedChange = { if (enabled) expanded = !expanded },
         modifier = modifier,
     ) {
         OutlinedTextField(
             value = display[value] ?: value,
             onValueChange = {},
             readOnly = true,
+            enabled = enabled,
             label = { Text(label) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
             modifier = Modifier.menuAnchor().fillMaxWidth(),
         )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        ExposedDropdownMenu(
+            expanded = expanded && enabled,
+            onDismissRequest = { expanded = false },
+        ) {
             options.forEach { option ->
                 DropdownMenuItem(
                     text = { Text(display[option] ?: option) },

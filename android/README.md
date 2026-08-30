@@ -29,10 +29,11 @@ the Android SDK configured:
 ./gradlew :app:installDebug
 ```
 
-The app requests microphone permission because Emit and Both capture audio.
-Android 13+ notification permission is requested for the foreground audio
-service. Pairing PINs are entered for the current client or host lifetime and
-are not persisted; there is no insecure app-wide default.
+The app requests microphone permission only when the selected operation
+captures audio: client Emit/Both and Android Host require it, while client
+Receive is playback-only. Android 13+ notification permission is requested for
+the foreground audio service. Pairing PINs are entered for the current client
+or host lifetime and are not persisted; there is no insecure app-wide default.
 
 The app mirrors the desktop relay panel with three tabs:
 
@@ -65,8 +66,9 @@ the USB network address assigned to the phone/Linux host:
 2. On Linux, identify the USB/RNDIS interface, usually `usb0`, `rndis0`, or
    an `enx...` address; the desktop relay panel shows the detected link and
    its address automatically.
-3. Start the desktop relay host with a PIN such as `123456`; use a fixed TCP port such
-   as `48123` so the address is easy to enter.
+3. Start the desktop relay host with a PIN; its application default is the
+   fixed TCP port `48123`, so the USB scanner can find it. If that port is
+   occupied, choose another explicit port and enter that address manually.
 4. Keep the preferred link on **Auto**: the relay panel auto-detects the USB
    tether and shows its address (for example `usb0 · 192.168.42.129`), and
    prefers the USB link automatically.
@@ -94,6 +96,12 @@ Manual address entry remains supported as a fallback. The relay protocol uses
 TCP control and UDP audio, so both devices must be able to reach each other
 on the local network. VPNs, guest Wi-Fi isolation, and firewalls can block
 the connection.
+
+The app does not auto-connect to arbitrary USB-discovered peers. A pairing
+attempt always requires the current PIN and explicit user approval; persistent
+trusted-device key auto-reconnect is not enabled yet. ADB/USB debugging alone
+is not relay networking because `adb reverse` does not carry the relay's UDP
+audio channel.
 
 ## Troubleshooting
 

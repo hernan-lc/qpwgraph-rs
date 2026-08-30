@@ -270,8 +270,10 @@ pub(crate) enum ResumeGraceResult {
     /// session is otherwise no longer waiting for this grace period.
     Resumed,
     /// A resume challenge is being authenticated. The watcher must not turn
-    /// this into an apparently active session with no control owner.
-    InProgress,
+    /// this into an apparently active session with no control owner. The
+    /// generation is the in-progress generation, not the stale generation
+    /// owned by the control watcher that entered the grace period.
+    InProgress { generation: u64 },
 }
 
 /// Internal session bookkeeping shared with worker threads.
@@ -390,7 +392,9 @@ impl SessionRecord {
     /// in progress until it succeeds or cancels itself.
     pub(crate) fn expire_resume_grace(&self, generation: u64) -> ResumeGraceResult {
         let Ok(mut state) = self.control_state.lock() else {
-            return ResumeGraceResult::InProgress;
+            return ResumeGraceResult::InProgress {
+                generation: self.control_generation.load(Ordering::Acquire),
+            };
         };
         if self.control_generation.load(Ordering::Acquire) != generation {
             return ResumeGraceResult::Resumed;
@@ -402,7 +406,7 @@ impl SessionRecord {
                 *state = ControlState::Active;
                 ResumeGraceResult::Expired
             }
-            ControlState::Resuming { .. } => ResumeGraceResult::InProgress,
+            ControlState::Resuming { generation } => ResumeGraceResult::InProgress { generation },
             _ => ResumeGraceResult::Resumed,
         }
     }
@@ -686,7 +690,14 @@ impl EngineInner {
                 };
                 continue;
             }
-            converter.convert(samples, buffer);
+            if realtime {
+                if !converter.try_convert_prepared(samples, buffer) {
+                    accepted = false;
+                    continue;
+                }
+            } else {
+                converter.convert(samples, buffer);
+            }
             accepted &= if realtime {
                 record.outgoing.try_push(buffer)
             } else {
@@ -864,6 +875,32 @@ pub struct RelayEngine {
     inner: Arc<EngineInner>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscoveryStartOutcome {
+    MdnsAndUsb,
+    MdnsOnly,
+    UsbOnly,
+}
+
+/// Decide whether discovery can remain usable when one of its independent
+/// mechanisms fails. Keeping this decision separate from worker startup makes
+/// the partial-failure contract explicit and testable.
+fn discovery_start_outcome(
+    mdns: &RelayResult<()>,
+    usb: &RelayResult<()>,
+) -> RelayResult<DiscoveryStartOutcome> {
+    match (mdns.is_ok(), usb.is_ok()) {
+        (true, true) => Ok(DiscoveryStartOutcome::MdnsAndUsb),
+        (true, false) => Ok(DiscoveryStartOutcome::MdnsOnly),
+        (false, true) => Ok(DiscoveryStartOutcome::UsbOnly),
+        (false, false) => Err(RelayError::Engine(format!(
+            "all relay discovery mechanisms failed (mDNS: {}; USB: {})",
+            mdns.as_ref().unwrap_err(),
+            usb.as_ref().unwrap_err()
+        ))),
+    }
+}
+
 impl RelayEngine {
     /// Create the engine. No sockets open until `host_start`/`connect`.
     pub fn start(config: EngineConfig) -> RelayResult<Self> {
@@ -956,7 +993,7 @@ impl RelayHandle {
             host.take()
         };
         if let Some(record) = removed {
-            record.stop.store(true, Ordering::Relaxed);
+            record.stop();
             self.inner.stop_advertiser();
             self.inner.emit(RelayEvent::HostStopped);
         }
@@ -977,16 +1014,42 @@ impl RelayHandle {
     /// probe of USB tether subnets, because mDNS often does not cross a USB
     /// tether. Idempotent.
     pub fn discovery_start(&self) -> RelayResult<()> {
-        self.inner.start_browser()?;
-        // Best-effort: a missing USB scanner must not fail mDNS browsing.
-        let _ = self.inner.start_usb_scanner();
-        Ok(())
+        // mDNS and direct USB probing are independent mechanisms. A multicast
+        // failure is expected on some tethered networks and must not prevent
+        // the mechanism designed for exactly that case from starting.
+        let mdns = self.inner.start_browser();
+        let usb = self.inner.start_usb_scanner();
+        match discovery_start_outcome(&mdns, &usb)? {
+            DiscoveryStartOutcome::MdnsAndUsb => Ok(()),
+            DiscoveryStartOutcome::MdnsOnly => {
+                let error = usb.expect_err("mDNS-only discovery must have a USB error");
+                self.inner.emit(RelayEvent::Error {
+                    message: format!("USB relay discovery unavailable: {error}"),
+                });
+                Ok(())
+            }
+            DiscoveryStartOutcome::UsbOnly => {
+                let error = mdns.expect_err("USB-only discovery must have an mDNS error");
+                self.inner.emit(RelayEvent::Error {
+                    message: format!("mDNS relay discovery unavailable: {error}"),
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Stop browsing for relay hosts. Idempotent.
     pub fn discovery_stop(&self) {
         self.inner.stop_browser();
         self.inner.stop_usb_scanner();
+        self.inner.clear_discovered();
+    }
+
+    /// Forget direct USB-probe results while leaving mDNS browsing active.
+    /// Platform link watchers call this as soon as a tether disappears; the
+    /// scanner also performs the same refresh when its next loop observes it.
+    pub fn discovery_usb_link_lost(&self) {
+        self.inner.lost_peer(usb_probe::USB_PROBE_SERVICE);
     }
 
     /// Snapshot of relay hosts discovered so far.
@@ -1061,7 +1124,7 @@ impl RelayHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv6Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
 
     #[test]
     fn default_config_is_usable() {
@@ -1074,10 +1137,78 @@ mod tests {
     }
 
     #[test]
+    fn discovery_start_accepts_each_working_mechanism_and_rejects_both_failures() {
+        let ok = Ok(());
+        let mdns_error = Err(RelayError::Engine("mDNS unavailable".into()));
+        let usb_error = Err(RelayError::Engine("USB scanner unavailable".into()));
+
+        assert!(matches!(
+            discovery_start_outcome(&ok, &ok),
+            Ok(DiscoveryStartOutcome::MdnsAndUsb)
+        ));
+        assert!(matches!(
+            discovery_start_outcome(&ok, &usb_error),
+            Ok(DiscoveryStartOutcome::MdnsOnly)
+        ));
+        assert!(matches!(
+            discovery_start_outcome(&mdns_error, &ok),
+            Ok(DiscoveryStartOutcome::UsbOnly)
+        ));
+        assert!(matches!(
+            discovery_start_outcome(&mdns_error, &usb_error),
+            Err(RelayError::Engine(message))
+                if message.contains("mDNS unavailable")
+                    && message.contains("USB scanner unavailable")
+        ));
+    }
+
+    #[test]
     fn host_start_requires_a_pin() {
         let engine = RelayEngine::start(EngineConfig::default()).unwrap();
         let handle = engine.handle();
         assert!(handle.host_start().is_err());
+    }
+
+    #[test]
+    fn host_start_reports_a_port_conflict_without_falling_back_to_another_port() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let engine = RelayEngine::start(EngineConfig {
+            pin: "123456".into(),
+            port,
+            bind_addr: Some(Ipv4Addr::LOCALHOST),
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        let handle = engine.handle();
+        let error = handle
+            .host_start()
+            .expect_err("the occupied port must fail");
+        assert!(error.to_string().contains("control port"));
+        assert!(error.to_string().contains(&port.to_string()));
+        assert!(!handle.status().host_active);
+        assert_eq!(handle.status().host_port, None);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn host_stop_releases_an_explicit_port_before_returning() {
+        let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let engine = RelayEngine::start(EngineConfig {
+            pin: "123456".into(),
+            port,
+            bind_addr: Some(Ipv4Addr::LOCALHOST),
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        let handle = engine.handle();
+        assert_eq!(handle.host_start().unwrap(), port);
+        handle.host_stop().unwrap();
+        assert_eq!(handle.host_start().unwrap(), port);
+        handle.host_stop().unwrap();
+        engine.shutdown();
     }
 
     #[test]
@@ -1111,7 +1242,10 @@ mod tests {
         let record = mixing_session(2, false);
         assert!(record.mark_control_dropped());
         let generation = record.begin_resume().expect("resume is eligible");
-        assert_eq!(record.expire_resume_grace(1), ResumeGraceResult::InProgress);
+        assert_eq!(
+            record.expire_resume_grace(1),
+            ResumeGraceResult::InProgress { generation }
+        );
         assert_eq!(
             *record.control_state.lock().unwrap(),
             ControlState::Resuming { generation }
@@ -1127,6 +1261,25 @@ mod tests {
         assert_eq!(record.expire_resume_grace(1), ResumeGraceResult::Expired);
         // Expiry wins only while the old generation is still current.
         assert!(!record.finish_resume(generation));
+    }
+
+    #[test]
+    fn resume_expiry_aborts_the_in_progress_generation_not_the_stale_owner() {
+        let record = mixing_session(4, false);
+        assert!(record.mark_control_dropped());
+        let generation = record.begin_resume().expect("resume is eligible");
+        assert_eq!(generation, 2);
+
+        // The old control watcher still owns generation 1. Once the grace
+        // deadline is reached, the result names generation 2 so the stalled
+        // challenge can be cancelled precisely.
+        assert_eq!(
+            record.expire_resume_grace(1),
+            ResumeGraceResult::InProgress { generation: 2 }
+        );
+        assert!(record.abort_resume(2));
+        assert_eq!(*record.control_state.lock().unwrap(), ControlState::Active);
+        assert!(!record.abort_resume(1));
     }
 
     #[test]

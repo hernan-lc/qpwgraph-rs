@@ -349,6 +349,16 @@ impl ApplicationDriver {
     }
 
     #[cfg(feature = "relay")]
+    pub(crate) fn relay_discovery_usb_link_lost(&mut self) {
+        RelayDriver::relay_discovery_usb_link_lost(self)
+    }
+
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_usb_link_present(&self) -> bool {
+        RelayDriver::relay_usb_link_present(self)
+    }
+
+    #[cfg(feature = "relay")]
     pub(crate) fn relay_peers(&self) -> Vec<RelayPeerInfo> {
         RelayDriver::relay_peers(self)
     }
@@ -693,6 +703,20 @@ impl RelayDriver for ApplicationDriver {
         match &mut self.backend {
             BackendKind::Demo(driver) => driver.relay_discovery_stop(),
             BackendKind::Live(driver) => driver.relay_discovery_stop(),
+        }
+    }
+
+    fn relay_discovery_usb_link_lost(&mut self) {
+        match &mut self.backend {
+            BackendKind::Demo(driver) => driver.relay_discovery_usb_link_lost(),
+            BackendKind::Live(driver) => driver.relay_discovery_usb_link_lost(),
+        }
+    }
+
+    fn relay_usb_link_present(&self) -> bool {
+        match &self.backend {
+            BackendKind::Demo(driver) => driver.relay_usb_link_present(),
+            BackendKind::Live(driver) => driver.relay_usb_link_present(),
         }
     }
 

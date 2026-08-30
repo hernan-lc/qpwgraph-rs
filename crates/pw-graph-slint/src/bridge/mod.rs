@@ -124,6 +124,14 @@ impl UiBridge {
             relay_levels: BTreeMap::new(),
             #[cfg(feature = "relay")]
             relay_connecting: None,
+            #[cfg(feature = "relay")]
+            relay_discovery_active: false,
+            #[cfg(feature = "relay")]
+            relay_usb_present: false,
+            #[cfg(feature = "relay")]
+            relay_usb_last_poll: None,
+            #[cfg(feature = "relay")]
+            relay_usb_auto_attempted: false,
         }));
 
         let window = MainWindow::new()?;
@@ -454,6 +462,14 @@ mod tests {
             relay_levels: BTreeMap::new(),
             #[cfg(feature = "relay")]
             relay_connecting: None,
+            #[cfg(feature = "relay")]
+            relay_discovery_active: false,
+            #[cfg(feature = "relay")]
+            relay_usb_present: false,
+            #[cfg(feature = "relay")]
+            relay_usb_last_poll: None,
+            #[cfg(feature = "relay")]
+            relay_usb_auto_attempted: false,
         }
     }
 

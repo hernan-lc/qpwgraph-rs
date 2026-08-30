@@ -12,6 +12,8 @@ use std::collections::BTreeSet;
 use std::net::ToSocketAddrs;
 #[cfg(feature = "relay")]
 use std::str::FromStr;
+#[cfg(feature = "relay")]
+use std::time::Duration;
 
 use pw_graph_i18n::I18n;
 
@@ -25,6 +27,8 @@ pub(crate) fn start_relay_discovery(application: &mut Application) {
     {
         if let Err(error) = application.source.relay_discovery_start() {
             application.status = application.tf("relay.error", &[("error", error)]);
+        } else {
+            application.relay_discovery_active = true;
         }
     }
     #[cfg(not(feature = "relay"))]
@@ -35,10 +39,57 @@ pub(crate) fn start_relay_discovery(application: &mut Application) {
 
 pub(crate) fn stop_relay_discovery(application: &mut Application) {
     #[cfg(feature = "relay")]
-    application.source.relay_discovery_stop();
+    {
+        application.source.relay_discovery_stop();
+        application.relay_discovery_active = false;
+    }
     #[cfg(not(feature = "relay"))]
     let _ = application;
 }
+
+/// Start discovery when a real USB tether link appears and remove its peers
+/// immediately when the link disappears. This is discovery-only: connecting
+/// still requires an explicit user action and a current pairing credential.
+#[cfg(feature = "relay")]
+pub(crate) fn poll_relay_usb_hotplug(application: &mut Application) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+    if application
+        .relay_usb_last_poll
+        .is_some_and(|last| last.elapsed() < POLL_INTERVAL)
+    {
+        return;
+    }
+    application.relay_usb_last_poll = Some(std::time::Instant::now());
+    let present = application.source.relay_usb_link_present();
+    let appeared = present && !application.relay_usb_present;
+    let disappeared = !present && application.relay_usb_present;
+    application.relay_usb_present = present;
+
+    if disappeared {
+        application.source.relay_discovery_usb_link_lost();
+        application.relay_usb_auto_attempted = false;
+    }
+    if appeared {
+        application.relay_usb_auto_attempted = false;
+    }
+    if appeared && !application.relay_usb_auto_attempted {
+        application.relay_usb_auto_attempted = true;
+        if !application.relay_discovery_active {
+            match application.source.relay_discovery_start() {
+                Ok(()) => {
+                    application.relay_discovery_active = true;
+                    application.status = application.t("relay.discovery_started");
+                }
+                Err(error) => {
+                    application.status = application.tf("relay.error", &[("error", error)]);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "relay"))]
+pub(crate) fn poll_relay_usb_hotplug(_application: &mut Application) {}
 
 pub(crate) fn relay_host_active(application: &Application) -> bool {
     #[cfg(feature = "relay")]
@@ -120,7 +171,13 @@ pub(crate) fn start_relay_host(application: &mut Application) {
                 application.status =
                     application.tf("relay.host_started", &[("port", port.to_string())])
             }
-            Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
+            Err(error) => {
+                // A failed bind/start is not a hosting session. Retire the
+                // generated PIN so a later retry gets a fresh credential and
+                // the UI never leaves a failed session's PIN displayed.
+                host_pin_on_stop(&mut application.config.relay_host_pin);
+                application.status = application.tf("relay.error", &[("error", error)])
+            }
         }
     }
     #[cfg(not(feature = "relay"))]
@@ -308,7 +365,7 @@ fn relay_transport(value: &str) -> RelayTransportPreference {
 pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
     let status = application.source.relay_status();
     let port = status.host_port?;
-    let addr = status.host_addr?;
+    let addr = host_link_addr(application)?;
     Some(relay_build_qr_payload(
         addr,
         port,
@@ -323,7 +380,21 @@ pub(crate) fn relay_qr_payload(application: &Application) -> Option<String> {
 /// an address nothing is listening on.
 #[cfg(feature = "relay")]
 fn host_link_addr(application: &Application) -> Option<std::net::Ipv4Addr> {
-    application.source.relay_status().host_addr
+    let status = application.source.relay_status();
+    status.host_addr.or_else(|| {
+        // A listener with no currently classified link intentionally binds
+        // INADDR_ANY. It is still useful to publish a real, reachable address
+        // when the display-side link enumerator has one, rather than showing
+        // 0.0.0.0 in the endpoint and QR code.
+        let links = application.source.relay_local_links();
+        let preference = relay_transport(&application.config.relay_transport);
+        let selected = pw_graph_backend::relay_select_links(&links, preference);
+        selected.first().map(|link| link.addr).or_else(|| {
+            let fallback =
+                pw_graph_backend::relay_select_links(&links, RelayTransportPreference::Auto);
+            fallback.first().map(|link| link.addr)
+        })
+    })
 }
 
 #[cfg(not(feature = "relay"))]

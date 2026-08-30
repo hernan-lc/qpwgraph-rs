@@ -133,29 +133,62 @@ impl Advertiser {
 /// A running browse; stopped by flag and daemon shutdown.
 pub(crate) struct Browser {
     stop: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    daemon: ServiceDaemon,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Browser {
     fn start(inner: &Arc<EngineInner>) -> RelayResult<Self> {
         let daemon = ServiceDaemon::new()
             .map_err(|error| RelayError::Engine(format!("mDNS daemon failed: {error}")))?;
-        let receiver = daemon
-            .browse(SERVICE_TYPE)
-            .map_err(|error| RelayError::Engine(format!("mDNS browse failed: {error}")))?;
+        let receiver = match daemon.browse(SERVICE_TYPE) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                let _ = daemon.shutdown();
+                return Err(RelayError::Engine(format!("mDNS browse failed: {error}")));
+            }
+        };
         let stop = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
+        let thread_active = Arc::clone(&active);
         let inner = Arc::clone(inner);
-        std::thread::Builder::new()
+        let worker_daemon = daemon.clone();
+        let worker = match std::thread::Builder::new()
             .name("relay-discovery".into())
             .spawn(move || {
-                browse_loop(&inner, daemon, receiver, thread_stop);
-            })
-            .map_err(RelayError::Io)?;
-        Ok(Self { stop })
+                browse_loop(&inner, worker_daemon, receiver, thread_stop, thread_active);
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = daemon.stop_browse(SERVICE_TYPE);
+                let _ = daemon.shutdown();
+                return Err(RelayError::Io(error));
+            }
+        };
+        Ok(Self {
+            stop,
+            active,
+            daemon,
+            worker: Some(worker),
+        })
     }
 
     fn is_running(&self) -> bool {
-        !self.stop.load(Ordering::Relaxed)
+        self.active.load(Ordering::Acquire)
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        // Wake the worker immediately instead of waiting for the next
+        // receive timeout. The worker repeats these calls on its way out so
+        // an engine-side exit is also cleaned up.
+        let _ = self.daemon.stop_browse(SERVICE_TYPE);
+        let _ = self.daemon.shutdown();
+        if let Some(worker) = self.worker {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -164,6 +197,7 @@ fn browse_loop(
     daemon: ServiceDaemon,
     receiver: mdns_sd::Receiver<ServiceEvent>,
     stop: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
 ) {
     loop {
         if !inner.running.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
@@ -204,6 +238,7 @@ fn browse_loop(
     }
     let _ = daemon.stop_browse(SERVICE_TYPE);
     let _ = daemon.shutdown();
+    active.store(false, Ordering::Release);
 }
 
 /// Engine-side discovery state and event plumbing.
@@ -326,16 +361,38 @@ impl EngineInner {
             .map(|peers| peers.values().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Remove every transient discovery result and emit the corresponding
+    /// loss events. This is called after both discovery workers have stopped,
+    /// so a later restart starts with a clean peer set and cannot display a
+    /// stale USB address from the previous tether.
+    pub(crate) fn clear_discovered(&self) {
+        let lost = if let (Ok(mut services), Ok(mut peers)) =
+            (self.peer_services.lock(), self.peers.lock())
+        {
+            services.clear();
+            std::mem::take(&mut *peers)
+                .into_values()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for peer in lost {
+            self.emit(crate::RelayEvent::PeerLost { peer });
+        }
+    }
 }
 
 /// A background service that can be stopped by taking it out of its slot.
-trait Stoppable: Send + Sync {
+trait Stoppable: Send {
     fn stop(self);
     fn is_active(&self) -> bool;
 }
 
 impl Stoppable for Browser {
-    fn stop(self) {}
+    fn stop(self) {
+        Browser::stop(self)
+    }
     fn is_active(&self) -> bool {
         self.is_running()
     }
@@ -351,7 +408,9 @@ impl Stoppable for Advertiser {
 }
 
 impl Stoppable for crate::usb_probe::UsbScanner {
-    fn stop(self) {}
+    fn stop(self) {
+        crate::usb_probe::UsbScanner::stop(self)
+    }
     fn is_active(&self) -> bool {
         crate::usb_probe::UsbScanner::is_active(self)
     }
@@ -359,27 +418,27 @@ impl Stoppable for crate::usb_probe::UsbScanner {
 
 /// Replace the content of a `Mutex<Option<T>>`, stopping the previous value.
 fn stop_slot<T: Stoppable>(slot: &Mutex<Option<T>>) {
-    if let Ok(mut slot) = slot.lock() {
-        if let Some(service) = slot.take() {
-            service.stop();
-        }
+    let service = slot.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(service) = service {
+        service.stop();
     }
 }
 
 /// Start a background service inside a slot, unless one is already running.
-fn start_stoppable<T: Stoppable, E, F: FnOnce() -> Result<T, E>>(
+fn start_stoppable<T: Stoppable, F: FnOnce() -> RelayResult<T>>(
     slot: &Mutex<Option<T>>,
     make: F,
-) -> Result<(), E> {
-    if let Ok(slot) = slot.lock() {
-        if slot.as_ref().is_some_and(|s| s.is_active()) {
-            return Ok(());
-        }
+) -> RelayResult<()> {
+    let mut slot = slot
+        .lock()
+        .map_err(|_| RelayError::Engine("discovery state is locked".into()))?;
+    if slot.as_ref().is_some_and(|service| service.is_active()) {
+        return Ok(());
     }
-    let service = make()?;
-    if let Ok(mut slot) = slot.lock() {
-        *slot = Some(service);
+    if let Some(previous) = slot.take() {
+        previous.stop();
     }
+    *slot = Some(make()?);
     Ok(())
 }
 
@@ -442,6 +501,101 @@ mod tests {
         assert_eq!(inner.discovered_peers(), vec![first.clone()]);
         inner.refresh_service("host._qpw-relay._udp.local.", vec![second.clone()]);
         assert_eq!(inner.discovered_peers(), vec![second]);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn clearing_discovery_removes_all_transient_peers() {
+        let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
+        let inner = &engine.inner;
+        let peer = PeerInfo {
+            name: "usb-host".into(),
+            kind: DeviceKind::Linux,
+            addr: "192.168.42.1:48123".parse().unwrap(),
+        };
+        inner.refresh_service(crate::usb_probe::USB_PROBE_SERVICE, vec![peer.clone()]);
+        assert_eq!(inner.discovered_peers(), vec![peer]);
+        inner.clear_discovered();
+        assert!(inner.discovered_peers().is_empty());
+        engine.shutdown();
+    }
+
+    #[test]
+    fn discovery_workers_stop_and_restart_without_duplicate_slots() {
+        let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
+        let inner = &engine.inner;
+
+        inner.start_usb_scanner().expect("USB scanner starts");
+        assert!(inner
+            .usb_scanner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|scanner| scanner.is_active()));
+        // Starting an already-live scanner is idempotent, not a second worker.
+        inner
+            .start_usb_scanner()
+            .expect("second start is idempotent");
+        assert!(inner
+            .usb_scanner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|scanner| scanner.is_active()));
+        inner.stop_usb_scanner();
+        assert!(inner.usb_scanner.lock().unwrap().is_none());
+
+        inner.start_usb_scanner().expect("scanner restarts");
+        assert!(inner
+            .usb_scanner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|scanner| scanner.is_active()));
+        inner.stop_usb_scanner();
+        assert!(inner.usb_scanner.lock().unwrap().is_none());
+
+        // mDNS startup depends on the host's multicast environment. When it
+        // is available, exercise the same stop/restart contract for Browser;
+        // a sandbox that cannot create the daemon is valid for the USB-only
+        // fallback and is handled by the independent-mechanism test.
+        if inner.start_browser().is_ok() {
+            assert!(inner
+                .browser
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|browser| browser.is_running()));
+            inner
+                .start_browser()
+                .expect("second browser start is idempotent");
+            inner.stop_browser();
+            assert!(inner.browser.lock().unwrap().is_none());
+            inner.start_browser().expect("browser restarts");
+            inner.stop_browser();
+            assert!(inner.browser.lock().unwrap().is_none());
+        }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn usb_link_loss_removes_usb_peers_but_keeps_mdns_peers() {
+        let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
+        let inner = &engine.inner;
+        let mdns_peer = PeerInfo {
+            name: "wifi-host".into(),
+            kind: DeviceKind::Linux,
+            addr: "192.168.1.20:48123".parse().unwrap(),
+        };
+        let usb_peer = PeerInfo {
+            name: "usb-host".into(),
+            kind: DeviceKind::Linux,
+            addr: "192.168.42.1:48123".parse().unwrap(),
+        };
+        inner.refresh_service("wifi-host._qpw-relay._udp.local.", vec![mdns_peer.clone()]);
+        inner.refresh_service(crate::usb_probe::USB_PROBE_SERVICE, vec![usb_peer]);
+        inner.lost_peer(crate::usb_probe::USB_PROBE_SERVICE);
+        assert_eq!(inner.discovered_peers(), vec![mdns_peer]);
         engine.shutdown();
     }
 

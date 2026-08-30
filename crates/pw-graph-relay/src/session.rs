@@ -200,6 +200,20 @@ pub(crate) struct HostRecord {
     /// documented no-link fallback, which intentionally uses INADDR_ANY.
     pub bind_addr: Option<Ipv4Addr>,
     pub stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HostRecord {
+    /// Stop the accept loop and wait for its listener to be dropped. Returning
+    /// only after the join makes an immediate same-port restart deterministic
+    /// and prevents callers from being tempted to hide the race by falling
+    /// back to an ephemeral port.
+    pub(crate) fn stop(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<HostRecord> {
@@ -208,7 +222,12 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
     // transport preference when no address is pinned, so the relay is offered
     // on the link it is meant to serve.
     let bind_ip = host_bind_addr(&inner.config());
-    let listener = TcpListener::bind((bind_ip.unwrap_or(Ipv4Addr::UNSPECIFIED), port))?;
+    let bind_address = bind_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let listener = TcpListener::bind((bind_address, port)).map_err(|error| {
+        RelayError::Engine(format!(
+            "could not bind relay control port {port} on {bind_address}: {error}"
+        ))
+    })?;
     let listener_addr = listener.local_addr()?.ip();
     let bound_addr = match listener_addr {
         IpAddr::V4(addr) if !addr.is_unspecified() => Some(addr),
@@ -219,13 +238,14 @@ pub(crate) fn start_host(inner: &Arc<EngineInner>, port: u16) -> RelayResult<Hos
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let inner = Arc::clone(inner);
-    std::thread::Builder::new()
+    let worker = std::thread::Builder::new()
         .name("relay-host".into())
         .spawn(move || accept_loop(inner, listener, thread_stop, bound_addr))?;
     Ok(HostRecord {
         port: bound,
         bind_addr: bound_addr,
         stop,
+        worker: Some(worker),
     })
 }
 
@@ -240,7 +260,7 @@ fn host_bind_addr(config: &crate::EngineConfig) -> Option<Ipv4Addr> {
 pub(crate) fn stop_host(inner: &EngineInner) {
     let taken = inner.host.lock().ok().and_then(|mut host| host.take());
     if let Some(record) = taken {
-        record.stop.store(true, Ordering::Relaxed);
+        record.stop();
     }
 }
 
@@ -769,7 +789,12 @@ fn resume_peer_session(
         // The old grace watcher has exited after the generation transition.
         // Re-enter the normal grace state so a failed response does not leave
         // the session permanently marked Active without a control owner.
-        let _ = await_resume_grace(inner, &record);
+        // `finish_resume` already rotated the control generation, so the
+        // original watcher has correctly returned `Resumed` and cannot watch
+        // this new owner. Re-enter the eligible state explicitly and give one
+        // bounded replacement attempt. If no replacement arrives, tear the
+        // record down here instead of leaving an Active zombie in the map.
+        handle_failed_resume_ok(inner, &record);
         return;
     }
     let inner = Arc::clone(inner);
@@ -819,9 +844,44 @@ fn host_control_loop(
 /// Wait for a client resume to replace this control watch. Returns `true`
 /// when somebody else now owns the session (no teardown by the caller).
 fn await_resume_grace(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>) -> bool {
+    await_resume_grace_with_deadlines(inner, record, RESUME_GRACE, HANDSHAKE_TIMEOUT)
+}
+
+/// Recover from committing a new control generation before its `ResumeOk`
+/// could be delivered. This is kept as one helper so the failure path cannot
+/// accidentally leave an active-but-ownerless record in the session map.
+fn handle_failed_resume_ok(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>) -> bool {
+    handle_failed_resume_ok_with_deadlines(inner, record, RESUME_GRACE, HANDSHAKE_TIMEOUT)
+}
+
+fn handle_failed_resume_ok_with_deadlines(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    grace: Duration,
+    handshake_timeout: Duration,
+) -> bool {
+    let _ = record.mark_control_dropped();
+    if await_resume_grace_with_deadlines(inner, record, grace, handshake_timeout) {
+        true
+    } else {
+        teardown(
+            inner,
+            record.id,
+            "resumed control channel could not deliver ResumeOk".into(),
+        );
+        false
+    }
+}
+
+fn await_resume_grace_with_deadlines(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    grace: Duration,
+    handshake_timeout: Duration,
+) -> bool {
     let _ = record.mark_control_dropped();
     let generation = record.control_generation.load(Ordering::Relaxed);
-    let deadline = Instant::now() + RESUME_GRACE;
+    let deadline = Instant::now() + grace;
     let mut in_flight_deadline = None;
     loop {
         if record.stop.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
@@ -837,9 +897,9 @@ fn await_resume_grace(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>) -> 
             match record.expire_resume_grace(generation) {
                 ResumeGraceResult::Expired => return false,
                 ResumeGraceResult::Resumed => return true,
-                ResumeGraceResult::InProgress => {
+                ResumeGraceResult::InProgress { generation } => {
                     let challenge_deadline = *in_flight_deadline
-                        .get_or_insert_with(|| Instant::now() + HANDSHAKE_TIMEOUT);
+                        .get_or_insert_with(|| Instant::now() + handshake_timeout);
                     if Instant::now() >= challenge_deadline && record.abort_resume(generation) {
                         return false;
                     }
@@ -1663,6 +1723,8 @@ mod tests {
     use super::*;
     use crate::audio::{seal_datagram, AudioHeader};
     use crate::crypto::{pake_start, Side};
+    use crate::PAIRING_ATTEMPT_LIMIT;
+    use std::net::{IpAddr, TcpListener, TcpStream};
 
     fn reject_worker_spawn(
         _name: String,
@@ -1692,6 +1754,47 @@ mod tests {
             [RelayEvent::SessionLost { id: lost, reason }] if *lost == id
                 && reason.contains("could not start relay connection worker")
         ));
+    }
+
+    #[test]
+    fn abandoned_valid_usb_probes_do_not_consume_pairing_attempts() {
+        let inner = EngineInner::new(crate::EngineConfig {
+            pin: "123456".into(),
+            ..crate::EngineConfig::default()
+        });
+        let peer_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+        for _ in 0..(PAIRING_ATTEMPT_LIMIT + 2) {
+            let listener =
+                TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("probe test listener");
+            let target = listener.local_addr().expect("probe test address");
+            let server_inner = Arc::clone(&inner);
+            let client_pake = pake_start(Side::Client, "123456");
+            let client_message = hex_encode(&client_pake.message);
+            let server = std::thread::spawn(move || {
+                let (mut stream, peer) = listener.accept().expect("probe connects");
+                host_pake_exchange(
+                    &server_inner,
+                    &mut stream,
+                    peer,
+                    &client_message,
+                    "probe-host".into(),
+                )
+            });
+
+            let mut client = TcpStream::connect(target).expect("probe TCP connection");
+            assert!(matches!(
+                read_frame(&mut client),
+                Ok(ControlMessage::Challenge { .. })
+            ));
+            // A discovery probe intentionally stops here. It sent a valid
+            // SPAKE2 message and must not be treated as an incorrect PIN.
+            drop(client);
+            assert!(server.join().expect("probe worker exits").is_none());
+        }
+
+        assert!(inner.pairing_allowed(peer_ip));
+        assert!(inner.pairing_failures.lock().unwrap().is_empty());
     }
 
     fn audio_keys() -> (crate::crypto::Sealer, crate::crypto::Opener) {
@@ -1783,6 +1886,81 @@ mod tests {
         server.join().expect("resume worker exits");
         assert_eq!(record.control_generation.load(Ordering::Acquire), 2);
         assert!(!inner.session_alive(record.id));
+    }
+
+    #[test]
+    fn failed_resume_ok_has_no_ownerless_zombie_session() {
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let record = resumable_session(7_005);
+        assert!(inner.insert_session(Arc::clone(&record)));
+
+        // Model the host having committed generation 2, then losing the
+        // socket before ResumeOk reached the client. The recovery helper is
+        // the same one used by the real host resume path; zero deadlines keep
+        // this deterministic and avoid a 15-second test.
+        assert!(record.mark_control_dropped());
+        let generation = record.begin_resume().expect("resume generation 2");
+        assert_eq!(generation, 2);
+        assert!(record.finish_resume(generation));
+        assert!(matches!(
+            *record.control_state.lock().expect("control state"),
+            ControlState::Active
+        ));
+
+        assert!(!handle_failed_resume_ok_with_deadlines(
+            &inner,
+            &record,
+            Duration::ZERO,
+            Duration::ZERO,
+        ));
+        assert!(!inner.session_alive(record.id));
+        assert!(matches!(
+            inner.drain_events().as_slice(),
+            [RelayEvent::SessionLost { id, reason }]
+                if *id == record.id && reason.contains("could not deliver ResumeOk")
+        ));
+    }
+
+    #[test]
+    fn failed_resume_ok_allows_one_bounded_replacement_resume() {
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let record = resumable_session(7_006);
+        assert!(inner.insert_session(Arc::clone(&record)));
+        assert!(record.mark_control_dropped());
+        let generation = record.begin_resume().expect("resume generation 2");
+        assert!(record.finish_resume(generation));
+
+        let waiter_inner = Arc::clone(&inner);
+        let waiter_record = Arc::clone(&record);
+        let waiter = std::thread::spawn(move || {
+            handle_failed_resume_ok_with_deadlines(
+                &waiter_inner,
+                &waiter_record,
+                Duration::from_millis(250),
+                Duration::from_millis(250),
+            )
+        });
+
+        for _ in 0..1_000 {
+            if matches!(
+                *record.control_state.lock().expect("control state"),
+                ControlState::ResumeEligible { generation: 2 }
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let replacement = record.begin_resume().expect("one replacement resume");
+        assert_eq!(replacement, 3);
+        assert!(record.finish_resume(replacement));
+
+        assert!(waiter.join().expect("resume grace watcher exits"));
+        assert!(inner.session_alive(record.id));
+        assert_eq!(
+            *record.control_state.lock().expect("control state"),
+            ControlState::Active
+        );
+        teardown(&inner, record.id, "resume replacement test complete".into());
     }
 
     #[test]

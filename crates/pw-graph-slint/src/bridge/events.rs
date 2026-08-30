@@ -13,7 +13,7 @@ use super::connections::{
 };
 use super::meters::refresh_meters;
 use super::models::{shortcut_rows, sync_models};
-use super::relay::poll_relay_events;
+use super::relay::{poll_relay_events, poll_relay_usb_hotplug};
 use super::utils::volume_from_track_position;
 use super::{CanvasGeometry, LinkRow, MainWindow, MinimapNode, NodeRow, ShortcutRow};
 
@@ -35,6 +35,7 @@ pub(crate) fn pump(
     for event in pending {
         process_event(window, &mut application, event);
     }
+    poll_relay_usb_hotplug(&mut application);
     poll_relay_events(&mut application);
     if application.source.graph_dirty()
         || application.last_refresh.elapsed() >= refresh_interval(&application)

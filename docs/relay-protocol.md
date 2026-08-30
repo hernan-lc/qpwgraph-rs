@@ -20,6 +20,26 @@ Version 3 also changes the control-channel resume format. A host-wide PIN and a
 session id are not enough to resume an existing session; resume additionally
 proves possession of a secret derived from that session's original pairing.
 
+## Network transports and discovery
+
+The normal transport is a TCP control socket plus an authenticated and
+encrypted UDP audio socket. USB tether discovery is ordinary IPv4 networking
+over the active RNDIS/NCM/USB Ethernet interface: the scanner binds each probe
+to the USB address that produced its candidate and sends the current protocol
+version before accepting a host identity. A probe that disconnects after the
+challenge is an abandoned discovery handshake, not a failed PIN attempt.
+
+The desktop application defaults to control port `48123` so a directly scanned
+USB tether can find it. An SDK caller may explicitly request port `0` for an
+ephemeral listener, but that listener is not discoverable by the fixed USB
+probe and must be shared through mDNS or a manual address.
+
+ADB/USB debugging is separate from USB tether networking. ADB port forwarding
+does not transparently carry this protocol's UDP audio channel, so an ADB-only
+cable is not advertised or treated as a relay transport. A dedicated
+authenticated multiplexed ADB transport would require a separate protocol
+backend; it is not part of protocol v3's TCP+UDP transport.
+
 ## Threat model
 
 The relay is designed to be safe on a network containing untrusted devices:

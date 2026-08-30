@@ -906,6 +906,17 @@ pub trait RelayDriver {
 
     fn relay_discovery_stop(&mut self) {}
 
+    /// Forget direct USB-probe results when the tether link disappears.
+    /// Backends without relay discovery keep this as a no-op.
+    fn relay_discovery_usb_link_lost(&mut self) {}
+
+    /// Whether an active USB/RNDIS/NCM relay-capable link is currently up.
+    /// This is separate from `relay_local_links`, whose display fallback may
+    /// include a physical interface without a carrier.
+    fn relay_usb_link_present(&self) -> bool {
+        false
+    }
+
     fn relay_peers(&self) -> Vec<RelayPeerInfo> {
         Vec::new()
     }

@@ -242,16 +242,6 @@ impl WindowsAudioDriver {
         }
         match devices.handle().host_start() {
             Ok(_) => Ok(()),
-            Err(_) if config.port != 0 => {
-                // The old socket has not been released yet. Keeping the host
-                // running matters more than keeping its port, so fall back to
-                // a fresh ephemeral one; callers read the port from status.
-                config.port = 0;
-                devices.handle().update_config(config);
-                devices.handle().host_start().map(|_| ()).map_err(|error| {
-                    BackendError::native(format!("relay host restart failed: {error}"))
-                })
-            }
             Err(error) => Err(BackendError::native(format!(
                 "relay host restart failed: {error}"
             ))),
@@ -629,6 +619,18 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         if let Some(devices) = self.relay.as_ref() {
             devices.handle().discovery_stop();
         }
+    }
+
+    fn relay_discovery_usb_link_lost(&mut self) {
+        if let Some(devices) = self.relay.as_ref() {
+            devices.handle().discovery_usb_link_lost();
+        }
+    }
+
+    fn relay_usb_link_present(&self) -> bool {
+        pw_graph_relay::netlink::local_links()
+            .iter()
+            .any(|link| link.kind == pw_graph_relay::LinkKind::Usb)
     }
 
     fn relay_peers(&self) -> Vec<super::api::RelayPeerInfo> {

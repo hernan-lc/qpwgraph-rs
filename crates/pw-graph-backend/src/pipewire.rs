@@ -1386,6 +1386,18 @@ impl RelayDriver for PipewireDriver {
         }
     }
 
+    fn relay_discovery_usb_link_lost(&mut self) {
+        if let Some(set) = self.relay.as_ref() {
+            set.handle().discovery_usb_link_lost();
+        }
+    }
+
+    fn relay_usb_link_present(&self) -> bool {
+        pw_graph_relay::netlink::local_links()
+            .iter()
+            .any(|link| link.kind == pw_graph_relay::LinkKind::Usb)
+    }
+
     fn relay_peers(&self) -> Vec<RelayPeerInfo> {
         self.relay
             .as_ref()

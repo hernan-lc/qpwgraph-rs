@@ -32,6 +32,56 @@ data class HostSettings(
 
 const val DEFAULT_HOST_PORT = 48123
 
+/** Android currently exposes mono PCM on both platform audio endpoints. */
+const val ANDROID_AUDIO_CHANNELS = 1
+const val PCM16_BYTES_PER_SAMPLE = 2
+
+/** Audio geometry copied into the foreground service start request. */
+data class AudioGeometry(
+    val sampleRate: Int,
+    val channels: Int,
+    val frameMs: Int,
+)
+
+/** Select the geometry belonging to the operation being started. */
+fun audioGeometryForHostMode(
+    hostMode: Boolean,
+    client: RelaySettings,
+    host: HostSettings,
+): AudioGeometry = if (hostMode) {
+    AudioGeometry(host.sampleRate, host.channels, host.frameMs)
+} else {
+    AudioGeometry(client.sampleRate, client.channels, client.frameMs)
+}
+
+fun clientRoleEmits(role: String): Boolean = when (role.lowercase()) {
+    "emit", "both" -> true
+    else -> false
+}
+
+fun clientRoleReceives(role: String): Boolean = when (role.lowercase()) {
+    "receive", "both" -> true
+    else -> false
+}
+
+fun clientNeedsMicrophone(role: String): Boolean = clientRoleEmits(role)
+
+/** Number of interleaved PCM frames in one configured relay quantum. */
+fun audioFrameCount(sampleRate: Int, frameMs: Int): Int {
+    require(sampleRate > 0 && frameMs > 0) { "audio geometry must be positive" }
+    val frames = sampleRate.toLong() * frameMs.toLong() / 1000L
+    require(frames in 1..Int.MAX_VALUE) { "audio frame count is out of range" }
+    return frames.toInt()
+}
+
+/** Byte count expected by AudioRecord/AudioTrack for PCM16 interleaved data. */
+fun pcm16BufferBytes(frames: Int, channels: Int = ANDROID_AUDIO_CHANNELS): Int {
+    require(frames > 0 && channels > 0) { "PCM geometry must be positive" }
+    val bytes = frames.toLong() * channels.toLong() * PCM16_BYTES_PER_SAMPLE
+    require(bytes <= Int.MAX_VALUE) { "PCM buffer is too large" }
+    return bytes.toInt()
+}
+
 enum class RelayConnectionState {
     Disconnected,
     Connecting,

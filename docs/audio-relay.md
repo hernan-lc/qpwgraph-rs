@@ -17,6 +17,32 @@ shown in the panel and encoded in the QR payload, is never written to disk, and
 is retired when the host stops — so a PIN that has been displayed or
 photographed does not keep working into the next session.
 
+## USB tethering, Wi-Fi, and ADB
+
+The desktop application's discoverable host default is TCP port `48123`. The
+relay SDK still accepts `port(0)` for callers that explicitly want an ephemeral
+port, but a USB direct scan cannot discover an ephemeral listener. If
+`48123` is occupied, the application reports the bind error; choose another
+explicit port and use its address manually.
+
+`Auto` selects the best active local network link in this order: USB/RNDIS/NCM
+tether, Wi-Fi, Bluetooth PAN, then LAN. It does not silently connect to an
+untrusted peer. While discovery is active, mDNS and the bounded direct USB
+probe run independently; either one may find a host, and stopping discovery
+terminates both workers and clears transient peers.
+
+A plain USB debugging/ADB cable is not a relay network link. The current relay
+uses TCP control plus authenticated/encrypted UDP audio, so ADB detection or
+`adb reverse` alone does not provide working audio transport. Enable USB
+tethering, or use Wi-Fi/LAN/Bluetooth PAN. Pairing still requires the current
+PIN and an explicit user action; trusted-device key auto-reconnect is not
+enabled by default.
+
+On Android, the platform audio endpoints currently run mono PCM16. Android
+rejects stereo relay geometry until stereo `AudioRecord`/`AudioTrack` I/O is
+implemented, and it requests microphone permission only for Emit, Both, and
+Host modes. Receive-only playback uses no microphone permission.
+
 ## Windows
 
 On Windows, the relay uses WASAPI loopback and render streams; the panel

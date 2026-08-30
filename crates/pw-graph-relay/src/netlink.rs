@@ -11,6 +11,7 @@ use netdev::get_interfaces;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // A kind of local network link, declared in preference order: USB
@@ -49,9 +50,9 @@ pub fn classify_interface(name: &str) -> Option<LinkKind> {
     // USB tethering and USB Ethernet dongles.
     if name.starts_with("usb")
         || name.starts_with("rndis")
+        || name.starts_with("ncm")
         || name.starts_with("enx")
-        || name == "wwan0"
-        || (name.starts_with("en") && name.contains('u'))
+        || is_usb_predictable_ethernet_name(&name)
     {
         return Some(LinkKind::Usb);
     }
@@ -70,6 +71,20 @@ pub fn classify_interface(name: &str) -> Option<LinkKind> {
         return Some(LinkKind::Lan);
     }
     None
+}
+
+/// Linux predictable names for an Ethernet interface attached below a USB
+/// path commonly contain a `u` component (for example `enp0s20u1`). Keep the
+/// heuristic narrow: arbitrary `en*` names and WWAN/mobile-broadband names
+/// must remain LAN/unknown rather than being preferred as USB tether links.
+fn is_usb_predictable_ethernet_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("enp") else {
+        return false;
+    };
+    rest.split('u')
+        .nth(1)
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(|first| first.is_ascii_digit())
 }
 
 // Which transport the user asked for. `Auto` (the default) picks the best
@@ -308,6 +323,33 @@ pub fn connect_tcp(
     bind: Option<Ipv4Addr>,
     timeout: Duration,
 ) -> std::io::Result<std::net::TcpStream> {
+    connect_tcp_inner(target, bind, timeout, None)
+}
+
+/// Cancellable variant used by bounded discovery probes. A connect that is
+/// already in progress is interrupted as soon as the scanner is stopped;
+/// callers that do not need cancellation should use [`connect_tcp`].
+pub fn connect_tcp_cancellable(
+    target: SocketAddr,
+    bind: Option<Ipv4Addr>,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> std::io::Result<std::net::TcpStream> {
+    connect_tcp_inner(target, bind, timeout, Some(cancel))
+}
+
+fn connect_tcp_inner(
+    target: SocketAddr,
+    bind: Option<Ipv4Addr>,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<std::net::TcpStream> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "TCP connect cancelled",
+        ));
+    }
     let Some(local) = bind else {
         let stream = std::net::TcpStream::connect_timeout(&target, timeout)?;
         let _ = stream.set_nodelay(true);
@@ -327,7 +369,7 @@ pub fn connect_tcp(
         // Non-blocking connect is in progress (EINPROGRESS on Linux, often
         // WouldBlock elsewhere). Poll until connected or the deadline hits.
         Err(error) if is_connect_in_progress(&error) => {
-            wait_for_connect(&socket, timeout)?;
+            wait_for_connect(&socket, timeout, cancel)?;
         }
         Err(error) => return Err(error),
     }
@@ -343,9 +385,19 @@ fn is_connect_in_progress(error: &std::io::Error) -> bool {
     ) || error.raw_os_error() == Some(115) // EINPROGRESS on Linux
 }
 
-fn wait_for_connect(socket: &Socket, timeout: Duration) -> std::io::Result<()> {
+fn wait_for_connect(
+    socket: &Socket,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "TCP connect cancelled",
+            ));
+        }
         if let Some(error) = socket.take_error()? {
             return Err(error);
         }
@@ -388,7 +440,7 @@ mod tests {
             ("rndis0", LinkKind::Usb),
             ("enx00e04c680000", LinkKind::Usb),
             ("enp0s20u1", LinkKind::Usb),
-            ("wwan0", LinkKind::Usb),
+            ("ncm0", LinkKind::Usb),
             ("bnep0", LinkKind::BluetoothPan),
             ("bt-pan0", LinkKind::BluetoothPan),
             ("pan0", LinkKind::BluetoothPan),
@@ -406,7 +458,7 @@ mod tests {
     #[test]
     fn ignores_unusable_interfaces() {
         for name in [
-            "lo", "veth0", "docker0", "virbr0", "tun0", "br0", "mystery0",
+            "lo", "veth0", "docker0", "virbr0", "tun0", "br0", "mystery0", "wwan0",
         ] {
             assert_eq!(classify_interface(name), None, "interface {name}");
         }

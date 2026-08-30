@@ -53,9 +53,10 @@
 //! repository.
 
 pub use pw_graph_relay::{
-    netlink::local_links, CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink,
-    PeerInfo, RelayError, RelayEvent, RelayResult, Roles, SessionId, SessionStatus,
-    TransportPreference, FRAME_DURATIONS_MS, MAX_REALTIME_QUANTUM_SAMPLES, SAMPLE_RATES_HZ,
+    netlink::{display_links, listen_bind_addr, local_links, select_links},
+    CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink, PeerInfo, RelayError,
+    RelayEvent, RelayResult, Roles, SessionId, SessionStatus, TransportPreference,
+    FRAME_DURATIONS_MS, MAX_REALTIME_QUANTUM_SAMPLES, SAMPLE_RATES_HZ,
 };
 // `RelayHost::handle`/`RelayClient::handle` return this, so it has to be
 // nameable by callers holding one.
@@ -146,7 +147,9 @@ impl RelayHostBuilder {
         self
     }
 
-    /// TCP control port; 0 picks an ephemeral port (default).
+    /// TCP control port; 0 picks an ephemeral port. The SDK deliberately
+    /// keeps that opt-in behavior; the desktop application's discoverable
+    /// default is 48123.
     pub fn port(mut self, port: u16) -> Self {
         self.config.port = port;
         self
@@ -574,8 +577,9 @@ impl RelayBrowser {
         self.handle.discovery_start()
     }
 
-    /// Stop browsing. Peers seen so far remain readable through
-    /// [`Self::peers`] until the browser is dropped. Idempotent.
+    /// Stop browsing and clear transient peers. A subsequent start rebuilds the
+    /// snapshot from live mDNS/USB results rather than exposing stale addresses.
+    /// Idempotent.
     pub fn discovery_stop(&self) {
         self.handle.discovery_stop()
     }
@@ -659,6 +663,13 @@ mod tests {
     fn accepts_ipv4_and_ipv6_control_targets() {
         assert_eq!(resolve("127.0.0.1:48123").unwrap().port(), 48123);
         assert_eq!(resolve("[::1]:48123").unwrap().port(), 48123);
+    }
+
+    #[test]
+    fn sdk_keeps_ephemeral_port_as_an_explicit_opt_in() {
+        assert_eq!(RelayHostBuilder::new().config.port, 0);
+        assert_eq!(RelayHostBuilder::new().port(48123).config.port, 48123);
+        assert_eq!(RelayHostBuilder::new().port(0).config.port, 0);
     }
 
     #[test]

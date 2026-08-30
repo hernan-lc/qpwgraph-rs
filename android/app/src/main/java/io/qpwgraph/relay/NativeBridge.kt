@@ -29,6 +29,8 @@ internal object NativeBridge {
     external fun connect(handle: Long, target: String, pin: String): String
     external fun disconnect(handle: Long): Boolean
     external fun pollEvents(handle: Long): String
+    /** Surface a fatal platform-audio failure through the relay event queue. */
+    external fun reportError(handle: Long, message: String): Boolean
 
     /**
      * Offer `length` samples from the prefix of `samples` to the realtime
@@ -69,6 +71,8 @@ internal object NativeBridge {
     external fun hostPollEvents(handle: Long): String
     external fun hostStatus(handle: Long): String
     external fun hostDisconnectSession(handle: Long, sessionId: Long): String
+    /** Surface a fatal platform-audio failure through the host event queue. */
+    external fun hostReportError(handle: Long, message: String): Boolean
 
     /** Same contract as [pushCapture], using the running host engine. */
     external fun hostPushCapture(handle: Long, samples: FloatArray, length: Int): Int
@@ -81,6 +85,8 @@ internal object NativeBridge {
     external fun discoveryCreate(deviceName: String): String
     external fun discoveryStart(handle: Long): String
     external fun discoveryStop(handle: Long): String
+    /** Remove only direct USB-probe peers when the tether link disappears. */
+    external fun discoveryUsbLinkLost(handle: Long): Boolean
     external fun discoveryPeers(handle: Long): String
     external fun discoveryPollEvents(handle: Long): String
     external fun discoveryRelease(handle: Long)

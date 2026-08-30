@@ -120,16 +120,53 @@ impl Converter {
             out.extend_from_slice(input);
             return;
         }
-        self.map_channels(input);
-        self.resample(out);
+        self.map_channels(input, true);
+        self.resample(out, true);
+    }
+
+    /// Convert using only storage that was prepared by [`Self::with_capacity`]
+    /// (or [`Self::prepare`]). Returns `false` instead of growing either
+    /// buffer when a caller hands over a larger-than-prepared quantum.
+    ///
+    /// The PipeWire callback uses this entry point. Keeping the growth-capable
+    /// [`Self::convert`] API for ordinary callers is useful, but it must not
+    /// be reachable from a realtime path because even a no-op `reserve` is an
+    /// unnecessary allocation-policy escape hatch there.
+    pub fn try_convert_prepared(&mut self, input: &[f32], out: &mut Vec<f32>) -> bool {
+        out.clear();
+        if input.is_empty() {
+            return true;
+        }
+        let output_capacity = self.output_capacity_for(input.len());
+        if out.capacity() < output_capacity {
+            return false;
+        }
+        if self.is_identity() {
+            out.extend_from_slice(input);
+            return true;
+        }
+        let mapped_capacity = self.mapped_capacity_for(input.len());
+        if self.mapped.capacity() < mapped_capacity {
+            return false;
+        }
+        self.map_channels(input, false);
+        self.resample(out, false);
+        true
     }
 
     /// Fold or spread the input's channels into the output channel count.
     /// Only 1 and 2 are negotiable, so this is downmix, duplicate, or copy.
-    fn map_channels(&mut self, input: &[f32]) {
+    fn map_channels(&mut self, input: &[f32], allow_growth: bool) {
         let frames = input.len() / self.in_channels;
         self.mapped.clear();
-        self.mapped.reserve(frames * self.out_channels);
+        if allow_growth {
+            self.mapped.reserve(frames * self.out_channels);
+        } else {
+            debug_assert!(
+                self.mapped.capacity() >= frames * self.out_channels,
+                "prepared converter received an oversized quantum"
+            );
+        }
         if self.in_channels == self.out_channels {
             self.mapped
                 .extend_from_slice(&input[..frames * self.in_channels]);
@@ -150,13 +187,16 @@ impl Converter {
         }
     }
 
-    fn resample(&mut self, out: &mut Vec<f32>) {
+    fn resample(&mut self, out: &mut Vec<f32>, allow_growth: bool) {
         let channels = self.out_channels;
         let frames = self.mapped.len() / channels;
         if frames == 0 {
             return;
         }
         if self.in_rate == self.out_rate {
+            if !allow_growth {
+                debug_assert!(out.len() + self.mapped.len() <= out.capacity());
+            }
             out.extend_from_slice(&self.mapped[..frames * channels]);
             self.remember_last(frames);
             return;
@@ -171,6 +211,9 @@ impl Converter {
         };
         let limit = (frames - 1) as f64;
         while position <= limit {
+            if !allow_growth {
+                debug_assert!(out.len() + channels <= out.capacity());
+            }
             let base = position.floor();
             let fraction = (position - base) as f32;
             let index = base as isize;

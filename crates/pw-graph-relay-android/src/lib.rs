@@ -2,9 +2,9 @@ use jni::objects::{JClass, JFloatArray, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use pw_graph_relay_sdk::{
-    CodecKind, DeviceKind, RelayBrowser, RelayClient, RelayClientBuilder, RelayEvent, RelayHandle,
-    RelayHost, RelayHostBuilder, RelayHostPrepared, Role, SessionId, TransportPreference,
-    MAX_REALTIME_QUANTUM_SAMPLES,
+    CodecKind, DeviceKind, EngineStatus, RelayBrowser, RelayClient, RelayClientBuilder, RelayEvent,
+    RelayHandle, RelayHost, RelayHostBuilder, RelayHostPrepared, Role, SessionId,
+    TransportPreference, MAX_REALTIME_QUANTUM_SAMPLES,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -83,6 +83,19 @@ fn positive_u32(name: &str, value: jint) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("{name} is out of range"))
 }
 
+/// Android's current audio pump is deliberately mono: both AudioRecord and
+/// AudioTrack use the mono channel masks and the PCM arrays contain one sample
+/// per frame. Rejecting stereo at the native boundary prevents the negotiated
+/// relay geometry from claiming two channels that the Java worker does not
+/// actually provide.
+fn android_channels(value: jint) -> Result<u16, String> {
+    let channels = positive_u16("channels", value)?;
+    if channels != 1 {
+        return Err("Android relay audio currently supports mono only (channels=1)".into());
+    }
+    Ok(channels)
+}
+
 fn port_u16(value: jint) -> Result<u16, String> {
     if value < 0 {
         return Err("port must not be negative".into());
@@ -157,6 +170,27 @@ fn local_links_json() -> serde_json::Value {
     json!({ "type": "links", "links": links })
 }
 
+fn connected_json(session: SessionId, host_name: &str) -> serde_json::Value {
+    json!({
+        "type": "connected",
+        "session": session.0,
+        "host": host_name,
+    })
+}
+
+fn host_display_address(handle: &RelayHandle, status: &EngineStatus) -> Option<String> {
+    status
+        .host_addr
+        .or_else(|| {
+            let config = handle.config();
+            pw_graph_relay_sdk::listen_bind_addr(
+                &pw_graph_relay_sdk::display_links(),
+                config.transport,
+            )
+        })
+        .map(|address| address.to_string())
+}
+
 fn link_json(link: &pw_graph_relay_sdk::LocalLink) -> serde_json::Value {
     json!({
         "type": "usb_link",
@@ -207,7 +241,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_create(
         let codec = parse_codec(&string(&mut env, codec)?)?;
         let transport = parse_transport(&string(&mut env, transport)?)?;
         let sample_rate = positive_u32("sample rate", sample_rate)?;
-        let channels = positive_u16("channels", channels)?;
+        let channels = android_channels(channels)?;
         let frame_ms = positive_u16("frame duration", frame_ms)?;
         let client = RelayClientBuilder::new()
             .device_name(device_name)
@@ -279,8 +313,13 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
                     Some(ClientSlot::Connecting { token: current, .. }) if *current == token
                 );
                 if same_attempt {
+                    // Read the metadata while the client is still borrowed.
+                    // The SDK consumed the initial SessionEstablished event
+                    // while connecting, so JNI returns this snapshot directly
+                    // rather than waiting for a duplicate event.
+                    let metadata = connected_json(client.session(), client.host_name());
                     guard.insert(handle, ClientSlot::Connected(client));
-                    Ok(json!({"type":"connected"}))
+                    Ok(metadata)
                 } else {
                     drop(guard);
                     let _ = client.disconnect();
@@ -307,6 +346,24 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_connect(
         Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
         Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_reportError(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    message: JString<'_>,
+) -> jboolean {
+    let result = (|| -> Result<bool, String> {
+        let message = string(&mut env, message)?;
+        let Some(engine) = client_engine_handle(handle)? else {
+            return Ok(false);
+        };
+        engine.report_error(message);
+        Ok(true)
+    })();
+    u8::from(result.unwrap_or(false))
 }
 
 #[no_mangle]
@@ -473,7 +530,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostCreate(
         let transport = parse_transport(&string(&mut env, transport)?)?;
         let port = port_u16(port)?;
         let sample_rate = positive_u32("sample rate", sample_rate)?;
-        let channels = positive_u16("channels", channels)?;
+        let channels = android_channels(channels)?;
         let frame_ms = positive_u16("frame duration", frame_ms)?;
         let host = RelayHostBuilder::new()
             .device_name(device_name)
@@ -527,6 +584,8 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStart(
         match prepared.clone().start() {
             Ok(host) => {
                 let port = host.port();
+                let host_handle = host.handle();
+                let address = host_display_address(&host_handle, &host.status());
                 let mut guard = hosts()
                     .lock()
                     .map_err(|_| "host store poisoned".to_string())?;
@@ -536,7 +595,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStart(
                 );
                 if same_attempt {
                     guard.insert(handle, HostSlot::Running(RunningHost { host, prepared }));
-                    Ok(json!({"type": "host_started", "port": port}))
+                    Ok(json!({"type": "host_started", "port": port, "address": address}))
                 } else {
                     drop(guard);
                     let _ = host.handle().host_stop();
@@ -683,7 +742,7 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStatus(
             "type": "status",
             "host_active": status.host_active,
             "port": status.host_port,
-            "address": status.host_addr.map(|address| address.to_string()),
+            "address": host_display_address(&engine, &status),
             "sessions": sessions,
         }))
     })();
@@ -691,6 +750,24 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostStatus(
         Ok(value) => json_string(&mut env, value).unwrap_or(std::ptr::null_mut()),
         Err(error) => error_json(&mut env, error).unwrap_or(std::ptr::null_mut()),
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_hostReportError(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    message: JString<'_>,
+) -> jboolean {
+    let result = (|| -> Result<bool, String> {
+        let message = string(&mut env, message)?;
+        let Some(engine) = host_engine_handle(handle)? else {
+            return Ok(false);
+        };
+        engine.report_error(message);
+        Ok(true)
+    })();
+    u8::from(result.unwrap_or(false))
 }
 
 #[no_mangle]
@@ -877,6 +954,24 @@ pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryStop(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryUsbLinkLost(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jboolean {
+    let result = browsers()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&handle).map(|browser| browser.handle()))
+        .map(|engine| {
+            engine.discovery_usb_link_lost();
+            true
+        })
+        .unwrap_or(false);
+    u8::from(result)
+}
+
+#[no_mangle]
 pub extern "system" fn Java_io_qpwgraph_relay_NativeBridge_discoveryPeers(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -1006,6 +1101,29 @@ mod tests {
         assert_eq!(port_u16(0).unwrap(), 0);
         assert!(port_u16(-1).is_err());
         assert!(port_u16(65_536).is_err());
+    }
+
+    #[test]
+    fn android_audio_is_explicitly_mono_until_stereo_io_is_implemented() {
+        assert_eq!(android_channels(1).unwrap(), 1);
+        assert!(android_channels(2).is_err());
+    }
+
+    #[test]
+    fn connected_response_contains_the_consumed_session_metadata() {
+        let value = connected_json(SessionId(42), "studio-pc");
+        assert_eq!(
+            value.get("type").and_then(|value| value.as_str()),
+            Some("connected")
+        );
+        assert_eq!(
+            value.get("session").and_then(|value| value.as_u64()),
+            Some(42)
+        );
+        assert_eq!(
+            value.get("host").and_then(|value| value.as_str()),
+            Some("studio-pc")
+        );
     }
 
     #[test]

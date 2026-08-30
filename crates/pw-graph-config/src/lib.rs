@@ -166,7 +166,11 @@ impl Default for AppConfig {
             effects: Vec::new(),
             relay_device_name: "qpwgraph-rs".into(),
             relay_host_pin: String::new(),
-            relay_host_port: 0,
+            // The desktop application participates in direct USB discovery.
+            // Keep its application default stable; the relay SDK still
+            // accepts port 0 when an embedding application explicitly asks
+            // the OS for an ephemeral port.
+            relay_host_port: 48123,
             relay_client_target: String::new(),
             relay_client_pin: String::new(),
             relay_role: "both".into(),
@@ -232,12 +236,14 @@ mod tests {
         // every other install also has.
         assert!(AppConfig::default().relay_host_pin.is_empty());
         assert!(AppConfig::default().relay_client_pin.is_empty());
+        assert_eq!(AppConfig::default().relay_host_port, 48123);
         let directory =
             std::env::temp_dir().join(format!("pw-graph-config-{}", std::process::id()));
         let path = directory.join("config.toml");
         let expected = AppConfig {
             relay_device_name: "studio-pc".into(),
             relay_host_pin: String::new(),
+            relay_host_port: 0,
             relay_client_target: "192.168.1.20:48123".into(),
             relay_capture_endpoint_id: Some("capture-endpoint".into()),
             relay_playback_endpoint_id: Some("playback-endpoint".into()),

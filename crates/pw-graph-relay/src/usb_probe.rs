@@ -17,9 +17,10 @@ use crate::protocol::{
     read_frame, write_frame, ControlMessage, DeviceKind, Roles, PROTOCOL_VERSION,
 };
 use crate::{EngineInner, PeerInfo, RelayError, RelayResult};
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The fixed relay control port recommended for manual USB setups, probed by
@@ -29,8 +30,20 @@ pub const DEFAULT_PROBE_PORT: u16 = 48123;
 /// Do not enumerate subnets larger than this (USB tether links are /24).
 const MAX_CANDIDATES: u32 = 1024;
 
-/// How many addresses are probed concurrently.
-const PROBE_BATCH: usize = 32;
+/// The scanner never creates more than this many probe workers at once.
+const PROBE_WORKERS: usize = 16;
+
+/// Bound the total work even when a caller supplies several ports.
+const MAX_SCAN_TARGETS: usize = MAX_CANDIDATES as usize * 4;
+
+/// Addresses commonly used as the phone/desktop side of a tether subnet.
+const PRIORITY_OFFSETS: [u32; 3] = [1, 2, 254];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ProbeTarget {
+    target: SocketAddr,
+    bind_addr: Ipv4Addr,
+}
 
 /// Host addresses worth checking on a USB link: every host address in the
 /// subnet except the local ones, capped at [`MAX_CANDIDATES`].
@@ -48,8 +61,29 @@ pub fn candidate_hosts(link: &LocalLink, local_addrs: &[Ipv4Addr]) -> Vec<Ipv4Ad
 
 /// Probe one address:port for a relay host. Returns the peer when the port
 /// answers the control handshake with a challenge.
-pub fn probe_target(target: SocketAddr, timeout: Duration) -> Option<PeerInfo> {
-    let mut stream = crate::netlink::connect_tcp(target, None, timeout).ok()?;
+pub fn probe_target(
+    target: SocketAddr,
+    bind_addr: Option<Ipv4Addr>,
+    timeout: Duration,
+) -> Option<PeerInfo> {
+    probe_target_with_cancel(target, bind_addr, timeout, None)
+}
+
+fn probe_target_with_cancel(
+    target: SocketAddr,
+    bind_addr: Option<Ipv4Addr>,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Option<PeerInfo> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return None;
+    }
+    let mut stream = match cancel {
+        Some(cancel) => crate::netlink::connect_tcp_cancellable(target, bind_addr, timeout, cancel),
+        None => crate::netlink::connect_tcp(target, bind_addr, timeout),
+    }
+    .ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
     stream.set_read_timeout(Some(timeout)).ok()?;
     // A well-formed SPAKE2 message even though the probe never pairs: a
     // malformed one would count against the host's pairing-attempt budget and
@@ -66,7 +100,11 @@ pub fn probe_target(target: SocketAddr, timeout: Duration) -> Option<PeerInfo> {
     };
     write_frame(&mut stream, &hello).ok()?;
     match read_frame(&mut stream) {
-        Ok(ControlMessage::Challenge { host_name, .. }) => Some(PeerInfo {
+        Ok(ControlMessage::Challenge {
+            protocol,
+            host_name,
+            ..
+        }) if protocol == PROTOCOL_VERSION as u32 => Some(PeerInfo {
             name: if host_name.trim().is_empty() {
                 format!("USB {}", target.ip())
             } else {
@@ -79,43 +117,125 @@ pub fn probe_target(target: SocketAddr, timeout: Duration) -> Option<PeerInfo> {
     }
 }
 
-/// Scan every USB tether link for relay hosts listening on `ports`.
-///
-/// Candidates are probed concurrently in small batches; the whole scan is
-/// bounded by `timeout` per candidate so a /24 subnet stays fast enough to
-/// repeat while discovery runs.
-pub fn probe_usb_hosts(ports: &[u16], timeout: Duration) -> Vec<PeerInfo> {
-    let links = local_links();
-    let local_addrs: Vec<Ipv4Addr> = links.iter().map(|link| link.addr).collect();
-    let mut candidates: Vec<SocketAddr> = Vec::new();
-    for link in links.iter().filter(|link| link.kind == LinkKind::Usb) {
-        for addr in candidate_hosts(link, &local_addrs) {
-            for port in ports {
-                candidates.push(SocketAddr::from((addr, *port)));
-            }
+fn add_probe_targets(
+    output: &mut Vec<ProbeTarget>,
+    seen: &mut HashSet<ProbeTarget>,
+    addr: Ipv4Addr,
+    bind_addr: Ipv4Addr,
+    ports: &[u16],
+) {
+    for port in ports.iter().copied().filter(|port| *port != 0) {
+        if output.len() >= MAX_SCAN_TARGETS {
+            return;
+        }
+        let candidate = ProbeTarget {
+            target: SocketAddr::from((addr, port)),
+            bind_addr,
+        };
+        if seen.insert(candidate) {
+            output.push(candidate);
         }
     }
+}
 
-    let mut found = Vec::new();
-    for batch in candidates.chunks(PROBE_BATCH) {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|target| {
-                    let target = *target;
-                    scope.spawn(move || probe_target(target, timeout))
-                })
-                .collect();
-            for handle in handles {
-                if let Ok(Some(peer)) = handle.join() {
-                    found.push(peer);
+/// Build a bounded, ordered list of USB probe targets. Previously successful
+/// addresses and the usual tether peer addresses are tried before the full
+/// subnet. Every target carries the exact local USB address that produced it,
+/// preventing the OS from choosing a VPN/Wi-Fi route for an overlapping subnet.
+fn probe_targets(
+    links: &[LocalLink],
+    local_addrs: &[Ipv4Addr],
+    ports: &[u16],
+    recent: &[SocketAddr],
+) -> Vec<ProbeTarget> {
+    let mut output = Vec::new();
+    let mut seen = HashSet::new();
+    for link in links.iter().filter(|link| link.kind == LinkKind::Usb) {
+        for target in recent {
+            let SocketAddr::V4(target) = target else {
+                continue;
+            };
+            if target.port() != 0 && ports.contains(&target.port()) && link.contains(*target.ip()) {
+                add_probe_targets(
+                    &mut output,
+                    &mut seen,
+                    *target.ip(),
+                    link.addr,
+                    &[target.port()],
+                );
+            }
+        }
+
+        let network = u32::from(link.addr) & u32::from(link.netmask);
+        let size = !u32::from(link.netmask);
+        if size == u32::MAX || size + 1 > MAX_CANDIDATES {
+            continue;
+        }
+        for offset in PRIORITY_OFFSETS {
+            if offset < size {
+                let addr = Ipv4Addr::from(network + offset);
+                if !local_addrs.contains(&addr) {
+                    add_probe_targets(&mut output, &mut seen, addr, link.addr, ports);
                 }
             }
-        });
+        }
+        for addr in candidate_hosts(link, local_addrs) {
+            add_probe_targets(&mut output, &mut seen, addr, link.addr, ports);
+        }
     }
+    output
+}
+
+fn probe_candidates(
+    candidates: &[ProbeTarget],
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Vec<PeerInfo> {
+    if candidates.is_empty() || cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return Vec::new();
+    }
+    let next = AtomicUsize::new(0);
+    let found = Mutex::new(Vec::new());
+    let workers = PROBE_WORKERS.min(candidates.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(candidate) = candidates.get(index).copied() else {
+                    break;
+                };
+                if let Some(peer) = probe_target_with_cancel(
+                    candidate.target,
+                    Some(candidate.bind_addr),
+                    timeout,
+                    cancel,
+                ) {
+                    if let Ok(mut found) = found.lock() {
+                        found.push(peer);
+                    }
+                }
+            });
+        }
+    });
+    let mut found = found.into_inner().unwrap_or_default();
     found.sort_by_key(|peer| peer.addr);
     found.dedup_by(|a, b| a.addr == b.addr);
     found
+}
+
+/// Scan every USB tether link for relay hosts listening on `ports`.
+///
+/// Candidates are probed concurrently by a fixed-size worker pool; the whole
+/// scan is bounded by `timeout` per candidate so a /24 subnet stays fast
+/// enough to repeat while discovery runs.
+pub fn probe_usb_hosts(ports: &[u16], timeout: Duration) -> Vec<PeerInfo> {
+    let links = local_links();
+    let local_addrs: Vec<Ipv4Addr> = links.iter().map(|link| link.addr).collect();
+    let candidates = probe_targets(&links, &local_addrs, ports, &[]);
+    probe_candidates(&candidates, timeout, None)
 }
 
 /// How often discovery rescans USB subnets while active.
@@ -128,22 +248,37 @@ const SCAN_TARGET_TIMEOUT: Duration = Duration::from_millis(250);
 /// mDNS browser uses, so they surface through the usual discovery events.
 pub(crate) struct UsbScanner {
     stop: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl UsbScanner {
     pub(crate) fn start(inner: &Arc<EngineInner>) -> RelayResult<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
+        let thread_active = Arc::clone(&active);
         let inner = Arc::clone(inner);
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("relay-usb-scan".into())
-            .spawn(move || scan_loop(&inner, thread_stop))
+            .spawn(move || scan_loop(&inner, thread_stop, thread_active))
             .map_err(RelayError::Io)?;
-        Ok(Self { stop })
+        Ok(Self {
+            stop,
+            active,
+            worker: Some(worker),
+        })
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        !self.stop.load(Ordering::Relaxed)
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -151,14 +286,23 @@ impl UsbScanner {
 /// any mDNS fullname, so probed and advertised peers never collide.
 pub(crate) const USB_PROBE_SERVICE: &str = "usb-probe._qpw-relay._udp.local.";
 
-fn scan_loop(inner: &Arc<EngineInner>, stop: Arc<AtomicBool>) {
+fn scan_loop(inner: &Arc<EngineInner>, stop: Arc<AtomicBool>, active: Arc<AtomicBool>) {
+    let mut recent = Vec::new();
     loop {
         if !inner.running.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
             break;
         }
-        let peers = probe_usb_hosts(&[DEFAULT_PROBE_PORT], SCAN_TARGET_TIMEOUT);
+        let peers = {
+            let links = local_links();
+            let local_addrs: Vec<Ipv4Addr> = links.iter().map(|link| link.addr).collect();
+            let candidates = probe_targets(&links, &local_addrs, &[DEFAULT_PROBE_PORT], &recent);
+            probe_candidates(&candidates, SCAN_TARGET_TIMEOUT, Some(&stop))
+        };
         if !stop.load(Ordering::Relaxed) && inner.running.load(Ordering::Relaxed) {
+            recent = peers.iter().map(|peer| peer.addr).take(16).collect();
             inner.refresh_service(USB_PROBE_SERVICE, peers);
+        } else {
+            recent.clear();
         }
         // Sleep in small slices so shutdown stays responsive.
         let mut waited = Duration::ZERO;
@@ -171,6 +315,7 @@ fn scan_loop(inner: &Arc<EngineInner>, stop: Arc<AtomicBool>) {
         }
     }
     inner.refresh_service(USB_PROBE_SERVICE, Vec::new());
+    active.store(false, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -213,7 +358,8 @@ mod tests {
         // A listener that accepts but never speaks the protocol is not a host.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let probe = std::thread::spawn(move || probe_target(addr, Duration::from_millis(300)));
+        let probe =
+            std::thread::spawn(move || probe_target(addr, None, Duration::from_millis(300)));
         let (stream, _) = listener.accept().unwrap();
         drop(stream);
         assert_eq!(probe.join().unwrap(), None);
@@ -241,9 +387,51 @@ mod tests {
             let mut sink = [0u8; 1];
             let _ = stream.read(&mut sink);
         });
-        let peer = probe_target(addr, Duration::from_secs(2)).unwrap();
+        let peer = probe_target(addr, None, Duration::from_secs(2)).unwrap();
         assert_eq!(peer.name, "phone");
         assert_eq!(peer.addr, addr);
         host.join().unwrap();
+    }
+
+    #[test]
+    fn probe_rejects_a_challenge_for_another_protocol_version() {
+        use crate::protocol::ControlMessage;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_frame(&mut stream).unwrap();
+            write_frame(
+                &mut stream,
+                &ControlMessage::Challenge {
+                    protocol: PROTOCOL_VERSION as u32 + 1,
+                    pake: "00".into(),
+                    host_name: "not-relay-v3".into(),
+                },
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            probe_target(addr, None, Duration::from_secs(2)),
+            None,
+            "an incompatible service must not appear as a relay peer"
+        );
+        host.join().unwrap();
+    }
+
+    #[test]
+    fn usb_targets_keep_the_link_that_generated_them_as_the_bind_address() {
+        let link = usb_link([192, 168, 42, 129]);
+        let recent = [SocketAddr::from(([192, 168, 42, 7], DEFAULT_PROBE_PORT))];
+        let targets = probe_targets(
+            std::slice::from_ref(&link),
+            &[link.addr],
+            &[DEFAULT_PROBE_PORT],
+            &recent,
+        );
+        assert_eq!(targets[0].target, recent[0]);
+        assert_eq!(targets[0].bind_addr, link.addr);
+        assert!(targets.iter().all(|target| target.bind_addr == link.addr));
     }
 }
