@@ -284,16 +284,6 @@ export component MainWindow inherits Window {
         background: #191d24;
         property <length> relay-sidebar-width: root.show-relay ? min(380px, max(320px, parent.width * 0.38)) : 0px;
 
-        LineEdit {
-            x: 16px;
-            y: 12px;
-            width: min(280px, parent.width - 32px);
-            height: 30px;
-            placeholder-text: UiI18n.localized("search.placeholder");
-            text <=> root.search-text;
-            z: 20;
-        }
-
         public function focus-shortcut-search() {
             shortcut-dialog.focus-search();
         }
@@ -397,6 +387,15 @@ export component MainWindow inherits Window {
                 audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
                 collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
             }
+        }
+
+        LineEdit {
+            x: 16px;
+            y: 12px;
+            width: min(280px, parent.width - workspace.relay-sidebar-width - 32px);
+            height: 30px;
+            placeholder-text: UiI18n.localized("search.placeholder");
+            text <=> root.search-text;
         }
 
         if root.show-relay: RelayPanel {

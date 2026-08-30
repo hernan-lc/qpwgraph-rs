@@ -67,6 +67,7 @@ export component RelayPanel inherits Rectangle {
             spacing: 9px;
 
             if root.relay-tab == 0: FormSection {
+                width: parent.width;
                 VerticalLayout {
                     spacing: 8px;
                     LineEdit { height: 31px; placeholder-text: UiI18n.localized("relay.target"); text <=> root.relay-client-target; }
@@ -116,33 +117,39 @@ export component RelayPanel inherits Rectangle {
             }
 
             if root.relay-tab == 1: FormSection {
+                width: parent.width;
                 title: UiI18n.localized("relay.title");
                 summary: UiI18n.localized("relay.emitter_hint");
 
                 if root.relay-windows-endpoints: FormRow {
+                    width: parent.width;
                     label: UiI18n.localized("relay.capture_endpoint");
                     ComboBox { width: parent.width; height: 31px; model: root.relay-endpoint-options; current-index <=> root.relay-capture-endpoint-index; }
                 }
                 if root.relay-windows-endpoints: FormRow {
+                    width: parent.width;
                     label: UiI18n.localized("relay.playback_endpoint");
                     ComboBox { width: parent.width; height: 31px; model: root.relay-endpoint-options; current-index <=> root.relay-playback-endpoint-index; }
                 }
                 if root.relay-windows-endpoints: Text {
+                    width: parent.width;
                     min-height: 28px;
                     text: UiI18n.localized("relay.windows_endpoint_help");
                     color: #8393a0;
                     font-size: 8px * UiTheme.panel-scale;
                     wrap: word-wrap;
                 }
-                FormRow { label: UiI18n.localized("relay.device_name"); LineEdit { width: parent.width; height: 31px; text <=> root.relay-device-name; } }
-                FormRow { label: UiI18n.localized("relay.pin"); LineEdit { width: parent.width; height: 31px; text <=> root.relay-host-pin; } }
-                FormRow { label: UiI18n.localized("relay.port"); LineEdit { width: parent.width; height: 31px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; } }
+                FormRow { width: parent.width; label: UiI18n.localized("relay.device_name"); LineEdit { width: parent.width; height: 31px; text <=> root.relay-device-name; } }
+                FormRow { width: parent.width; label: UiI18n.localized("relay.pin"); LineEdit { width: parent.width; height: 31px; text <=> root.relay-host-pin; } }
+                FormRow { width: parent.width; label: UiI18n.localized("relay.port"); LineEdit { width: parent.width; height: 31px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; } }
                 HorizontalLayout {
+                    width: parent.width;
                     height: 31px; spacing: 8px;
                     ActionButton { horizontal-stretch: 1; text: root.relay-host-active ? UiI18n.localized("relay.stop_host") : UiI18n.localized("relay.start_host"); enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
                     ActionButton { horizontal-stretch: 1; text: UiI18n.localized("relay.show_qr"); enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
                 }
                 Text {
+                    width: parent.width;
                     min-height: 28px;
                     text: root.relay-host-active ? UiI18n.formatted-one("relay.listening", root.relay-host-endpoint) : UiI18n.localized("relay.host_stopped");
                     color: root.relay-host-active ? #57c785 : #aebdca;
@@ -150,6 +157,7 @@ export component RelayPanel inherits Rectangle {
                     wrap: word-wrap;
                 }
                 Text {
+                    width: parent.width;
                     min-height: 32px;
                     text: root.relay-host-active ? UiI18n.formatted-one("relay.qr_pin", root.relay-host-pin) : UiI18n.localized("relay.advanced_help");
                     color: #aebdca;
@@ -159,16 +167,19 @@ export component RelayPanel inherits Rectangle {
             }
 
             if root.relay-tab == 2: FormSection {
+                width: parent.width;
                 title: UiI18n.localized("relay.advanced");
                 FormRow {
+                    width: parent.width;
                     label: UiI18n.localized("relay.role");
                     ComboBox { width: parent.width; height: 31px; model: [UiI18n.localized("relay.role_emit"), UiI18n.localized("relay.role_receive"), UiI18n.localized("relay.role_both")]; current-index <=> root.relay-role-index; }
                 }
-                FormRow { label: UiI18n.localized("relay.codec"); ComboBox { width: parent.width; height: 31px; model: root.relay-codec-options; current-index <=> root.relay-codec-index; } }
-                FormRow { label: UiI18n.localized("relay.frame_ms"); ComboBox { width: parent.width; height: 31px; model: root.relay-frame-options; current-index <=> root.relay-frame-index; } }
-                FormRow { label: UiI18n.localized("relay.transport"); ComboBox { width: parent.width; height: 31px; model: root.relay-transport-options; current-index <=> root.relay-transport-index; } }
-                CheckBox { height: 31px; text: UiI18n.localized("relay.auto_connect_trusted"); checked <=> root.relay-auto-connect-trusted; }
+                FormRow { width: parent.width; label: UiI18n.localized("relay.codec"); ComboBox { width: parent.width; height: 31px; model: root.relay-codec-options; current-index <=> root.relay-codec-index; } }
+                FormRow { width: parent.width; label: UiI18n.localized("relay.frame_ms"); ComboBox { width: parent.width; height: 31px; model: root.relay-frame-options; current-index <=> root.relay-frame-index; } }
+                FormRow { width: parent.width; label: UiI18n.localized("relay.transport"); ComboBox { width: parent.width; height: 31px; model: root.relay-transport-options; current-index <=> root.relay-transport-index; } }
+                CheckBox { width: parent.width; height: 31px; text: UiI18n.localized("relay.auto_connect_trusted"); checked <=> root.relay-auto-connect-trusted; }
                 Text {
+                    width: parent.width;
                     min-height: 44px;
                     text: UiI18n.localized("relay.auto_connect_trusted_help");
                     color: #aebdca;
@@ -176,6 +187,7 @@ export component RelayPanel inherits Rectangle {
                     wrap: word-wrap;
                 }
                 Text {
+                    width: parent.width;
                     min-height: 44px;
                     text: UiI18n.localized("relay.advanced_help");
                     color: #aebdca;
