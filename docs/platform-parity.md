@@ -4,6 +4,21 @@ What qpwgraph-rs can do on each backend, what it cannot, and which gaps are
 worth closing. This is a status document, not a promise: entries change as the
 backends do.
 
+## At a glance
+
+| Feature | Linux | Windows |
+| --- | --- | --- |
+| Audio devices | PipeWire | Core Audio |
+| Audio sessions | PipeWire nodes | Core Audio sessions |
+| Arbitrary patch routing | Yes | No for Core Audio |
+| Volume, mute, and metering | Yes | Yes, peak metering where available |
+| Effects | Yes | No arbitrary insertion; standalone future |
+| MIDI routing | ALSA Sequencer | WinMM, one output per input |
+| Relay | Yes, virtual nodes | Yes, endpoint loopback/render; no microphone emulation |
+
+The rest of this document breaks each of those rows down and says which of the
+differences are backlog items and which are facts about the operating system.
+
 ## How to read the categories
 
 | Category | Meaning |
