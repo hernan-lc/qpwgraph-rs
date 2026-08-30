@@ -9,15 +9,18 @@ component SettingDescription inherits Rectangle {
     in property <string> help;
     in property <length> help-height: 27px;
     in property <length> content-width: 240px;
+    in property <length> icon-y: 19px;
+    in property <length> title-y: 5px;
+    in property <length> help-y: 26px;
 
-    Image { x: 4px; y: 19px; width: 16px; height: 16px; source: root.icon; opacity: 0.76; }
+    Image { x: 4px; y: root.icon-y; width: 16px; height: 16px; source: root.icon; opacity: 0.76; }
     Text {
-        x: 32px; y: 5px; width: root.content-width; height: 18px;
+        x: 32px; y: root.title-y; width: root.content-width; height: 18px;
         text: root.title; color: #e6edf2; font-size: 11px * UiTheme.panel-scale;
         vertical-alignment: center; overflow: elide;
     }
     Text {
-        x: 32px; y: 26px; width: root.content-width; height: root.help-height;
+        x: 32px; y: root.help-y; width: root.content-width; height: root.help-height;
         text: root.help; color: #8393a0; font-size: 8px * UiTheme.panel-scale;
         wrap: word-wrap; overflow: elide;
     }
@@ -69,6 +72,9 @@ export component SwitchSettingRow inherits Rectangle {
         help: root.help;
         content-width: parent.width - 84px;
         help-height: 19px;
+        icon-y: 17px;
+        title-y: 6px;
+        help-y: 27px;
     }
     CheckBox { x: parent.width - 37px; y: 18px; width: 22px; checked <=> root.checked; }
     touch := TouchArea { x: 0px; y: 0px; width: parent.width - 48px; height: parent.height; clicked => { root.checked = !root.checked; } }
@@ -86,6 +92,7 @@ export component SelectSettingRow inherits Rectangle {
         icon: root.icon;
         title: root.title;
         help: root.help;
+        content-width: parent.width - 246px;
     }
     ComboBox { x: parent.width - 204px; y: 13px; width: 194px; model: root.options; current-index <=> root.current-index; }
 }

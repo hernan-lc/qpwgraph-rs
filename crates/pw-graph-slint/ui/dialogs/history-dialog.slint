@@ -1,21 +1,13 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { UiTheme } from "../foundation/theme.slint";
 import { UiI18n } from "../foundation/i18n.slint";
-import { AppButton } from "../components/button.slint";
 import { HistoryRow } from "../foundation/structs.slint";
+import { DialogShell } from "../components/dialog-shell.slint";
 
-export component HistoryDialog inherits Rectangle {
+export component HistoryDialog inherits DialogShell {
+    title: UiI18n.localized("history.title");
     in property <[HistoryRow]> undo-history;
     in property <[HistoryRow]> redo-history;
-    callback close();
-
-    background: #222a33fa;
-    border-color: #617080;
-    border-width: 1px;
-    border-radius: 8px;
-
-    Text { x: 20px; y: 18px; text: UiI18n.localized("history.title"); color: #f0f4f7; font-size: 19px * UiTheme.ui-scale; }
-    AppButton { x: parent.width - 47px; y: 14px; width: 30px; text: "×"; text-scale: UiTheme.ui-scale; clicked => { root.close(); } }
     Text { x: 20px; y: 62px; width: parent.width - 40px; text: UiI18n.localized("history.hint"); color: #aebdca; font-size: 12px * UiTheme.panel-scale; wrap: word-wrap; }
     Text { x: 20px; y: 103px; text: UiI18n.localized("history.undo"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
     ScrollView { x: 20px; y: 124px; width: parent.width / 2 - 28px; height: parent.height - 148px;

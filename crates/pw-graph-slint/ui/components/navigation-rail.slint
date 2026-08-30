@@ -1,5 +1,6 @@
 // RailButton and the hover plumbing were duplicated for every entry in MainWindow.
 // Centralizing here keeps the hover-changed contract in one place.
+import { AppTokens } from "../foundation/tokens.slint";
 export component RailButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
@@ -14,7 +15,7 @@ export component RailButton inherits Rectangle {
 
     height: 42px;
     background: root.active ? #245777 : touch.has-hover && root.enabled ? #2d3844 : transparent;
-    border-radius: 5px;
+    border-radius: AppTokens.radius-md;
 
     Image {
         x: 11px;
@@ -34,4 +35,12 @@ export component RailButton inherits Rectangle {
     changed hovered => {
         root.hover-changed(root.hovered, root.label, root.absolute-position.y);
     }
+}
+
+// DRY wrapper: every rail entry is 42px wide and forwards hover to the
+// parent's rail-hover helper. Using this instead of raw RailButton removes
+// the per-entry `width: 42px` repetition; the data-driven rail (see
+// main.slint) owns the single `hover-changed => root.rail-hover(...)` forwarder.
+export component RailActionButton inherits RailButton {
+    width: 42px;
 }

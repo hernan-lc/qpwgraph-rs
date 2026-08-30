@@ -15,7 +15,7 @@ import {
     UiTheme,
     UiI18n,
 } from "parity-components.slint";
-import { RailButton } from "components/navigation-rail.slint";
+import { RailButton, RailActionButton } from "components/navigation-rail.slint";
 import { RailTooltip, ConnectionToast } from "components/toast.slint";
 import { AppButton, ActionButton } from "components/button.slint";
 import { HistoryDialog } from "dialogs/history-dialog.slint";
@@ -217,29 +217,25 @@ export component MainWindow inherits Window {
                 spacing: 6px;
 
                 Rectangle { width: 42px; height: 2px; background: transparent; }
-                preferences_button := RailButton {
-                    width: 42px;
+                preferences_button := RailActionButton {
                     icon: @image-url("../../../assets/icons/settings.svg");
                     label: UiI18n.localized("nav.preferences"); active: root.show-preferences;
                     clicked => { root.action("preferences"); }
                     hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
-                appearance_button := RailButton {
-                    width: 42px;
+                appearance_button := RailActionButton {
                     icon: @image-url("../../../assets/icons/appearance.svg");
                     label: UiI18n.localized("inspector.node_appearance"); active: root.show-node-editor;
                     clicked => { root.action("node-appearance"); }
                     hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
-                relay_button := RailButton {
-                    width: 42px;
+                relay_button := RailActionButton {
                     icon: @image-url("../../../assets/icons/relay.svg");
                     label: UiI18n.localized("nav.relay"); active: root.show-relay;
                     clicked => { root.action("relay"); }
                     hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
                 }
-                shortcuts_button := RailButton {
-                    width: 42px;
+                shortcuts_button := RailActionButton {
                     icon: @image-url("../../../assets/icons/help.svg");
                     label: UiI18n.localized("nav.shortcuts"); active: root.show-shortcuts;
                     clicked => { root.action("shortcuts"); }
@@ -248,24 +244,24 @@ export component MainWindow inherits Window {
 
                 Rectangle { width: 52px; x: -5px; height: 1px; background: #35414d; }
                 Rectangle { width: 42px; height: 7px; background: transparent; }
-                minimap_button := RailButton { width: 42px; icon: @image-url("../../../assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                minimap_button := RailActionButton { icon: @image-url("../../../assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
                 if root.show-common-actions : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
                 if root.show-common-actions && root.has-selected-link : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/disconnect_link.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
                 if root.show-common-actions && root.links.length > 0 : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/disconnect_all.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
                 if root.show-common-actions && root.has-selected-node : RailButton { enabled: root.connections-available; width: 42px; icon: @image-url("../../../assets/icons/disconnect_node.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/snapshot.svg"); label: UiI18n.localized("toolbar.snapshot"); clicked => { root.action("snapshot-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailButton { width: 42px; icon: @image-url("../../../assets/icons/activate.svg"); label: UiI18n.localized("toolbar.activate"); active: root.patchbay-activated; clicked => { root.action("activate-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailButton { width: 42px; icon: @image-url("../../../assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/snapshot.svg"); label: UiI18n.localized("toolbar.snapshot"); clicked => { root.action("snapshot-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/activate.svg"); label: UiI18n.localized("toolbar.activate"); active: root.patchbay-activated; clicked => { root.action("activate-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
 
                 Rectangle {
                     width: 42px;

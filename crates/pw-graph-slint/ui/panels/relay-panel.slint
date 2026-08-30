@@ -1,7 +1,7 @@
 import { CheckBox, ComboBox, LineEdit, ScrollView, VerticalBox } from "std-widgets.slint";
 import { UiTheme } from "../foundation/theme.slint";
 import { UiI18n } from "../foundation/i18n.slint";
-import { AppButton } from "../components/button.slint";
+import { ActionButton } from "../components/button.slint";
 import { RelayRow } from "../foundation/structs.slint";
 
 export component RelayPanel inherits Rectangle {
@@ -36,11 +36,11 @@ export component RelayPanel inherits Rectangle {
     border-width: 1px;
 
     Text { x: 18px; y: 14px; text: UiI18n.localized("relay.title"); color: #f0f4f7; font-size: 18px * UiTheme.ui-scale; }
-    AppButton { x: parent.width - 47px; y: 12px; width: 30px; text: "×"; text-scale: UiTheme.ui-scale; clicked => { root.close(); } }
+    ActionButton { x: parent.width - 47px; y: 12px; width: 30px; text: "×"; clicked => { root.close(); } }
     Rectangle { x: 16px; y: 49px; width: parent.width - 32px; height: 1px; background: #3d4a56; }
-    AppButton { x: 16px; y: 62px; width: 110px; text: UiI18n.localized("relay.tab_connections"); selected: root.relay-tab == 0; text-scale: UiTheme.ui-scale; clicked => { root.relay-tab = 0; } }
-    AppButton { x: 134px; y: 62px; width: 80px; text: UiI18n.localized("relay.tab_host"); selected: root.relay-tab == 1; text-scale: UiTheme.ui-scale; clicked => { root.relay-tab = 1; } }
-    AppButton { x: 222px; y: 62px; width: 80px; text: UiI18n.localized("relay.advanced"); selected: root.relay-tab == 2; text-scale: UiTheme.ui-scale; clicked => { root.relay-tab = 2; } }
+    ActionButton { x: 16px; y: 62px; width: 110px; text: UiI18n.localized("relay.tab_connections"); selected: root.relay-tab == 0; clicked => { root.relay-tab = 0; } }
+    ActionButton { x: 134px; y: 62px; width: 80px; text: UiI18n.localized("relay.tab_host"); selected: root.relay-tab == 1; clicked => { root.relay-tab = 1; } }
+    ActionButton { x: 222px; y: 62px; width: 80px; text: UiI18n.localized("relay.advanced"); selected: root.relay-tab == 2; clicked => { root.relay-tab = 2; } }
 
     if root.relay-tab == 0: ScrollView {
         x: 16px; y: 106px; width: parent.width - 32px; height: parent.height - 124px;
@@ -50,7 +50,7 @@ export component RelayPanel inherits Rectangle {
                 height: 82px; background: #29323c; border-color: #40505f; border-width: 1px; border-radius: 5px;
                 LineEdit { x: 8px; y: 8px; width: parent.width - 112px; height: 29px; placeholder-text: UiI18n.localized("relay.target"); text <=> root.relay-client-target; }
                 LineEdit { x: 8px; y: 45px; width: parent.width - 200px; height: 29px; placeholder-text: UiI18n.localized("relay.pin"); text <=> root.relay-client-pin; }
-                AppButton { x: parent.width - 96px; y: 27px; width: 82px; text: UiI18n.localized("relay.connect"); text-scale: UiTheme.ui-scale; enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
+                ActionButton { x: parent.width - 96px; y: 27px; width: 82px; text: UiI18n.localized("relay.connect"); enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
             }
             Text { text: UiI18n.localized("relay.group_available"); color: #aebdca; font-size: 11px * UiTheme.panel-scale; }
             for row in root.relay-rows: Rectangle {
@@ -59,10 +59,10 @@ export component RelayPanel inherits Rectangle {
                 Text { x: 9px; y: 26px; width: 185px; height: 16px; text: row.state + " · " + row.address; color: #aebdca; font-size: 9px * UiTheme.panel-scale; overflow: elide; }
                 Rectangle { x: parent.width - 80px; y: 21px; width: 42px; height: 5px; background: #151a20; border-radius: 3px; }
                 Rectangle { x: parent.width - 80px; y: 21px; width: row.level * 42px; height: 5px; background: #57c785; border-radius: 3px; }
-                AppButton {
+                ActionButton {
                     x: parent.width - 31px; y: 12px; width: 22px;
                     text: row.connected ? "−" : row.connecting ? "…" : "+";
-                    text-scale: UiTheme.ui-scale;
+                   
                     enabled: root.relay-available && row.id != "" && !row.connecting;
                     clicked => {
                         if (row.connected) {
@@ -72,10 +72,10 @@ export component RelayPanel inherits Rectangle {
                         }
                     }
                 }
-                if row.trusted : AppButton {
+                if row.trusted : ActionButton {
                     x: parent.width - 58px; y: 12px; width: 22px;
                     text: "×";
-                    text-scale: UiTheme.ui-scale;
+                   
                     enabled: root.relay-available && row.peer-id != "";
                     clicked => { root.action("relay-forget:" + row.peer-id); }
                 }
@@ -102,8 +102,8 @@ export component RelayPanel inherits Rectangle {
         LineEdit { x: 100px; y: 105px + relay-fields-offset; width: parent.width - 112px; height: 29px; text <=> root.relay-host-pin; }
         Text { x: 12px; y: 152px + relay-fields-offset; text: UiI18n.localized("relay.port"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; }
         LineEdit { x: 100px; y: 142px + relay-fields-offset; width: 110px; height: 29px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; }
-        AppButton { x: 12px; y: 190px + relay-fields-offset; width: 112px; text: root.relay-host-active ? UiI18n.localized("relay.stop_host") : UiI18n.localized("relay.start_host"); text-scale: UiTheme.ui-scale; enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
-        AppButton { x: 132px; y: 190px + relay-fields-offset; width: 112px; text: UiI18n.localized("relay.show_qr"); text-scale: UiTheme.ui-scale; enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
+        ActionButton { x: 12px; y: 190px + relay-fields-offset; width: 112px; text: root.relay-host-active ? UiI18n.localized("relay.stop_host") : UiI18n.localized("relay.start_host"); enabled: root.relay-available; clicked => { root.action("relay-host-toggle"); } }
+        ActionButton { x: 132px; y: 190px + relay-fields-offset; width: 112px; text: UiI18n.localized("relay.show_qr"); enabled: root.relay-host-active && root.relay-qr-payload != ""; clicked => { root.action("relay-show-qr"); } }
         Text { x: 12px; y: 237px + relay-fields-offset; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.listening", root.relay-host-endpoint) : UiI18n.localized("relay.host_stopped"); color: root.relay-host-active ? #57c785 : #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
         Text { x: 12px; y: 263px + relay-fields-offset; width: parent.width - 24px; text: root.relay-host-active ? UiI18n.formatted-one("relay.qr_pin", root.relay-host-pin) : UiI18n.localized("relay.advanced_help"); color: #aebdca; font-size: 10px * UiTheme.panel-scale; overflow: elide; }
     }
