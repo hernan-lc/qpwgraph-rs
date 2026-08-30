@@ -55,12 +55,43 @@
 pub use pw_graph_relay::{
     netlink::local_links, CodecKind, DeviceKind, EngineConfig, EngineStatus, LinkKind, LocalLink,
     PeerInfo, RelayError, RelayEvent, RelayResult, Roles, SessionId, SessionStatus,
-    TransportPreference,
+    TransportPreference, FRAME_DURATIONS_MS, SAMPLE_RATES_HZ,
 };
+// `RelayHost::handle`/`RelayClient::handle` return this, so it has to be
+// nameable by callers holding one.
+pub use pw_graph_relay::RelayHandle;
 
-use pw_graph_relay::{RelayEngine, RelayHandle};
+use pw_graph_relay::RelayEngine;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
+
+/// Reject an audio geometry the session negotiation would refuse anyway.
+///
+/// Builders used to accept any numbers at all and only fail once a handshake
+/// reached `validate_negotiation`, which on the client side is after a TCP
+/// connect and a PAKE — a long way to travel to learn that `44_100` is not a
+/// negotiable rate. Validating at `build()` keeps the failure next to the
+/// mistake. Nothing is silently normalised: an unsupported value is an error,
+/// not something quietly rounded into a different format than the caller
+/// asked for.
+fn validate_audio(sample_rate: u32, channels: u16, frame_ms: u16) -> RelayResult<()> {
+    if !pw_graph_relay::is_supported_sample_rate(sample_rate) {
+        return Err(RelayError::Config(format!(
+            "unsupported sample rate {sample_rate} Hz; supported: {SAMPLE_RATES_HZ:?}"
+        )));
+    }
+    if !pw_graph_relay::is_supported_channels(channels) {
+        return Err(RelayError::Config(format!(
+            "unsupported channel count {channels}; supported: 1 (mono) or 2 (stereo)"
+        )));
+    }
+    if !pw_graph_relay::is_supported_frame_ms(frame_ms) {
+        return Err(RelayError::Config(format!(
+            "unsupported frame duration {frame_ms} ms; supported: {FRAME_DURATIONS_MS:?}"
+        )));
+    }
+    Ok(())
+}
 
 /// The role a client takes in a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,17 +161,60 @@ impl RelayHostBuilder {
         self
     }
 
-    /// Audio format exchanged with connected peers. Embedding applications
-    /// drive their own audio IO (e.g. `AudioRecord`/`AudioTrack` on Android)
-    /// and push/pull PCM at this rate.
+    /// Audio format exchanged with connected peers *and* the format of the
+    /// PCM the embedding application pushes and pulls.
+    ///
+    /// Embedding applications drive their own audio IO (e.g.
+    /// `AudioRecord`/`AudioTrack` on Android) and push/pull PCM at this rate,
+    /// so this sets both the negotiated wire geometry and the engine's local
+    /// geometry. Setting only the wire half — as this used to — left the
+    /// engine interpreting an SDK caller's interleaved stereo buffers as mono
+    /// at the default 48 kHz, which is audible corruption rather than a
+    /// mis-negotiation. Use [`Self::wire_audio`] afterwards if the two really
+    /// do differ.
+    ///
+    /// Invalid geometries are rejected at [`Self::build`], not here, so the
+    /// builder stays chainable.
     pub fn audio(mut self, sample_rate: u32, channels: u16, frame_ms: u16) -> Self {
         self.config.sample_rate = sample_rate;
         self.config.channels = channels;
         self.config.frame_ms = frame_ms;
+        self.config.local_sample_rate = sample_rate;
+        self.config.local_channels = channels;
+        self
+    }
+
+    /// Override *only* the negotiated wire geometry, leaving the local
+    /// application geometry set by [`Self::audio`] alone.
+    ///
+    /// Call this after [`Self::audio`]: the engine then converts between the
+    /// two, which is the supported way to, say, run 48 kHz stereo endpoints
+    /// while sending 16 kHz mono over a constrained link.
+    pub fn wire_audio(mut self, sample_rate: u32, channels: u16) -> Self {
+        self.config.sample_rate = sample_rate;
+        self.config.channels = channels;
+        self
+    }
+
+    /// Override *only* the local application geometry — the format of the PCM
+    /// passed to `push_capture` and filled by `pull_playback`.
+    pub fn local_audio(mut self, sample_rate: u32, channels: u16) -> Self {
+        self.config.local_sample_rate = sample_rate;
+        self.config.local_channels = channels;
         self
     }
 
     pub fn build(self) -> RelayResult<RelayHostPrepared> {
+        validate_audio(
+            self.config.sample_rate,
+            self.config.channels,
+            self.config.frame_ms,
+        )?;
+        validate_audio(
+            self.config.local_sample_rate,
+            self.config.local_channels,
+            self.config.frame_ms,
+        )?;
         Ok(RelayHostPrepared {
             config: self.config,
         })
@@ -269,15 +343,48 @@ impl RelayClientBuilder {
         self
     }
 
-    /// Audio format used for capture/playback PCM passed to the client.
+    /// Audio format used for capture/playback PCM passed to the client, and
+    /// the format negotiated with the host.
+    ///
+    /// See [`RelayHostBuilder::audio`]: this sets both the wire and the local
+    /// geometry, because the PCM an SDK caller hands over is in exactly one
+    /// format and the engine has to be told which.
     pub fn audio(mut self, sample_rate: u32, channels: u16, frame_ms: u16) -> Self {
         self.config.sample_rate = sample_rate;
         self.config.channels = channels;
         self.config.frame_ms = frame_ms;
+        self.config.local_sample_rate = sample_rate;
+        self.config.local_channels = channels;
+        self
+    }
+
+    /// Override *only* the negotiated wire geometry. See
+    /// [`RelayHostBuilder::wire_audio`].
+    pub fn wire_audio(mut self, sample_rate: u32, channels: u16) -> Self {
+        self.config.sample_rate = sample_rate;
+        self.config.channels = channels;
+        self
+    }
+
+    /// Override *only* the local application geometry. See
+    /// [`RelayHostBuilder::local_audio`].
+    pub fn local_audio(mut self, sample_rate: u32, channels: u16) -> Self {
+        self.config.local_sample_rate = sample_rate;
+        self.config.local_channels = channels;
         self
     }
 
     pub fn build(self) -> RelayResult<RelayClientPrepared> {
+        validate_audio(
+            self.config.sample_rate,
+            self.config.channels,
+            self.config.frame_ms,
+        )?;
+        validate_audio(
+            self.config.local_sample_rate,
+            self.config.local_channels,
+            self.config.frame_ms,
+        )?;
         Ok(RelayClientPrepared {
             config: self.config,
             role: self.role,
@@ -560,5 +667,128 @@ mod tests {
             browser.discovery_stop();
         }
         browser.shutdown();
+    }
+
+    #[test]
+    fn audio_sets_both_wire_and_local_geometry() {
+        // The bug this pins: `.audio()` used to move only the wire half, so
+        // an Android caller pushing 48 kHz interleaved stereo had it read as
+        // 48 kHz mono — every other sample landing in the wrong frame.
+        let prepared = RelayHostBuilder::new()
+            .pin("123456")
+            .audio(48_000, 2, 10)
+            .build()
+            .expect("builder");
+        assert_eq!(prepared.config.sample_rate, 48_000);
+        assert_eq!(prepared.config.channels, 2);
+        assert_eq!(prepared.config.frame_ms, 10);
+        assert_eq!(prepared.config.local_sample_rate, 48_000);
+        assert_eq!(prepared.config.local_channels, 2);
+
+        let prepared = RelayClientBuilder::new()
+            .audio(48_000, 2, 10)
+            .build()
+            .expect("builder");
+        assert_eq!(prepared.config.local_channels, 2);
+        assert_eq!(prepared.config.local_sample_rate, 48_000);
+    }
+
+    #[test]
+    fn audio_at_sixteen_kilohertz_mono_sets_both_geometries() {
+        let prepared = RelayClientBuilder::new()
+            .audio(16_000, 1, 20)
+            .build()
+            .expect("builder");
+        assert_eq!(prepared.config.sample_rate, 16_000);
+        assert_eq!(prepared.config.channels, 1);
+        assert_eq!(prepared.config.frame_ms, 20);
+        assert_eq!(prepared.config.local_sample_rate, 16_000);
+        assert_eq!(prepared.config.local_channels, 1);
+    }
+
+    #[test]
+    fn wire_and_local_audio_can_be_split_deliberately() {
+        let prepared = RelayHostBuilder::new()
+            .pin("123456")
+            .audio(48_000, 2, 20)
+            .wire_audio(16_000, 1)
+            .build()
+            .expect("builder");
+        assert_eq!(prepared.config.sample_rate, 16_000);
+        assert_eq!(prepared.config.channels, 1);
+        assert_eq!(prepared.config.local_sample_rate, 48_000);
+        assert_eq!(prepared.config.local_channels, 2);
+
+        let prepared = RelayClientBuilder::new()
+            .audio(16_000, 1, 20)
+            .local_audio(48_000, 2)
+            .build()
+            .expect("builder");
+        assert_eq!(prepared.config.sample_rate, 16_000);
+        assert_eq!(prepared.config.local_channels, 2);
+    }
+
+    #[test]
+    fn builders_reject_unsupported_audio_geometry_at_build() {
+        // Failing here rather than mid-handshake is the point: a client would
+        // otherwise get as far as a completed PAKE before learning that 44.1
+        // kHz is not negotiable.
+        for (rate, channels, frame_ms) in [
+            (44_100u32, 1u16, 10u16),
+            (48_000, 3, 10),
+            (48_000, 0, 10),
+            (48_000, 1, 7),
+            (0, 1, 10),
+        ] {
+            let host = RelayHostBuilder::new()
+                .pin("123456")
+                .audio(rate, channels, frame_ms)
+                .build();
+            assert!(
+                matches!(host, Err(RelayError::Config(_))),
+                "host builder accepted {rate} Hz / {channels} ch / {frame_ms} ms"
+            );
+            let client = RelayClientBuilder::new()
+                .audio(rate, channels, frame_ms)
+                .build();
+            assert!(
+                matches!(client, Err(RelayError::Config(_))),
+                "client builder accepted {rate} Hz / {channels} ch / {frame_ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn builders_accept_every_negotiable_audio_geometry() {
+        for rate in SAMPLE_RATES_HZ {
+            for channels in [1u16, 2] {
+                for frame_ms in FRAME_DURATIONS_MS {
+                    assert!(
+                        RelayHostBuilder::new()
+                            .pin("123456")
+                            .audio(rate, channels, frame_ms)
+                            .build()
+                            .is_ok(),
+                        "rejected {rate} Hz / {channels} ch / {frame_ms} ms"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_split_geometry_is_validated_on_both_halves() {
+        let host = RelayHostBuilder::new()
+            .pin("123456")
+            .audio(48_000, 2, 10)
+            .wire_audio(44_100, 1)
+            .build();
+        assert!(matches!(host, Err(RelayError::Config(_))));
+
+        let client = RelayClientBuilder::new()
+            .audio(48_000, 2, 10)
+            .local_audio(48_000, 4)
+            .build();
+        assert!(matches!(client, Err(RelayError::Config(_))));
     }
 }

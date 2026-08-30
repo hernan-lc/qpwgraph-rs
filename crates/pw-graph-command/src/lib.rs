@@ -118,6 +118,24 @@ fn rollback_disconnects(
     stranded
 }
 
+/// Disconnect everything a failed group connect had already created.
+/// Returns how many could not be removed.
+///
+/// The mirror image of [`rollback_disconnects`]. `allow_connection` is only
+/// meaningful for a pair that really did come back out of the graph: telling
+/// the backend to stop suppressing a link that is still connected would
+/// contradict the state it can see.
+fn rollback_connects(driver: &mut dyn GraphDriver, created_keys: &[(PortKey, PortKey)]) -> usize {
+    let mut stranded = 0;
+    for (output, input) in created_keys.iter().rev() {
+        match driver.disconnect_by_key_if_present(output, input) {
+            Ok(_) => driver.allow_connection(output, input),
+            Err(_) => stranded += 1,
+        }
+    }
+    stranded
+}
+
 /// Reconnect every previously removed pair, returning the restored links.
 ///
 /// An undo that fails partway is reported as partially applied rather than as
@@ -338,13 +356,25 @@ impl Command for ConnectManyCommand {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    for (created_output, created_input) in self.created_keys.iter().rev() {
-                        let _ = driver.disconnect_by_key_if_present(created_output, created_input);
-                        driver.allow_connection(created_output, created_input);
-                    }
+                    // Rolling back is not best-effort housekeeping: the
+                    // command never completes, so `CommandStack::execute`
+                    // will not record it and nothing else will offer to
+                    // repair the graph. Discarding the rollback's own errors
+                    // — as this used to — could leave links this command
+                    // created behind while reporting a plain backend failure,
+                    // as if nothing had been mutated.
+                    let stranded = rollback_connects(driver, &self.created_keys);
                     self.links.clear();
                     self.created_keys.clear();
-                    return Err(error.into());
+                    return Err(if stranded == 0 {
+                        error.into()
+                    } else {
+                        CommandError::PartiallyApplied {
+                            operation: "Connect group",
+                            cause: error.to_string(),
+                            stranded,
+                        }
+                    });
                 }
             }
         }
@@ -565,8 +595,28 @@ impl Command for RerouteLinkCommand {
             // with neither route and reporting a plain backend error would
             // hide that. Put the new route back if we can.
             if removed_new {
-                let _ = driver.connect_by_key_if_missing(&new.0, &new.1);
-                return Err(error.into());
+                match driver.connect_by_key_if_missing(&new.0, &new.1) {
+                    // The undo did not happen, but the graph is back where it
+                    // was before it started, so an ordinary backend error is
+                    // the honest report.
+                    Ok(_) => return Err(error.into()),
+                    // Both levels failed: neither the route the undo was
+                    // restoring nor the one it removed to make room is in the
+                    // graph. Swallowing this second error — as this used to —
+                    // reported a plain backend failure for a graph that had
+                    // lost a connection outright.
+                    Err(rollback) => {
+                        return Err(CommandError::PartiallyApplied {
+                            operation: "Reroute",
+                            cause: format!(
+                                "restoring the original route failed: {error}; \
+                                 and the rerouted connection could not be put \
+                                 back either: {rollback}"
+                            ),
+                            stranded: 2,
+                        })
+                    }
+                }
             }
             return Err(CommandError::PartiallyApplied {
                 operation: "Reroute",
@@ -1038,5 +1088,194 @@ mod tests {
         assert_eq!(driver.graph().node(NodeId(1)).unwrap().position, before);
         commands.redo(&mut driver).unwrap();
         assert_eq!(driver.graph().node(NodeId(1)).unwrap().position, after);
+    }
+
+    /// The demo graph's two source ports and two sink ports, as stable keys.
+    fn key(driver: &InMemoryDriver, port: PortId) -> PortKey {
+        driver.graph().port_key(port).expect("demo port exists")
+    }
+
+    fn is_connected(driver: &InMemoryDriver, output: PortId, input: PortId) -> bool {
+        driver
+            .graph()
+            .find_link_by_keys(&key(driver, output), &key(driver, input))
+            .is_some()
+    }
+
+    #[test]
+    fn a_failed_group_connect_rolls_every_created_link_back() {
+        let mut driver = InMemoryDriver::demo();
+        driver.fail_connect_of(PortId(2), PortId(4));
+        let mut commands = CommandStack::new();
+
+        let error = commands
+            .execute(
+                Box::new(ConnectManyCommand::new(vec![
+                    (PortId(1), PortId(3)),
+                    (PortId(2), PortId(4)),
+                ])),
+                &mut driver,
+            )
+            .expect_err("the second pair is refused");
+
+        // Rollback worked, so the caller sees the real cause, not a
+        // partially-applied report.
+        assert!(matches!(error, CommandError::Backend(_)), "{error:?}");
+        assert!(driver.graph().links.is_empty(), "a created link was left behind");
+        assert!(!commands.can_undo(), "a failed command must not reach the undo stack");
+    }
+
+    #[test]
+    fn a_group_connect_failing_on_a_later_pair_still_rolls_everything_back() {
+        let mut driver = InMemoryDriver::demo();
+        driver.fail_connect_of(PortId(2), PortId(3));
+        let mut commands = CommandStack::new();
+
+        let error = commands
+            .execute(
+                Box::new(ConnectManyCommand::new(vec![
+                    (PortId(1), PortId(3)),
+                    (PortId(1), PortId(4)),
+                    (PortId(2), PortId(3)),
+                ])),
+                &mut driver,
+            )
+            .expect_err("the third pair is refused");
+
+        assert!(matches!(error, CommandError::Backend(_)), "{error:?}");
+        assert!(driver.graph().links.is_empty());
+    }
+
+    #[test]
+    fn a_group_connect_whose_rollback_fails_reports_the_stranded_links() {
+        // The regression: the rollback's own errors were discarded, so a
+        // command that had left links behind reported a plain backend
+        // failure — and, never having completed, was not on the undo stack
+        // either, so nothing offered to clean them up.
+        let mut driver = InMemoryDriver::demo();
+        driver.fail_connect_of(PortId(2), PortId(4));
+        driver.fail_disconnect_of_pair(PortId(1), PortId(3));
+        let mut commands = CommandStack::new();
+
+        let error = commands
+            .execute(
+                Box::new(ConnectManyCommand::new(vec![
+                    (PortId(1), PortId(3)),
+                    (PortId(2), PortId(4)),
+                ])),
+                &mut driver,
+            )
+            .expect_err("the second pair is refused");
+
+        match error {
+            CommandError::PartiallyApplied {
+                operation,
+                stranded,
+                ..
+            } => {
+                assert_eq!(operation, "Connect group");
+                assert_eq!(stranded, 1);
+            }
+            other => panic!("expected a partially-applied report, got {other:?}"),
+        }
+        assert!(
+            is_connected(&driver, PortId(1), PortId(3)),
+            "the test wired this link to be unremovable"
+        );
+        assert!(!is_connected(&driver, PortId(2), PortId(4)));
+    }
+
+    #[test]
+    fn a_group_connect_rollback_leaves_pre_existing_links_alone() {
+        // `connect_by_key_if_missing` returns `None` for a pair that already
+        // exists, so it never enters the created set — and the rollback must
+        // not disconnect something this command did not create.
+        let mut driver = InMemoryDriver::demo();
+        driver.connect(PortId(1), PortId(3)).unwrap();
+        driver.fail_connect_of(PortId(2), PortId(4));
+        let mut commands = CommandStack::new();
+
+        assert!(commands
+            .execute(
+                Box::new(ConnectManyCommand::new(vec![
+                    (PortId(1), PortId(3)),
+                    (PortId(1), PortId(4)),
+                    (PortId(2), PortId(4)),
+                ])),
+                &mut driver,
+            )
+            .is_err());
+
+        assert!(
+            is_connected(&driver, PortId(1), PortId(3)),
+            "rollback removed a link the command never created"
+        );
+        assert!(!is_connected(&driver, PortId(1), PortId(4)));
+        assert_eq!(driver.graph().links.len(), 1);
+    }
+
+    #[test]
+    fn a_reroute_undo_that_cannot_restore_either_route_says_so() {
+        // Undo removes the rerouted link to make room, then fails to restore
+        // the original, then fails to put the rerouted one back. The graph is
+        // left with neither connection; reporting only the first error — as
+        // this used to — described that as an ordinary backend failure.
+        let mut driver = InMemoryDriver::demo();
+        let link = driver.connect(PortId(1), PortId(3)).unwrap();
+        let mut commands = CommandStack::new();
+        commands
+            .execute(
+                Box::new(RerouteLinkCommand::new(link.id, PortId(2))),
+                &mut driver,
+            )
+            .expect("the reroute itself succeeds");
+        assert!(is_connected(&driver, PortId(2), PortId(3)));
+
+        driver.fail_connect_of(PortId(1), PortId(3));
+        driver.fail_connect_of(PortId(2), PortId(3));
+        let error = commands.undo(&mut driver).expect_err("undo cannot complete");
+
+        match error {
+            CommandError::PartiallyApplied {
+                operation,
+                cause,
+                stranded,
+            } => {
+                assert_eq!(operation, "Reroute");
+                assert_eq!(stranded, 2);
+                assert!(
+                    cause.contains("could not be put") && cause.contains("original"),
+                    "the report must name both failures: {cause}"
+                );
+            }
+            other => panic!("expected a partially-applied report, got {other:?}"),
+        }
+        assert!(driver.graph().links.is_empty(), "neither route survived");
+    }
+
+    #[test]
+    fn a_reroute_undo_that_can_put_the_new_route_back_reports_a_plain_error() {
+        // Only the first level failed, so the graph is exactly where it was
+        // before the undo started. That is an ordinary backend error, not a
+        // partial application.
+        let mut driver = InMemoryDriver::demo();
+        let link = driver.connect(PortId(1), PortId(3)).unwrap();
+        let mut commands = CommandStack::new();
+        commands
+            .execute(
+                Box::new(RerouteLinkCommand::new(link.id, PortId(2))),
+                &mut driver,
+            )
+            .expect("the reroute itself succeeds");
+
+        driver.fail_connect_of(PortId(1), PortId(3));
+        let error = commands.undo(&mut driver).expect_err("undo cannot complete");
+
+        assert!(matches!(error, CommandError::Backend(_)), "{error:?}");
+        assert!(
+            is_connected(&driver, PortId(2), PortId(3)),
+            "the rerouted link must be back"
+        );
+        assert!(!is_connected(&driver, PortId(1), PortId(3)));
     }
 }

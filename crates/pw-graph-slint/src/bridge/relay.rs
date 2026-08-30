@@ -65,15 +65,45 @@ pub(crate) fn relay_nodes_visible(application: &Application) -> bool {
     }
 }
 
+/// A host PIN is ephemeral: each hosting session gets a fresh random one
+/// rather than a stored (or, worse, shipped) value.
+///
+/// The two halves of that promise are split into these functions so the
+/// lifecycle can be tested without standing up a relay backend. Together they
+/// hold three properties the UI depends on:
+///
+/// - a first start always has a PIN;
+/// - the PIN does not move while a session is live, so the panel and the
+///   pairing QR code keep showing one that actually works;
+/// - a stop retires it, so the next start generates a new one.
+///
+/// Generating unconditionally in [`host_pin_on_start`] would satisfy the third
+/// property too, but it would also throw away a PIN a user had deliberately
+/// typed into the field, so the retirement happens on stop instead.
+pub(crate) fn host_pin_on_start(pin: &mut String, generate: impl FnOnce() -> String) {
+    if pin.trim().is_empty() {
+        *pin = generate();
+    }
+}
+
+/// Retire the PIN along with the session it belonged to.
+///
+/// Leaving it set meant the next start silently reused it, so a PIN already
+/// shown on screen, photographed as a QR code or read out loud kept working
+/// across sessions — the opposite of the per-session freshness above. It is
+/// never written to disk (`AppConfig::relay_host_pin` is `serde(skip)`), so
+/// clearing it loses nothing.
+pub(crate) fn host_pin_on_stop(pin: &mut String) {
+    pin.clear();
+}
+
 pub(crate) fn start_relay_host(application: &mut Application) {
     #[cfg(feature = "relay")]
     {
-        // A host PIN is ephemeral: generate a fresh random one for each
-        // hosting session rather than reusing a stored (or, worse, shipped)
-        // value. It is displayed in the UI and in the pairing QR code.
-        if application.config.relay_host_pin.trim().is_empty() {
-            application.config.relay_host_pin = pw_graph_backend::relay_generate_pin();
-        }
+        host_pin_on_start(
+            &mut application.config.relay_host_pin,
+            pw_graph_backend::relay_generate_pin,
+        );
         let request = RelayHostRequest {
             device_name: application.config.relay_device_name.trim().to_owned(),
             pin: application.config.relay_host_pin.trim().to_owned(),
@@ -103,7 +133,10 @@ pub(crate) fn stop_relay_host(application: &mut Application) {
     #[cfg(feature = "relay")]
     {
         match application.source.relay_stop_host() {
-            Ok(()) => application.status = application.t("relay.host_stopped"),
+            Ok(()) => {
+                host_pin_on_stop(&mut application.config.relay_host_pin);
+                application.status = application.t("relay.host_stopped");
+            }
             Err(error) => application.status = application.tf("relay.error", &[("error", error)]),
         }
     }
@@ -566,5 +599,94 @@ mod tests {
         for (stored, expected) in [(0u16, 5u16), (7, 5), (13, 10), (35, 40), (9_000, 60)] {
             assert_eq!(relay_frame_from_index(relay_frame_index(stored)), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod host_pin_tests {
+    use super::{host_pin_on_start, host_pin_on_stop};
+
+    /// Stand-in for `relay_generate_pin`, so the test controls what "fresh"
+    /// means and can tell a regenerated PIN from a reused one.
+    fn counting_generator(next: &std::cell::Cell<u32>) -> impl FnOnce() -> String + '_ {
+        move || {
+            next.set(next.get() + 1);
+            format!("pin-{}", next.get())
+        }
+    }
+
+    #[test]
+    fn the_first_host_start_gets_a_pin() {
+        let counter = std::cell::Cell::new(0);
+        let mut pin = String::new();
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        assert_eq!(pin, "pin-1");
+        assert!(!pin.trim().is_empty());
+    }
+
+    #[test]
+    fn the_pin_is_stable_for_the_life_of_one_hosting_session() {
+        // The panel and the QR code both read this field while the host runs;
+        // moving it mid-session would show a PIN that does not pair.
+        let counter = std::cell::Cell::new(0);
+        let mut pin = String::new();
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        let during = pin.clone();
+        for _ in 0..3 {
+            host_pin_on_start(&mut pin, counting_generator(&counter));
+        }
+        assert_eq!(pin, during);
+        assert_eq!(counter.get(), 1, "the PIN was regenerated mid-session");
+    }
+
+    #[test]
+    fn stopping_then_starting_produces_a_different_pin() {
+        // The regression: stopping used to leave the PIN in place, so the
+        // next start silently reused a PIN that had already been displayed.
+        let counter = std::cell::Cell::new(0);
+        let mut pin = String::new();
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        let first = pin.clone();
+        host_pin_on_stop(&mut pin);
+        assert!(pin.is_empty(), "the stopped session left its PIN behind");
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        assert_ne!(pin, first);
+        assert_eq!(counter.get(), 2);
+    }
+
+    #[test]
+    fn a_deliberately_typed_pin_survives_until_the_session_ends() {
+        // The field is editable, so a start must not clobber a PIN the user
+        // chose — only a stop retires it.
+        let counter = std::cell::Cell::new(0);
+        let mut pin = String::from("246813");
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        assert_eq!(pin, "246813");
+        assert_eq!(counter.get(), 0);
+        host_pin_on_stop(&mut pin);
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        assert_eq!(pin, "pin-1");
+    }
+
+    #[test]
+    fn a_whitespace_only_pin_counts_as_absent() {
+        let counter = std::cell::Cell::new(0);
+        let mut pin = String::from("   ");
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        assert_eq!(pin, "pin-1");
+    }
+
+    #[test]
+    fn generated_pins_are_not_all_the_same() {
+        // Guards the real generator rather than the lifecycle: a constant
+        // "fresh" PIN would pass every test above.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            let mut pin = String::new();
+            host_pin_on_start(&mut pin, pw_graph_backend::relay_generate_pin);
+            assert!(!pin.trim().is_empty());
+            seen.insert(pin);
+        }
+        assert!(seen.len() > 1, "relay_generate_pin returned a constant");
     }
 }

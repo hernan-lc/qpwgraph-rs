@@ -44,6 +44,9 @@ pub struct DemoDriver {
 struct ForcedFailures {
     connects: BTreeSet<(PortId, PortId)>,
     disconnects: BTreeSet<LinkId>,
+    /// Disconnects refused by endpoint rather than by link id, so a test can
+    /// arm a failure for a link a command has not created yet.
+    disconnect_pairs: BTreeSet<(PortId, PortId)>,
 }
 
 impl DemoDriver {
@@ -154,6 +157,27 @@ impl DemoDriver {
             .get_or_insert_with(Default::default)
             .disconnects
             .insert(link);
+    }
+
+    /// Make every future `disconnect` of this port pair fail.
+    ///
+    /// The id-keyed variant can only name a link that already exists, which
+    /// is no use for testing the rollback of a command that creates its own
+    /// links: the id is not known until the command has already run past the
+    /// point the test wants to break.
+    pub fn fail_disconnect_of_pair(&mut self, src: PortId, dst: PortId) {
+        self.forced_failures
+            .get_or_insert_with(Default::default)
+            .disconnect_pairs
+            .insert((src, dst));
+    }
+
+    /// Stop refusing this port pair's connects, so a test can let a rollback
+    /// succeed after the operation it was rolling back has failed.
+    pub fn allow_connect_of(&mut self, src: PortId, dst: PortId) {
+        if let Some(forced) = self.forced_failures.as_mut() {
+            forced.connects.remove(&(src, dst));
+        }
     }
 
     fn allocate_link_id(&mut self) -> LinkId {
@@ -328,11 +352,15 @@ impl GraphDriver for DemoDriver {
     }
 
     fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
-        if self
-            .forced_failures
-            .as_ref()
-            .is_some_and(|forced| forced.disconnects.contains(&link))
-        {
+        let endpoints = self
+            .graph
+            .links
+            .get(&link)
+            .map(|link| (link.output_port, link.input_port));
+        if self.forced_failures.as_ref().is_some_and(|forced| {
+            forced.disconnects.contains(&link)
+                || endpoints.is_some_and(|pair| forced.disconnect_pairs.contains(&pair))
+        }) {
             return Err(BackendError::native(
                 "disconnect refused by the test driver",
             ));

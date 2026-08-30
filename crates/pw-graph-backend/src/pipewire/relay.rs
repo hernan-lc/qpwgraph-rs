@@ -24,7 +24,11 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Mutex;
 
-const RELAY_MAX_FRAMES: u32 = 16_384;
+/// Quanta larger than this are skipped rather than served. The relay engine
+/// sizes its realtime-path buffers from the same constant, so raising this
+/// without raising `MAX_REALTIME_QUANTUM_SAMPLES` would reintroduce
+/// allocation on the audio thread.
+const RELAY_MAX_FRAMES: u32 = pw_graph_relay::MAX_REALTIME_QUANTUM_SAMPLES as u32;
 const RELAY_CHANNELS: usize = 2;
 
 pub(super) const RELAY_SOURCE_NAME: &str = "qpwgraph-rs.relay.source";

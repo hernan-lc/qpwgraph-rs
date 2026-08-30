@@ -345,15 +345,7 @@ fn host_peer_thread(
         peer_audio_addr: Mutex::new(None),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
         incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
-        capture_convert: Mutex::new((
-            Converter::new(
-                local.sample_rate,
-                local.channels,
-                format.sample_rate,
-                format.channels,
-            ),
-            Vec::new(),
-        )),
+        capture_convert: Mutex::new(prepared_capture_converter(local, format)),
         audio_sealer: Mutex::new(audio_sealer),
         audio_opener: Mutex::new(audio_opener),
     });
@@ -785,15 +777,7 @@ fn client_thread(
         peer_audio_addr: Mutex::new(Some(host_audio_addr)),
         outgoing: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
         incoming: crate::PcmQueue::new(crate::DEFAULT_QUEUE_CAPACITY),
-        capture_convert: Mutex::new((
-            Converter::new(
-                local.sample_rate,
-                local.channels,
-                format.sample_rate,
-                format.channels,
-            ),
-            Vec::new(),
-        )),
+        capture_convert: Mutex::new(prepared_capture_converter(local, format)),
         audio_sealer: Mutex::new(audio_sealer),
         audio_opener: Mutex::new(audio_opener),
     });
@@ -992,6 +976,45 @@ fn resume_client_control(
     None
 }
 
+/// Build this session's transmit converter with every buffer already grown
+/// for the largest quantum a realtime callback can present.
+///
+/// `broadcast_capture` runs on the PipeWire process thread. A converter built
+/// by `Converter::new` allocates inside its first `convert` — and again on any
+/// quantum larger than one it has already seen — which is exactly what the
+/// realtime contract forbids. Sizing here, on the session-setup thread, is
+/// what makes `try_push_capture` allocation-free from the very first callback
+/// rather than only "after warm-up".
+fn prepared_capture_converter(local: AudioFormat, wire: AudioFormat) -> (Converter, Vec<f32>) {
+    let max_input = crate::MAX_REALTIME_QUANTUM_SAMPLES;
+    let converter = Converter::with_capacity(
+        local.sample_rate,
+        local.channels,
+        wire.sample_rate,
+        wire.channels,
+        max_input,
+    );
+    // The identity path pushes `samples` straight through and never touches
+    // this buffer, but a geometry change writes the full converted quantum
+    // into it, so it is sized for the worst supported expansion.
+    let out = Vec::with_capacity(converter.output_capacity_for(max_input));
+    (converter, out)
+}
+
+/// Whether an authenticated audio packet's header agrees with what the
+/// session negotiated.
+///
+/// Only applies to packets carrying audio: an announce packet's header is
+/// filler (see [`crate::audio::announce_packet`]) and is filtered out by its
+/// empty payload before this is consulted.
+fn packet_matches_negotiation(
+    packet: &AudioPacket<'_>,
+    codec: CodecKind,
+    format: AudioFormat,
+) -> bool {
+    packet.codec == codec && packet.stereo == format.is_stereo()
+}
+
 fn validate_negotiation(
     codec: CodecKind,
     frame_ms: u16,
@@ -1003,12 +1026,12 @@ fn validate_negotiation(
             "unsupported frame duration {frame_ms} ms"
         )));
     }
-    if !matches!(sample_rate, 16_000 | 24_000 | 48_000) {
+    if !crate::is_supported_sample_rate(sample_rate) {
         return Err(RelayError::Protocol(format!(
             "unsupported sample rate {sample_rate} Hz"
         )));
     }
-    if !matches!(channels, 1 | 2) {
+    if !crate::is_supported_channels(channels) {
         return Err(RelayError::Protocol(format!(
             "unsupported channel count {channels}"
         )));
@@ -1056,17 +1079,21 @@ fn run_rx(
             return;
         }
     };
-    let mut converter = Converter::new(
+    // Decode output is exactly one frame per call, so the receive converter
+    // only ever needs that much. Sizing it here keeps the steady state free of
+    // reallocation even though this thread is not itself realtime.
+    let mut converter = Converter::with_capacity(
         record.format.sample_rate,
         record.format.channels,
         local.sample_rate,
         local.channels,
+        record.format.frame_samples(),
     );
 
     let mut jitter = JitterBuffer::new(JITTER_DEPTH_FRAMES);
     let mut datagram = vec![0u8; MAX_DATAGRAM];
     let mut frame_buf = vec![0.0f32; record.format.frame_samples()];
-    let mut converted = Vec::new();
+    let mut converted = Vec::with_capacity(converter.output_capacity_for(record.format.frame_samples()));
     let mut sumsq = 0.0f64;
     let mut level_samples = 0usize;
     let mut frames_since_level = 0u32;
@@ -1111,7 +1138,20 @@ fn run_rx(
             }
         }
         if payload.is_empty() {
-            // An announce packet: address bookkeeping only.
+            // An announce packet: address bookkeeping only. Its header carries
+            // no meaningful geometry (the sender hardcodes mono), so the
+            // metadata check below deliberately sits after this.
+            continue;
+        }
+        // Authentication proves *who* sent the datagram, not that they are
+        // still speaking the format this session negotiated. A paired but
+        // buggy or hostile peer that flips its codec id or stereo flag
+        // mid-stream would otherwise feed the decoder and the jitter buffer
+        // frames they cannot interpret — a decode error per packet at best,
+        // and silently mis-framed audio at worst. The negotiated format is
+        // the authority; a packet that disagrees with it is dropped before
+        // it reaches any stateful audio machinery.
+        if !packet_matches_negotiation(&packet, record.codec, record.format) {
             continue;
         }
         if packet.keyframe {
@@ -1319,5 +1359,140 @@ fn watch_control(
             last_keepalive = now;
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::{seal_datagram, AudioHeader};
+    use crate::crypto::{pake_start, Side};
+
+    fn audio_keys() -> (crate::crypto::Sealer, crate::crypto::Opener) {
+        let client = pake_start(Side::Client, "123456");
+        let host = pake_start(Side::Host, "123456");
+        let client_message = client.message.clone();
+        let host_message = host.message.clone();
+        let client_keys = client.finish(&host_message).expect("client pairs");
+        let host_keys = host.finish(&client_message).expect("host pairs");
+        let (sealer, _) = client_keys.audio_channel().expect("client audio keys");
+        let (_, opener) = host_keys.audio_channel().expect("host audio keys");
+        (sealer, opener)
+    }
+
+    /// Seal a frame with the given header metadata, then take it back apart
+    /// the way `run_rx` does: parse, authenticate, and only then judge the
+    /// header against the negotiated format.
+    fn authenticated_packet_is_accepted(
+        header_codec: CodecKind,
+        header_stereo: bool,
+        negotiated_codec: CodecKind,
+        negotiated: AudioFormat,
+    ) -> bool {
+        let (mut sealer, mut opener) = audio_keys();
+        let datagram = seal_datagram(
+            &mut sealer,
+            &AudioHeader {
+                stereo: header_stereo,
+                keyframe: true,
+                codec: header_codec,
+                sequence: 0,
+                timestamp_ms: 0,
+            },
+            &[1, 2, 3],
+        )
+        .expect("frame seals");
+        let packet = AudioPacket::parse(&datagram).expect("parses");
+        let payload = packet.open(&mut opener).expect("authenticates");
+        assert!(!payload.is_empty(), "this is an audio frame, not an announce");
+        packet_matches_negotiation(&packet, negotiated_codec, negotiated)
+    }
+
+    #[test]
+    fn an_authenticated_packet_matching_the_negotiation_is_accepted() {
+        let format = AudioFormat::new(48_000, 1, 20);
+        assert!(authenticated_packet_is_accepted(
+            CodecKind::Opus,
+            false,
+            CodecKind::Opus,
+            format
+        ));
+        let stereo = AudioFormat::new(48_000, 2, 20);
+        assert!(authenticated_packet_is_accepted(
+            CodecKind::Opus,
+            true,
+            CodecKind::Opus,
+            stereo
+        ));
+    }
+
+    #[test]
+    fn an_authenticated_packet_with_the_wrong_codec_is_rejected() {
+        // The peer is paired — the packet opens — but it is now claiming a
+        // codec the session never agreed to. Handing that to a decoder built
+        // for the negotiated codec is at best an error per packet.
+        let format = AudioFormat::new(48_000, 1, 20);
+        assert!(!authenticated_packet_is_accepted(
+            CodecKind::Pcm,
+            false,
+            CodecKind::Opus,
+            format
+        ));
+        assert!(!authenticated_packet_is_accepted(
+            CodecKind::Opus,
+            false,
+            CodecKind::Pcm,
+            format
+        ));
+    }
+
+    #[test]
+    fn an_authenticated_packet_with_the_wrong_stereo_flag_is_rejected() {
+        // A stereo flag that disagrees with the negotiated channel count means
+        // every frame would be de-interleaved against the wrong geometry.
+        let mono = AudioFormat::new(48_000, 1, 20);
+        assert!(!authenticated_packet_is_accepted(
+            CodecKind::Opus,
+            true,
+            CodecKind::Opus,
+            mono
+        ));
+        let stereo = AudioFormat::new(48_000, 2, 20);
+        assert!(!authenticated_packet_is_accepted(
+            CodecKind::Opus,
+            false,
+            CodecKind::Opus,
+            stereo
+        ));
+    }
+
+    #[test]
+    fn prepared_capture_converters_are_sized_for_the_realtime_quantum() {
+        // Session setup must leave nothing for `broadcast_capture` to grow.
+        let quantum = crate::MAX_REALTIME_QUANTUM_SAMPLES;
+        for local_channels in [1u16, 2] {
+            for wire_rate in crate::SAMPLE_RATES_HZ {
+                for wire_channels in [1u16, 2] {
+                    let local = AudioFormat::new(48_000, local_channels, 20);
+                    let wire = AudioFormat::new(wire_rate, wire_channels, 20);
+                    let (mut converter, mut out) = prepared_capture_converter(local, wire);
+                    if converter.is_identity() {
+                        continue;
+                    }
+                    let mapped_before = converter.output_capacity_for(quantum);
+                    assert!(out.capacity() >= mapped_before);
+                    let out_capacity = out.capacity();
+                    let input = vec![0.1f32; quantum];
+                    for _ in 0..4 {
+                        converter.convert(&input, &mut out);
+                        assert_eq!(
+                            out.capacity(),
+                            out_capacity,
+                            "{local:?} -> {wire:?} grew its transmit buffer"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

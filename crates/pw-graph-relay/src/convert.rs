@@ -53,6 +53,58 @@ impl Converter {
         }
     }
 
+    /// Like [`Self::new`], but with the internal buffer already grown for an
+    /// input of `max_input_samples`.
+    ///
+    /// Use this whenever the converter will be reachable from a realtime
+    /// callback. `new` alone leaves `mapped` empty, so the first conversion —
+    /// and any conversion of a larger quantum than has been seen before —
+    /// allocates, on the one thread that must not.
+    pub fn with_capacity(
+        in_rate: u32,
+        in_channels: u16,
+        out_rate: u32,
+        out_channels: u16,
+        max_input_samples: usize,
+    ) -> Self {
+        let mut converter = Self::new(in_rate, in_channels, out_rate, out_channels);
+        converter.prepare(max_input_samples);
+        converter
+    }
+
+    /// Grow the internal buffer so [`Self::convert`] of up to
+    /// `max_input_samples` interleaved input samples cannot reallocate.
+    ///
+    /// Call it from setup code only — it allocates by design.
+    pub fn prepare(&mut self, max_input_samples: usize) {
+        let needed = self.mapped_capacity_for(max_input_samples);
+        if self.mapped.capacity() < needed {
+            let extra = needed - self.mapped.len();
+            self.mapped.reserve(extra);
+        }
+    }
+
+    /// Interleaved samples `mapped` must hold for an input of
+    /// `max_input_samples`: the input's frame count times the *output* channel
+    /// count, since channel mapping happens before resampling.
+    fn mapped_capacity_for(&self, max_input_samples: usize) -> usize {
+        (max_input_samples / self.in_channels + 1) * self.out_channels
+    }
+
+    /// Interleaved samples [`Self::convert`] can emit for an input of
+    /// `max_input_samples`, so callers can size the destination `Vec`.
+    ///
+    /// The resampler emits at most one frame per `out_rate / in_rate` step
+    /// plus the carried fractional position, so a whole extra frame of
+    /// headroom covers the boundary case.
+    pub fn output_capacity_for(&self, max_input_samples: usize) -> usize {
+        let in_frames = max_input_samples / self.in_channels + 1;
+        let out_frames = (in_frames as u64 * self.out_rate as u64)
+            .div_ceil(self.in_rate as u64) as usize
+            + 1;
+        out_frames * self.out_channels
+    }
+
     /// True when input and output geometries match, so `convert` is a copy.
     pub fn is_identity(&self) -> bool {
         self.in_rate == self.out_rate && self.in_channels == self.out_channels
@@ -253,5 +305,107 @@ mod tests {
             (total as i64 - 48_000).abs() < 10,
             "100 buffers of 10 ms should be ~48000 samples, got {total}"
         );
+    }
+
+    /// Run `converter` over `blocks` inputs of `input_samples` and assert that
+    /// neither the internal nor the destination buffer ever reallocates.
+    /// Capacity growth is the observable proxy for a heap allocation on a
+    /// path where allocating is the bug.
+    fn assert_no_growth(
+        converter: &mut Converter,
+        out: &mut Vec<f32>,
+        input_samples: usize,
+        blocks: usize,
+    ) {
+        let mapped_capacity = converter.mapped.capacity();
+        let out_capacity = out.capacity();
+        let input = vec![0.25f32; input_samples];
+        for block in 0..blocks {
+            converter.convert(&input, out);
+            assert_eq!(
+                converter.mapped.capacity(),
+                mapped_capacity,
+                "internal buffer grew on block {block}"
+            );
+            assert_eq!(
+                out.capacity(),
+                out_capacity,
+                "output buffer grew on block {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_buffers_do_not_grow_for_rate_expansion() {
+        // 16 -> 48 kHz is the largest supported ratio, so it is the case that
+        // would allocate first if the sizing arithmetic were short.
+        let input_samples = 160;
+        let mut converter = Converter::with_capacity(16_000, 1, 48_000, 1, input_samples);
+        let mut out = Vec::with_capacity(converter.output_capacity_for(input_samples));
+        assert_no_growth(&mut converter, &mut out, input_samples, 50);
+    }
+
+    #[test]
+    fn prepared_buffers_do_not_grow_for_channel_expansion() {
+        let input_samples = 480;
+        let mut converter = Converter::with_capacity(48_000, 1, 48_000, 2, input_samples);
+        let mut out = Vec::with_capacity(converter.output_capacity_for(input_samples));
+        assert_no_growth(&mut converter, &mut out, input_samples, 50);
+    }
+
+    #[test]
+    fn prepared_buffers_do_not_grow_for_combined_expansion() {
+        // Mono 16 kHz in, stereo 48 kHz out: six output samples per input one.
+        let input_samples = 160;
+        let mut converter = Converter::with_capacity(16_000, 1, 48_000, 2, input_samples);
+        let mut out = Vec::with_capacity(converter.output_capacity_for(input_samples));
+        assert_no_growth(&mut converter, &mut out, input_samples, 50);
+    }
+
+    #[test]
+    fn prepared_buffers_cover_every_negotiable_geometry_pair() {
+        // The session-setup path sizes from one global maximum quantum; this
+        // pins that the bound really does hold for every pair it can be
+        // asked to serve, including the fractional 48 -> 24 and 24 -> 48 ones.
+        let quantum = 1_024;
+        for in_rate in crate::SAMPLE_RATES_HZ {
+            for out_rate in crate::SAMPLE_RATES_HZ {
+                for in_channels in [1u16, 2] {
+                    for out_channels in [1u16, 2] {
+                        let mut converter = Converter::with_capacity(
+                            in_rate,
+                            in_channels,
+                            out_rate,
+                            out_channels,
+                            quantum,
+                        );
+                        if converter.is_identity() {
+                            continue;
+                        }
+                        let mut out =
+                            Vec::with_capacity(converter.output_capacity_for(quantum));
+                        // Also exercise short blocks: the carried fractional
+                        // position is what makes an occasional block emit one
+                        // frame more than the nominal ratio.
+                        for samples in [quantum, quantum - in_channels as usize, quantum] {
+                            assert_no_growth(&mut converter, &mut out, samples, 8);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_does_not_change_conversion_results() {
+        let input: Vec<f32> = (0..160).map(|i| i as f32).collect();
+        let mut plain = Converter::new(16_000, 1, 48_000, 2);
+        let mut prepared = Converter::with_capacity(16_000, 1, 48_000, 2, 160);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..10 {
+            plain.convert(&input, &mut a);
+            prepared.convert(&input, &mut b);
+            assert_eq!(a, b);
+        }
     }
 }

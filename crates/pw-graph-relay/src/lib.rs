@@ -32,9 +32,21 @@ pub use convert::Converter;
 pub use crypto::{Opener, Sealer};
 pub use netlink::{LinkKind, LocalLink, TransportPreference};
 pub use protocol::{
-    is_supported_frame_ms, normalize_frame_ms, CodecKind, DeviceKind, Roles, FRAME_DURATIONS_MS,
+    is_supported_channels, is_supported_frame_ms, is_supported_sample_rate, normalize_frame_ms,
+    CodecKind, DeviceKind, Roles, FRAME_DURATIONS_MS, MAX_CHANNELS, MAX_SAMPLE_RATE_HZ,
+    SAMPLE_RATES_HZ,
 };
 pub use queue::{PcmQueue, CAPTURE_DEPTH_FRAMES, DEFAULT_QUEUE_CAPACITY, PLAYBACK_DEPTH_FRAMES};
+
+/// The largest buffer a realtime audio callback may hand to
+/// [`RelayHandle::try_pull_playback`] or [`RelayHandle::try_push_capture`],
+/// in samples.
+///
+/// Everything the realtime path might otherwise have to grow — the mixing
+/// scratch, each session's conversion buffers — is sized from this at setup
+/// time. A callback presenting more than this gets served only this much
+/// rather than triggering an allocation on the audio thread.
+pub const MAX_REALTIME_QUANTUM_SAMPLES: usize = 16_384;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -75,6 +87,12 @@ pub enum RelayError {
     Codec(String),
     #[error("relay engine error: {0}")]
     Engine(String),
+    /// A caller-supplied configuration that could never work — an audio
+    /// geometry outside the negotiable set, say. Distinguished from
+    /// [`Self::Protocol`] because nothing was ever put on the wire: the
+    /// mistake is local and the caller can fix it directly.
+    #[error("relay configuration error: {0}")]
+    Config(String),
 }
 
 pub type RelayResult<T> = Result<T, RelayError>;
@@ -297,7 +315,9 @@ impl EngineInner {
         Arc::new(Self {
             config: Mutex::new(config),
             events: Mutex::new(VecDeque::new()),
-            mix_scratch: Mutex::new(Vec::new()),
+            // Allocated once, at the largest quantum the realtime callback
+            // will ever present, so `mix_playback` never grows it. 64 KiB.
+            mix_scratch: Mutex::new(Vec::with_capacity(MAX_REALTIME_QUANTUM_SAMPLES)),
             sessions: Mutex::new(BTreeMap::new()),
             pairing_failures: Mutex::new(BTreeMap::new()),
             pending_handshakes: AtomicU64::new(0),
@@ -537,55 +557,76 @@ impl EngineInner {
             };
             sessions
         };
-        let receiving: Vec<&Arc<SessionRecord>> = sessions
-            .values()
-            .filter(|record| record.receiving)
-            .collect();
-        match receiving.as_slice() {
-            [] => 0,
+        // Iterate the map directly. Collecting the receiving sessions into a
+        // `Vec` first — as this used to — allocated on the PipeWire process
+        // callback, on a path whose entire contract is that it does not.
+        let mut receiving = sessions.values().filter(|record| record.receiving);
+        let Some(first) = receiving.next() else {
+            return 0;
+        };
+        let Some(second) = receiving.next() else {
             // One session is the overwhelmingly common case; skip the scratch
             // buffer and the summing loop entirely.
-            [only] => {
-                if realtime {
-                    only.incoming.try_pull(out)
-                } else {
-                    only.incoming.pull(out)
-                }
+            return if realtime {
+                first.incoming.try_pull(out)
+            } else {
+                first.incoming.pull(out)
+            };
+        };
+
+        let scratch = if realtime {
+            self.mix_scratch.try_lock().ok()
+        } else {
+            self.mix_scratch.lock().ok()
+        };
+        let Some(mut scratch) = scratch else {
+            return 0;
+        };
+        // `mix_scratch` is allocated at [`MAX_REALTIME_QUANTUM_SAMPLES`] when
+        // the engine is built, so for any realtime caller this resize is a
+        // length change inside existing capacity. A caller that ignores that
+        // bound and hands over something longer would otherwise reallocate
+        // here, so instead it mixes into the part that is already backed and
+        // reports only that much.
+        let usable = if realtime {
+            if scratch.capacity() < out.len() {
+                scratch.capacity()
+            } else {
+                out.len()
             }
-            many => {
-                let scratch = if realtime {
-                    self.mix_scratch.try_lock().ok()
-                } else {
-                    self.mix_scratch.lock().ok()
-                };
-                let Some(mut scratch) = scratch else {
-                    return 0;
-                };
-                scratch.clear();
-                scratch.resize(out.len(), 0.0);
-                out.fill(0.0);
-                let mut produced = 0;
-                for record in many {
-                    let count = if realtime {
-                        record.incoming.try_pull(&mut scratch[..])
-                    } else {
-                        record.incoming.pull(&mut scratch[..])
-                    };
-                    for (slot, sample) in out.iter_mut().zip(scratch.iter()).take(count) {
-                        *slot += *sample;
-                    }
-                    produced = produced.max(count);
-                }
-                // Summed peers can exceed full scale; clamping is far less
-                // objectionable than the wraparound a raw sum would hand to
-                // an integer conversion downstream.
-                for sample in out.iter_mut().take(produced) {
-                    *sample = sample.clamp(-1.0, 1.0);
-                }
-                produced
-            }
+        } else {
+            out.len()
+        };
+        if usable == 0 {
+            return 0;
         }
+        scratch.clear();
+        scratch.resize(usable, 0.0);
+        out[..usable].fill(0.0);
+
+        let mut produced = 0;
+        // `first` and `second` are already pulled off the iterator; chaining
+        // them back on keeps one loop body without building a collection.
+        for record in [first, second].into_iter().chain(receiving) {
+            let count = if realtime {
+                record.incoming.try_pull(&mut scratch[..])
+            } else {
+                record.incoming.pull(&mut scratch[..])
+            };
+            for (slot, sample) in out.iter_mut().zip(scratch.iter()).take(count) {
+                *slot += *sample;
+            }
+            produced = produced.max(count);
+        }
+        // Summed peers can exceed full scale; clamping is far less
+        // objectionable than the wraparound a raw sum would hand to an
+        // integer conversion downstream.
+        for sample in out.iter_mut().take(produced) {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        produced
     }
+
 
     fn remove_session(&self, id: SessionId) -> Option<Arc<SessionRecord>> {
         let record = self.sessions.lock().ok()?.remove(&id);
@@ -857,5 +898,141 @@ mod tests {
         let engine = RelayEngine::start(EngineConfig::default()).unwrap();
         let handle = engine.handle();
         assert!(handle.host_start().is_err());
+    }
+
+    /// A session record with just enough filled in to exercise mixing. The
+    /// crypto halves are real, because `SessionRecord` has nowhere to put a
+    /// placeholder, but nothing in the mix path touches them.
+    fn mixing_session(id: u64, receiving: bool) -> Arc<SessionRecord> {
+        use crate::crypto::{pake_start, Side};
+        let client = pake_start(Side::Client, "123456");
+        let host = pake_start(Side::Host, "123456");
+        let client_message = client.message.clone();
+        let host_message = host.message.clone();
+        let keys = client.finish(&host_message).expect("client pairs");
+        let peer_keys = host.finish(&client_message).expect("host pairs");
+        let (sealer, _) = keys.audio_channel().expect("audio keys");
+        let (_, opener) = peer_keys.audio_channel().expect("peer audio keys");
+        let format = AudioFormat::new(48_000, 1, 10);
+        Arc::new(SessionRecord {
+            id: SessionId(id),
+            wire_id: id,
+            peer: PeerInfo {
+                name: format!("peer-{id}"),
+                kind: DeviceKind::Other,
+                addr: "127.0.0.1:1".parse().unwrap(),
+            },
+            roles: Roles::both(),
+            codec: CodecKind::Pcm,
+            format,
+            sending: true,
+            receiving,
+            stop: Arc::new(AtomicBool::new(false)),
+            bye_requested: AtomicBool::new(false),
+            control_generation: AtomicU64::new(0),
+            resuming: AtomicBool::new(false),
+            peer_audio_addr: Mutex::new(None),
+            outgoing: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
+            incoming: PcmQueue::new(DEFAULT_QUEUE_CAPACITY),
+            capture_convert: Mutex::new((Converter::new(48_000, 1, 48_000, 1), Vec::new())),
+            audio_sealer: Mutex::new(sealer),
+            audio_opener: Mutex::new(opener),
+        })
+    }
+
+    fn mixing_engine(sessions: Vec<Arc<SessionRecord>>) -> Arc<EngineInner> {
+        let inner = EngineInner::new(EngineConfig::default());
+        for record in sessions {
+            inner.insert_session(record);
+        }
+        inner
+    }
+
+    #[test]
+    fn mixing_with_no_receiving_sessions_produces_nothing() {
+        let inner = mixing_engine(vec![mixing_session(1, false)]);
+        let mut out = [9.0f32; 4];
+        assert_eq!(inner.mix_playback(&mut out, true), 0);
+        // Producing nothing must also mean touching nothing: the caller fills
+        // the untouched tail with silence itself.
+        assert_eq!(out, [9.0; 4]);
+        assert_eq!(mixing_engine(vec![]).mix_playback(&mut out, true), 0);
+    }
+
+    #[test]
+    fn mixing_one_receiving_session_passes_its_audio_through() {
+        let session = mixing_session(1, true);
+        session.incoming.push(&[0.1, 0.2, 0.3]);
+        let inner = mixing_engine(vec![session, mixing_session(2, false)]);
+        let mut out = [0.0f32; 4];
+        assert_eq!(inner.mix_playback(&mut out, true), 3);
+        assert_eq!(&out[..3], &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn mixing_several_receiving_sessions_sums_them() {
+        let first = mixing_session(1, true);
+        let second = mixing_session(2, true);
+        let third = mixing_session(3, true);
+        first.incoming.push(&[0.1, 0.1, 0.1, 0.1]);
+        second.incoming.push(&[0.2, 0.2]);
+        third.incoming.push(&[0.3, 0.3, 0.3]);
+        let inner = mixing_engine(vec![first, second, third]);
+        let mut out = [0.0f32; 4];
+        // The count is the longest contributor, not the sum of the lengths:
+        // peers are mixed, not concatenated.
+        assert_eq!(inner.mix_playback(&mut out, true), 4);
+        assert!((out[0] - 0.6).abs() < 1e-6, "{out:?}");
+        assert!((out[1] - 0.6).abs() < 1e-6, "{out:?}");
+        assert!((out[2] - 0.4).abs() < 1e-6, "{out:?}");
+        assert!((out[3] - 0.1).abs() < 1e-6, "{out:?}");
+    }
+
+    #[test]
+    fn a_summed_mix_is_clamped_to_full_scale() {
+        let first = mixing_session(1, true);
+        let second = mixing_session(2, true);
+        first.incoming.push(&[0.9, -0.9]);
+        second.incoming.push(&[0.9, -0.9]);
+        let inner = mixing_engine(vec![first, second]);
+        let mut out = [0.0f32; 2];
+        assert_eq!(inner.mix_playback(&mut out, true), 2);
+        assert_eq!(out, [1.0, -1.0]);
+    }
+
+    #[test]
+    fn realtime_mixing_does_not_grow_the_scratch_buffer() {
+        // This is the regression the `Vec` collect used to cause: every
+        // realtime callback allocated, on the one thread that must not.
+        let first = mixing_session(1, true);
+        let second = mixing_session(2, true);
+        let inner = mixing_engine(vec![Arc::clone(&first), Arc::clone(&second)]);
+        let capacity = inner.mix_scratch.lock().unwrap().capacity();
+        assert!(capacity >= MAX_REALTIME_QUANTUM_SAMPLES);
+        let block = vec![0.25f32; 1_024];
+        let mut out = vec![0.0f32; 1_024];
+        for _ in 0..64 {
+            first.incoming.push(&block);
+            second.incoming.push(&block);
+            inner.mix_playback(&mut out, true);
+            assert_eq!(inner.mix_scratch.lock().unwrap().capacity(), capacity);
+        }
+    }
+
+    #[test]
+    fn realtime_mixing_of_an_oversized_buffer_serves_what_it_can_without_growing() {
+        // A caller ignoring `MAX_REALTIME_QUANTUM_SAMPLES` gets a short read
+        // rather than an allocation on the audio thread.
+        let first = mixing_session(1, true);
+        let second = mixing_session(2, true);
+        let oversized = MAX_REALTIME_QUANTUM_SAMPLES + 512;
+        first.incoming.push(&vec![0.5f32; oversized]);
+        second.incoming.push(&vec![0.5f32; oversized]);
+        let inner = mixing_engine(vec![first, second]);
+        let capacity = inner.mix_scratch.lock().unwrap().capacity();
+        let mut out = vec![0.0f32; oversized];
+        let produced = inner.mix_playback(&mut out, true);
+        assert!(produced <= MAX_REALTIME_QUANTUM_SAMPLES);
+        assert_eq!(inner.mix_scratch.lock().unwrap().capacity(), capacity);
     }
 }

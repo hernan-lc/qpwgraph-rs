@@ -43,6 +43,30 @@ pub fn normalize_frame_ms(frame_ms: u16) -> u16 {
 pub fn is_supported_frame_ms(frame_ms: u16) -> bool {
     FRAME_DURATIONS_MS.contains(&frame_ms)
 }
+
+/// Sample rates the codec layer and the session negotiation both accept.
+///
+/// Opus itself accepts more, but the relay narrows the set so both ends can
+/// size their conversion buffers from a known maximum ratio rather than from
+/// whatever the peer happened to ask for.
+pub const SAMPLE_RATES_HZ: [u32; 3] = [16_000, 24_000, 48_000];
+
+/// The largest negotiable sample rate. Buffer sizing upper bounds come from
+/// this, so it must stay the maximum of [`SAMPLE_RATES_HZ`].
+pub const MAX_SAMPLE_RATE_HZ: u32 = 48_000;
+
+/// The largest negotiable channel count.
+pub const MAX_CHANNELS: u16 = 2;
+
+/// Whether `sample_rate` is exactly one of the negotiable rates.
+pub fn is_supported_sample_rate(sample_rate: u32) -> bool {
+    SAMPLE_RATES_HZ.contains(&sample_rate)
+}
+
+/// Whether `channels` is a negotiable channel count (mono or stereo).
+pub fn is_supported_channels(channels: u16) -> bool {
+    (1..=MAX_CHANNELS).contains(&channels)
+}
 /// Refuse control frames larger than this. They are small JSON documents;
 /// a bigger frame indicates a broken or hostile peer.
 pub const MAX_CONTROL_FRAME: u32 = 64 * 1024;
