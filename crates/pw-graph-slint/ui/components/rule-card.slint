@@ -9,8 +9,9 @@ export component RuleCard inherits Rectangle {
     callback edit();
     callback toggle-pin();
     callback delete();
-    // For shared tooltip handling: report hover with tooltip text
-    callback hover-tooltip(string, bool);
+    // For shared tooltip handling: report the owner and absolute anchor so the
+    // dialog can render one unclipped tooltip for every rule action.
+    callback hover-tooltip(string, bool, length, length, string);
 
     height: 72px;
     background: AppTokens.panel-bg;
@@ -58,7 +59,9 @@ export component RuleCard inherits Rectangle {
         y: 10px;
         icon: @image-url("../../../../assets/icons/edit.svg");
         tooltip: UiI18n.localized("patchbay.edit_rule");
-        hover-changed(entered, tip, ax, ay) => { root.hover-tooltip(tip, entered); }
+        hover-changed(entered, tip, ax, ay) => {
+            root.hover-tooltip(tip, entered, ax, ay, "rule-edit:" + root.rule.index);
+        }
         clicked => { root.edit(); }
     }
     pin-btn := IconButton {
@@ -67,7 +70,9 @@ export component RuleCard inherits Rectangle {
         icon: @image-url("../../../../assets/icons/pin.svg");
         tooltip: root.rule.pinned ? UiI18n.localized("patchbay.unpin") : UiI18n.localized("patchbay.pin");
         selected: root.rule.pinned;
-        hover-changed(entered, tip, ax, ay) => { root.hover-tooltip(tip, entered); }
+        hover-changed(entered, tip, ax, ay) => {
+            root.hover-tooltip(tip, entered, ax, ay, "rule-pin:" + root.rule.index);
+        }
         clicked => { root.toggle-pin(); }
     }
     delete-btn := IconButton {
@@ -76,7 +81,13 @@ export component RuleCard inherits Rectangle {
         icon: @image-url("../../../../assets/icons/delete.svg");
         tooltip: UiI18n.localized("effects.remove");
         danger: true;
-        hover-changed(entered, tip, ax, ay) => { root.hover-tooltip(tip, entered); }
-        clicked => { root.delete(); }
+        hover-changed(entered, tip, ax, ay) => {
+            root.hover-tooltip(tip, entered, ax, ay, "rule-remove:" + root.rule.index);
+        }
+        clicked => {
+            // Clear the shared tooltip before this card can disappear.
+            root.hover-tooltip(delete-btn.tooltip, false, delete-btn.absolute-position.x, delete-btn.absolute-position.y, "rule-remove:" + root.rule.index);
+            root.delete();
+        }
     }
 }

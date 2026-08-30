@@ -6,6 +6,8 @@ import { DialogShell } from "../components/dialog-shell.slint";
 export component QrDialog inherits DialogShell {
     title: UiI18n.localized("relay.qr_title");
     title-size: 18px * UiTheme.ui-scale;
+    title-x: 18px;
+    show-header-close: false;
     in property <string> relay-qr-payload: "";
     in property <image> relay-qr-image;
     Rectangle { x: 72px; y: 65px; width: 236px; height: 236px; background: #f5f5f5; border-radius: 4px; Image { width: parent.width; height: parent.height; source: root.relay-qr-image; } }

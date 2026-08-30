@@ -17,6 +17,13 @@ export component IconButton inherits Rectangle {
     border-color: root.selected ? AppTokens.border-button-selected : root.danger ? (touch.has-hover && root.enabled ? #c76b6b : #7a4040) : AppTokens.border-button;
     background: root.selected ? AppTokens.accent-blue : touch.has-hover && root.enabled ? (root.danger ? #5a2f2f : #344252) : root.danger ? #3d2c2c : #27313c;
     opacity: root.enabled ? 1 : 0.45;
+    accessible-role: button;
+    accessible-label: root.tooltip;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
 
     out property <bool> hovered: touch.has-hover;
 

@@ -8,6 +8,10 @@ import { ActionButton } from "button.slint";
 export component DialogShell inherits Rectangle {
     in property <string> title: "";
     in property <length> title-size: 19px * UiTheme.ui-scale;
+    in property <length> title-x: 20px;
+    in property <length> title-y: 18px;
+    in property <bool> show-header-close: true;
+    in property <length> header-close-y: 14px;
     in property <color> bg: AppTokens.dialog-bg;
     in property <color> border-col: AppTokens.border-dialog;
     callback close();
@@ -21,8 +25,8 @@ export component DialogShell inherits Rectangle {
     // custom header (e.g. centered preferences title) leave `title` empty
     // and draw their own Text inside @children.
     if root.title != "": Text {
-        x: 20px;
-        y: 18px;
+        x: root.title-x;
+        y: root.title-y;
         width: parent.width - 80px;
         height: 24px;
         text: root.title;
@@ -33,8 +37,9 @@ export component DialogShell inherits Rectangle {
     }
 
     ActionButton {
+        visible: root.show-header-close;
         x: parent.width - 47px;
-        y: 14px;
+        y: root.header-close-y;
         width: 30px;
         text: "×";
         clicked => { root.close(); }

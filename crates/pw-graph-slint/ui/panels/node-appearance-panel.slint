@@ -7,6 +7,9 @@ import { DialogShell } from "../components/dialog-shell.slint";
 export component NodeAppearancePanel inherits DialogShell {
     title: UiI18n.localized("inspector.node_appearance");
     title-size: 18px * UiTheme.ui-scale;
+    title-x: 18px;
+    title-y: 16px;
+    header-close-y: 12px;
     in-out property <string> node-editor-node-name: "";
     in-out property <string> node-editor-custom-name: "";
     in-out property <string> node-editor-color: "";

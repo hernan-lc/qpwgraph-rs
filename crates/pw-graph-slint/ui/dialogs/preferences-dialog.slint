@@ -42,6 +42,16 @@ export component PreferencesDialog inherits Rectangle {
 
     property <string> rule-tooltip-text: "";
     property <bool> rule-tooltip-shown: false;
+    property <string> rule-tooltip-owner: "";
+    property <length> rule-tooltip-anchor-x: 0px;
+    property <length> rule-tooltip-anchor-y: 0px;
+
+    changed tab => {
+        if (root.tab != 1) {
+            root.rule-tooltip-shown = false;
+            root.rule-tooltip-owner = "";
+        }
+    }
 
     background: AppTokens.dialog-bg-alt;
     border-color: #607080;
@@ -152,16 +162,19 @@ export component PreferencesDialog inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    ScrollView {
+                    rules-scroll := ScrollView {
                         x: 0px;
                         y: 0px;
                         width: parent.width;
                         height: parent.height;
-                        viewport-width: parent.width;
-                        viewport-height: max(parent.height, root.rules.length * 80px);
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                        viewport-width: self.visible-width;
+                        viewport-height: max(self.visible-height, rule-list.min-height);
 
-                        VerticalBox {
+                        rule-list := VerticalLayout {
+                            width: rules-scroll.visible-width;
                             spacing: 8px;
+                            padding: 0px;
                             padding-bottom: 8px;
                             for rule[index] in root.rules: RuleCard {
                                 height: 72px;
@@ -169,9 +182,17 @@ export component PreferencesDialog inherits Rectangle {
                                 edit => { root.action("rule-edit:" + rule.index); }
                                 toggle-pin => { root.action("rule-pin:" + rule.index); }
                                 delete => { root.action("rule-remove:" + rule.index); }
-                                hover-tooltip(tip, shown) => {
-                                    root.rule-tooltip-text = tip;
-                                    root.rule-tooltip-shown = shown;
+                                hover-tooltip(tip, shown, ax, ay, owner) => {
+                                    if (shown) {
+                                        root.rule-tooltip-text = tip;
+                                        root.rule-tooltip-anchor-x = ax;
+                                        root.rule-tooltip-anchor-y = ay;
+                                        root.rule-tooltip-owner = owner;
+                                        root.rule-tooltip-shown = true;
+                                    } else if (root.rule-tooltip-owner == owner) {
+                                        root.rule-tooltip-shown = false;
+                                        root.rule-tooltip-owner = "";
+                                    }
                                 }
                             }
                         }
@@ -214,8 +235,8 @@ export component PreferencesDialog inherits Rectangle {
     // Shared tooltip for rule icon buttons – single visual implementation, avoids
     // clipping by living outside the bounded ScrollView.
     Tooltip {
-        x: parent.width - self.width - 16px;
-        y: 84px;
+        x: clamp(root.rule-tooltip-anchor-x - root.absolute-position.x - self.width - 8px, 8px, parent.width - self.width - 8px);
+        y: clamp(root.rule-tooltip-anchor-y - root.absolute-position.y, 8px, parent.height - self.height - 8px);
         text: root.rule-tooltip-text;
         shown: root.rule-tooltip-shown && root.tab == 1;
         z: 100;
