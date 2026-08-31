@@ -221,7 +221,7 @@ impl CallbackState {
 /// indicator, not an audio-quality noise source.
 fn next_diagnostic_noise(state: &AtomicU32) -> f32 {
     let value = state
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             let mut next = value;
             next ^= next << 13;
             next ^= next >> 17;

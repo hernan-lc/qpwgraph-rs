@@ -86,7 +86,10 @@ pub(super) fn process_meter_buffer(stream: &pw::stream::StreamRef, data: &mut Me
         if offset >= end {
             continue;
         }
-        for chunk in bytes[offset..end].chunks_exact(std::mem::size_of::<f32>()) {
+        for chunk in bytes[offset..end]
+            .as_chunks::<{ std::mem::size_of::<f32>() }>()
+            .0
+        {
             let mut raw = [0_u8; 4];
             raw.copy_from_slice(chunk);
             let value = if format == AudioFormat::F32BE {
