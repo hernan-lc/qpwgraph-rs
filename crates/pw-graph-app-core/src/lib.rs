@@ -14,7 +14,6 @@ use pw_graph_core::{
     LinkId, Node, NodeId, NodeType, PortId, PortType,
 };
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 /// Legacy public compatibility constant. New routing code uses the shared
 /// backend namespace helpers in `pw-graph-core`; the high bit remains
@@ -61,6 +60,7 @@ pub struct BackendAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     // The refresh clock and the graph merge live in `composite::refresh`;
     // these tests exercise them directly.
     use crate::composite::refresh::{merge_graph_into, refresh_due};

@@ -23,6 +23,10 @@ mod routing;
 
 pub use routing::{route_for_ports, CompositeRoute};
 
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", any(feature = "pipewire", feature = "alsa"))
+))]
 use refresh::RefreshSchedule;
 
 /// PipeWire + ALSA MIDI graph with disjoint ID namespaces.
@@ -37,6 +41,10 @@ pub struct CompositeDriver {
     #[cfg(target_os = "windows")]
     pub windows_midi: Option<WindowsMidiDriver>,
     graph: Graph,
+    #[cfg(any(
+        target_os = "windows",
+        all(target_os = "linux", any(feature = "pipewire", feature = "alsa"))
+    ))]
     refresh_schedule: RefreshSchedule,
 }
 

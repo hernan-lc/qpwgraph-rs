@@ -1,6 +1,7 @@
 //! The relay engine lives on one child backend per platform, so the composite
 //! only has to find it and forward.
 
+#[cfg(feature = "relay")]
 use super::*;
 
 /// Which child driver hosts the relay on this platform.

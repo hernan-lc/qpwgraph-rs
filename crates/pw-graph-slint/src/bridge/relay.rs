@@ -466,6 +466,7 @@ pub(crate) fn relay_nodes_visible(application: &Application) -> bool {
 /// Generating unconditionally in [`host_pin_on_start`] would satisfy the third
 /// property too, but it would also throw away a PIN a user had deliberately
 /// typed into the field, so the retirement happens on stop instead.
+#[cfg(feature = "relay")]
 pub(crate) fn host_pin_on_start(pin: &mut String, generate: impl FnOnce() -> String) {
     if pin.trim().is_empty() {
         *pin = generate();
@@ -479,6 +480,7 @@ pub(crate) fn host_pin_on_start(pin: &mut String, generate: impl FnOnce() -> Str
 /// across sessions — the opposite of the per-session freshness above. It is
 /// never written to disk (`AppConfig::relay_host_pin` is `serde(skip)`), so
 /// clearing it loses nothing.
+#[cfg(feature = "relay")]
 pub(crate) fn host_pin_on_stop(pin: &mut String) {
     pin.clear();
 }
@@ -1181,7 +1183,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "relay"))]
 mod host_pin_tests {
     use super::{host_pin_on_start, host_pin_on_stop};
 
