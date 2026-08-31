@@ -5,6 +5,7 @@
 //! the single thread that initialized the apartment.
 
 use super::*;
+#[cfg(feature = "relay")]
 use crate::api;
 
 pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
@@ -29,6 +30,20 @@ pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabi
 /// not mark the topology dirty: a volume change used to force a full endpoint
 /// and session re-enumeration.
 pub(super) type AudioStateMap = Arc<Mutex<BTreeMap<NodeId, NodeAudioState>>>;
+
+#[cfg(feature = "relay")]
+struct RelayConfigOptions {
+    device_name: String,
+    pin: String,
+    port: u16,
+    codec: api::RelayCodecKind,
+    frame_ms: u16,
+    transport: api::RelayTransportPreference,
+    roles: api::RelayRoles,
+    device_id: String,
+    trusted_peers: Vec<api::RelayTrustedPeer>,
+    trust_new_peers: bool,
+}
 
 /// Public Windows audio driver. The COM worker owns all Core Audio objects;
 /// this value only owns a graph snapshot, command channel, and lifecycle state.
@@ -206,32 +221,21 @@ impl WindowsAudioDriver {
 
     /// The relay's format, fixed by the WASAPI endpoints that carry it.
     #[cfg(feature = "relay")]
-    pub(super) fn relay_config(
-        device_name: String,
-        pin: String,
-        port: u16,
-        codec: api::RelayCodecKind,
-        frame_ms: u16,
-        transport: api::RelayTransportPreference,
-        roles: api::RelayRoles,
-        device_id: String,
-        trusted_peers: Vec<api::RelayTrustedPeer>,
-        trust_new_peers: bool,
-    ) -> pw_graph_relay::EngineConfig {
+    fn relay_config(options: RelayConfigOptions) -> pw_graph_relay::EngineConfig {
         pw_graph_relay::EngineConfig {
-            device_id,
-            device_name,
+            device_id: options.device_id,
+            device_name: options.device_name,
             device_kind: api::RelayDeviceKind::Other,
-            pin,
-            port,
-            codec,
-            frame_ms,
+            pin: options.pin,
+            port: options.port,
+            codec: options.codec,
+            frame_ms: options.frame_ms,
             sample_rate: crate::windows_relay::RELAY_SAMPLE_RATE,
             channels: crate::windows_relay::RELAY_CHANNELS,
-            client_roles: roles,
-            transport,
-            trusted_peers,
-            trust_new_peers,
+            client_roles: options.roles,
+            transport: options.transport,
+            trusted_peers: options.trusted_peers,
+            trust_new_peers: options.trust_new_peers,
             // The WASAPI relay endpoints run 48 kHz stereo, so that is this
             // machine's local geometry; sessions negotiating anything else are
             // converted rather than misinterpreted.
@@ -472,20 +476,20 @@ impl api::RelayDriver for WindowsAudioDriver {
     }
 
     fn relay_start_host(&mut self, request: api::RelayHostRequest) -> BackendResult<u16> {
-        let config = Self::relay_config(
-            request.device_name,
-            request.pin,
-            request.port,
-            request.codec,
-            request.frame_ms,
-            request.transport,
+        let config = Self::relay_config(RelayConfigOptions {
+            device_name: request.device_name,
+            pin: request.pin,
+            port: request.port,
+            codec: request.codec,
+            frame_ms: request.frame_ms,
+            transport: request.transport,
             // A host serves whatever a peer asks for; the client's own roles
             // only matter when this machine is the one connecting out.
-            api::RelayRoles::both(),
-            request.device_id,
-            request.trusted_peers,
-            request.trust_new_peers,
-        );
+            roles: api::RelayRoles::both(),
+            device_id: request.device_id,
+            trusted_peers: request.trusted_peers,
+            trust_new_peers: request.trust_new_peers,
+        });
         let devices = self.ensure_relay(config)?;
         devices
             .handle()
@@ -515,18 +519,18 @@ impl api::RelayDriver for WindowsAudioDriver {
         // audio to *other applications* as a microphone -- a routing limit, not
         // a role limit -- so neither role is refused here.
         if self.relay.is_none() {
-            let config = Self::relay_config(
-                "qpwgraph-rs".into(),
-                pin.to_owned(),
-                0,
-                api::RelayCodecKind::Opus,
-                10,
-                api::RelayTransportPreference::Auto,
+            let config = Self::relay_config(RelayConfigOptions {
+                device_name: "qpwgraph-rs".into(),
+                pin: pin.to_owned(),
+                port: 0,
+                codec: api::RelayCodecKind::Opus,
+                frame_ms: 10,
+                transport: api::RelayTransportPreference::Auto,
                 roles,
-                pw_graph_relay::generate_device_id(),
-                Vec::new(),
-                true,
-            );
+                device_id: pw_graph_relay::generate_device_id(),
+                trusted_peers: Vec::new(),
+                trust_new_peers: true,
+            });
             self.ensure_relay(config)?;
         }
         let devices = self.relay.as_ref().expect("relay was just created");
@@ -541,18 +545,18 @@ impl api::RelayDriver for WindowsAudioDriver {
         roles: api::RelayRoles,
     ) -> BackendResult<api::RelaySessionId> {
         if self.relay.is_none() {
-            let config = Self::relay_config(
-                "qpwgraph-rs".into(),
-                String::new(),
-                0,
-                api::RelayCodecKind::Opus,
-                10,
-                api::RelayTransportPreference::Auto,
+            let config = Self::relay_config(RelayConfigOptions {
+                device_name: "qpwgraph-rs".into(),
+                pin: String::new(),
+                port: 0,
+                codec: api::RelayCodecKind::Opus,
+                frame_ms: 10,
+                transport: api::RelayTransportPreference::Auto,
                 roles,
-                pw_graph_relay::generate_device_id(),
-                Vec::new(),
-                false,
-            );
+                device_id: pw_graph_relay::generate_device_id(),
+                trusted_peers: Vec::new(),
+                trust_new_peers: false,
+            });
             self.ensure_relay(config)?;
         }
         let devices = self.relay.as_ref().expect("relay was just created");
@@ -574,18 +578,18 @@ impl api::RelayDriver for WindowsAudioDriver {
             config.transport = transport;
             devices.handle().update_config(config);
         } else {
-            let config = Self::relay_config(
-                "qpwgraph-rs".into(),
-                String::new(),
-                0,
-                api::RelayCodecKind::Opus,
-                10,
+            let config = Self::relay_config(RelayConfigOptions {
+                device_name: "qpwgraph-rs".into(),
+                pin: String::new(),
+                port: 0,
+                codec: api::RelayCodecKind::Opus,
+                frame_ms: 10,
                 transport,
-                api::RelayRoles::both(),
+                roles: api::RelayRoles::both(),
                 device_id,
                 trusted_peers,
-                true,
-            );
+                trust_new_peers: true,
+            });
             let _ = self.ensure_relay(config)?;
         }
         Ok(())
@@ -660,18 +664,18 @@ impl api::RelayDriver for WindowsAudioDriver {
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {
         if self.relay.is_none() {
-            let config = Self::relay_config(
-                "qpwgraph-rs".into(),
-                String::new(),
-                0,
-                api::RelayCodecKind::Opus,
-                10,
-                api::RelayTransportPreference::Auto,
-                api::RelayRoles::both(),
-                pw_graph_relay::generate_device_id(),
-                Vec::new(),
-                true,
-            );
+            let config = Self::relay_config(RelayConfigOptions {
+                device_name: "qpwgraph-rs".into(),
+                pin: String::new(),
+                port: 0,
+                codec: api::RelayCodecKind::Opus,
+                frame_ms: 10,
+                transport: api::RelayTransportPreference::Auto,
+                roles: api::RelayRoles::both(),
+                device_id: pw_graph_relay::generate_device_id(),
+                trusted_peers: Vec::new(),
+                trust_new_peers: true,
+            });
             self.ensure_relay(config)?;
         }
         let devices = self.relay.as_ref().expect("relay was just created");

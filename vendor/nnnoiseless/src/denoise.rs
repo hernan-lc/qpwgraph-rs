@@ -344,14 +344,13 @@ pub fn denoise_offline(params: DenoiseParams, input: &[f32]) -> Vec<f32> {
     let mut frame = [0.0; FRAME_SIZE];
     let mut out = Vec::with_capacity(input.len() + (latency + 1) * FRAME_SIZE);
 
-    let mut chunks = input.chunks_exact(FRAME_SIZE);
-    for chunk in chunks.by_ref() {
+    let (chunks, tail) = input.as_chunks::<FRAME_SIZE>();
+    for chunk in chunks {
         state.process_frame(&mut frame, chunk);
         out.extend_from_slice(&frame);
     }
 
     // Zero-pad a ragged final frame rather than dropping it.
-    let tail = chunks.remainder();
     if !tail.is_empty() {
         let mut padded = [0.0; FRAME_SIZE];
         padded[..tail.len()].copy_from_slice(tail);
@@ -401,7 +400,7 @@ mod tests {
         let mut st = DenoiseState::with_params(params);
         let mut o = vec![0.0; FRAME_SIZE];
         let mut out = Vec::with_capacity(input.len());
-        for f in input.chunks_exact(FRAME_SIZE) {
+        for f in input.as_chunks::<FRAME_SIZE>().0 {
             st.process_frame(&mut o, f);
             out.extend_from_slice(&o);
         }
@@ -425,7 +424,7 @@ mod tests {
             let mut st = DenoiseState::new();
             let mut o = vec![0.0; FRAME_SIZE];
             let mut out = Vec::new();
-            for f in input.chunks_exact(FRAME_SIZE) {
+            for f in input.as_chunks::<FRAME_SIZE>().0 {
                 st.process_frame(&mut o, f);
                 out.extend_from_slice(&o);
             }
@@ -562,14 +561,14 @@ mod tests {
         let mut o = vec![0.0; FRAME_SIZE];
 
         let mut first = Vec::new();
-        for f in input.chunks_exact(FRAME_SIZE) {
+        for f in input.as_chunks::<FRAME_SIZE>().0 {
             st.process_frame(&mut o, f);
             first.extend_from_slice(&o);
         }
 
         st.reset();
         let mut second = Vec::new();
-        for f in input.chunks_exact(FRAME_SIZE) {
+        for f in input.as_chunks::<FRAME_SIZE>().0 {
             st.process_frame(&mut o, f);
             second.extend_from_slice(&o);
         }

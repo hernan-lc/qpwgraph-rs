@@ -127,10 +127,9 @@ fn dot_body(xs: &[f32], ys: &[f32]) -> f32 {
     let n_lanes = n - n % LANES;
 
     let mut acc = [0.0f32; LANES];
-    for (x, y) in xs[..n_lanes]
-        .chunks_exact(LANES)
-        .zip(ys[..n_lanes].chunks_exact(LANES))
-    {
+    let (x_chunks, _) = xs[..n_lanes].as_chunks::<LANES>();
+    let (y_chunks, _) = ys[..n_lanes].as_chunks::<LANES>();
+    for (x, y) in x_chunks.iter().zip(y_chunks) {
         for k in 0..LANES {
             acc[k] += x[k] * y[k];
         }
@@ -164,7 +163,9 @@ fn xcorr_body(xs: &[f32], ys: &[f32], xcorr: &mut [f32]) {
         let mut y2 = ys[i + 2];
         let mut y3 = ys[i + 3];
 
-        for (x, y) in xs.chunks_exact(4).zip(ys[(i + 4)..].chunks_exact(4)) {
+        let (x_chunks, _) = xs.as_chunks::<4>();
+        let (y_chunks, _) = ys[(i + 4)..].as_chunks::<4>();
+        for (x, y) in x_chunks.iter().zip(y_chunks) {
             c0 += x[0] * y0;
             c1 += x[0] * y1;
             c2 += x[0] * y2;
@@ -379,7 +380,9 @@ mod tests {
 
         // band correlation
         let spec: Vec<Complex> = pseudo_random(crate::FREQ_SIZE * 2, 7)
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| Complex::new(c[0], c[1]))
             .collect();
         let mut got = [0.0; NB_BANDS];
@@ -399,7 +402,9 @@ mod tests {
     fn band_energies_are_non_negative() {
         let bands = BandTables::new();
         let spec: Vec<Complex> = pseudo_random(crate::FREQ_SIZE * 2, 11)
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| Complex::new(c[0], c[1]))
             .collect();
         let mut e = [0.0; NB_BANDS];

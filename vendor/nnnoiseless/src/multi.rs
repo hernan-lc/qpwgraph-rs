@@ -235,7 +235,7 @@ mod tests {
         let mut st = DenoiseState::new();
         let mut o = vec![0.0; FRAME_SIZE];
         let mut single = Vec::new();
-        for f in ch[0].chunks_exact(FRAME_SIZE) {
+        for f in ch[0].as_chunks::<FRAME_SIZE>().0 {
             st.process_frame(&mut o, f);
             single.extend_from_slice(&o);
         }

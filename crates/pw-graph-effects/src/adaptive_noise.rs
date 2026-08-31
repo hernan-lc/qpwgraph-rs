@@ -183,7 +183,10 @@ impl ChannelState {
             return Err(EffectError::InternalBufferOverflow);
         }
 
-        for frame in self.pending[..processed_samples].chunks_exact(MODEL_FRAME_SIZE) {
+        for frame in self.pending[..processed_samples]
+            .as_chunks::<MODEL_FRAME_SIZE>()
+            .0
+        {
             for (destination, &sample) in self.frame_input.iter_mut().zip(frame) {
                 *destination = sample * SAMPLE_SCALE;
             }

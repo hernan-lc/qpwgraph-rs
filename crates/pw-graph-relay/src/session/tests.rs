@@ -295,6 +295,7 @@ fn a_host_migration_that_cannot_reopen_the_negotiated_port_is_fatal() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn losing_the_negotiated_port_to_another_socket_is_fatal() {
     // The same failure with real sockets and no injection: a foreign
@@ -322,7 +323,12 @@ fn a_resume_whose_audio_port_is_lost_is_rejected_instead_of_acknowledged() {
     // port must not answer `ResumeOk`. Doing so would report a healthy
     // session to the client while its audio went nowhere. The host sends
     // `PairFail` and tears the session down so the peer negotiates afresh.
-    let inner = EngineInner::new(crate::EngineConfig::default());
+    // Force a specific loopback bind so this test exercises migration even
+    // on hosts whose interface inventory would make Auto keep the wildcard.
+    let inner = EngineInner::new(crate::EngineConfig {
+        transport: crate::TransportPreference::Adb,
+        ..crate::EngineConfig::default()
+    });
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket");
     let slot = UdpAudioSlot::new(socket).expect("audio slot");
     let audio_port = slot.local_addr().expect("bound address").port();

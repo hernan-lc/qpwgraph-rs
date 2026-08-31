@@ -1,5 +1,11 @@
 #[cfg(target_os = "linux")]
 fn main() {
+    // Build scripts are compiled for the host, so `cfg!(target_os)` alone
+    // would probe ALSA even when a Linux machine is cross-compiling the app
+    // for Windows. Cargo exposes the package target explicitly here.
+    if std::env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(std::ffi::OsStr::new("linux")) {
+        return;
+    }
     if std::env::var_os("CARGO_FEATURE_ALSA").is_none() {
         return;
     }

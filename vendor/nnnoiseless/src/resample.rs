@@ -371,8 +371,8 @@ mod tests {
 
         let out = resample(&interleaved, from, to, 2);
         assert_eq!(out.len() % 2, 0);
-        let right_out: Vec<f32> = out.chunks_exact(2).map(|c| c[1]).collect();
-        let left_out: Vec<f32> = out.chunks_exact(2).map(|c| c[0]).collect();
+        let right_out: Vec<f32> = out.as_chunks::<2>().0.iter().map(|c| c[1]).collect();
+        let left_out: Vec<f32> = out.as_chunks::<2>().0.iter().map(|c| c[0]).collect();
         assert!(
             rms(&right_out) < 1e-6,
             "silence leaked: {}",
