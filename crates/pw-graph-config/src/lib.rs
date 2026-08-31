@@ -328,9 +328,11 @@ mod tests {
 
     #[test]
     fn pairing_pins_never_reach_disk() {
-        let path = std::env::temp_dir()
-            .join(format!("pw-graph-config-{}", std::process::id()))
-            .join("pins.toml");
+        // Keep this directory distinct from `defaults_round_trip`: tests run
+        // concurrently, and that test removes its directory after saving.
+        let directory =
+            std::env::temp_dir().join(format!("pw-graph-config-pins-{}", std::process::id()));
+        let path = directory.join("pins.toml");
         let config = AppConfig {
             relay_host_pin: "864209".into(),
             relay_client_pin: "135790".into(),
@@ -346,7 +348,7 @@ mod tests {
         let reloaded = AppConfig::load_from(&path).unwrap();
         assert!(reloaded.relay_host_pin.is_empty());
         assert!(reloaded.relay_client_pin.is_empty());
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! the single thread that initialized the apartment.
 
 use super::*;
+use crate::api;
 
 pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     topology: true,
@@ -209,18 +210,18 @@ impl WindowsAudioDriver {
         device_name: String,
         pin: String,
         port: u16,
-        codec: super::api::RelayCodecKind,
+        codec: api::RelayCodecKind,
         frame_ms: u16,
-        transport: super::api::RelayTransportPreference,
-        roles: super::api::RelayRoles,
+        transport: api::RelayTransportPreference,
+        roles: api::RelayRoles,
         device_id: String,
-        trusted_peers: Vec<super::api::RelayTrustedPeer>,
+        trusted_peers: Vec<api::RelayTrustedPeer>,
         trust_new_peers: bool,
     ) -> pw_graph_relay::EngineConfig {
         pw_graph_relay::EngineConfig {
             device_id,
             device_name,
-            device_kind: super::api::RelayDeviceKind::Other,
+            device_kind: api::RelayDeviceKind::Other,
             pin,
             port,
             codec,
@@ -454,12 +455,12 @@ impl crate::api::EffectDriver for WindowsAudioDriver {}
 /// The engine is the same one PipeWire uses; only the audio endpoints differ.
 /// See `windows_relay` for why the microphone role cannot be offered here.
 #[cfg(feature = "relay")]
-impl super::api::RelayDriver for WindowsAudioDriver {
+impl api::RelayDriver for WindowsAudioDriver {
     fn relay_available(&self) -> bool {
         true
     }
 
-    fn relay_status(&self) -> super::api::RelayEngineStatus {
+    fn relay_status(&self) -> api::RelayEngineStatus {
         self.relay
             .as_ref()
             .map(|devices| devices.handle().status())
@@ -470,7 +471,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         self.relay.is_some()
     }
 
-    fn relay_start_host(&mut self, request: super::api::RelayHostRequest) -> BackendResult<u16> {
+    fn relay_start_host(&mut self, request: api::RelayHostRequest) -> BackendResult<u16> {
         let config = Self::relay_config(
             request.device_name,
             request.pin,
@@ -480,7 +481,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             request.transport,
             // A host serves whatever a peer asks for; the client's own roles
             // only matter when this machine is the one connecting out.
-            super::api::RelayRoles::both(),
+            api::RelayRoles::both(),
             request.device_id,
             request.trusted_peers,
             request.trust_new_peers,
@@ -505,8 +506,8 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         &mut self,
         target: std::net::SocketAddr,
         pin: &str,
-        roles: super::api::RelayRoles,
-    ) -> BackendResult<super::api::RelaySessionId> {
+        roles: api::RelayRoles,
+    ) -> BackendResult<api::RelaySessionId> {
         // Both roles work here. `emit` means "send what this machine's relay
         // capture endpoint supplies", which on Windows is the playback
         // loopback, and `receive` means "play what the peer sends", which is
@@ -518,9 +519,9 @@ impl super::api::RelayDriver for WindowsAudioDriver {
                 "qpwgraph-rs".into(),
                 pin.to_owned(),
                 0,
-                super::api::RelayCodecKind::Opus,
+                api::RelayCodecKind::Opus,
                 10,
-                super::api::RelayTransportPreference::Auto,
+                api::RelayTransportPreference::Auto,
                 roles,
                 pw_graph_relay::generate_device_id(),
                 Vec::new(),
@@ -537,16 +538,16 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         target: std::net::SocketAddr,
         peer_id: &str,
         secret: [u8; 32],
-        roles: super::api::RelayRoles,
-    ) -> BackendResult<super::api::RelaySessionId> {
+        roles: api::RelayRoles,
+    ) -> BackendResult<api::RelaySessionId> {
         if self.relay.is_none() {
             let config = Self::relay_config(
                 "qpwgraph-rs".into(),
                 String::new(),
                 0,
-                super::api::RelayCodecKind::Opus,
+                api::RelayCodecKind::Opus,
                 10,
-                super::api::RelayTransportPreference::Auto,
+                api::RelayTransportPreference::Auto,
                 roles,
                 pw_graph_relay::generate_device_id(),
                 Vec::new(),
@@ -563,8 +564,8 @@ impl super::api::RelayDriver for WindowsAudioDriver {
     fn relay_configure_identity(
         &mut self,
         device_id: String,
-        trusted_peers: Vec<super::api::RelayTrustedPeer>,
-        transport: super::api::RelayTransportPreference,
+        trusted_peers: Vec<api::RelayTrustedPeer>,
+        transport: api::RelayTransportPreference,
     ) -> BackendResult<()> {
         if let Some(devices) = self.relay.as_ref() {
             let mut config = devices.handle().config();
@@ -577,10 +578,10 @@ impl super::api::RelayDriver for WindowsAudioDriver {
                 "qpwgraph-rs".into(),
                 String::new(),
                 0,
-                super::api::RelayCodecKind::Opus,
+                api::RelayCodecKind::Opus,
                 10,
                 transport,
-                super::api::RelayRoles::both(),
+                api::RelayRoles::both(),
                 device_id,
                 trusted_peers,
                 true,
@@ -590,7 +591,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
         Ok(())
     }
 
-    fn relay_disconnect(&mut self, session: super::api::RelaySessionId) -> BackendResult<()> {
+    fn relay_disconnect(&mut self, session: api::RelaySessionId) -> BackendResult<()> {
         let Some(devices) = self.relay.as_mut() else {
             return Err(BackendError::native(
                 "no relay session exists to disconnect",
@@ -650,7 +651,7 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             .map_err(|error| BackendError::native(format!("trusted peer removal failed: {error}")))
     }
 
-    fn relay_events(&mut self) -> Vec<super::api::RelayEvent> {
+    fn relay_events(&mut self) -> Vec<api::RelayEvent> {
         self.relay
             .as_mut()
             .map(|devices| devices.handle().events())
@@ -663,10 +664,10 @@ impl super::api::RelayDriver for WindowsAudioDriver {
                 "qpwgraph-rs".into(),
                 String::new(),
                 0,
-                super::api::RelayCodecKind::Opus,
+                api::RelayCodecKind::Opus,
                 10,
-                super::api::RelayTransportPreference::Auto,
-                super::api::RelayRoles::both(),
+                api::RelayTransportPreference::Auto,
+                api::RelayRoles::both(),
                 pw_graph_relay::generate_device_id(),
                 Vec::new(),
                 true,
@@ -698,14 +699,14 @@ impl super::api::RelayDriver for WindowsAudioDriver {
             .any(|link| link.kind == pw_graph_relay::LinkKind::Usb)
     }
 
-    fn relay_peers(&self) -> Vec<super::api::RelayPeerInfo> {
+    fn relay_peers(&self) -> Vec<api::RelayPeerInfo> {
         self.relay
             .as_ref()
             .map(|devices| devices.handle().discovered_peers())
             .unwrap_or_default()
     }
 
-    fn relay_local_links(&self) -> Vec<super::api::RelayLocalLink> {
+    fn relay_local_links(&self) -> Vec<api::RelayLocalLink> {
         pw_graph_relay::netlink::display_links()
     }
 }
