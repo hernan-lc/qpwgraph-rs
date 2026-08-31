@@ -3,7 +3,6 @@ package io.qpwgraph.relay
 import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -247,12 +246,18 @@ internal class TrustedCredentialStore(
         }
     }
 
-    private fun encoded(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+    // `java.util.Base64` rather than `android.util.Base64`: it is available
+    // from API 26, which is this module's `minSdk`, it produces exactly the
+    // unwrapped padded output the previous `NO_WRAP` encoder wrote, and it is
+    // a real implementation under JVM unit tests instead of a stub that
+    // throws "not mocked" before any credential handling is exercised.
+    private fun encoded(bytes: ByteArray): String =
+        java.util.Base64.getEncoder().encodeToString(bytes)
 
     private fun decode(value: String, field: String): ByteArray {
         if (value.isBlank()) throw CredentialStoreException("$field is missing")
         return try {
-            Base64.decode(value, Base64.DEFAULT)
+            java.util.Base64.getDecoder().decode(value)
         } catch (error: IllegalArgumentException) {
             throw CredentialStoreException("$field is malformed", error)
         }

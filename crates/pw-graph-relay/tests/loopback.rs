@@ -420,9 +420,8 @@ fn trusted_pairing_allows_a_later_pinless_connection() {
     // the second connection must be able to authenticate without its PIN.
     assert!(wait_until(|| {
         for event in host_handle.events() {
-            match event {
-                RelayEvent::SessionEstablished { .. } => host_established = true,
-                _ => {}
+            if let RelayEvent::SessionEstablished { .. } = event {
+                host_established = true;
             }
         }
         host_established && host_enrolled

@@ -5,7 +5,9 @@
 //! and for compatibility with the first Rust prototype.
 
 use pw_graph_backend::{BackendError, GraphDriver};
-use pw_graph_core::{Direction, Graph, NodeType, PortId, PortKey, PortType};
+use pw_graph_core::{
+    legacy_relay_port_name, Direction, Graph, NodeType, PortId, PortKey, PortType,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -593,9 +595,15 @@ fn find_named_port(
         .filter(|node| node.name == node_name)
         .filter(|node| node_type.is_none_or(|expected| node.node_type == expected))
         .find_map(|node| {
+            // A patchbay saved before the relay filter ports were
+            // role-prefixed stores them as bare `FL`/`FR`. `legacy_relay_port_name`
+            // accepts that one rewrite, and only on the two relay nodes, so
+            // an ordinary card's `FL` pin is untouched.
+            let legacy_relay_port = legacy_relay_port_name(&node.name, port_name, direction);
             node.ports.iter().find_map(|id| {
                 let port = graph.port(*id)?;
-                (port.name == port_name
+                ((port.name == port_name
+                    || legacy_relay_port.is_some_and(|name| port.name == name))
                     && port.direction == direction
                     && (port_type == PortType::Unknown || port.port_type == port_type))
                     .then_some(port.id)
@@ -1184,6 +1192,127 @@ mod tests {
         assert_eq!(connection.input_node_type, None);
         assert_eq!(connection.effective_output_node_type(), NodeType::PipeWire);
         assert_eq!(connection.effective_input_node_type(), NodeType::PipeWire);
+    }
+
+    /// A graph holding both relay virtual nodes with their current
+    /// role-prefixed ports, plus a normal card that still names its ports
+    /// with the bare channel.
+    fn relay_graph() -> Graph {
+        let mut graph = Graph::default();
+        for (id, name) in [
+            (1u64, pw_graph_core::RELAY_SOURCE_NODE_NAME),
+            (2, pw_graph_core::RELAY_SINK_NODE_NAME),
+            (3, "alsa_output.pci-0000_00"),
+        ] {
+            graph
+                .add_node(pw_graph_core::Node::new(
+                    pw_graph_core::NodeId(id),
+                    name,
+                    NodeType::PipeWire,
+                ))
+                .unwrap();
+        }
+        for (id, node, name, direction) in [
+            (10u64, 1u64, "capture_FL", Direction::Source),
+            (11, 1, "capture_FR", Direction::Source),
+            (12, 2, "playback_FL", Direction::Sink),
+            (13, 2, "playback_FR", Direction::Sink),
+            (14, 3, "FL", Direction::Sink),
+            (15, 3, "FR", Direction::Sink),
+        ] {
+            graph
+                .add_port(pw_graph_core::Port::new(
+                    PortId(id),
+                    pw_graph_core::NodeId(node),
+                    name,
+                    direction,
+                    PortType::Audio,
+                ))
+                .unwrap();
+        }
+        graph
+    }
+
+    fn relay_patchbay(output_name: &str, input_node: &str, input_name: &str) -> Patchbay {
+        serde_json::from_str(&format!(
+            r#"{{
+                "version": 1,
+                "name": "legacy relay",
+                "connections": [{{
+                    "output_port": 0,
+                    "input_port": 0,
+                    "pinned": true,
+                    "port_type": "Audio",
+                    "output_node_type": "PipeWire",
+                    "input_node_type": "PipeWire",
+                    "output_node": "{}",
+                    "output_name": "{output_name}",
+                    "input_node": "{input_node}",
+                    "input_name": "{input_name}"
+                }}]
+            }}"#,
+            pw_graph_core::RELAY_SOURCE_NODE_NAME
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_patchbay_saved_with_the_current_relay_port_names_activates() {
+        let patchbay = relay_patchbay(
+            "capture_FL",
+            pw_graph_core::RELAY_SINK_NODE_NAME,
+            "playback_FL",
+        );
+        let mut driver = InMemoryDriver::new(relay_graph());
+        assert_eq!(
+            patchbay
+                .activate(&mut driver, false, false)
+                .unwrap()
+                .connected,
+            1
+        );
+    }
+
+    #[test]
+    fn a_patchbay_saved_before_the_relay_port_rename_still_activates() {
+        // Regression: relay ports were renamed `FL` -> `capture_FL` /
+        // `playback_FL` to make the canvas group them as a stereo pair.
+        // Without a compatibility rewrite every relay connection in an
+        // already-saved patchbay silently stopped reconnecting.
+        let patchbay = relay_patchbay("FL", pw_graph_core::RELAY_SINK_NODE_NAME, "FL");
+        let mut driver = InMemoryDriver::new(relay_graph());
+        let report = patchbay.activate(&mut driver, false, false).unwrap();
+        assert_eq!(report.connected, 1);
+
+        let link = driver
+            .graph()
+            .links
+            .values()
+            .find(|link| link.output_port == PortId(10) && link.input_port == PortId(12));
+        assert!(
+            link.is_some(),
+            "legacy relay FL keys must land on the role-prefixed ports"
+        );
+    }
+
+    #[test]
+    fn a_legacy_fl_rule_for_an_ordinary_card_is_not_rewritten() {
+        // The rewrite is scoped to the relay nodes: a normal card whose ports
+        // really are named `FL` must still resolve to its own pins.
+        let patchbay = relay_patchbay("FL", "alsa_output.pci-0000_00", "FL");
+        let mut driver = InMemoryDriver::new(relay_graph());
+        assert_eq!(
+            patchbay
+                .activate(&mut driver, false, false)
+                .unwrap()
+                .connected,
+            1
+        );
+        assert!(driver
+            .graph()
+            .links
+            .values()
+            .any(|link| link.output_port == PortId(10) && link.input_port == PortId(14)));
     }
 
     #[test]

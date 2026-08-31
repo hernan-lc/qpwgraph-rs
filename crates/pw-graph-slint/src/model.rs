@@ -12,8 +12,9 @@ const NODE_HEADER_HEIGHT: f32 = 42.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
-pub(crate) const RELAY_SOURCE_NAME: &str = "qpwgraph-rs.relay.source";
-pub(crate) const RELAY_SINK_NAME: &str = "qpwgraph-rs.relay.sink";
+pub(crate) use pw_graph_core::{
+    RELAY_SINK_NODE_NAME as RELAY_SINK_NAME, RELAY_SOURCE_NODE_NAME as RELAY_SOURCE_NAME,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum MeterState {
@@ -1816,7 +1817,7 @@ mod tests {
                     Port::new(
                         id,
                         NodeId(3),
-                        &format!("playback_{channel}"),
+                        format!("playback_{channel}"),
                         Direction::Sink,
                         PortType::Audio,
                     )

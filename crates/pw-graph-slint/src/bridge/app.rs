@@ -99,6 +99,7 @@ pub(crate) struct Application {
     /// UI frame, but a transient cable/link failure should be retried even if
     /// discovery does not emit another `PeerDiscovered` event.
     pub(crate) relay_trusted_auto_attempt_at: Option<Instant>,
+    #[cfg(feature = "relay")]
     /// `(peer_id,address)`-scoped backoff for discovered candidates. A
     /// spoofed stable ID must not make every other address for the same
     /// trusted peer unusable, nor couple unrelated peers sharing an address.

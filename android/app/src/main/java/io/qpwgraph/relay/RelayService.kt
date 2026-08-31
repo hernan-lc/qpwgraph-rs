@@ -1,11 +1,13 @@
 package io.qpwgraph.relay
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -15,6 +17,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -259,6 +262,15 @@ class RelayService : Service() {
                 AudioFormat.ENCODING_PCM_16BIT,
             )
             require(minimum > 0) { "AudioRecord returned invalid minimum buffer size $minimum" }
+            // RECORD_AUDIO is revocable and the user can withdraw it while the
+            // service is already running. Check it here so a missing grant is
+            // reported as exactly that, instead of surfacing as an opaque
+            // AudioRecord initialisation failure.
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                throw SecurityException("the microphone permission has not been granted")
+            }
             val created = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
                 request.sampleRate,

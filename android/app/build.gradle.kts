@@ -53,6 +53,13 @@ dependencies {
     implementation("androidx.camera:camera-view:1.4.1")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     testImplementation("junit:junit:4.13.2")
+    // The `android.jar` used for JVM unit tests stubs every `org.json`
+    // method to throw "not mocked", which would make the credential-store
+    // tests fail before they exercise any real behaviour. A real
+    // implementation on the unit-test classpath keeps those tests honest;
+    // `unitTests.isReturnDefaultValues` would instead have them pass
+    // vacuously against null results.
+    testImplementation("org.json:json:20260814")
 }
 
 // Build the Rust bridge separately with cargo-ndk and copy the resulting

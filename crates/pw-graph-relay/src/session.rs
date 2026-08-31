@@ -89,8 +89,38 @@ impl UdpAudioSlot {
         self.current().and_then(|socket| socket.local_addr().ok())
     }
 
-    fn take_current(&self) -> Option<Arc<UdpSocket>> {
-        self.current.lock().ok()?.take()
+    /// Unlink the current socket from the slot and wait until this thread
+    /// holds the only reference to it, so that dropping the returned socket
+    /// really closes the file descriptor.
+    ///
+    /// Taking the `Arc` out of the slot is not enough on its own: the RX and
+    /// TX workers lease a clone for each iteration, so the underlying socket
+    /// stays open while any lease is outstanding. A migration that needs the
+    /// old address released — a wildcard socket standing in the way of a
+    /// specific bind on the same port, or the reverse — must wait for those
+    /// leases. They are short: a worker holds one only across a single
+    /// `recv_from`/`send_to`, and the slot's read timeout bounds that at
+    /// 500ms, so this wait is bounded rather than open-ended.
+    ///
+    /// Returns `None` when the slot was already empty, `Some(Ok(socket))`
+    /// when the caller now owns the socket outright, and `Some(Err(socket))`
+    /// when the leases did not drain in time — the caller must then
+    /// [`restore`](Self::restore) it.
+    fn take_exclusive(&self, timeout: Duration) -> Option<Result<UdpSocket, Arc<UdpSocket>>> {
+        let mut socket = self.current.lock().ok()?.take()?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match Arc::try_unwrap(socket) {
+                Ok(socket) => return Some(Ok(socket)),
+                Err(still_leased) => {
+                    if Instant::now() >= deadline {
+                        return Some(Err(still_leased));
+                    }
+                    socket = still_leased;
+                    std::thread::sleep(UDP_MIGRATION_DRAIN_POLL);
+                }
+            }
+        }
     }
 
     fn restore(&self, socket: Arc<UdpSocket>) {
@@ -574,6 +604,112 @@ fn connect_control_tcp(
     })
 }
 
+/// How long a migration waits for outstanding UDP socket leases to drain
+/// before giving up and restoring the socket it was trying to replace. The
+/// audio workers' 500ms read timeout bounds a single lease, so this leaves
+/// several timeouts of headroom while still guaranteeing the migration
+/// cannot block a control thread indefinitely.
+const UDP_MIGRATION_DRAIN_TIMEOUT: Duration = Duration::from_millis(2_000);
+/// Poll interval used while waiting for those leases to drain.
+const UDP_MIGRATION_DRAIN_POLL: Duration = Duration::from_millis(5);
+
+/// Whether the socket at `old` must be closed before `desired:port` can be
+/// bound.
+///
+/// A wildcard socket owns its port on every local address, so it conflicts
+/// with any specific bind on that port, and a specific bind likewise blocks
+/// a later wildcard on the same port. Two *different* specific addresses on
+/// the same port do not conflict, and a migration that does not preserve the
+/// port cannot conflict at all.
+fn udp_binds_collide(old: SocketAddr, desired: Ipv4Addr, port: u16) -> bool {
+    port != 0 && old.port() == port && (old.ip().is_unspecified() || desired.is_unspecified())
+}
+
+/// Move `slot` onto `desired`, keeping `preserve_port` when one is given.
+///
+/// This is the socket-lifecycle half of a migration, split out from
+/// interface discovery so it can be driven deterministically in tests:
+/// `bind` receives an already resolved local address, and injecting a
+/// failing `bind` exercises the rollback path without a timing race.
+///
+/// When the old and new addresses collide on the port being preserved, the
+/// old socket is removed from the slot, drained of outstanding worker
+/// leases, and closed *before* the new bind is attempted. If that bind then
+/// fails the slot is refilled with a wildcard socket on the original port,
+/// so the audio workers are never left with an empty slot.
+fn migrate_udp_slot(
+    slot: &UdpAudioSlot,
+    desired: Ipv4Addr,
+    preserve_port: Option<u16>,
+    bind: &dyn Fn(SocketAddr) -> std::io::Result<UdpSocket>,
+) -> std::io::Result<()> {
+    let port = preserve_port.unwrap_or(0);
+    let wanted = SocketAddr::from((desired, port));
+    let Some(old_addr) = slot.local_addr() else {
+        // Nothing is installed, so there is no address to collide with and
+        // nothing to roll back to: just fill the slot.
+        return slot.install(bind(wanted)?);
+    };
+    if !udp_binds_collide(old_addr, desired, port) {
+        // The old socket can stay open across the swap; installing the new
+        // one retires it as soon as the last in-flight lease finishes.
+        return slot.install(bind(wanted)?);
+    }
+
+    let Some(taken) = slot.take_exclusive(UDP_MIGRATION_DRAIN_TIMEOUT) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "UDP audio socket is not ready",
+        ));
+    };
+    let old = match taken {
+        Ok(socket) => socket,
+        Err(still_leased) => {
+            // Put the still-live socket back rather than leaving the session
+            // without an audio endpoint; the caller reports the failure.
+            slot.restore(still_leased);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "UDP audio socket on {old_addr} is still in use; migration to {wanted} timed out"
+                ),
+            ));
+        }
+    };
+    // Closing here is the whole point: `{old_addr}` and `{wanted}` share a
+    // port, so the kernel refuses the new bind while the old socket lives.
+    drop(old);
+
+    match bind(wanted) {
+        Ok(next) => slot.install(next),
+        Err(error) => {
+            // The old socket is gone for good. Restore a usable endpoint on
+            // the negotiated port so the peer keeps reaching this session,
+            // falling back to an ephemeral port if even that is refused.
+            let fallback = bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, old_addr.port())))
+                .or_else(|_| bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))));
+            match fallback {
+                Ok(fallback) => {
+                    let _ = slot.install(fallback);
+                    Err(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "could not move UDP audio to {wanted}: {error}; restored a wildcard socket on port {}",
+                            old_addr.port()
+                        ),
+                    ))
+                }
+                Err(fallback_error) => Err(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not move UDP audio to {wanted}: {error}; the fallback rebind also failed: {fallback_error}"
+                    ),
+                )),
+            }
+        }
+    }
+}
+
 /// Move one authenticated session's UDP socket to the link selected for its
 /// newly authenticated control path. The host preserves its UDP port so the
 /// client can continue using the negotiated destination; the client may use a
@@ -607,31 +743,16 @@ fn migrate_udp_audio_socket(
     } else {
         None
     };
-    let replacing_wildcard = old_addr.is_some_and(|addr| addr.ip().is_unspecified());
-    if replacing_wildcard {
-        let Some(old) = slot.take_current() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "UDP audio socket is not ready",
-            ));
-        };
-        match bind_udp_audio_socket_on(inner, target, host_side, preserve_port) {
-            Ok(next) => {
-                tune_audio_socket(&next);
-                slot.install(next)?;
-                drop(old);
-                Ok(())
-            }
-            Err(error) => {
-                slot.restore(old);
-                Err(error)
-            }
-        }
-    } else {
-        let next = bind_udp_audio_socket_on(inner, target, host_side, preserve_port)?;
-        tune_audio_socket(&next);
-        slot.install(next)
-    }
+    migrate_udp_slot(
+        slot,
+        desired.unwrap_or(Ipv4Addr::UNSPECIFIED),
+        preserve_port,
+        &|addr| {
+            let socket = UdpSocket::bind(addr)?;
+            tune_audio_socket(&socket);
+            Ok(socket)
+        },
+    )
 }
 
 pub(crate) fn stop_host(inner: &EngineInner) {
@@ -918,25 +1039,25 @@ fn host_peer_thread(
             device_kind,
             host_id,
             transport,
-            roles,
-            sample_rate,
-            channels,
             client_nonce,
+            // The codec parameters advertised here are deliberately dropped:
+            // the shared post-authentication path negotiates them from the
+            // sealed `SessionStart` frame, exactly as PIN pairing does.
+            ..
         } if protocol == PROTOCOL_VERSION as u32 => {
             trusted_peer_thread(
                 &inner,
                 stream,
                 peer_addr,
                 control_port,
-                device_id,
-                device_name,
-                device_kind,
-                host_id,
-                transport,
-                roles,
-                sample_rate,
-                channels,
-                client_nonce,
+                TrustedHelloContext {
+                    client_id: device_id,
+                    peer_name: device_name,
+                    peer_kind: device_kind,
+                    host_id,
+                    transport,
+                    client_nonce,
+                },
             );
             return;
         }
@@ -989,13 +1110,15 @@ fn host_peer_thread(
         inner,
         stream,
         peer_addr,
-        peer_id,
-        peer_name,
-        peer_kind,
-        keys,
-        audio_over_tcp,
-        control_port,
-        None,
+        HostAuthenticatedPeer {
+            peer_id,
+            peer_name,
+            peer_kind,
+            keys,
+            audio_over_tcp,
+            control_port,
+            requested_id: None,
+        },
     );
 }
 
@@ -1093,21 +1216,39 @@ fn host_audio_thread(
     }
 }
 
+/// Everything a `TrustedHello` frame carries that the trusted reconnect path
+/// actually needs. The codec parameters the frame also advertises are not
+/// kept here on purpose: `host_session_after_auth` re-negotiates them from
+/// the sealed `SessionStart` frame so a trusted reconnect gets exactly the
+/// same validation as a PIN pairing.
+struct TrustedHelloContext {
+    /// Stable peer identity the client claims; must match an enrolled
+    /// trusted credential before anything else happens.
+    client_id: String,
+    peer_name: String,
+    peer_kind: DeviceKind,
+    /// Host identity the client believes it is reconnecting to.
+    host_id: String,
+    transport: String,
+    /// Client half of the resume challenge, hex encoded.
+    client_nonce: String,
+}
+
 fn trusted_peer_thread(
     inner: &Arc<EngineInner>,
     mut stream: TcpStream,
     peer_addr: SocketAddr,
     control_port: u16,
-    client_id: String,
-    peer_name: String,
-    peer_kind: DeviceKind,
-    host_id: String,
-    transport: String,
-    _roles: Roles,
-    _sample_rate: u32,
-    _channels: u16,
-    client_nonce: String,
+    hello: TrustedHelloContext,
 ) {
+    let TrustedHelloContext {
+        client_id,
+        peer_name,
+        peer_kind,
+        host_id,
+        transport,
+        client_nonce,
+    } = hello;
     let config = inner.config();
     if host_id != config.device_id {
         let _ = write_frame(
@@ -1186,13 +1327,15 @@ fn trusted_peer_thread(
         Arc::clone(inner),
         stream,
         peer_addr,
-        client_id,
-        peer_name,
-        peer_kind,
-        keys,
-        audio_over_tcp,
-        control_port,
-        Some(id),
+        HostAuthenticatedPeer {
+            peer_id: client_id,
+            peer_name,
+            peer_kind,
+            keys,
+            audio_over_tcp,
+            control_port,
+            requested_id: Some(id),
+        },
     );
 }
 
@@ -1200,18 +1343,40 @@ fn trusted_peer_thread(
 /// session setup. Keeping this after-auth path shared is important: a trusted
 /// reconnect must receive exactly the same role/codec validation and worker
 /// startup guarantees as a PIN pairing.
+/// A peer that has proved possession of either the PIN or its trusted
+/// credential, together with the transport facts the shared setup path needs.
+struct HostAuthenticatedPeer {
+    peer_id: String,
+    peer_name: String,
+    peer_kind: DeviceKind,
+    /// Directional keys derived by the completed handshake. Moved, never
+    /// cloned, so the session record keeps sole ownership.
+    keys: SessionKeys,
+    /// ADB peers carry audio on the authenticated secondary TCP stream
+    /// instead of UDP.
+    audio_over_tcp: bool,
+    /// Control port this listener accepted on, reported back to ADB peers as
+    /// their audio port.
+    control_port: u16,
+    /// Session id already allocated by a trusted reconnect, if any.
+    requested_id: Option<SessionId>,
+}
+
 fn host_session_after_auth(
     inner: Arc<EngineInner>,
     mut stream: TcpStream,
     peer_addr: SocketAddr,
-    peer_id: String,
-    peer_name: String,
-    peer_kind: DeviceKind,
-    keys: SessionKeys,
-    audio_over_tcp: bool,
-    control_port: u16,
-    requested_id: Option<SessionId>,
+    peer: HostAuthenticatedPeer,
 ) {
+    let HostAuthenticatedPeer {
+        peer_id,
+        peer_name,
+        peer_kind,
+        keys,
+        audio_over_tcp,
+        control_port,
+        requested_id,
+    } = peer;
     let Ok((control_sealer, control_opener)) = keys.control_channel() else {
         return;
     };
@@ -1916,15 +2081,17 @@ fn trusted_client_thread(
     };
     client_session_after_auth(
         inner,
-        id,
-        target,
-        roles,
-        config,
         stream,
         ControlCipher { sealer, opener },
-        host_name,
-        host_id,
-        keys,
+        ClientAuthenticatedSession {
+            id,
+            target,
+            roles,
+            config,
+            host_name,
+            host_id,
+            keys,
+        },
     );
 }
 
@@ -2286,18 +2453,35 @@ fn enroll_trusted_peer(
 
 /// Shared post-authentication client setup used by both PIN and trusted
 /// handshakes.
-fn client_session_after_auth(
-    inner: Arc<EngineInner>,
+/// The locally decided session facts a client carries into the shared
+/// post-authentication setup, once the host has been authenticated.
+struct ClientAuthenticatedSession {
     id: SessionId,
     target: SocketAddr,
     roles: Roles,
     config: crate::EngineConfig,
-    mut stream: TcpStream,
-    mut cipher: ControlCipher,
     host_name: String,
     host_id: String,
+    /// Directional keys derived by the completed handshake, moved into the
+    /// session record below.
     keys: SessionKeys,
+}
+
+fn client_session_after_auth(
+    inner: Arc<EngineInner>,
+    mut stream: TcpStream,
+    mut cipher: ControlCipher,
+    session: ClientAuthenticatedSession,
 ) {
+    let ClientAuthenticatedSession {
+        id,
+        target,
+        roles,
+        config,
+        host_name,
+        host_id,
+        keys,
+    } = session;
     let (audio_port, wire_id) = match cipher.receive(&mut stream) {
         Ok(ControlMessage::PairOk {
             audio_port,
@@ -3635,10 +3819,7 @@ mod tests {
         _name: String,
         _worker: Worker,
     ) -> std::io::Result<std::thread::JoinHandle<()>> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "worker spawn rejected by test",
-        ))
+        Err(std::io::Error::other("worker spawn rejected by test"))
     }
 
     #[test]
@@ -3789,6 +3970,152 @@ mod tests {
         migrate_udp_audio_socket(&inner, &record, target, true).expect("resume keeps the socket");
 
         assert_eq!(slot.local_addr(), Some(before));
+    }
+
+    /// The real binder used by `migrate_udp_audio_socket`, reproduced so the
+    /// lifecycle tests exercise the same kernel behaviour without depending
+    /// on netlink interface discovery.
+    fn real_udp_binder(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+        let socket = UdpSocket::bind(addr)?;
+        tune_audio_socket(&socket);
+        Ok(socket)
+    }
+
+    #[test]
+    fn migrating_a_wildcard_socket_to_a_specific_address_keeps_the_port() {
+        // Regression: `take_current` only unlinked the `Arc` from the slot.
+        // Worker leases kept the wildcard socket open, so binding
+        // `127.0.0.1:PORT` while `0.0.0.0:PORT` was still alive failed with
+        // EADDRINUSE and the host lost its negotiated audio port.
+        let slot = UdpAudioSlot::new(
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket"),
+        )
+        .expect("audio slot");
+        let port = slot.local_addr().expect("bound address").port();
+
+        migrate_udp_slot(&slot, Ipv4Addr::LOCALHOST, Some(port), &real_udp_binder)
+            .expect("wildcard migrates onto a specific address");
+
+        let after = slot.local_addr().expect("migrated address");
+        assert_eq!(after.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(after.port(), port);
+    }
+
+    #[test]
+    fn migrating_a_wildcard_socket_waits_for_outstanding_worker_leases() {
+        // A worker holding a lease across its bounded `recv_from` must not
+        // make the migration bind against a still-open wildcard socket.
+        let slot = Arc::new(
+            UdpAudioSlot::new(
+                UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket"),
+            )
+            .expect("audio slot"),
+        );
+        let port = slot.local_addr().expect("bound address").port();
+
+        let lease = slot.current().expect("worker leases the socket");
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            drop(lease);
+        });
+
+        migrate_udp_slot(&slot, Ipv4Addr::LOCALHOST, Some(port), &real_udp_binder)
+            .expect("migration drains the lease and rebinds");
+        holder.join().expect("lease holder finishes");
+
+        let after = slot.local_addr().expect("migrated address");
+        assert_eq!(after.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(after.port(), port);
+    }
+
+    #[test]
+    fn migrating_back_to_a_wildcard_socket_keeps_the_port() {
+        // The reverse direction collides just as hard: `0.0.0.0:PORT` cannot
+        // be bound while `127.0.0.1:PORT` is still open.
+        let slot =
+            UdpAudioSlot::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("specific socket"))
+                .expect("audio slot");
+        let port = slot.local_addr().expect("bound address").port();
+
+        migrate_udp_slot(&slot, Ipv4Addr::UNSPECIFIED, Some(port), &real_udp_binder)
+            .expect("specific address migrates back onto the wildcard");
+
+        let after = slot.local_addr().expect("migrated address");
+        assert!(after.ip().is_unspecified());
+        assert_eq!(after.port(), port);
+    }
+
+    #[test]
+    fn a_failed_migration_restores_a_wildcard_socket_on_the_original_port() {
+        // Rollback: once the old wildcard socket has been closed there is
+        // nothing to put back, so the slot must be refilled rather than left
+        // empty, and the caller must still learn that the move failed.
+        let slot = UdpAudioSlot::new(
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket"),
+        )
+        .expect("audio slot");
+        let port = slot.local_addr().expect("bound address").port();
+
+        // Injected failure for the desired address only; the wildcard
+        // fallback still succeeds, exactly as a vanished interface behaves.
+        let binder = |addr: SocketAddr| -> std::io::Result<UdpSocket> {
+            if !addr.ip().is_unspecified() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
+            }
+            real_udp_binder(addr)
+        };
+
+        let error = migrate_udp_slot(&slot, Ipv4Addr::LOCALHOST, Some(port), &binder)
+            .expect_err("the desired address cannot be bound");
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+
+        let after = slot.local_addr().expect("the slot is never left empty");
+        assert!(after.ip().is_unspecified());
+        assert_eq!(after.port(), port);
+    }
+
+    #[test]
+    fn a_migration_that_cannot_drain_restores_the_live_socket() {
+        // If worker leases outlive the migration window the old socket is
+        // still usable, so it must go back into the slot instead of being
+        // closed on a guess.
+        let slot = UdpAudioSlot::new(
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket"),
+        )
+        .expect("audio slot");
+        let before = slot.local_addr().expect("bound address");
+        let lease = slot.current().expect("worker leases the socket");
+
+        let taken = slot
+            .take_exclusive(Duration::from_millis(20))
+            .expect("the slot was populated");
+        let still_leased = taken.expect_err("an outstanding lease blocks the take");
+        slot.restore(still_leased);
+        drop(lease);
+
+        assert_eq!(slot.local_addr(), Some(before));
+    }
+
+    #[test]
+    fn migrating_between_two_specific_addresses_does_not_close_the_old_socket() {
+        // Two different specific addresses do not contend for the port, so
+        // the old socket may stay open while the new one is installed.
+        let old: SocketAddr = "127.0.0.1:0".parse().expect("address");
+        assert!(!udp_binds_collide(old, Ipv4Addr::new(127, 0, 0, 2), 40_000));
+        let bound: SocketAddr = "127.0.0.1:40000".parse().expect("address");
+        assert!(!udp_binds_collide(
+            bound,
+            Ipv4Addr::new(127, 0, 0, 2),
+            40_000
+        ));
+        assert!(udp_binds_collide(
+            "0.0.0.0:40000".parse().expect("address"),
+            Ipv4Addr::new(127, 0, 0, 2),
+            40_000
+        ));
+        assert!(udp_binds_collide(bound, Ipv4Addr::UNSPECIFIED, 40_000));
+        // A client migration takes a fresh ephemeral port and never collides.
+        assert!(!udp_binds_collide(bound, Ipv4Addr::UNSPECIFIED, 0));
     }
 
     #[test]

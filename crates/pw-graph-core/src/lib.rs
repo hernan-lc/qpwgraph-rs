@@ -16,6 +16,52 @@ pub struct NodeAppearance {
     pub color: Option<[u8; 4]>,
 }
 
+/// PipeWire node name of the relay's virtual capture device, presented to the
+/// user as "Relay Microphone". Defined here so the backend that creates the
+/// node, the UI that renames it, and the patchbay compatibility rules below
+/// all agree on one spelling.
+pub const RELAY_SOURCE_NODE_NAME: &str = "qpwgraph-rs.relay.source";
+/// PipeWire node name of the relay's virtual playback device, presented as
+/// "Relay Speaker".
+pub const RELAY_SINK_NODE_NAME: &str = "qpwgraph-rs.relay.sink";
+/// Role prefix the relay source node gives its ports (`capture_FL`, ...).
+pub const RELAY_SOURCE_PORT_ROLE: &str = "capture";
+/// Role prefix the relay sink node gives its ports (`playback_FL`, ...).
+pub const RELAY_SINK_PORT_ROLE: &str = "playback";
+
+/// The port name a pre-rename patchbay entry should resolve to, if it is one.
+///
+/// The relay filter ports were once named for their bare channel — `FL` and
+/// `FR` — which left them as two loose pins with no base for the canvas to
+/// group on. They are now role-prefixed like every other node's ports, but
+/// patchbay files saved before that rename still carry the bare names and
+/// would otherwise silently stop reconnecting.
+///
+/// This is deliberately narrow: it fires only for the two relay node names,
+/// only for the two bare channel names, and only in the direction that node
+/// actually has ports in. An unrelated device with `FL`/`FR` ports is never
+/// rewritten, and nothing here affects how new patchbays are written.
+pub fn legacy_relay_port_name(
+    node_name: &str,
+    port_name: &str,
+    direction: Direction,
+) -> Option<&'static str> {
+    if !matches!(port_name, "FL" | "FR") {
+        return None;
+    }
+    match (node_name, direction) {
+        (RELAY_SOURCE_NODE_NAME, Direction::Source) => match port_name {
+            "FL" => Some("capture_FL"),
+            _ => Some("capture_FR"),
+        },
+        (RELAY_SINK_NODE_NAME, Direction::Sink) => match port_name {
+            "FL" => Some("playback_FL"),
+            _ => Some("playback_FR"),
+        },
+        _ => None,
+    }
+}
+
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(
@@ -439,9 +485,17 @@ impl Graph {
     /// Serial is preferred, but a name fallback is intentional: a playback
     /// stream often receives a new serial when it is resumed.
     pub fn resolve_port_key(&self, key: &PortKey) -> Option<PortId> {
+        // A patchbay saved before the relay ports were role-prefixed names
+        // them `FL`/`FR`; accept that one rewrite so those files keep
+        // reconnecting. See [`legacy_relay_port_name`] for its scope.
+        let legacy_relay_port =
+            legacy_relay_port_name(&key.node_name, &key.port_name, key.direction);
         self.ports
             .values()
-            .filter(|port| port.name == key.port_name)
+            .filter(|port| {
+                port.name == key.port_name
+                    || legacy_relay_port.is_some_and(|name| port.name == name)
+            })
             .filter(|port| port.direction == key.direction)
             .filter(|port| {
                 port.port_type == key.port_type
@@ -451,6 +505,12 @@ impl Graph {
             .filter_map(|port| {
                 let node = self.node(port.node_id)?;
                 if node.node_type != key.node_type {
+                    return None;
+                }
+                // The legacy relay rewrite is accepted only on the relay node
+                // the key actually names, never on some other node that
+                // happens to carry a matching serial.
+                if port.name != key.port_name && node.name != key.node_name {
                     return None;
                 }
                 let serial_matches = matches!((key.node_serial, node.serial),
@@ -841,6 +901,142 @@ mod tests {
         graph.nodes.get_mut(&node_id).unwrap().name = "Speakers (new name)".into();
 
         assert_eq!(graph.resolve_port_key(&key), Some(port_id));
+    }
+
+    /// Build a graph holding both relay virtual nodes with their current
+    /// role-prefixed ports, plus an unrelated device that also has `FL`/`FR`.
+    fn relay_graph() -> (Graph, Vec<(PortId, &'static str)>) {
+        let mut graph = Graph::default();
+        graph
+            .add_node(Node::new(
+                NodeId(1),
+                RELAY_SOURCE_NODE_NAME,
+                NodeType::PipeWire,
+            ))
+            .unwrap();
+        graph
+            .add_node(Node::new(
+                NodeId(2),
+                RELAY_SINK_NODE_NAME,
+                NodeType::PipeWire,
+            ))
+            .unwrap();
+        graph
+            .add_node(Node::new(
+                NodeId(3),
+                "alsa_output.pci-0000_00",
+                NodeType::PipeWire,
+            ))
+            .unwrap();
+
+        let mut ports = Vec::new();
+        for (id, node, name, channel, direction) in [
+            (10u64, NodeId(1), "capture_FL", "FL", Direction::Source),
+            (11, NodeId(1), "capture_FR", "FR", Direction::Source),
+            (12, NodeId(2), "playback_FL", "FL", Direction::Sink),
+            (13, NodeId(2), "playback_FR", "FR", Direction::Sink),
+            // The unrelated card still uses bare channel port names.
+            (14, NodeId(3), "FL", "FL", Direction::Sink),
+            (15, NodeId(3), "FR", "FR", Direction::Sink),
+        ] {
+            graph
+                .add_port(
+                    Port::new(PortId(id), node, name, direction, PortType::Audio)
+                        .with_channel(channel),
+                )
+                .unwrap();
+            ports.push((PortId(id), name));
+        }
+        (graph, ports)
+    }
+
+    /// A patchbay key exactly as an older file would have stored it: the
+    /// relay node name with the bare channel as the port name.
+    fn legacy_relay_key(node_name: &str, port_name: &str, direction: Direction) -> PortKey {
+        PortKey {
+            node_name: node_name.into(),
+            node_serial: None,
+            node_type: NodeType::PipeWire,
+            port_name: port_name.into(),
+            channel: Some(port_name.into()),
+            direction,
+            port_type: PortType::Audio,
+        }
+    }
+
+    #[test]
+    fn current_relay_patchbay_keys_resolve() {
+        let (graph, ports) = relay_graph();
+        for (id, _) in &ports[..4] {
+            let key = graph.port_key(*id).unwrap();
+            assert_eq!(graph.resolve_port_key(&key), Some(*id));
+        }
+    }
+
+    #[test]
+    fn legacy_relay_source_keys_resolve_to_the_capture_ports() {
+        // Regression: renaming the relay filter ports to `capture_*` silently
+        // orphaned every relay connection in a patchbay saved before it.
+        let (graph, _) = relay_graph();
+        assert_eq!(
+            graph.resolve_port_key(&legacy_relay_key(
+                RELAY_SOURCE_NODE_NAME,
+                "FL",
+                Direction::Source
+            )),
+            Some(PortId(10))
+        );
+        assert_eq!(
+            graph.resolve_port_key(&legacy_relay_key(
+                RELAY_SOURCE_NODE_NAME,
+                "FR",
+                Direction::Source
+            )),
+            Some(PortId(11))
+        );
+    }
+
+    #[test]
+    fn legacy_relay_sink_keys_resolve_to_the_playback_ports() {
+        let (graph, _) = relay_graph();
+        assert_eq!(
+            graph.resolve_port_key(&legacy_relay_key(
+                RELAY_SINK_NODE_NAME,
+                "FL",
+                Direction::Sink
+            )),
+            Some(PortId(12))
+        );
+        assert_eq!(
+            graph.resolve_port_key(&legacy_relay_key(
+                RELAY_SINK_NODE_NAME,
+                "FR",
+                Direction::Sink
+            )),
+            Some(PortId(13))
+        );
+    }
+
+    #[test]
+    fn unrelated_devices_keep_their_own_fl_fr_ports() {
+        // The compatibility rewrite must not make a normal card's `FL` pin
+        // resolve to a relay port, nor stop resolving to itself.
+        let (graph, _) = relay_graph();
+        let key = legacy_relay_key("alsa_output.pci-0000_00", "FL", Direction::Sink);
+        assert_eq!(graph.resolve_port_key(&key), Some(PortId(14)));
+
+        // A relay key in the direction that node has no ports in is not
+        // rewritten into the other relay node either.
+        let wrong_direction = legacy_relay_key(RELAY_SOURCE_NODE_NAME, "FL", Direction::Sink);
+        assert_eq!(graph.resolve_port_key(&wrong_direction), None);
+    }
+
+    #[test]
+    fn saving_a_relay_port_still_writes_the_role_prefixed_name() {
+        // The migration is read-only: new patchbays must keep the new names.
+        let (graph, _) = relay_graph();
+        assert_eq!(graph.port_key(PortId(10)).unwrap().port_name, "capture_FL");
+        assert_eq!(graph.port_key(PortId(12)).unwrap().port_name, "playback_FL");
     }
 
     #[test]
