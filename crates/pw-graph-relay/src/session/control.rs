@@ -1,0 +1,324 @@
+//! The control channel: its cipher, the keepalive/watch loops both sides run,
+//! and the teardown paths.
+
+use super::*;
+
+/// The two ends of an encrypted control channel, owned by one control thread.
+pub(super) struct ControlCipher {
+    pub(super) sealer: Sealer,
+    pub(super) opener: Opener,
+}
+
+impl ControlCipher {
+    pub(super) fn send(
+        &mut self,
+        stream: &mut TcpStream,
+        message: &ControlMessage,
+    ) -> std::io::Result<()> {
+        write_sealed_frame(stream, &mut self.sealer, message)
+    }
+
+    pub(super) fn receive(&mut self, stream: &mut TcpStream) -> std::io::Result<ControlMessage> {
+        read_sealed_frame(stream, &mut self.opener)
+    }
+}
+
+/// Ask a session's control thread to send `bye` and tear down. Only the
+/// bye flag is set: the control thread checks it before its stop condition
+/// so the farewell frame actually goes out.
+pub(crate) fn request_bye(inner: &EngineInner, id: SessionId) {
+    if let Some(record) = inner.session(id) {
+        record.bye_requested.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Remove a session and announce its loss. Idempotent.
+pub(crate) fn teardown(inner: &EngineInner, id: SessionId, reason: String) {
+    if inner.remove_session(id).is_some() {
+        inner.emit(RelayEvent::SessionLost { id, reason });
+    }
+}
+
+/// Report a connection attempt that failed before any session existed. The
+/// caller owns the id (it came from `connect`), so the loss must always be
+/// announced even though nothing was registered.
+pub(crate) fn fail_attempt(inner: &EngineInner, id: SessionId, reason: String) {
+    inner.remove_session(id);
+    inner.emit(RelayEvent::SessionLost { id, reason });
+}
+
+/// Handle a clean control-watch exit that ends the session. Returns `true`
+/// if the session was torn down (so the caller can return).
+pub(super) fn handle_teardown_exit(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    exit: ControlExit,
+    on_drop: impl FnOnce(String) -> bool,
+) -> bool {
+    match exit {
+        ControlExit::Stopped => {
+            teardown(inner, record.id, "session stopped".into());
+            true
+        }
+        ControlExit::PeerBye(reason) => {
+            teardown(inner, record.id, format!("peer left: {reason}"));
+            true
+        }
+        ControlExit::Dropped(reason) => on_drop(reason),
+    }
+}
+
+/// Watch the control channel, waiting out link drops for [`RESUME_GRACE`]
+/// so a reconnecting client can take over without losing the session. The
+/// resuming thread runs its own watch, so every outcome ends this one.
+pub(super) fn host_control_loop(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    stream: TcpStream,
+    cipher: ControlCipher,
+) {
+    let result = watch_control(Arc::clone(&inner), Arc::clone(&record), stream, cipher);
+    handle_teardown_exit(&inner, &record, result, |reason| {
+        if await_resume_grace(&inner, &record) {
+            return false;
+        }
+        teardown(&inner, record.id, reason);
+        true
+    });
+}
+
+/// Client-side control watch: on a link drop the host is re-dialed and the
+/// session resumed, so Wi-Fi roaming or brief outages do not end the session.
+pub(super) fn client_control_loop(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    stream: TcpStream,
+    cipher: ControlCipher,
+    socket: Option<Arc<UdpAudioSlot>>,
+    target: SocketAddr,
+) {
+    let socket_codec = record.codec;
+    let mut stream = Some((stream, cipher));
+    loop {
+        let (taken, cipher) = stream.take().expect("stream is set between iterations");
+        let result = watch_control(Arc::clone(&inner), Arc::clone(&record), taken, cipher);
+        let torn_down = handle_teardown_exit(&inner, &record, result, |reason| {
+            if record.bye_requested.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
+                teardown(&inner, record.id, reason);
+                return true;
+            }
+            inner.emit(RelayEvent::Error {
+                message: format!("control link to host lost ({reason}); attempting to resume"),
+            });
+            match resume_client_control(&inner, &record, target) {
+                Some((resumed_stream, resumed_cipher, resumed_target)) => {
+                    if let Ok(mut current) = record.control_peer_addr.lock() {
+                        *current = resumed_target;
+                    }
+                    if record.tcp_audio.is_none() {
+                        // Re-announce our UDP address from the real audio socket:
+                        // the route may have changed link (e.g. Wi-Fi to USB
+                        // tethering), and the host must learn the new source
+                        // address. The announce is sealed with the session's
+                        // unchanged audio key, which is exactly what authorises
+                        // the host to follow us.
+                        let audio_port = record
+                            .peer_audio_addr
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.map(|addr| addr.port()));
+                        match migrate_udp_audio_socket(&inner, &record, resumed_target, false) {
+                            Ok(()) => {
+                                if let (
+                                    Some(socket),
+                                    Some(audio_port),
+                                    Ok(mut slot),
+                                    Ok(mut sealer),
+                                ) = (
+                                    socket.as_ref().and_then(|slot| slot.current()),
+                                    audio_port,
+                                    record.peer_audio_addr.lock(),
+                                    record.audio_sealer.lock(),
+                                ) {
+                                    let addr = SocketAddr::new(resumed_target.ip(), audio_port);
+                                    *slot = Some(addr);
+                                    if let Ok(announce) = announce_packet(&mut sealer, socket_codec)
+                                    {
+                                        let _ = socket.send_to(&announce, addr);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                inner.emit(RelayEvent::Error {
+                                    message: format!(
+                                        "UDP audio interface migration failed: {error}"
+                                    ),
+                                });
+                                if error.is_fatal() {
+                                    // A client normally takes a fresh
+                                    // ephemeral port and announces it, so it
+                                    // should never reach here; if its audio
+                                    // socket is nonetheless unrecoverable the
+                                    // session can only go silent, so end it.
+                                    teardown(
+                                        &inner,
+                                        record.id,
+                                        format!("relay audio socket was lost: {error}"),
+                                    );
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    stream = Some((resumed_stream, resumed_cipher));
+                    false
+                }
+                None => {
+                    teardown(&inner, record.id, reason);
+                    true
+                }
+            }
+        });
+        if torn_down {
+            return;
+        }
+    }
+}
+
+/// Tear a session down after an unrecoverable worker failure, surfacing the
+/// reason once. Both are idempotent, so a deliberate shutdown that races a
+/// worker failure still produces exactly one `SessionLost`.
+pub(super) fn fail_session(inner: &Arc<EngineInner>, record: &Arc<SessionRecord>, reason: String) {
+    // A stop that was already requested is an orderly shutdown, not a fault.
+    if record.stop.load(Ordering::Relaxed) || !inner.session_alive(record.id) {
+        return;
+    }
+    inner.emit(RelayEvent::Error {
+        message: reason.clone(),
+    });
+    teardown(inner, record.id, reason);
+}
+
+/// Why a control watch ended. Teardown decisions belong to the caller so
+/// host and client loops can attempt a resume first.
+pub(super) enum ControlExit {
+    /// Engine shutdown or local bye request (farewell already sent).
+    Stopped,
+    /// The peer said goodbye.
+    PeerBye(String),
+    /// The link broke (closed or keepalive timeout); may be resumable.
+    Dropped(String),
+}
+
+/// Keepalive watcher; runs on the session's control thread until the watch
+/// ends. Returns the reason so the caller can decide about resuming.
+pub(super) fn watch_control(
+    inner: Arc<EngineInner>,
+    record: Arc<SessionRecord>,
+    mut stream: TcpStream,
+    mut cipher: ControlCipher,
+) -> ControlExit {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut last_seen = Instant::now();
+    let mut last_keepalive = Instant::now();
+
+    loop {
+        if !inner.running.load(Ordering::Relaxed) || record.stop.load(Ordering::Relaxed) {
+            return ControlExit::Stopped;
+        }
+        if record.bye_requested.load(Ordering::Relaxed) {
+            let _ = cipher.send(
+                &mut stream,
+                &ControlMessage::Bye {
+                    reason: "user disconnected".into(),
+                },
+            );
+            return ControlExit::Stopped;
+        }
+        if let Some(resolution) = inner.take_trusted_enrollment(record.id) {
+            if resolution.accepted {
+                // The embedding has already committed the secret to durable
+                // storage before it can mark this transaction accepted. Only
+                // now import it into the live map and acknowledge the client.
+                inner.remember_trusted_peer(resolution.peer_id, resolution.secret);
+                if let Ok(mut enrolled) = record.trust_secret.lock() {
+                    *enrolled = Some(resolution.secret);
+                }
+                if cipher
+                    .send(&mut stream, &ControlMessage::TrustAccepted {})
+                    .is_err()
+                {
+                    return ControlExit::Dropped("control channel closed".into());
+                }
+            } else if cipher
+                .send(
+                    &mut stream,
+                    &ControlMessage::TrustRejected {
+                        reason: resolution
+                            .reason
+                            .unwrap_or_else(|| "trusted enrollment rejected".into()),
+                    },
+                )
+                .is_err()
+            {
+                return ControlExit::Dropped("control channel closed".into());
+            }
+        }
+        match cipher.receive(&mut stream) {
+            Ok(ControlMessage::Bye { reason }) => return ControlExit::PeerBye(reason),
+            Ok(ControlMessage::TrustEnroll { peer_id, secret }) => {
+                let rejected = if !inner.config().trust_new_peers {
+                    Some("this host requires explicit PIN pairing".to_string())
+                } else if peer_id != record.peer.id {
+                    Some("trusted peer identity did not match the session".to_string())
+                } else {
+                    match hex_decode(&secret)
+                        .ok()
+                        .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                    {
+                        Some(secret) => {
+                            match inner.begin_trusted_enrollment(
+                                record.id,
+                                peer_id,
+                                record.peer.clone(),
+                                secret,
+                            ) {
+                                Ok(transaction_id) => {
+                                    inner.emit(RelayEvent::TrustedPeerEnrollmentRequested {
+                                        transaction_id,
+                                        peer_id: record.peer.id.clone(),
+                                        peer: record.peer.clone(),
+                                    });
+                                    None
+                                }
+                                Err(reason) => Some(reason),
+                            }
+                        }
+                        None => Some("trusted credential was malformed".to_string()),
+                    }
+                };
+                if let Some(reason) = rejected {
+                    let _ = cipher.send(&mut stream, &ControlMessage::TrustRejected { reason });
+                }
+                last_seen = Instant::now();
+            }
+            Ok(_) => last_seen = Instant::now(),
+            Err(error) if is_timeout(&error) => {}
+            Err(_) => return ControlExit::Dropped("control channel closed".into()),
+        }
+        let now = Instant::now();
+        if now.duration_since(last_seen) > SESSION_TIMEOUT {
+            return ControlExit::Dropped("keepalive timeout".into());
+        }
+        if now.duration_since(last_keepalive) >= KEEPALIVE_INTERVAL {
+            if cipher
+                .send(&mut stream, &ControlMessage::Keepalive {})
+                .is_err()
+            {
+                return ControlExit::Dropped("control channel closed".into());
+            }
+            last_keepalive = now;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
