@@ -1037,6 +1037,69 @@ mod tests {
         );
     }
 
+    /// Minimum width a button needs before `AppButton`'s label, inset by 9px
+    /// on each side, has room for a word. The relay rows used to place their
+    /// actions in 22px squares, where every glyph elided to a bare "…".
+    const READABLE_BUTTON_WIDTH: f32 = 60.0;
+
+    #[test]
+    fn relay_peer_rows_give_their_actions_a_readable_label() {
+        let harness = CanvasHarness::new(ConnectMode::Advanced);
+        harness.window.set_show_relay(true);
+        harness.window.set_relay_tab(0);
+        harness
+            .window
+            .set_relay_rows(ModelRc::from(Rc::new(VecModel::from(vec![RelayRow {
+                id: "1".into(),
+                name: "Configured peer".into(),
+                address: "192.168.18.249:48123".into(),
+                state: "configured".into(),
+                level: 0.4,
+                connected: true,
+                connecting: false,
+                trusted: true,
+                peer_id: "abc".into(),
+            }]))));
+        slint::platform::update_timers_and_animations();
+
+        let panel = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+            &harness.window,
+            "RelayPanel",
+        )
+        .next()
+        .expect("the relay panel should be rendered");
+        let panel_left = panel.absolute_position().x;
+        let panel_right = panel_left + panel.size().width;
+
+        // Every action inside the panel: the row's Connect/Forget pair, the
+        // tab strip, the header close and the Connect button of the form.
+        let buttons: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+            &harness.window,
+            "AppButton",
+        )
+        .collect();
+        assert!(buttons.len() >= 6, "expected the peer row's own actions");
+
+        let row_actions: Vec<_> = buttons
+            .iter()
+            .filter(|button| button.size().height == 30.0)
+            .collect();
+        assert_eq!(row_actions.len(), 2, "connect and forget");
+        for action in row_actions {
+            let left = action.absolute_position().x;
+            let right = left + action.size().width;
+            assert!(
+                action.size().width >= READABLE_BUTTON_WIDTH,
+                "a peer action must fit its label, got {}",
+                action.size().width
+            );
+            assert!(
+                left >= panel_left && right <= panel_right,
+                "a peer action must stay inside the panel"
+            );
+        }
+    }
+
     #[test]
     fn relay_sidebar_overlays_the_canvas_without_resizing_it() {
         let harness = CanvasHarness::new(ConnectMode::Advanced);

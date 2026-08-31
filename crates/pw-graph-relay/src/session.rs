@@ -3377,6 +3377,16 @@ fn run_tx_source(
     let mut sequence = 0u32;
     let mut timestamp_ms = 0u32;
     let mut payload = Vec::with_capacity(4096);
+    // A send-only session decodes nothing, so the receive path never reports a
+    // level for it and its meter would sit at zero however loud the transmitted
+    // audio is. Meter the outgoing frames instead, and leave the meter to the
+    // receive path whenever this session also receives: both directions share
+    // one `AudioLevel` per session and the incoming level is the one the UI
+    // documents.
+    let meter_outgoing = !record.receiving;
+    let mut frames_since_level = 0u32;
+    let mut sumsq = 0f64;
+    let mut level_samples = 0usize;
 
     loop {
         if !inner.session_alive(record.id) {
@@ -3395,6 +3405,27 @@ fn run_tx_source(
         else {
             continue;
         };
+        if meter_outgoing {
+            for sample in &samples {
+                sumsq += (*sample as f64) * (*sample as f64);
+            }
+            level_samples += samples.len();
+            frames_since_level += 1;
+            if frames_since_level >= 25 {
+                let rms = if level_samples == 0 {
+                    0.0
+                } else {
+                    (sumsq / level_samples as f64).sqrt() as f32
+                };
+                inner.emit(RelayEvent::AudioLevel {
+                    id: record.id,
+                    rms: rms.min(1.0),
+                });
+                frames_since_level = 0;
+                sumsq = 0.0;
+                level_samples = 0;
+            }
+        }
         match encoder.encode(&samples, &mut payload) {
             Ok(0) => continue,
             Ok(_) => {

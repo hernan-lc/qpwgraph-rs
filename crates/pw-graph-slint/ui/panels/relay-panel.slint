@@ -108,29 +108,106 @@ export component RelayPanel inherits Rectangle {
                 vertical-alignment: center;
             }
 
+            // This list is the desktop's discovery: without a word here an
+            // empty section reads as a broken panel rather than as a search
+            // still running.
+            if root.relay-tab == 0 && root.relay-rows.length == 0: Text {
+                min-height: 40px;
+                text: UiI18n.localized("relay.no_peers");
+                color: #8393a0;
+                font-size: 9px * UiTheme.panel-scale;
+                wrap: word-wrap;
+            }
+
             if root.relay-tab == 0: VerticalLayout {
                 spacing: 7px;
                 for row in root.relay-rows: Rectangle {
-                    height: 51px;
+                    // Two text lines plus a meter lane, with the actions in a
+                    // fixed right-hand column so the name and address elide
+                    // instead of pushing the buttons off the card.
+                    property <length> action-width: row.trusted ? 200px : 104px;
+                    property <length> text-width: max(48px, self.width - 34px - self.action-width);
+
+                    height: 60px;
                     background: #29323c;
                     border-color: #40505f;
                     border-width: 1px;
                     border-radius: 5px;
-                    Text { x: 9px; y: 5px; width: parent.width - 112px; height: 17px; text: row.name; color: #edf3f7; font-size: 11px * UiTheme.panel-scale; overflow: elide; }
-                    Text { x: 9px; y: 26px; width: parent.width - 112px; height: 16px; text: row.state + " · " + row.address; color: #aebdca; font-size: 9px * UiTheme.panel-scale; overflow: elide; }
-                    Rectangle { x: parent.width - 80px; y: 21px; width: 42px; height: 5px; background: #151a20; border-radius: 3px; }
-                    Rectangle { x: parent.width - 80px; y: 21px; width: row.level * 42px; height: 5px; background: #57c785; border-radius: 3px; }
+
+                    // Status at a glance: green connected, amber negotiating,
+                    // blue reachable, grey merely configured.
+                    Rectangle {
+                        x: 12px;
+                        y: 15px;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: row.connected ? #57c785
+                            : row.connecting ? #e0b062
+                            : row.state == "" ? #6b7785 : #5a9ad6;
+                    }
+
+                    Text {
+                        x: 28px;
+                        y: 8px;
+                        width: parent.text-width;
+                        height: 20px;
+                        text: row.name;
+                        color: #edf3f7;
+                        font-size: 12px * UiTheme.panel-scale;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        x: 28px;
+                        y: 28px;
+                        width: parent.text-width;
+                        height: 16px;
+                        text: row.state + " · " + row.address;
+                        color: #9fb0be;
+                        font-size: 9px * UiTheme.panel-scale;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    // A track under the fill, so a silent session reads as an
+                    // empty meter rather than as a stray dash.
+                    if row.connected: Rectangle {
+                        x: 28px;
+                        y: 47px;
+                        width: parent.text-width;
+                        height: 4px;
+                        background: #1b2129;
+                        border-radius: 2px;
+                        Rectangle {
+                            x: 0px;
+                            width: parent.width * row.level;
+                            height: parent.height;
+                            background: row.level > 0.9 ? #d8734f : #57c785;
+                            border-radius: 2px;
+                        }
+                    }
+
                     ActionButton {
-                        x: parent.width - 31px; y: 12px; width: 22px;
-                        text: row.connected ? "−" : row.connecting ? "…" : "+";
+                        x: parent.width - 104px - 12px;
+                        y: 15px;
+                        width: 104px;
+                        height: 30px;
+                        text: row.connected ? UiI18n.localized("relay.disconnect")
+                            : row.connecting ? UiI18n.localized("relay.state_connecting")
+                            : UiI18n.localized("relay.connect");
                         enabled: root.relay-available && row.id != "" && !row.connecting;
                         clicked => {
                             if (row.connected) { root.action("relay-disconnect:" + row.id); }
                             else { root.action("relay-connect:" + row.id); }
                         }
                     }
-                    if row.trusted : ActionButton {
-                        x: parent.width - 58px; y: 12px; width: 22px; text: "×";
+                    if row.trusted: ActionButton {
+                        x: parent.width - 200px - 12px;
+                        y: 15px;
+                        width: 88px;
+                        height: 30px;
+                        text: UiI18n.localized("relay.forget");
                         enabled: root.relay-available && row.peer-id != "";
                         clicked => { root.action("relay-forget:" + row.peer-id); }
                     }
