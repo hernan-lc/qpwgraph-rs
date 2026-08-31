@@ -613,6 +613,52 @@ const UDP_MIGRATION_DRAIN_TIMEOUT: Duration = Duration::from_millis(2_000);
 /// Poll interval used while waiting for those leases to drain.
 const UDP_MIGRATION_DRAIN_POLL: Duration = Duration::from_millis(5);
 
+/// Binds one audio socket at an already resolved local address.
+///
+/// Injected as a function pointer so the socket-lifecycle and resume paths
+/// can be driven deterministically in tests, the same way `WorkerSpawner`
+/// is threaded through session startup.
+type AudioBinder<'a> = &'a dyn Fn(SocketAddr) -> std::io::Result<UdpSocket>;
+
+fn bind_audio_socket_at(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = UdpSocket::bind(addr)?;
+    tune_audio_socket(&socket);
+    Ok(socket)
+}
+
+/// Why an audio-socket migration failed, and — crucially — whether the
+/// session it belongs to can carry on afterwards.
+#[derive(Debug)]
+enum AudioMigrationError {
+    /// The socket the session was already using is still installed and
+    /// usable. The move did not happen, but the audio path is unharmed and a
+    /// later authenticated resume can retry it.
+    Recoverable(std::io::Error),
+    /// The negotiated audio endpoint is gone and could not be restored.
+    ///
+    /// The peer is still sending to the port it negotiated and nothing is
+    /// bound there any more, so the session's audio is black-holed. A caller
+    /// that acknowledged this resume would report a healthy session that can
+    /// never carry audio again; it must tear the session down instead and let
+    /// the peer negotiate a fresh one.
+    Fatal(std::io::Error),
+}
+
+impl AudioMigrationError {
+    fn is_fatal(&self) -> bool {
+        matches!(self, Self::Fatal(_))
+    }
+}
+
+impl std::fmt::Display for AudioMigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Recoverable(error) => write!(f, "{error}"),
+            Self::Fatal(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 /// Whether the socket at `old` must be closed before `desired:port` can be
 /// bound.
 ///
@@ -629,38 +675,49 @@ fn udp_binds_collide(old: SocketAddr, desired: Ipv4Addr, port: u16) -> bool {
 ///
 /// This is the socket-lifecycle half of a migration, split out from
 /// interface discovery so it can be driven deterministically in tests:
-/// `bind` receives an already resolved local address, and injecting a
-/// failing `bind` exercises the rollback path without a timing race.
+/// `bind` receives an already resolved local address.
 ///
 /// When the old and new addresses collide on the port being preserved, the
-/// old socket is removed from the slot, drained of outstanding worker
-/// leases, and closed *before* the new bind is attempted. If that bind then
-/// fails the slot is refilled with a wildcard socket on the original port,
-/// so the audio workers are never left with an empty slot.
+/// old socket is removed from the slot, drained of outstanding worker leases,
+/// and closed *before* the new bind is attempted.
+///
+/// A preserved port is a *negotiated* port: the peer is already sending to
+/// it and there is no port renegotiation during a resume. So if the new bind
+/// fails, the only acceptable recovery is a wildcard socket back on that same
+/// port. Falling back to an ephemeral port would leave the slot holding an
+/// address the peer will never send to, which is worse than failing loudly —
+/// hence [`AudioMigrationError::Fatal`] rather than a silent port change.
 fn migrate_udp_slot(
     slot: &UdpAudioSlot,
     desired: Ipv4Addr,
     preserve_port: Option<u16>,
     bind: &dyn Fn(SocketAddr) -> std::io::Result<UdpSocket>,
-) -> std::io::Result<()> {
+) -> Result<(), AudioMigrationError> {
     let port = preserve_port.unwrap_or(0);
     let wanted = SocketAddr::from((desired, port));
     let Some(old_addr) = slot.local_addr() else {
         // Nothing is installed, so there is no address to collide with and
         // nothing to roll back to: just fill the slot.
-        return slot.install(bind(wanted)?);
+        let socket = bind(wanted).map_err(AudioMigrationError::Recoverable)?;
+        return slot
+            .install(socket)
+            .map_err(AudioMigrationError::Recoverable);
     };
     if !udp_binds_collide(old_addr, desired, port) {
         // The old socket can stay open across the swap; installing the new
-        // one retires it as soon as the last in-flight lease finishes.
-        return slot.install(bind(wanted)?);
+        // one retires it as soon as the last in-flight lease finishes. If the
+        // bind fails the old socket is untouched and still serving.
+        let socket = bind(wanted).map_err(AudioMigrationError::Recoverable)?;
+        return slot
+            .install(socket)
+            .map_err(AudioMigrationError::Recoverable);
     }
 
     let Some(taken) = slot.take_exclusive(UDP_MIGRATION_DRAIN_TIMEOUT) else {
-        return Err(std::io::Error::new(
+        return Err(AudioMigrationError::Recoverable(std::io::Error::new(
             std::io::ErrorKind::NotConnected,
             "UDP audio socket is not ready",
-        ));
+        )));
     };
     let old = match taken {
         Ok(socket) => socket,
@@ -668,45 +725,43 @@ fn migrate_udp_slot(
             // Put the still-live socket back rather than leaving the session
             // without an audio endpoint; the caller reports the failure.
             slot.restore(still_leased);
-            return Err(std::io::Error::new(
+            return Err(AudioMigrationError::Recoverable(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 format!(
                     "UDP audio socket on {old_addr} is still in use; migration to {wanted} timed out"
                 ),
-            ));
+            )));
         }
     };
-    // Closing here is the whole point: `{old_addr}` and `{wanted}` share a
-    // port, so the kernel refuses the new bind while the old socket lives.
+    // Closing here is the whole point: `old_addr` and `wanted` share a port,
+    // so the kernel refuses the new bind while the old socket lives.
     drop(old);
 
-    match bind(wanted) {
-        Ok(next) => slot.install(next),
-        Err(error) => {
-            // The old socket is gone for good. Restore a usable endpoint on
-            // the negotiated port so the peer keeps reaching this session,
-            // falling back to an ephemeral port if even that is refused.
-            let fallback = bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, old_addr.port())))
-                .or_else(|_| bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))));
-            match fallback {
-                Ok(fallback) => {
-                    let _ = slot.install(fallback);
-                    Err(std::io::Error::new(
-                        error.kind(),
-                        format!(
-                            "could not move UDP audio to {wanted}: {error}; restored a wildcard socket on port {}",
-                            old_addr.port()
-                        ),
-                    ))
-                }
-                Err(fallback_error) => Err(std::io::Error::new(
-                    error.kind(),
-                    format!(
-                        "could not move UDP audio to {wanted}: {error}; the fallback rebind also failed: {fallback_error}"
-                    ),
-                )),
-            }
-        }
+    let error = match bind(wanted) {
+        Ok(next) => return slot.install(next).map_err(AudioMigrationError::Fatal),
+        Err(error) => error,
+    };
+    // The old socket is gone for good. The negotiated port is the only
+    // address the peer will send to, so restore a wildcard socket on exactly
+    // that port — never on an ephemeral one.
+    match bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, old_addr.port()))) {
+        Ok(fallback) => match slot.install(fallback) {
+            Ok(()) => Err(AudioMigrationError::Recoverable(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "could not move UDP audio to {wanted}: {error}; kept a wildcard socket on the negotiated port {}",
+                    old_addr.port()
+                ),
+            ))),
+            Err(install_error) => Err(AudioMigrationError::Fatal(install_error)),
+        },
+        Err(fallback_error) => Err(AudioMigrationError::Fatal(std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not move UDP audio to {wanted}: {error}; the negotiated port {} could not be reopened either: {fallback_error}",
+                old_addr.port()
+            ),
+        ))),
     }
 }
 
@@ -719,7 +774,17 @@ fn migrate_udp_audio_socket(
     record: &Arc<SessionRecord>,
     target: SocketAddr,
     host_side: bool,
-) -> std::io::Result<()> {
+) -> Result<(), AudioMigrationError> {
+    migrate_udp_audio_socket_with(inner, record, target, host_side, &bind_audio_socket_at)
+}
+
+fn migrate_udp_audio_socket_with(
+    inner: &Arc<EngineInner>,
+    record: &Arc<SessionRecord>,
+    target: SocketAddr,
+    host_side: bool,
+    bind: AudioBinder,
+) -> Result<(), AudioMigrationError> {
     let Some(slot) = record.udp_audio.as_ref() else {
         return Ok(());
     };
@@ -729,7 +794,8 @@ fn migrate_udp_audio_socket(
     // live socket still holds, which fails with EADDRINUSE and reports a
     // migration error for a session that never needed to move. Only rebind
     // when the selected interface actually changed.
-    let desired = audio_bind_addr(inner, target, host_side)?;
+    let desired =
+        audio_bind_addr(inner, target, host_side).map_err(AudioMigrationError::Recoverable)?;
     let unchanged = match (old_addr.map(|addr| addr.ip()), desired) {
         (Some(IpAddr::V4(current)), Some(next)) => current == next,
         (Some(current), None) => current.is_unspecified(),
@@ -747,11 +813,7 @@ fn migrate_udp_audio_socket(
         slot,
         desired.unwrap_or(Ipv4Addr::UNSPECIFIED),
         preserve_port,
-        &|addr| {
-            let socket = UdpSocket::bind(addr)?;
-            tune_audio_socket(&socket);
-            Ok(socket)
-        },
+        bind,
     )
 }
 
@@ -1645,8 +1707,18 @@ fn reject_pairing(inner: &Arc<EngineInner>, stream: &mut TcpStream, addr: IpAddr
 fn resume_peer_session(
     inner: &Arc<EngineInner>,
     id: SessionId,
+    stream: TcpStream,
+    client_nonce: &str,
+) {
+    resume_peer_session_with(inner, id, stream, client_nonce, &bind_audio_socket_at);
+}
+
+fn resume_peer_session_with(
+    inner: &Arc<EngineInner>,
+    id: SessionId,
     mut stream: TcpStream,
     client_nonce: &str,
+    bind: AudioBinder,
 ) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
@@ -1745,14 +1817,33 @@ fn resume_peer_session(
     };
     let mut cipher = ControlCipher { sealer, opener };
     if let Some(peer_addr) = peer_addr {
-        let migrated = migrate_udp_audio_socket(inner, &record, peer_addr, true);
+        let migrated = migrate_udp_audio_socket_with(inner, &record, peer_addr, true, bind);
         if let Err(error) = migrated {
-            // A failed rebind must not destroy a still-usable authenticated
-            // session. The old socket remains installed and the control
-            // resume continues; the next authenticated resume can retry.
             inner.emit(RelayEvent::Error {
                 message: format!("UDP audio interface migration failed: {error}"),
             });
+            if error.is_fatal() {
+                // The negotiated UDP port could not be reopened, so the
+                // client's audio is going nowhere. Acknowledging this resume
+                // would hand back a session with a live control link and a
+                // permanently silent audio path, so reject it instead and let
+                // the peer negotiate a fresh session. `PairFail` is already
+                // what a resuming client expects on a rejected candidate, so
+                // this needs no wire change.
+                let reason = format!("relay audio endpoint could not be restored: {error}");
+                let _ = cipher.send(
+                    &mut stream,
+                    &ControlMessage::PairFail {
+                        reason: reason.clone(),
+                    },
+                );
+                record.cancel_resume(generation);
+                teardown(inner, id, reason);
+                return;
+            }
+            // Otherwise the old socket is still installed and serving: a
+            // failed rebind must not destroy a still-usable authenticated
+            // session, and the next authenticated resume can retry.
         }
         // The control address is learned from the authenticated resume, never
         // from discovery. It is reported independently from the stable peer
@@ -2853,9 +2944,26 @@ fn client_control_loop(
                                     }
                                 }
                             }
-                            Err(error) => inner.emit(RelayEvent::Error {
-                                message: format!("UDP audio interface migration failed: {error}"),
-                            }),
+                            Err(error) => {
+                                inner.emit(RelayEvent::Error {
+                                    message: format!(
+                                        "UDP audio interface migration failed: {error}"
+                                    ),
+                                });
+                                if error.is_fatal() {
+                                    // A client normally takes a fresh
+                                    // ephemeral port and announces it, so it
+                                    // should never reach here; if its audio
+                                    // socket is nonetheless unrecoverable the
+                                    // session can only go silent, so end it.
+                                    teardown(
+                                        &inner,
+                                        record.id,
+                                        format!("relay audio socket was lost: {error}"),
+                                    );
+                                    return true;
+                                }
+                            }
                         }
                     }
                     stream = Some((resumed_stream, resumed_cipher));
@@ -4046,10 +4154,11 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_migration_restores_a_wildcard_socket_on_the_original_port() {
+    fn a_failed_migration_keeps_a_wildcard_socket_on_the_negotiated_port() {
         // Rollback: once the old wildcard socket has been closed there is
-        // nothing to put back, so the slot must be refilled rather than left
-        // empty, and the caller must still learn that the move failed.
+        // nothing to put back, so the slot must be refilled on the *same*
+        // negotiated port, and the caller must still learn that the move
+        // failed. The session stays usable, so this is recoverable.
         let slot = UdpAudioSlot::new(
             UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket"),
         )
@@ -4067,11 +4176,133 @@ mod tests {
 
         let error = migrate_udp_slot(&slot, Ipv4Addr::LOCALHOST, Some(port), &binder)
             .expect_err("the desired address cannot be bound");
-        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert!(
+            !error.is_fatal(),
+            "the negotiated port was kept, so the session survives"
+        );
 
         let after = slot.local_addr().expect("the slot is never left empty");
         assert!(after.ip().is_unspecified());
         assert_eq!(after.port(), port);
+    }
+
+    #[test]
+    fn a_host_migration_that_cannot_reopen_the_negotiated_port_is_fatal() {
+        // Regression: the rollback used to fall back to `0.0.0.0:0` and
+        // install that ephemeral port. The peer keeps sending to the port it
+        // negotiated — there is no port renegotiation during a resume — so
+        // the session would have kept a live control link with permanently
+        // black-holed audio. The migration must fail fatally instead, and it
+        // must never install an ephemeral port behind the caller's back.
+        let slot = UdpAudioSlot::new(
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket"),
+        )
+        .expect("audio slot");
+        let port = slot.local_addr().expect("bound address").port();
+
+        // Every bind on the negotiated port fails; only an ephemeral port
+        // would succeed. That ephemeral escape hatch must not be taken.
+        let binder = move |addr: SocketAddr| -> std::io::Result<UdpSocket> {
+            if addr.port() == port {
+                return Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
+            }
+            real_udp_binder(addr)
+        };
+
+        let error = migrate_udp_slot(&slot, Ipv4Addr::LOCALHOST, Some(port), &binder)
+            .expect_err("neither the desired address nor the negotiated port can be bound");
+        assert!(
+            error.is_fatal(),
+            "losing the negotiated port must be reported as fatal, not papered over"
+        );
+        assert!(
+            slot.local_addr().is_none(),
+            "the slot must not hold an unannounced ephemeral port: {:?}",
+            slot.local_addr()
+        );
+    }
+
+    #[test]
+    fn losing_the_negotiated_port_to_another_socket_is_fatal() {
+        // The same failure with real sockets and no injection: a foreign
+        // socket on 127.0.0.2:PORT blocks both the desired specific bind and
+        // the wildcard rollback on that port once the old socket is closed.
+        let slot =
+            UdpAudioSlot::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("host socket"))
+                .expect("audio slot");
+        let port = slot.local_addr().expect("bound address").port();
+        let Ok(_squatter) = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, 2), port)) else {
+            // A platform without the whole 127.0.0.0/8 loopback range cannot
+            // stage this collision; the injected-binder test above covers the
+            // same path deterministically everywhere.
+            return;
+        };
+
+        let error = migrate_udp_slot(&slot, Ipv4Addr::UNSPECIFIED, Some(port), &real_udp_binder)
+            .expect_err("the negotiated port is held by another socket");
+        assert!(error.is_fatal());
+        assert!(slot.local_addr().is_none());
+    }
+
+    #[test]
+    fn a_resume_whose_audio_port_is_lost_is_rejected_instead_of_acknowledged() {
+        // End-to-end: a host resume that cannot restore its negotiated UDP
+        // port must not answer `ResumeOk`. Doing so would report a healthy
+        // session to the client while its audio went nowhere. The host sends
+        // `PairFail` and tears the session down so the peer negotiates afresh.
+        let inner = EngineInner::new(crate::EngineConfig::default());
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("wildcard socket");
+        let slot = UdpAudioSlot::new(socket).expect("audio slot");
+        let audio_port = slot.local_addr().expect("bound address").port();
+        let record = resumable_session_with_udp(7_060, Some(Arc::clone(&slot)));
+        assert!(inner.insert_session(Arc::clone(&record)));
+        assert!(record.mark_control_dropped());
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("resume listener");
+        let target = listener.local_addr().expect("resume address");
+        let server_inner = Arc::clone(&inner);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("resume client connects");
+            let ControlMessage::ResumeHello {
+                session_id,
+                client_nonce,
+            } = read_frame(&mut stream).expect("resume hello")
+            else {
+                panic!("resume client sent the wrong first message");
+            };
+            // Refuse only the negotiated port. An ephemeral bind would
+            // still succeed, which is precisely the escape hatch that used to
+            // hand the client a silent session.
+            let binder = move |addr: SocketAddr| -> std::io::Result<UdpSocket> {
+                if addr.port() == audio_port {
+                    return Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
+                }
+                bind_audio_socket_at(addr)
+            };
+            resume_peer_session_with(
+                &server_inner,
+                SessionId(session_id),
+                stream,
+                &client_nonce,
+                &binder,
+            );
+        });
+
+        let resumed = resume_client_control(&inner, &record, target);
+        server.join().expect("host resume worker finishes");
+
+        assert!(
+            resumed.is_none(),
+            "the client must not see this resume succeed"
+        );
+        assert!(
+            !inner.session_alive(record.id),
+            "the host must tear down a session whose audio endpoint is gone"
+        );
+        assert!(
+            slot.local_addr().is_none(),
+            "no ephemeral port may be installed behind the peer's back"
+        );
     }
 
     #[test]
