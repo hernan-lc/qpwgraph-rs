@@ -7,7 +7,7 @@ patchbay, effects, relay, and metering crates.
 
 `src/bridge/` translates application models into Slint rows and translates
 callbacks into application actions. It does not mutate PipeWire, ALSA, relay,
-or patchbay state independently. `src/model.rs` contains the UI projection,
+or patchbay state independently. `src/model/` contains the UI projection,
 selection state, stable ID mapping, geometry inputs, layout persistence, and
 node appearance projection.
 
