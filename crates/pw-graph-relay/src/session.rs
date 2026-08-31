@@ -514,12 +514,14 @@ fn bind_udp_audio_socket(
     bind_udp_audio_socket_on(inner, target, host_side, None)
 }
 
-fn bind_udp_audio_socket_on(
+/// The local address the audio socket for `target` belongs on, or an error
+/// when the selected link is gone. `None` is the documented wildcard
+/// fallback for an Auto host with no classified link at all.
+fn audio_bind_addr(
     inner: &Arc<EngineInner>,
     target: SocketAddr,
     host_side: bool,
-    port: Option<u16>,
-) -> std::io::Result<UdpSocket> {
+) -> std::io::Result<Option<Ipv4Addr>> {
     let config = inner.config();
     let links = netlink::local_links();
     let bind = if host_side {
@@ -534,6 +536,16 @@ fn bind_udp_audio_socket_on(
             "the selected relay interface is not available",
         ));
     }
+    Ok(bind)
+}
+
+fn bind_udp_audio_socket_on(
+    inner: &Arc<EngineInner>,
+    target: SocketAddr,
+    host_side: bool,
+    port: Option<u16>,
+) -> std::io::Result<UdpSocket> {
+    let bind = audio_bind_addr(inner, target, host_side)?;
     UdpSocket::bind((bind.unwrap_or(Ipv4Addr::UNSPECIFIED), port.unwrap_or(0)))
 }
 
@@ -576,6 +588,20 @@ fn migrate_udp_audio_socket(
         return Ok(());
     };
     let old_addr = slot.local_addr();
+    // A resume normally re-authenticates over the very link the socket is
+    // already on. Rebinding then means asking the kernel for an address the
+    // live socket still holds, which fails with EADDRINUSE and reports a
+    // migration error for a session that never needed to move. Only rebind
+    // when the selected interface actually changed.
+    let desired = audio_bind_addr(inner, target, host_side)?;
+    let unchanged = match (old_addr.map(|addr| addr.ip()), desired) {
+        (Some(IpAddr::V4(current)), Some(next)) => current == next,
+        (Some(current), None) => current.is_unspecified(),
+        _ => false,
+    };
+    if unchanged {
+        return Ok(());
+    }
     let preserve_port = if host_side {
         old_addr.map(|addr| addr.port())
     } else {
@@ -3690,6 +3716,13 @@ mod tests {
     }
 
     fn resumable_session(id: u64) -> Arc<SessionRecord> {
+        resumable_session_with_udp(id, None)
+    }
+
+    fn resumable_session_with_udp(
+        id: u64,
+        udp_audio: Option<Arc<UdpAudioSlot>>,
+    ) -> Arc<SessionRecord> {
         let client = pake_start(Side::Client, "123456");
         let host = pake_start(Side::Host, "123456");
         let client_message = client.message.clone();
@@ -3724,7 +3757,7 @@ mod tests {
             resume_secret: client_keys.resume_auth_key(),
             trust_secret: Mutex::new(None),
             tcp_audio: None,
-            udp_audio: None,
+            udp_audio,
             control_peer_addr: Mutex::new("127.0.0.1:1".parse().unwrap()),
             control_state: Mutex::new(ControlState::Active),
             peer_audio_addr: Mutex::new(None),
@@ -3734,6 +3767,28 @@ mod tests {
             audio_sealer: Mutex::new(audio_sealer),
             audio_opener: Mutex::new(audio_opener),
         })
+    }
+
+    #[test]
+    fn resuming_on_the_same_link_keeps_the_existing_audio_socket() {
+        // ADB pins the host bind address to loopback, so the interface
+        // selected for the resume is exactly the one the socket already
+        // holds. Rebinding it would ask the kernel for an address this very
+        // session still owns and fail with EADDRINUSE.
+        let config = crate::EngineConfig {
+            transport: crate::TransportPreference::Adb,
+            ..crate::EngineConfig::default()
+        };
+        let inner = EngineInner::new(config);
+        let target: SocketAddr = "127.0.0.1:48123".parse().expect("target");
+        let socket = bind_udp_audio_socket(&inner, target, true).expect("audio socket");
+        let slot = UdpAudioSlot::new(socket).expect("audio slot");
+        let before = slot.local_addr().expect("bound address");
+        let record = resumable_session_with_udp(7_050, Some(Arc::clone(&slot)));
+
+        migrate_udp_audio_socket(&inner, &record, target, true).expect("resume keeps the socket");
+
+        assert_eq!(slot.local_addr(), Some(before));
     }
 
     #[test]

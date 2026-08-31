@@ -232,6 +232,12 @@ fn browse_loop(
                 if meta.version != TXT_VERSION {
                     continue;
                 }
+                // A host browses while it advertises, so it resolves its own
+                // record. Listing the local machine as a connectable peer is
+                // never useful and invites a self-connect, so drop it.
+                if is_local_advertisement(inner, &meta, info.get_fullname()) {
+                    continue;
+                }
                 let service_id = info.get_fullname().to_string();
                 let name = meta.name.clone().unwrap_or_else(|| service_id.clone());
                 let peers = info
@@ -260,6 +266,30 @@ fn browse_loop(
     let _ = daemon.stop_browse(SERVICE_TYPE);
     let _ = daemon.shutdown();
     active.store(false, Ordering::Release);
+}
+
+/// True when a resolved record is this engine's own advertisement.
+///
+/// The stable device ID is authoritative when both sides publish one. The
+/// advertised fullname is the fallback for a record that predates the `id`
+/// TXT key, which is the same name this engine registers.
+fn is_local_advertisement(inner: &EngineInner, meta: &DiscoveredMeta, fullname: &str) -> bool {
+    let config = inner.config();
+    if let Some(device_id) = meta.device_id.as_deref() {
+        let device_id = device_id.trim();
+        if !device_id.is_empty() {
+            return device_id == config.device_id;
+        }
+    }
+    inner
+        .advertiser
+        .lock()
+        .ok()
+        .and_then(|slot| {
+            slot.as_ref()
+                .map(|advertiser| advertiser.fullname == fullname)
+        })
+        .unwrap_or(false)
 }
 
 /// Engine-side discovery state and event plumbing.
@@ -776,6 +806,42 @@ mod tests {
         inner.refresh_service(crate::usb_probe::USB_PROBE_SERVICE, vec![usb_peer]);
         inner.lost_peer(crate::usb_probe::USB_PROBE_SERVICE);
         assert_eq!(inner.discovered_peers(), vec![mdns_peer]);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn a_hosts_own_advertisement_is_not_a_discoverable_peer() {
+        let engine = crate::RelayEngine::start(crate::EngineConfig::default()).unwrap();
+        let inner = &engine.inner;
+        let config = inner.config();
+
+        let own = parse_txt_properties(&txt_properties(
+            &config.device_id,
+            &config.device_name,
+            config.device_kind,
+            Roles::both(),
+            None,
+        ));
+        assert!(is_local_advertisement(
+            inner,
+            &own,
+            "qpwgraph-rs._qpw-relay._udp.local."
+        ));
+
+        // A different installation sharing the advertised name is still a
+        // real peer: identity comes from the stable device ID.
+        let other = parse_txt_properties(&txt_properties(
+            "another-device-id",
+            &config.device_name,
+            config.device_kind,
+            Roles::both(),
+            None,
+        ));
+        assert!(!is_local_advertisement(
+            inner,
+            &other,
+            "qpwgraph-rs._qpw-relay._udp.local."
+        ));
         engine.shutdown();
     }
 
