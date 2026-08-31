@@ -282,14 +282,17 @@ export component MainWindow inherits Window {
         width: root.width - root.rail-width;
         height: root.height - root.status-height;
         background: #191d24;
-        property <length> relay-sidebar-width: root.show-relay ? min(380px, max(320px, parent.width * 0.38)) : 0px;
+        // The Relay panel is an overlay: it covers the right half of the
+        // workspace instead of taking width away from the canvas, so opening
+        // it never moves, resizes or reflows the node graph.
+        property <length> relay-sidebar-width: root.show-relay ? self.width / 2 : 0px;
 
         public function focus-shortcut-search() {
             shortcut-dialog.focus-search();
         }
 
         workspace_focus := FocusScope {
-            width: parent.width - workspace.relay-sidebar-width;
+            width: parent.width;
             height: 100%;
             startup-focus := Timer {
                 interval: 1ms;
@@ -392,10 +395,11 @@ export component MainWindow inherits Window {
         LineEdit {
             x: 16px;
             y: 12px;
-            width: min(280px, parent.width - workspace.relay-sidebar-width - 32px);
+            width: max(0px, min(280px, parent.width - workspace.relay-sidebar-width - 32px));
             height: 30px;
             placeholder-text: UiI18n.localized("search.placeholder");
             text <=> root.search-text;
+            z: 1;
         }
 
         if root.show-relay: RelayPanel {
@@ -403,6 +407,8 @@ export component MainWindow inherits Window {
             y: 0px;
             width: workspace.relay-sidebar-width;
             height: parent.height;
+            // Above the canvas and the search field it overlaps.
+            z: 2;
             relay-tab <=> root.relay-tab;
             relay-rows: root.relay-rows;
             relay-device-name <=> root.relay-device-name;

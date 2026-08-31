@@ -1038,16 +1038,23 @@ mod tests {
     }
 
     #[test]
-    fn relay_sidebar_reserves_space_from_the_canvas() {
+    fn relay_sidebar_overlays_the_canvas_without_resizing_it() {
         let harness = CanvasHarness::new(ConnectMode::Advanced);
         let full_width = harness.window.get_canvas_width_();
+        let pan = harness.window.get_pan_x();
 
         harness.window.set_show_relay(true);
         slint::platform::update_timers_and_animations();
 
-        let sidebar_width = full_width - harness.window.get_canvas_width_();
-        assert!(sidebar_width >= 320.0);
-        assert!(sidebar_width <= 380.0);
+        // The panel floats over the right half of the workspace: the canvas
+        // keeps every pixel it had, so no node moves or reflows when it opens.
+        assert!((harness.window.get_canvas_width_() - full_width).abs() < 0.01);
+        assert!((harness.window.get_pan_x() - pan).abs() < 0.01);
+
+        harness.window.set_show_relay(false);
+        slint::platform::update_timers_and_animations();
+        assert!((harness.window.get_canvas_width_() - full_width).abs() < 0.01);
+        assert!((harness.window.get_pan_x() - pan).abs() < 0.01);
     }
 
     #[test]

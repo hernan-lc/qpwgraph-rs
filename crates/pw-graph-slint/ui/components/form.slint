@@ -1,42 +1,68 @@
 import { UiTheme } from "../foundation/theme.slint";
 import { ActionButton } from "button.slint";
 
-// Semantic label/control row used by settings panels. The label owns a
-// bounded share of the row and the control stretches into all remaining room.
+// Semantic label/control row used by settings panels. The row owns both
+// column geometries: the label sits in the left half and the injected control
+// fills the right half. `@children` keep their call-site lexical scope, so a
+// control must never size itself from `parent.width` - the content layout
+// below stretches it to the column instead.
 export component FormRow inherits Rectangle {
     in property <string> label;
     in property <string> help: "";
-    in property <length> row-height: root.help == "" ? 40px : 58px;
+    in property <length> row-height: root.help == "" ? 44px : 62px;
+    property <length> column-spacing: 12px;
+    property <length> effective-spacing: min(root.column-spacing, root.width);
+    property <length> column-width: max(0px, (root.width - root.effective-spacing) / 2);
+    property <length> control-x: root.column-width + root.effective-spacing;
+    property <length> control-width: max(0px, root.width - root.control-x);
+    property <length> help-height: root.help == "" ? 0px : 24px;
+    property <length> label-height: root.help == "" ? root.height : max(0px, root.height - root.help-height - 2px);
 
     height: root.row-height;
+    min-width: 0px;
+    horizontal-stretch: 1;
 
-    HorizontalLayout {
-        width: parent.width;
+    label-column := Rectangle {
+        // An omitted x binding is centered by Slint's implicit geometry pass.
+        // Keep the label column anchored to the row so labels start at the
+        // same left edge in every translated layout.
+        x: 0px;
+        y: 0px;
+        width: root.column-width;
         height: parent.height;
-        spacing: 10px;
+        clip: true;
 
-        VerticalLayout {
-            width: min(150px, parent.width * 0.43);
-            spacing: 2px;
-            Text {
-                text: root.label;
-                color: #aebdca;
-                font-size: 10px * UiTheme.panel-scale;
-                wrap: word-wrap;
-                vertical-alignment: center;
-            }
-            if root.help != "": Text {
-                text: root.help;
-                color: #8393a0;
-                font-size: 8px * UiTheme.panel-scale;
-                wrap: word-wrap;
-            }
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: root.label-height;
+            text: root.label;
+            color: #aebdca;
+            font-size: 10px * UiTheme.panel-scale;
+            wrap: word-wrap;
+            vertical-alignment: center;
         }
+        if root.help != "": Text {
+            x: 0px;
+            y: parent.height - root.help-height;
+            width: parent.width;
+            height: root.help-height;
+            text: root.help;
+            color: #8393a0;
+            font-size: 8px * UiTheme.panel-scale;
+            wrap: word-wrap;
+        }
+    }
 
-        content := Rectangle {
-            horizontal-stretch: 1;
-            @children
-        }
+    // A layout, not a plain rectangle: it stretches the injected control to
+    // the control column no matter what `parent` means at the call site.
+    content := HorizontalLayout {
+        x: root.control-x;
+        y: 0px;
+        width: root.control-width;
+        height: parent.height;
+        @children
     }
 }
 
@@ -47,7 +73,7 @@ export component FormSection inherits Rectangle {
     in property <string> summary: "";
 
     min-height: section-layout.min-height + 24px;
-    preferred-height: self.min-height;
+    preferred-height: section-layout.preferred-height + 24px;
     vertical-stretch: 0;
     background: #29323c;
     border-color: #40505f;
@@ -58,9 +84,12 @@ export component FormSection inherits Rectangle {
         x: 12px;
         y: 12px;
         width: parent.width - 24px;
+        min-width: 0px;
         spacing: 8px;
+        alignment: start;
 
         if root.title != "": Text {
+            width: parent.width;
             height: 22px;
             text: root.title;
             color: #edf3f7;
@@ -69,6 +98,7 @@ export component FormSection inherits Rectangle {
             overflow: elide;
         }
         if root.summary != "": Text {
+            width: parent.width;
             min-height: 36px;
             text: root.summary;
             color: #aebdca;
@@ -88,20 +118,24 @@ export component TabStrip inherits Rectangle {
 
     height: 31px;
     HorizontalLayout {
+        width: parent.width;
         spacing: 8px;
         ActionButton {
+            min-width: 0px;
             horizontal-stretch: 1;
             text: root.first;
             selected: root.current-index == 0;
             clicked => { root.current-index = 0; }
         }
         ActionButton {
+            min-width: 0px;
             horizontal-stretch: 1;
             text: root.second;
             selected: root.current-index == 1;
             clicked => { root.current-index = 1; }
         }
         ActionButton {
+            min-width: 0px;
             horizontal-stretch: 1;
             text: root.third;
             selected: root.current-index == 2;
