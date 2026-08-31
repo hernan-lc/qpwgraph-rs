@@ -90,12 +90,21 @@ export component MainWindow inherits Window {
     in-out property <bool> show-node-editor: false;
     in-out property <bool> show-relay: false;
     in-out property <bool> show-qr: false;
-    // Any of these owns the keyboard: while one is up the graph shortcuts
-    // behind it must stay inert. The relay panel is deliberately absent —
-    // it is a side panel, not a modal, so the canvas keymap survives it.
-    property <bool> modal-open: root.show-preferences || root.show-history
+    // --- Keyboard policy -------------------------------------------------
+    // The three questions every key handler needs to ask, answered once here
+    // instead of being re-derived at each call site. `docs/keyboard.md` and
+    // `src/shortcuts.rs` describe the contract these express.
+    //
+    // A modal owns the keyboard: while one is up the graph shortcuts behind it
+    // stay inert. The relay panel is deliberately absent — it is a side panel,
+    // not a modal, so the canvas keymap survives it and only its own text
+    // fields suppress typing shortcuts.
+    out property <bool> modal-open: root.show-preferences || root.show-history
         || root.show-shortcuts || root.show-effects || root.show-node-editor
         || root.show-qr;
+    // Text editing always wins: a typed 'r', 'a' or digit belongs to the field.
+    out property <bool> text-editing: TextInputInterface.text-input-focused;
+    out property <bool> canvas-shortcuts-enabled: !root.modal-open && !root.text-editing;
     in-out property <int> preferences-tab: 0;
     in-out property <int> relay-tab: 0;
     in-out property <string> relay-device-name: "";
@@ -257,11 +266,9 @@ export component MainWindow inherits Window {
                 return accept;
             }
 
-            // Everything below acts on the graph behind the dialogs, so it
-            // stays inert while a modal is up. Text fields own their editing
-            // keys: do not turn a typed 'r', 'a' or digit into a graph action.
-            if (root.modal-open) { return reject; }
-            if (TextInputInterface.text-input-focused) { return reject; }
+            // Everything below drives the graph behind the dialogs. One
+            // property decides whether that layer may be reached at all.
+            if (!root.canvas-shortcuts-enabled) { return reject; }
 
             // Panning and zooming are the only commands that want auto-repeat.
             if (event.text == Key.LeftArrow && (bare || ctrl-only)) { root.pan-x -= ctrl-only ? 192px : shift ? 96px : 48px; return accept; }
@@ -416,6 +423,7 @@ export component MainWindow inherits Window {
                 pin-preview-path(pin, x, y) => { root.graph-pin-preview-path(pin, x, y) }
                 node-preview-path(node, x, y) => { root.graph-node-preview-path(node, x, y) }
                 request-grid => { root.graph-request-grid(); }
+                focus-requested => { app_focus.focus(); }
 
                 node-selected(id, shift) => { root.graph-node-selected(id, shift); }
                 link-selected(id, shift) => { root.graph-link-selected(id, shift); }

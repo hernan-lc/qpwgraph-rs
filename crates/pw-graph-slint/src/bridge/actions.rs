@@ -214,13 +214,7 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
             application.meters.clear();
             application.status = application.t("status.audio_monitoring_reset");
         }
-        "escape" => {
-            cancel_effect_setup(window, application);
-            close_modals(window);
-            window.set_show_relay(false);
-            window.set_show_qr(false);
-            stop_relay_discovery(application);
-        }
+        "escape" => escape_topmost_layer(window, application),
         "save-config" => save_config(application, true),
         "delete-selection" => delete_selection(application),
         "disconnect-node" => disconnect_selected_node(application),
@@ -471,6 +465,56 @@ fn toggle_overlay(window: &MainWindow, overlay: Overlay) {
         Overlay::History => window.set_show_history(!currently_open),
         Overlay::Shortcuts => window.set_show_shortcuts(!currently_open),
         Overlay::Effects => window.set_show_effects(!currently_open),
+    }
+}
+
+/// Escape cancels the topmost active layer and nothing else.
+///
+/// It used to close every overlay at once, which meant dismissing a QR code
+/// also tore down the relay panel underneath it and stopped discovery. The
+/// order below is the layering order on screen, innermost first:
+///
+/// ```text
+/// QR dialog -> node appearance -> effect setup -> the four modals
+///           -> relay panel -> canvas gesture
+/// ```
+///
+/// The canvas gesture is cancelled in `ui/main.slint` before this runs, so an
+/// Escape with nothing open still aborts a drag.
+fn escape_topmost_layer(window: &MainWindow, application: &mut Application) {
+    if window.get_show_qr() {
+        window.set_show_qr(false);
+        return;
+    }
+    if window.get_show_node_editor() {
+        window.set_show_node_editor(false);
+        return;
+    }
+    // Inside the effects dialog a half-filled setup form is its own layer: the
+    // first Escape abandons the draft, a second one closes the dialog.
+    if window.get_show_effects() && window.get_effect_configuring() {
+        cancel_effect_setup(window, application);
+        return;
+    }
+    if window.get_show_effects() {
+        window.set_show_effects(false);
+        return;
+    }
+    if window.get_show_shortcuts() {
+        window.set_show_shortcuts(false);
+        return;
+    }
+    if window.get_show_history() {
+        window.set_show_history(false);
+        return;
+    }
+    if window.get_show_preferences() {
+        window.set_show_preferences(false);
+        return;
+    }
+    if window.get_show_relay() {
+        window.set_show_relay(false);
+        stop_relay_discovery(application);
     }
 }
 

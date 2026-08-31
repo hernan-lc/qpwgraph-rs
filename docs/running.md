@@ -26,7 +26,10 @@ live backend is reported in the status bar and leaves the graph empty.
 ## Keyboard
 
 Press F1 for the complete shortcut list. Graph shortcuts are ignored while a
-text input owns keyboard focus.
+text input owns keyboard focus or a dialog is open, `Ctrl` is `Cmd` on macOS,
+and the Windows/Super key is never an application modifier. The full contract —
+focus routing, auto-repeat, Escape precedence — is in
+[the keyboard contract](keyboard.md).
 
 ## Related
 

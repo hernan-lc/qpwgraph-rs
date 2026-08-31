@@ -3,6 +3,7 @@ mod bridge;
 mod canvas;
 mod model;
 mod names;
+mod shortcuts;
 mod source;
 #[cfg(all(target_os = "linux", feature = "tray"))]
 mod tray;

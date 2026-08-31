@@ -37,6 +37,11 @@ export component NodeCanvas inherits Rectangle {
     callback node-selected(int, bool);
     callback link-selected(int, bool);
     callback selection-cleared();
+    // The canvas is drawn by a TouchArea, which swallows the press before any
+    // ancestor FocusScope can react to it. Without this the keymap stayed with
+    // whatever text field was clicked last, and pressing 'r' over the graph
+    // typed into the search box instead of refreshing.
+    callback focus-requested();
     callback box-selected(float, float, float, float, bool);
     callback drag-committed(int, float, float);
     callback link-requested(int, int);
@@ -141,6 +146,7 @@ export component NodeCanvas inherits Rectangle {
 
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
+                root.focus-requested();
                 root.press-x = self.mouse-x;
                 root.press-y = self.mouse-y;
                 root.current-x = self.mouse-x;

@@ -490,35 +490,12 @@ fn graph_bounds(snapshot: &GraphSnapshot) -> [f32; 4] {
 }
 
 pub(crate) fn shortcut_rows(i18n: &I18n, query: &str) -> Vec<ShortcutRow> {
-    const ENTRIES: [(&str, &str); 22] = [
-        ("F1", "shortcuts.help"),
-        ("Esc", "shortcuts.close_cancel"),
-        ("Delete / Backspace", "shortcuts.delete_link"),
-        ("Ctrl/Cmd+Z", "shortcuts.undo"),
-        ("Ctrl/Cmd+Shift+Z", "shortcuts.redo"),
-        ("Ctrl/Cmd+Y", "shortcuts.redo"),
-        ("Ctrl/Cmd+S", "shortcuts.save_config"),
-        ("Ctrl/Cmd+Shift+S", "shortcuts.save_patchbay"),
-        ("Ctrl/Cmd+O", "shortcuts.load_patchbay"),
-        ("Ctrl/Cmd+F", "shortcuts.search_hint"),
-        ("R", "shortcuts.refresh"),
-        ("A", "shortcuts.arrange"),
-        ("T", "shortcuts.thumbnail"),
-        ("Arrow keys", "shortcuts.pan_keyboard"),
-        ("0", "shortcuts.filter_all"),
-        ("1", "shortcuts.filter_audio"),
-        ("2", "shortcuts.filter_video"),
-        ("3", "shortcuts.filter_midi"),
-        ("+ / -", "shortcuts.zoom"),
-        ("Scroll", "shortcuts.scroll_pan"),
-        ("Shift+Scroll", "shortcuts.scroll_pan_horizontal"),
-        ("Ctrl/Cmd+Scroll", "shortcuts.scroll_zoom"),
-    ];
     let query = query.trim().to_ascii_lowercase();
-    ENTRIES
-        .into_iter()
-        .filter_map(|(keys, key)| {
-            let description = i18n.text(key);
+    crate::shortcuts::SHORTCUTS
+        .iter()
+        .filter_map(|shortcut| {
+            let keys = crate::shortcuts::display_keys(shortcut.keys);
+            let description = i18n.text(shortcut.description);
             (query.is_empty()
                 || keys.to_ascii_lowercase().contains(&query)
                 || description.to_ascii_lowercase().contains(&query))

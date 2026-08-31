@@ -19,6 +19,8 @@ mod config;
 mod connections;
 mod effects;
 mod events;
+#[cfg(test)]
+mod keyboard;
 mod meters;
 mod models;
 mod patchbay;
@@ -430,7 +432,7 @@ mod tests {
     use slint::{LogicalPosition, ModelRc};
     use std::path::PathBuf;
 
-    fn demo_application() -> Application {
+    pub(super) fn demo_application() -> Application {
         let args = Args {
             demo: true,
             ..Args::default()
