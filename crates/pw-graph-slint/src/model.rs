@@ -12,8 +12,8 @@ const NODE_HEADER_HEIGHT: f32 = 42.0;
 const COLLAPSED_NODE_HEIGHT: f32 = 50.0;
 const PORT_ROW_HEIGHT: f32 = 25.0;
 const AUDIO_CONTROLS_HEIGHT: f32 = 42.0;
-const RELAY_SOURCE_NAME: &str = "qpwgraph-rs.relay.source";
-const RELAY_SINK_NAME: &str = "qpwgraph-rs.relay.sink";
+pub(crate) const RELAY_SOURCE_NAME: &str = "qpwgraph-rs.relay.source";
+pub(crate) const RELAY_SINK_NAME: &str = "qpwgraph-rs.relay.sink";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum MeterState {
@@ -1760,6 +1760,93 @@ mod tests {
         assert_eq!(source.meter.state, MeterState::Live);
         assert_eq!(sink.meter.state, MeterState::Waiting);
         assert_eq!(graph.links.len(), 1);
+    }
+
+    #[test]
+    fn easy_mode_pairs_a_source_into_the_relay_speaker() {
+        // Relay endpoints are ordinary patchable nodes: an Easy-mode gesture
+        // has to resolve pairs into them like it does for any other card.
+        let mut graph = graph();
+        graph
+            .add_node(Node::new(NodeId(3), RELAY_SINK_NAME, NodeType::PipeWire))
+            .unwrap();
+        for (id, channel) in [(PortId(30), "FL"), (PortId(31), "FR")] {
+            graph
+                .add_port(
+                    Port::new(id, NodeId(3), channel, Direction::Sink, PortType::Audio)
+                        .with_channel(channel),
+                )
+                .unwrap();
+        }
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        state.relay_nodes_visible = true;
+
+        let pairs = state.matching_port_pairs(&graph, NodeId(1), NodeId(3));
+        assert_eq!(pairs, vec![(PortId(u64::MAX), PortId(30))]);
+
+        let snapshot = state.snapshot_with_meters(
+            &graph,
+            &config,
+            &BTreeMap::new(),
+            MeterState::Waiting,
+            &fully_capable_backend_profiles(&graph),
+        );
+        let relay = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(3))
+            .unwrap();
+        assert!(relay.connectable);
+        assert_eq!(relay.ports.len(), 2);
+    }
+
+    #[test]
+    fn easy_mode_groups_the_relay_stereo_pair_into_one_pin() {
+        // The relay filters name their ports `<role>_<channel>` so the canvas
+        // can strip the channel suffix; bare "FL"/"FR" has no base name and
+        // used to leave two loose pins on the card in Easy mode.
+        let mut graph = graph();
+        graph
+            .add_node(Node::new(NodeId(3), RELAY_SINK_NAME, NodeType::PipeWire))
+            .unwrap();
+        for (id, channel) in [(PortId(30), "FL"), (PortId(31), "FR")] {
+            graph
+                .add_port(
+                    Port::new(
+                        id,
+                        NodeId(3),
+                        &format!("playback_{channel}"),
+                        Direction::Sink,
+                        PortType::Audio,
+                    )
+                    .with_channel(channel),
+                )
+                .unwrap();
+        }
+        let config = AppConfig::default();
+        let mut state = UiGraphState::from_config(&config);
+        state.relay_nodes_visible = true;
+
+        state.connect_mode = ConnectMode::Easy;
+        let grouped = state.snapshot(&graph, &config);
+        let relay = grouped
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(3))
+            .unwrap();
+        assert_eq!(relay.ports.len(), 1);
+        assert_eq!(relay.ports[0].label, "playback");
+        assert_eq!(relay.ports[0].ports.len(), 2);
+
+        state.connect_mode = ConnectMode::Advanced;
+        let individual = state.snapshot(&graph, &config);
+        let relay = individual
+            .nodes
+            .iter()
+            .find(|node| node.node_id == NodeId(3))
+            .unwrap();
+        assert_eq!(relay.ports.len(), 2);
     }
 
     #[test]

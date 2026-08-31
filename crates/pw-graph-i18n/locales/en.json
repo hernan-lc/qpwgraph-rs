@@ -488,6 +488,8 @@
   "canvas.node_name_bluetooth_midi": "Bluetooth MIDI",
   "canvas.node_name_camera_input": "Camera Input",
   "canvas.node_name_midi_through": "MIDI Through",
+  "canvas.node_name_relay_microphone": "Relay Microphone",
+  "canvas.node_name_relay_speaker": "Relay Speaker",
   "canvas.capture": "Capture",
   "canvas.playback": "Playback",
   "patchbay.link_summary": "{output_node} / {output_port} → {input_node} / {input_port}",

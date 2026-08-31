@@ -466,6 +466,8 @@
   "canvas.node_name_bluetooth_midi": "MIDI Bluetooth",
   "canvas.node_name_camera_input": "Entrada de cámara",
   "canvas.node_name_midi_through": "MIDI Through",
+  "canvas.node_name_relay_microphone": "Micrófono del relé",
+  "canvas.node_name_relay_speaker": "Altavoz del relé",
   "canvas.capture": "Captura",
   "canvas.playback": "Reproducción",
   "patchbay.link_summary": "{output_node} / {output_port} → {input_node} / {input_port}",

@@ -1096,7 +1096,7 @@ impl GraphDriver for PipewireDriver {
             .nodes
             .get(&node)
             .ok_or(GraphError::MissingNode(node))?;
-        if record.node_type == NodeType::Effect {
+        if record.node_type == NodeType::Effect || is_relay_device_node(&record.name) {
             return Ok(NodeAudioState::UNSUPPORTED);
         }
         let known = self.audio_controls.get(&node).copied().unwrap_or_default();
@@ -1534,6 +1534,23 @@ impl PipewireDriver {
                 .nodes
                 .values()
                 .any(|node| node.name == relay::RELAY_SINK_NAME)
+    }
+}
+
+/// Whether a node is one of the relay's own `pw_filter` devices.
+///
+/// Those filters publish no `Props`, so their volume and mute can neither be
+/// read nor written. Reporting them as unsupported keeps the card from
+/// offering a fader that does nothing and a mute button stuck on "unknown".
+fn is_relay_device_node(name: &str) -> bool {
+    #[cfg(all(target_os = "linux", feature = "relay"))]
+    {
+        matches!(name, relay::RELAY_SOURCE_NAME | relay::RELAY_SINK_NAME)
+    }
+    #[cfg(not(all(target_os = "linux", feature = "relay")))]
+    {
+        let _ = name;
+        false
     }
 }
 

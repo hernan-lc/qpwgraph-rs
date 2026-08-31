@@ -674,6 +674,22 @@ mod tests {
             "relay speaker node should appear in the graph, got: {names:?}"
         );
 
+        // `<role>_<channel>`: the canvas groups a stereo pair into one pin by
+        // splitting the channel suffix off a base name, so bare "FL"/"FR"
+        // would leave these cards ungrouped in Easy mode.
+        let port_names: Vec<String> = driver
+            .graph()
+            .ports
+            .values()
+            .map(|port| port.name.clone())
+            .collect();
+        for expected in ["capture_FL", "capture_FR", "playback_FL", "playback_FR"] {
+            assert!(
+                port_names.iter().any(|name| name == expected),
+                "relay device should expose {expected}, got: {port_names:?}"
+            );
+        }
+
         driver.relay_stop_host().expect("relay host should stop");
         assert!(!driver.relay_status().host_active);
     }

@@ -3,6 +3,7 @@
 //! Backend names are deliberately kept as the stable identity used for
 //! persistence and matching. This module only changes their presentation.
 
+use crate::model::{RELAY_SINK_NAME, RELAY_SOURCE_NAME};
 use pw_graph_i18n::I18n;
 
 pub(crate) fn display_node_name(name: &str, i18n: &I18n) -> String {
@@ -28,6 +29,12 @@ pub(crate) fn display_node_name(name: &str, i18n: &I18n) -> String {
         ("canvas.node_name_camera_input", None)
     } else if name.starts_with("Midi Through:") {
         ("canvas.node_name_midi_through", None)
+    } else if name == RELAY_SOURCE_NAME {
+        // The relay's own virtual devices. Their backend names are the stable
+        // identity used for matching, so only the presentation is localised.
+        ("canvas.node_name_relay_microphone", None)
+    } else if name == RELAY_SINK_NAME {
+        ("canvas.node_name_relay_speaker", None)
     } else {
         return name.replace(['_', '-'], " ");
     };
@@ -103,6 +110,28 @@ mod tests {
         assert_eq!(
             display_port_name("Midi Through: Port-0 (capture)", &i18n),
             "Port 0 Capture"
+        );
+    }
+
+    #[test]
+    fn relay_devices_are_named_by_role_in_the_selected_locale() {
+        // The raw filter names ("qpwgraph-rs.relay.sink") used to leak onto
+        // the canvas because nothing claimed them before the fallback.
+        let english = I18n::default();
+        assert_eq!(
+            display_node_name(RELAY_SOURCE_NAME, &english),
+            "Relay Microphone"
+        );
+        assert_eq!(display_node_name(RELAY_SINK_NAME, &english), "Relay Speaker");
+
+        let spanish = I18n::from_language("es");
+        assert_eq!(
+            display_node_name(RELAY_SOURCE_NAME, &spanish),
+            "Micrófono del relé"
+        );
+        assert_eq!(
+            display_node_name(RELAY_SINK_NAME, &spanish),
+            "Altavoz del relé"
         );
     }
 

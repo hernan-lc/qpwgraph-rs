@@ -212,9 +212,17 @@ impl RelayNodeRuntime {
             RelayNodeKind::Microphone => pw::spa::sys::SPA_DIRECTION_OUTPUT,
             RelayNodeKind::Speaker => pw::spa::sys::SPA_DIRECTION_INPUT,
         };
+        // `<role>_<channel>`, the same shape PipeWire devices and our effect
+        // filters use. The bare channel name has no base for the canvas to
+        // group on, which left these cards showing two loose `FL`/`FR` pins
+        // in Easy mode where every other node collapses to one.
+        let role = match kind {
+            RelayNodeKind::Microphone => "capture",
+            RelayNodeKind::Speaker => "playback",
+        };
         let mut ports = [ptr::null_mut(); RELAY_CHANNELS];
         for (index, channel) in ["FL", "FR"].iter().enumerate() {
-            ports[index] = runtime.add_port(direction, channel, channel)?;
+            ports[index] = runtime.add_port(direction, &format!("{role}_{channel}"), channel)?;
         }
         for (callback_port, port) in runtime.callback().ports.iter().zip(ports.iter()) {
             callback_port.store(*port, Ordering::Release);
