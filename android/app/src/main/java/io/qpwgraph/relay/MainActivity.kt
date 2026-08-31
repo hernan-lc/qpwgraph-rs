@@ -243,6 +243,10 @@ private fun UsbStatus(link: UsbLinkInfo?) {
 }
 
 /** Camera preview that decodes QR codes and reports the first payload. */
+// `ImageProxy.image` is CameraX's experimental accessor; ML Kit's
+// `InputImage.fromMediaImage` is the documented consumer for it. Opt in
+// explicitly rather than silencing the lint.
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 @Composable
 private fun QrScannerDialog(onDetected: (String) -> Unit, onDismiss: () -> Unit) {
     val context = LocalContext.current

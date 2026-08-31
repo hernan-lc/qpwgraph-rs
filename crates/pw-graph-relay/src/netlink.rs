@@ -594,7 +594,7 @@ mod tests {
             Some(Ipv4Addr::new(192, 168, 42, 2))
         );
         assert_eq!(
-            listen_bind_addr(&[wifi.clone()], TransportPreference::Auto),
+            listen_bind_addr(std::slice::from_ref(&wifi), TransportPreference::Auto),
             Some(wifi.addr)
         );
         assert_eq!(

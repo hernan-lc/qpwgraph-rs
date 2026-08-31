@@ -217,6 +217,7 @@ fn connect_trusted_peer(
     true
 }
 
+#[cfg(feature = "relay")]
 fn trusted_candidate_allowed(application: &mut Application, peer: &RelayPeerInfo) -> bool {
     let key = (peer.id.clone(), peer.addr.to_string());
     let Some((_, retry_at)) = application.relay_trusted_candidate_failures.get(&key) else {
@@ -230,6 +231,7 @@ fn trusted_candidate_allowed(application: &mut Application, peer: &RelayPeerInfo
     }
 }
 
+#[cfg(feature = "relay")]
 fn note_trusted_candidate_failure(application: &mut Application, peer_id: &str, address: &str) {
     const MAX_FAILURES: usize = 256;
     let now = Instant::now();
@@ -265,6 +267,7 @@ fn note_trusted_candidate_failure(application: &mut Application, peer_id: &str, 
         .insert(key, (count, now + delay.min(Duration::from_secs(30))));
 }
 
+#[cfg(feature = "relay")]
 fn trusted_candidate_rank(application: &Application, peer: &RelayPeerInfo) -> (u8, SocketAddr) {
     if application
         .config
@@ -299,6 +302,7 @@ fn trusted_candidate_rank(application: &Application, peer: &RelayPeerInfo) -> (u
 /// reports address changes, but a failed TCP attempt does not necessarily
 /// produce a second discovery event; bounded retries are what make a cable
 /// insertion work through a short host-start or route-setup race.
+#[cfg(feature = "relay")]
 fn retry_trusted_auto_connect(application: &mut Application) {
     const RETRY_INTERVAL: Duration = Duration::from_secs(5);
     if !application.config.relay_auto_connect_trusted

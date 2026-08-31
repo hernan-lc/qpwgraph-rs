@@ -31,8 +31,9 @@ use std::sync::Mutex;
 const RELAY_MAX_FRAMES: u32 = pw_graph_relay::MAX_REALTIME_QUANTUM_SAMPLES as u32;
 const RELAY_CHANNELS: usize = 2;
 
-pub(super) const RELAY_SOURCE_NAME: &str = "qpwgraph-rs.relay.source";
-pub(super) const RELAY_SINK_NAME: &str = "qpwgraph-rs.relay.sink";
+pub(super) use pw_graph_core::{
+    RELAY_SINK_NODE_NAME as RELAY_SINK_NAME, RELAY_SOURCE_NODE_NAME as RELAY_SOURCE_NAME,
+};
 
 /// Which virtual device a filter represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,8 +218,8 @@ impl RelayNodeRuntime {
         // group on, which left these cards showing two loose `FL`/`FR` pins
         // in Easy mode where every other node collapses to one.
         let role = match kind {
-            RelayNodeKind::Microphone => "capture",
-            RelayNodeKind::Speaker => "playback",
+            RelayNodeKind::Microphone => pw_graph_core::RELAY_SOURCE_PORT_ROLE,
+            RelayNodeKind::Speaker => pw_graph_core::RELAY_SINK_PORT_ROLE,
         };
         let mut ports = [ptr::null_mut(); RELAY_CHANNELS];
         for (index, channel) in ["FL", "FR"].iter().enumerate() {

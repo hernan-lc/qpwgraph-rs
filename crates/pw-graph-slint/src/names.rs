@@ -122,7 +122,10 @@ mod tests {
             display_node_name(RELAY_SOURCE_NAME, &english),
             "Relay Microphone"
         );
-        assert_eq!(display_node_name(RELAY_SINK_NAME, &english), "Relay Speaker");
+        assert_eq!(
+            display_node_name(RELAY_SINK_NAME, &english),
+            "Relay Speaker"
+        );
 
         let spanish = I18n::from_language("es");
         assert_eq!(

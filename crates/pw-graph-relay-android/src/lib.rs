@@ -8,7 +8,6 @@ use pw_graph_relay_sdk::{
     MAX_REALTIME_QUANTUM_SAMPLES, MAX_TRUSTED_PEERS,
 };
 use serde_json::json;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -17,12 +16,28 @@ static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
 static NEXT_OPERATION: AtomicI64 = AtomicI64::new(1);
 static CLIENTS: OnceLock<Mutex<HashMap<i64, ClientSlot>>> = OnceLock::new();
 
-thread_local! {
-    /// Per-JNI-thread PCM storage. It grows at most once to the realtime
-    /// quantum and is filled before the engine call, so native audio methods
-    /// do not allocate a Vec on every callback.
-    static PCM_SCRATCH: RefCell<Vec<f32>> = RefCell::new(Vec::new());
+/// Wrapper module carrying a target-scoped lint suppression.
+///
+/// `clippy::missing_const_for_thread_local` misreads the `thread_local!`
+/// expansion on targets without native TLS and asks for the `const`
+/// initialiser that is already written below. Verified with clippy 1.97.1:
+/// the identical item is clean for `x86_64-unknown-linux-gnu` and warns for
+/// `aarch64-linux-android`. The allow is scoped to Android so a genuine
+/// regression still fails the host lint, and an attribute has to sit on this
+/// module because one placed on the macro invocation itself is ignored.
+#[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
+mod pcm_scratch {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// Per-JNI-thread PCM storage. It grows at most once to the realtime
+        /// quantum and is filled before the engine call, so native audio
+        /// methods do not allocate a Vec on every callback.
+        pub static PCM_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+    }
 }
+
+use pcm_scratch::PCM_SCRATCH;
 
 fn clients() -> &'static Mutex<HashMap<i64, ClientSlot>> {
     CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
