@@ -90,6 +90,12 @@ export component MainWindow inherits Window {
     in-out property <bool> show-node-editor: false;
     in-out property <bool> show-relay: false;
     in-out property <bool> show-qr: false;
+    // Any of these owns the keyboard: while one is up the graph shortcuts
+    // behind it must stay inert. The relay panel is deliberately absent —
+    // it is a side panel, not a modal, so the canvas keymap survives it.
+    property <bool> modal-open: root.show-preferences || root.show-history
+        || root.show-shortcuts || root.show-effects || root.show-node-editor
+        || root.show-qr;
     in-out property <int> preferences-tab: 0;
     in-out property <int> relay-tab: 0;
     in-out property <string> relay-device-name: "";
@@ -186,165 +192,200 @@ export component MainWindow inherits Window {
     pure callback graph-node-preview-path(int, float, float) -> string;
     callback graph-request-grid();
 
-    changed show-preferences => { if (!root.show-preferences) { workspace_focus.focus(); } }
-    changed show-history => { if (!root.show-history) { workspace_focus.focus(); } }
+    changed show-preferences => { if (!root.show-preferences) { app_focus.focus(); } }
+    changed show-history => { if (!root.show-history) { app_focus.focus(); } }
     changed show-shortcuts => {
         if (root.show-shortcuts) {
             workspace.focus-shortcut-search();
         } else {
-            workspace_focus.focus();
+            app_focus.focus();
         }
     }
-    changed show-effects => { if (!root.show-effects) { workspace_focus.focus(); } }
+    changed show-effects => { if (!root.show-effects) { app_focus.focus(); } }
 
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: root.rail-width;
-        height: root.height - root.status-height;
-        background: #20262d;
-        Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #36414c; }
-        Image { x: 22px; y: 14px; width: 32px; height: 32px; source: @image-url("../../../assets/icons/brand.svg"); }
+    // One FocusScope for the whole window – rail, workspace, dialogs and the
+    // status bar are all inside it. Slint delivers a key event to the focused
+    // element and then bubbles it up the *parent* chain, never sideways: a
+    // scope that wrapped only the canvas stopped receiving keys the moment a
+    // LineEdit was clicked. As the common ancestor this one still sees every
+    // key a focused text field or dialog rejects.
+    app_focus := FocusScope {
+        width: 100%;
+        height: 100%;
 
-        rail-scroll := ScrollView {
-            x: 0px;
-            y: 54px;
-            width: parent.width;
-            height: max(1px, parent.height - 54px);
-            VerticalBox {
-                x: 17px;
-                width: 42px;
-                spacing: 6px;
-
-                Rectangle { width: 42px; height: 2px; background: transparent; }
-                preferences_button := RailActionButton {
-                    icon: @image-url("../../../assets/icons/settings.svg");
-                    label: UiI18n.localized("nav.preferences"); active: root.show-preferences;
-                    clicked => { root.action("preferences"); }
-                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
-                }
-                appearance_button := RailActionButton {
-                    icon: @image-url("../../../assets/icons/appearance.svg");
-                    label: UiI18n.localized("inspector.node_appearance"); active: root.show-node-editor;
-                    clicked => { root.action("node-appearance"); }
-                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
-                }
-                relay_button := RailActionButton {
-                    icon: @image-url("../../../assets/icons/relay.svg");
-                    label: UiI18n.localized("nav.relay"); active: root.show-relay;
-                    clicked => { root.action("relay"); }
-                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
-                }
-                shortcuts_button := RailActionButton {
-                    icon: @image-url("../../../assets/icons/help.svg");
-                    label: UiI18n.localized("nav.shortcuts"); active: root.show-shortcuts;
-                    clicked => { root.action("shortcuts"); }
-                    hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
-                }
-
-                Rectangle { width: 52px; x: -5px; height: 1px; background: #35414d; }
-                Rectangle { width: 42px; height: 7px; background: transparent; }
-                minimap_button := RailActionButton { icon: @image-url("../../../assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions && root.has-selected-link : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/disconnect_link.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions && root.links.length > 0 : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/disconnect_all.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions && root.has-selected-node : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/disconnect_node.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/snapshot.svg"); label: UiI18n.localized("toolbar.snapshot"); clicked => { root.action("snapshot-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/activate.svg"); label: UiI18n.localized("toolbar.activate"); active: root.patchbay-activated; clicked => { root.action("activate-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-                if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
-
-                Rectangle {
-                    width: 42px;
-                    height: 29px;
-                    background: #182029;
-                    border-color: #394653;
-                    border-width: 1px;
-                    border-radius: 4px;
-                    Text { width: parent.width; height: parent.height; text: root.media-filter == "audio" ? "1" : root.media-filter == "video" ? "2" : root.media-filter == "midi" ? "3" : "0"; color: #a9b7c3; horizontal-alignment: center; vertical-alignment: center; font-size: 11px * UiTheme.ui-scale; }
-                }
+        startup-focus := Timer {
+            interval: 1ms;
+            running: true;
+            triggered => {
+                self.running = false;
+                app_focus.focus();
             }
         }
-    }
+        // The canvas has no focus of its own: this scope owns the keymap,
+        // so the shortcuts work on startup and again after a graph click.
+        init => { app_focus.focus(); }
+        key-pressed(event) => {
+            // `control` is Slint's portable shortcut modifier: Ctrl on
+            // Windows/Linux, Command on macOS. `meta` is the Windows key
+            // (physical Control on macOS) and must never stand in for it,
+            // or Win+Arrow would pan the graph instead of snapping windows.
+            // Alt is excluded everywhere so Alt+R and friends stay free.
+            let alt = event.modifiers.alt;
+            let meta = event.modifiers.meta;
+            let shift = event.modifiers.shift;
+            let ctrl = event.modifiers.control && !alt && !meta;
+            let ctrl-only = ctrl && !shift;
+            let ctrl-shift = ctrl && shift;
+            let bare = !event.modifiers.control && !alt && !meta;
+            let plain = bare && !shift;
 
-    workspace := Rectangle {
-        x: root.rail-width;
-        y: 0px;
-        width: root.width - root.rail-width;
-        height: root.height - root.status-height;
-        background: #191d24;
-        // The Relay panel is an overlay: it covers the right half of the
-        // workspace instead of taking width away from the canvas, so opening
-        // it never moves, resizes or reflows the node graph.
-        property <length> relay-sidebar-width: root.show-relay ? self.width / 2 : 0px;
-
-        public function focus-shortcut-search() {
-            shortcut-dialog.focus-search();
-        }
-
-        workspace_focus := FocusScope {
-            width: parent.width;
-            height: 100%;
-            startup-focus := Timer {
-                interval: 1ms;
-                running: true;
-                triggered => {
-                    self.running = false;
-                    workspace_focus.focus();
-                }
+            // Application-global: these must work from inside a dialog and
+            // from a focused text field, which is why they come first.
+            if (event.text == Key.F1 && plain) {
+                if (!event.repeat) { root.action("shortcuts"); }
+                return accept;
             }
-            // The canvas has no focus of its own: this scope owns the keymap,
-            // so the shortcuts work on startup and again after a graph click.
-            init => { workspace_focus.focus(); }
-            key-pressed(event) => {
-                if (event.text == Key.F1) { root.action("shortcuts"); return accept; }
-                if (event.text == Key.Escape) {
+            if (event.text == Key.Escape && plain) {
+                if (!event.repeat) {
                     canvas.cancel-gesture();
                     root.action("escape");
-                    return accept;
                 }
-                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "f" || event.text == "F") && root.show-shortcuts) {
-                    workspace.focus-shortcut-search();
-                    return accept;
-                }
-                // Text fields own their editing shortcuts. In particular, do
-                // not turn a typed 'r', 'a', or digit into a graph action.
-                if (TextInputInterface.text-input-focused) { return reject; }
-                if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "z" || event.text == "Z")) { root.action("redo"); return accept; }
-                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "z" || event.text == "Z")) { root.action("undo"); return accept; }
-                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "y" || event.text == "Y")) { root.action("redo"); return accept; }
-                if ((event.modifiers.control || event.modifiers.meta) && event.modifiers.shift && (event.text == "s" || event.text == "S")) { root.action("save-patchbay"); return accept; }
-                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "s" || event.text == "S")) { root.action("save-config"); return accept; }
-                if ((event.modifiers.control || event.modifiers.meta) && (event.text == "o" || event.text == "O")) { root.action("load-patchbay"); return accept; }
-                // Arrow navigation is a canvas command too. Handle it before
-                // the generic Ctrl/Cmd guard so Ctrl/Cmd+Arrow can use the
-                // documented fastest movement step.
-                if (event.text == Key.LeftArrow) { root.pan-x -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.text == Key.RightArrow) { root.pan-x += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.text == Key.UpArrow) { root.pan-y -= event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.text == Key.DownArrow) { root.pan-y += event.modifiers.control || event.modifiers.meta ? 192px : event.modifiers.shift ? 96px : 48px; return accept; }
-                if (event.modifiers.control || event.modifiers.meta) { return reject; }
-                if (event.text == Key.Delete || event.text == Key.Backspace) { root.action("delete-selection"); return accept; }
-                if (event.text == "r" || event.text == "R") { root.action("refresh"); return accept; }
-                if (event.text == "a" || event.text == "A") { root.action("arrange"); return accept; }
-                if (event.text == "t" || event.text == "T") { root.action("toggle-thumbnail"); return accept; }
-                if (event.text == "0") { root.action("filter-all"); return accept; }
-                if (event.text == "1") { root.action("filter-audio"); return accept; }
-                if (event.text == "2") { root.action("filter-video"); return accept; }
-                if (event.text == "3") { root.action("filter-midi"); return accept; }
-                if (event.text == "+" || event.text == "=") { root.action("zoom-in"); return accept; }
-                if (event.text == "-" || event.text == "_") { root.action("zoom-out"); return accept; }
-                return reject;
+                return accept;
             }
+            if (ctrl-only && (event.text == "f" || event.text == "F") && root.show-shortcuts) {
+                if (!event.repeat) { workspace.focus-shortcut-search(); }
+                return accept;
+            }
+
+            // Everything below acts on the graph behind the dialogs, so it
+            // stays inert while a modal is up. Text fields own their editing
+            // keys: do not turn a typed 'r', 'a' or digit into a graph action.
+            if (root.modal-open) { return reject; }
+            if (TextInputInterface.text-input-focused) { return reject; }
+
+            // Panning and zooming are the only commands that want auto-repeat.
+            if (event.text == Key.LeftArrow && (bare || ctrl-only)) { root.pan-x -= ctrl-only ? 192px : shift ? 96px : 48px; return accept; }
+            if (event.text == Key.RightArrow && (bare || ctrl-only)) { root.pan-x += ctrl-only ? 192px : shift ? 96px : 48px; return accept; }
+            if (event.text == Key.UpArrow && (bare || ctrl-only)) { root.pan-y -= ctrl-only ? 192px : shift ? 96px : 48px; return accept; }
+            if (event.text == Key.DownArrow && (bare || ctrl-only)) { root.pan-y += ctrl-only ? 192px : shift ? 96px : 48px; return accept; }
+            if (bare && (event.text == "+" || event.text == "=")) { root.action("zoom-in"); return accept; }
+            if (bare && (event.text == "-" || event.text == "_")) { root.action("zoom-out"); return accept; }
+
+            // Held keys stop here: a repeating 'T' or Ctrl+S would toggle the
+            // thumbnail view or rewrite the configuration dozens of times.
+            if (event.repeat) { return reject; }
+            if (ctrl-shift && (event.text == "z" || event.text == "Z")) { root.action("redo"); return accept; }
+            if (ctrl-only && (event.text == "z" || event.text == "Z")) { root.action("undo"); return accept; }
+            if (ctrl-only && (event.text == "y" || event.text == "Y")) { root.action("redo"); return accept; }
+            if (ctrl-shift && (event.text == "s" || event.text == "S")) { root.action("save-patchbay"); return accept; }
+            if (ctrl-only && (event.text == "s" || event.text == "S")) { root.action("save-config"); return accept; }
+            if (ctrl-only && (event.text == "o" || event.text == "O")) { root.action("load-patchbay"); return accept; }
+            if (!bare) { return reject; }
+            if (event.text == Key.Delete || event.text == Key.Backspace) { root.action("delete-selection"); return accept; }
+            if (event.text == "r" || event.text == "R") { root.action("refresh"); return accept; }
+            if (event.text == "a" || event.text == "A") { root.action("arrange"); return accept; }
+            if (event.text == "t" || event.text == "T") { root.action("toggle-thumbnail"); return accept; }
+            if (event.text == "0") { root.action("filter-all"); return accept; }
+            if (event.text == "1") { root.action("filter-audio"); return accept; }
+            if (event.text == "2") { root.action("filter-video"); return accept; }
+            if (event.text == "3") { root.action("filter-midi"); return accept; }
+            return reject;
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.rail-width;
+            height: root.height - root.status-height;
+            background: #20262d;
+            Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #36414c; }
+            Image { x: 22px; y: 14px; width: 32px; height: 32px; source: @image-url("../../../assets/icons/brand.svg"); }
+
+            rail-scroll := ScrollView {
+                x: 0px;
+                y: 54px;
+                width: parent.width;
+                height: max(1px, parent.height - 54px);
+                VerticalBox {
+                    x: 17px;
+                    width: 42px;
+                    spacing: 6px;
+
+                    Rectangle { width: 42px; height: 2px; background: transparent; }
+                    preferences_button := RailActionButton {
+                        icon: @image-url("../../../assets/icons/settings.svg");
+                        label: UiI18n.localized("nav.preferences"); active: root.show-preferences;
+                        clicked => { root.action("preferences"); }
+                        hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
+                    }
+                    appearance_button := RailActionButton {
+                        icon: @image-url("../../../assets/icons/appearance.svg");
+                        label: UiI18n.localized("inspector.node_appearance"); active: root.show-node-editor;
+                        clicked => { root.action("node-appearance"); }
+                        hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
+                    }
+                    relay_button := RailActionButton {
+                        icon: @image-url("../../../assets/icons/relay.svg");
+                        label: UiI18n.localized("nav.relay"); active: root.show-relay;
+                        clicked => { root.action("relay"); }
+                        hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
+                    }
+                    shortcuts_button := RailActionButton {
+                        icon: @image-url("../../../assets/icons/help.svg");
+                        label: UiI18n.localized("nav.shortcuts"); active: root.show-shortcuts;
+                        clicked => { root.action("shortcuts"); }
+                        hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); }
+                    }
+
+                    Rectangle { width: 52px; x: -5px; height: 1px; background: #35414d; }
+                    Rectangle { width: 42px; height: 7px; background: transparent; }
+                    minimap_button := RailActionButton { icon: @image-url("../../../assets/icons/minimap.svg"); label: UiI18n.localized("toolbar.minimap"); active: root.show-minimap; clicked => { root.action("toggle-minimap"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/refresh.svg"); label: UiI18n.localized("toolbar.refresh"); clicked => { root.action("refresh"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/undo.svg"); label: UiI18n.localized("toolbar.undo"); clicked => { root.action("undo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/redo.svg"); label: UiI18n.localized("toolbar.redo"); clicked => { root.action("redo"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/timer.svg"); label: UiI18n.localized("toolbar.history"); active: root.show-history; clicked => { root.action("history"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/connect.svg"); label: root.connect-mode == "easy" ? UiI18n.localized("toolbar.connect_mode_easy") : UiI18n.localized("toolbar.connect_mode_advanced"); active: root.connect-mode == "easy"; clicked => { root.action("toggle-connect-mode"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/repel.svg"); label: UiI18n.localized("inspector.arrange_nodes"); clicked => { root.action("arrange"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/sort.svg"); label: root.sort-type == "name" ? UiI18n.localized("sort.name") : UiI18n.localized("sort.id"); active: root.sort-type == "name"; clicked => { root.action("toggle-sort-type"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/sort_direction.svg"); label: root.sort-order == "ascending" ? UiI18n.localized("sort.ascending") : UiI18n.localized("sort.descending"); active: root.sort-order == "ascending"; clicked => { root.action("toggle-sort-order"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions && root.has-selected-link : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/disconnect_link.svg"); label: UiI18n.localized("toolbar.disconnect"); clicked => { root.action("delete-selection"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions && root.links.length > 0 : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/disconnect_all.svg"); label: UiI18n.localized("toolbar.disconnect_all"); clicked => { root.action("disconnect-all"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions && root.has-selected-node : RailActionButton { enabled: root.connections-available; icon: @image-url("../../../assets/icons/disconnect_node.svg"); label: UiI18n.localized("canvas.disconnect_node"); clicked => { root.action("disconnect-node"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/effects.svg"); label: UiI18n.localized("effects.title"); active: root.show-effects; clicked => { root.action("effects"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/save.svg"); label: UiI18n.localized("toolbar.save_patchbay"); clicked => { root.action("save-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/load.svg"); label: UiI18n.localized("toolbar.load_patchbay"); clicked => { root.action("load-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/snapshot.svg"); label: UiI18n.localized("toolbar.snapshot"); clicked => { root.action("snapshot-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-patchbay-toolbar : RailActionButton { icon: @image-url("../../../assets/icons/activate.svg"); label: UiI18n.localized("toolbar.activate"); active: root.patchbay-activated; clicked => { root.action("activate-patchbay"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+                    if root.show-common-actions : RailActionButton { icon: @image-url("../../../assets/icons/filter.svg"); label: UiI18n.localized("toolbar.media_filter"); active: root.media-filter != "all"; clicked => { root.action("cycle-filter"); } hover-changed(entered, label, anchor) => { root.rail-hover(entered, label, anchor); } }
+
+                    Rectangle {
+                        width: 42px;
+                        height: 29px;
+                        background: #182029;
+                        border-color: #394653;
+                        border-width: 1px;
+                        border-radius: 4px;
+                        Text { width: parent.width; height: parent.height; text: root.media-filter == "audio" ? "1" : root.media-filter == "video" ? "2" : root.media-filter == "midi" ? "3" : "0"; color: #a9b7c3; horizontal-alignment: center; vertical-alignment: center; font-size: 11px * UiTheme.ui-scale; }
+                    }
+                }
+            }
+        }
+
+        workspace := Rectangle {
+            x: root.rail-width;
+            y: 0px;
+            width: root.width - root.rail-width;
+            height: root.height - root.status-height;
+            background: #191d24;
+            // The Relay panel is an overlay: it covers the right half of the
+            // workspace instead of taking width away from the canvas, so opening
+            // it never moves, resizes or reflows the node graph.
+            property <length> relay-sidebar-width: root.show-relay ? self.width / 2 : 0px;
+
+            public function focus-shortcut-search() {
+                shortcut-dialog.focus-search();
+            }
+
             canvas := NodeCanvas {
                 width: parent.width;
                 height: parent.height;
@@ -390,197 +431,197 @@ export component MainWindow inherits Window {
                 audio-mute-toggled(id) => { root.graph-audio-mute-toggled(id); }
                 collapse-toggled(id) => { root.graph-node-collapse-toggled(id); }
             }
-        }
 
-        LineEdit {
-            x: 16px;
-            y: 12px;
-            width: max(0px, min(280px, parent.width - workspace.relay-sidebar-width - 32px));
-            height: 30px;
-            placeholder-text: UiI18n.localized("search.placeholder");
-            text <=> root.search-text;
-            z: 1;
-        }
+            LineEdit {
+                x: 16px;
+                y: 12px;
+                width: max(0px, min(280px, parent.width - workspace.relay-sidebar-width - 32px));
+                height: 30px;
+                placeholder-text: UiI18n.localized("search.placeholder");
+                text <=> root.search-text;
+                z: 1;
+            }
 
-        if root.show-relay: RelayPanel {
-            x: parent.width - workspace.relay-sidebar-width;
-            y: 0px;
-            width: workspace.relay-sidebar-width;
-            height: parent.height;
-            // Above the canvas and the search field it overlaps.
-            z: 2;
-            relay-tab <=> root.relay-tab;
-            relay-rows: root.relay-rows;
-            relay-device-name <=> root.relay-device-name;
-            relay-host-pin <=> root.relay-host-pin;
-            relay-host-port-text <=> root.relay-host-port-text;
-            relay-client-target <=> root.relay-client-target;
-            relay-client-pin <=> root.relay-client-pin;
-            relay-auto-connect-trusted <=> root.relay-auto-connect-trusted;
-            relay-role-index <=> root.relay-role-index;
-            relay-codec-index <=> root.relay-codec-index;
-            relay-frame-index <=> root.relay-frame-index;
-            relay-transport-index <=> root.relay-transport-index;
-            relay-codec-options: root.relay-codec-options;
-            relay-frame-options: root.relay-frame-options;
-            relay-transport-options: root.relay-transport-options;
-            relay-endpoint-options: root.relay-endpoint-options;
-            relay-windows-endpoints: root.relay-windows-endpoints;
-            relay-capture-endpoint-index <=> root.relay-capture-endpoint-index;
-            relay-playback-endpoint-index <=> root.relay-playback-endpoint-index;
-            relay-available: root.relay-available;
-            relay-host-active: root.relay-host-active;
-            relay-host-endpoint: root.relay-host-endpoint;
-            relay-qr-payload: root.relay-qr-payload;
-            action(action) => { root.action(action); }
-            close => { root.action("relay"); }
-        }
-
-        if root.show-preferences: Rectangle {
-            width: parent.width; height: parent.height; background: #05070a99;
-            PreferencesDialog {
-                x: max(16px, (parent.width - min(930px, parent.width - 32px)) / 2);
-                y: max(16px, (parent.height - min(700px, parent.height - 32px)) / 2);
-                width: min(930px, parent.width - 32px);
-                height: min(700px, parent.height - 32px);
-                tab <=> root.preferences-tab;
-                language-index <=> root.language-index;
-                show-common-actions <=> root.show-common-actions;
-                show-statusbar <=> root.show-statusbar;
-                show-patchbay-toolbar <=> root.show-patchbay-toolbar;
-                repel-overlaps <=> root.repel-overlaps;
-                connect-through <=> root.connect-through;
-                thumbnail-view <=> root.thumbnail-view;
-                meter-policy-index <=> root.meter-policy-index;
-                ui-scale <=> root.ui-text-scale;
-                panel-scale <=> root.panel-text-scale;
-                node-scale <=> root.node-text-scale;
-                patchbay-exclusive <=> root.patchbay-exclusive;
-                patchbay-auto-disconnect <=> root.patchbay-auto-disconnect;
-                patchbay-auto-pin <=> root.patchbay-auto-pin;
-                patchbay-activated <=> root.patchbay-activated;
-                profile-name <=> root.profile-name;
-                profile-options: root.profile-options;
-                profile-index <=> root.profile-index;
-                recent-patchbay-paths: root.recent-patchbay-paths;
-                config-path: root.config-path;
-                patchbay-path: root.patchbay-path;
-                rules: root.rules;
-                rule-editor-index <=> root.rule-editor-index;
-                rule-output-node <=> root.rule-output-node;
-                rule-output-port <=> root.rule-output-port;
-                rule-input-node <=> root.rule-input-node;
-                rule-input-port <=> root.rule-input-port;
-                close => { root.action("preferences"); }
+            if root.show-relay: RelayPanel {
+                x: parent.width - workspace.relay-sidebar-width;
+                y: 0px;
+                width: workspace.relay-sidebar-width;
+                height: parent.height;
+                // Above the canvas and the search field it overlaps.
+                z: 2;
+                relay-tab <=> root.relay-tab;
+                relay-rows: root.relay-rows;
+                relay-device-name <=> root.relay-device-name;
+                relay-host-pin <=> root.relay-host-pin;
+                relay-host-port-text <=> root.relay-host-port-text;
+                relay-client-target <=> root.relay-client-target;
+                relay-client-pin <=> root.relay-client-pin;
+                relay-auto-connect-trusted <=> root.relay-auto-connect-trusted;
+                relay-role-index <=> root.relay-role-index;
+                relay-codec-index <=> root.relay-codec-index;
+                relay-frame-index <=> root.relay-frame-index;
+                relay-transport-index <=> root.relay-transport-index;
+                relay-codec-options: root.relay-codec-options;
+                relay-frame-options: root.relay-frame-options;
+                relay-transport-options: root.relay-transport-options;
+                relay-endpoint-options: root.relay-endpoint-options;
+                relay-windows-endpoints: root.relay-windows-endpoints;
+                relay-capture-endpoint-index <=> root.relay-capture-endpoint-index;
+                relay-playback-endpoint-index <=> root.relay-playback-endpoint-index;
+                relay-available: root.relay-available;
+                relay-host-active: root.relay-host-active;
+                relay-host-endpoint: root.relay-host-endpoint;
+                relay-qr-payload: root.relay-qr-payload;
                 action(action) => { root.action(action); }
+                close => { root.action("relay"); }
+            }
+
+            if root.show-preferences: Rectangle {
+                width: parent.width; height: parent.height; background: #05070a99;
+                PreferencesDialog {
+                    x: max(16px, (parent.width - min(930px, parent.width - 32px)) / 2);
+                    y: max(16px, (parent.height - min(700px, parent.height - 32px)) / 2);
+                    width: min(930px, parent.width - 32px);
+                    height: min(700px, parent.height - 32px);
+                    tab <=> root.preferences-tab;
+                    language-index <=> root.language-index;
+                    show-common-actions <=> root.show-common-actions;
+                    show-statusbar <=> root.show-statusbar;
+                    show-patchbay-toolbar <=> root.show-patchbay-toolbar;
+                    repel-overlaps <=> root.repel-overlaps;
+                    connect-through <=> root.connect-through;
+                    thumbnail-view <=> root.thumbnail-view;
+                    meter-policy-index <=> root.meter-policy-index;
+                    ui-scale <=> root.ui-text-scale;
+                    panel-scale <=> root.panel-text-scale;
+                    node-scale <=> root.node-text-scale;
+                    patchbay-exclusive <=> root.patchbay-exclusive;
+                    patchbay-auto-disconnect <=> root.patchbay-auto-disconnect;
+                    patchbay-auto-pin <=> root.patchbay-auto-pin;
+                    patchbay-activated <=> root.patchbay-activated;
+                    profile-name <=> root.profile-name;
+                    profile-options: root.profile-options;
+                    profile-index <=> root.profile-index;
+                    recent-patchbay-paths: root.recent-patchbay-paths;
+                    config-path: root.config-path;
+                    patchbay-path: root.patchbay-path;
+                    rules: root.rules;
+                    rule-editor-index <=> root.rule-editor-index;
+                    rule-output-node <=> root.rule-output-node;
+                    rule-output-port <=> root.rule-output-port;
+                    rule-input-node <=> root.rule-input-node;
+                    rule-input-port <=> root.rule-input-port;
+                    close => { root.action("preferences"); }
+                    action(action) => { root.action(action); }
+                }
+            }
+
+            if root.show-node-editor: NodeAppearancePanel {
+                x: max(24px, (parent.width - 470px) / 2);
+                y: max(34px, (parent.height - 300px) / 2);
+                width: min(470px, parent.width - 48px);
+                height: 300px;
+                z: 50;
+                node-editor-node-name <=> root.node-editor-node-name;
+                node-editor-custom-name <=> root.node-editor-custom-name;
+                node-editor-color <=> root.node-editor-color;
+                action(action) => { root.action(action); }
+            }
+
+            if root.show-history: HistoryDialog {
+                x: max(24px, (parent.width - 560px) / 2); y: max(32px, (parent.height - 350px) / 2); width: min(560px, parent.width - 48px); height: min(350px, parent.height - 64px);
+                undo-history: root.undo-history;
+                redo-history: root.redo-history;
+                close => { root.action("history"); }
+            }
+
+            shortcut-overlay := Rectangle {
+                visible: root.show-shortcuts;
+                width: parent.width; height: parent.height; background: #05070a99;
+            }
+            shortcut-dialog := ShortcutsDialog {
+                visible: root.show-shortcuts;
+                x: max(16px, (parent.width - min(650px, parent.width - 32px)) / 2);
+                y: max(16px, (parent.height - min(590px, parent.height - 32px)) / 2);
+                width: min(650px, parent.width - 32px);
+                height: min(590px, parent.height - 32px);
+                entries: root.shortcuts;
+                search-text <=> root.shortcut-search;
+                close => { root.action("shortcuts"); }
+            }
+
+            if root.show-effects: EffectsDialog {
+                x: max(24px, (parent.width - 700px) / 2); y: max(28px, (parent.height - 510px) / 2); width: min(700px, parent.width - 48px); height: min(510px, parent.height - 56px);
+                effects: root.effects;
+                effect-options: root.effect-options;
+                effects-available: root.effects-available;
+                effect-setup-parameters: root.effect-setup-parameters;
+                effect-configuring <=> root.effect-configuring;
+                effect-setup-enabled <=> root.effect-setup-enabled;
+                effect-selection-index <=> root.effect-selection-index;
+                action(action) => { root.action(action); }
+                close => { root.action("effects"); }
+            }
+
+            if root.show-qr: QrDialog {
+                x: max(24px, (parent.width - 380px) / 2); y: max(28px, (parent.height - 435px) / 2); width: min(380px, parent.width - 48px); height: min(435px, parent.height - 56px);
+                relay-qr-payload: root.relay-qr-payload;
+                relay-qr-image: root.relay-qr-image;
+                close => { root.action("close-qr"); }
             }
         }
 
-        if root.show-node-editor: NodeAppearancePanel {
-            x: max(24px, (parent.width - 470px) / 2);
-            y: max(34px, (parent.height - 300px) / 2);
-            width: min(470px, parent.width - 48px);
-            height: 300px;
-            z: 50;
-            node-editor-node-name <=> root.node-editor-node-name;
-            node-editor-custom-name <=> root.node-editor-custom-name;
-            node-editor-color <=> root.node-editor-color;
-            action(action) => { root.action(action); }
+        if root.show-statusbar: Rectangle {
+            x: 0px;
+            y: root.height - root.status-height;
+            width: root.width;
+            height: root.status-height;
+            background: #20262d;
+            border-color: #36414c;
+            border-width: 1px;
+            Text {
+                x: root.rail-width + 12px;
+                width: root.width - root.rail-width - 220px;
+                height: parent.height;
+                text: root.status;
+                color: #b7c5d0;
+                font-size: 10px * root.ui-text-scale;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: root.width - 200px;
+                width: 186px;
+                height: parent.height;
+                text: root.backend != "" ? root.backend + " · " + root.graph-counts : root.graph-counts;
+                color: #8798a7;
+                font-size: 9px * root.ui-text-scale;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                overflow: elide;
+            }
         }
 
-        if root.show-history: HistoryDialog {
-            x: max(24px, (parent.width - 560px) / 2); y: max(32px, (parent.height - 350px) / 2); width: min(560px, parent.width - 48px); height: min(350px, parent.height - 64px);
-            undo-history: root.undo-history;
-            redo-history: root.redo-history;
-            close => { root.action("history"); }
+        ConnectionToast {
+            x: root.rail-width + 18px;
+            y: max(16px, root.height - 68px);
+            width: min(520px, root.width - root.rail-width - 36px);
+            height: 38px;
+            message: root.toast-message;
+            shown: root.toast-visible;
+            error: root.toast-error;
         }
 
-        shortcut-overlay := Rectangle {
-            visible: root.show-shortcuts;
-            width: parent.width; height: parent.height; background: #05070a99;
+        // One tooltip for the whole rail. Per-button tooltips could not survive
+        // the buttons moving inside `if` blocks, because Slint does not expose
+        // ids declared inside a conditional. The buttons report their own hover
+        // instead, which also keeps this correct while the rail is scrolled: the
+        // reported position is window-space, not scrolled-content space.
+        RailTooltip {
+            x: root.rail-width + 8px;
+            y: clamp(root.tip-anchor-y + 6px, 8px, root.height - root.status-height - 38px);
+            text: root.tip-text;
+            shown: root.tip-shown;
         }
-        shortcut-dialog := ShortcutsDialog {
-            visible: root.show-shortcuts;
-            x: max(16px, (parent.width - min(650px, parent.width - 32px)) / 2);
-            y: max(16px, (parent.height - min(590px, parent.height - 32px)) / 2);
-            width: min(650px, parent.width - 32px);
-            height: min(590px, parent.height - 32px);
-            entries: root.shortcuts;
-            search-text <=> root.shortcut-search;
-            close => { root.action("shortcuts"); }
-        }
-
-        if root.show-effects: EffectsDialog {
-            x: max(24px, (parent.width - 700px) / 2); y: max(28px, (parent.height - 510px) / 2); width: min(700px, parent.width - 48px); height: min(510px, parent.height - 56px);
-            effects: root.effects;
-            effect-options: root.effect-options;
-            effects-available: root.effects-available;
-            effect-setup-parameters: root.effect-setup-parameters;
-            effect-configuring <=> root.effect-configuring;
-            effect-setup-enabled <=> root.effect-setup-enabled;
-            effect-selection-index <=> root.effect-selection-index;
-            action(action) => { root.action(action); }
-            close => { root.action("effects"); }
-        }
-
-        if root.show-qr: QrDialog {
-            x: max(24px, (parent.width - 380px) / 2); y: max(28px, (parent.height - 435px) / 2); width: min(380px, parent.width - 48px); height: min(435px, parent.height - 56px);
-            relay-qr-payload: root.relay-qr-payload;
-            relay-qr-image: root.relay-qr-image;
-            close => { root.action("close-qr"); }
-        }
-    }
-
-    if root.show-statusbar: Rectangle {
-        x: 0px;
-        y: root.height - root.status-height;
-        width: root.width;
-        height: root.status-height;
-        background: #20262d;
-        border-color: #36414c;
-        border-width: 1px;
-        Text {
-            x: root.rail-width + 12px;
-            width: root.width - root.rail-width - 220px;
-            height: parent.height;
-            text: root.status;
-            color: #b7c5d0;
-            font-size: 10px * root.ui-text-scale;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        Text {
-            x: root.width - 200px;
-            width: 186px;
-            height: parent.height;
-            text: root.backend != "" ? root.backend + " · " + root.graph-counts : root.graph-counts;
-            color: #8798a7;
-            font-size: 9px * root.ui-text-scale;
-            vertical-alignment: center;
-            horizontal-alignment: right;
-            overflow: elide;
-        }
-    }
-
-    ConnectionToast {
-        x: root.rail-width + 18px;
-        y: max(16px, root.height - 68px);
-        width: min(520px, root.width - root.rail-width - 36px);
-        height: 38px;
-        message: root.toast-message;
-        shown: root.toast-visible;
-        error: root.toast-error;
-    }
-
-    // One tooltip for the whole rail. Per-button tooltips could not survive
-    // the buttons moving inside `if` blocks, because Slint does not expose
-    // ids declared inside a conditional. The buttons report their own hover
-    // instead, which also keeps this correct while the rail is scrolled: the
-    // reported position is window-space, not scrolled-content space.
-    RailTooltip {
-        x: root.rail-width + 8px;
-        y: clamp(root.tip-anchor-y + 6px, 8px, root.height - root.status-height - 38px);
-        text: root.tip-text;
-        shown: root.tip-shown;
     }
 }

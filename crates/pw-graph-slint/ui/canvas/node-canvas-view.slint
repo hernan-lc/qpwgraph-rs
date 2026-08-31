@@ -121,7 +121,7 @@ export component NodeCanvas inherits Rectangle {
             : MouseCursor.default;
 
         scroll-event(event) => {
-            if ((event.modifiers.control || event.modifiers.meta) && abs(event.delta-x) < 1px) {
+            if (event.modifiers.control && abs(event.delta-x) < 1px) {
                 root.zoom-at(1.0 + (event.delta-y / 1px) * 0.002, self.mouse-x, self.mouse-y);
             } else if (event.modifiers.shift) {
                 root.pan-x += abs(event.delta-x) > abs(event.delta-y) ? event.delta-x : event.delta-y;
@@ -152,7 +152,7 @@ export component NodeCanvas inherits Rectangle {
                     root.pan-origin-x = root.pan-x;
                     root.pan-origin-y = root.pan-y;
                 } else if (event.button == PointerEventButton.left) {
-                    root.begin-left-press(event.modifiers.shift, event.modifiers.control || event.modifiers.meta);
+                    root.begin-left-press(event.modifiers.shift, event.modifiers.control);
                 }
             } else if (event.kind == PointerEventKind.up) {
                 if (event.button == PointerEventButton.left || event.button == PointerEventButton.middle) {
