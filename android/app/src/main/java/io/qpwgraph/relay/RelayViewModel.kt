@@ -9,7 +9,6 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,15 +46,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         RelayUiState(settings = settings.loadSettings(), host = settings.loadHostSettings()),
     )
     val state: StateFlow<RelayUiState> = mutableState.asStateFlow()
-    @Volatile private var clientHandle = 0L
-    @Volatile private var hostHandle = 0L
-    // Keep the configuration used to prepare the current host so edits made
-    // while it is stopped can be compared before a restart. The handle is
-    // released on every stop so newly enrolled trusted peers are imported
-    // into the next native engine instance.
-    private var hostPreparedSettings: HostSettings? = null
-    private var clientPolling: Job? = null
-    private var hostPolling: Job? = null
+    // The native handles and their teardown rules live in the controllers.
+    // This class owns the UI state, the operation mutex that serializes the
+    // two roles against each other, and nothing else about them.
+    private val client = ClientController(viewModelScope, service)
+    private val host = HostController(viewModelScope, service)
     private var usbPolling: Job? = null
     private var serviceEvents: Job? = null
     private val operationMutex = Mutex()
@@ -90,9 +85,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         getApplication(),
         Manifest.permission.RECORD_AUDIO,
     ) == PackageManager.PERMISSION_GRANTED
-
-    private fun createdHandle(raw: String): Long =
-        RelayJson.createdHandle(raw) { text(R.string.relay_error_native_create) }
 
     /** Reading failures surface once, then degrade to an empty record. */
     private fun trustedPeers(): List<TrustedRelayPeer> =
@@ -135,16 +127,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         response.optJSONObject("trusted_peer")?.let { rememberTrustedPeerFromJson(it) }
     }
 
-    private fun rememberTrustedPeerFromNative(handle: Long) {
-        runCatching { JSONObject(NativeBridge.clientTrustedPeer(handle)) }
-            .getOrNull()
-            ?.takeIf { it.optString("type") == "trusted_peer" }
-            ?.let { credential ->
-                saveTrustedPeer(
-                    peerId = credential.optString("peer_id"),
-                    secret = credential.optString("secret"),
-                )
-            }
+    private fun rememberTrustedPeerFromNative() {
+        client.trustedCredential()?.let { credential ->
+            saveTrustedPeer(
+                peerId = credential.optString("peer_id"),
+                secret = credential.optString("secret"),
+            )
+        }
     }
 
     private fun removeStoredTrustedPeer(peerId: String): Boolean =
@@ -205,12 +194,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 // A false native result means the handle is stale/unknown,
                 // not that revocation succeeded. Keep the encrypted record
                 // until every live owner has acknowledged removal.
-                val clientRevoked = clientHandle == 0L ||
-                    runCatching { NativeBridge.removeTrustedPeer(clientHandle, peerId) }
-                        .getOrDefault(false)
-                val hostRevoked = hostHandle == 0L ||
-                    runCatching { NativeBridge.hostRemoveTrustedPeer(hostHandle, peerId) }
-                        .getOrDefault(false)
+                val clientRevoked = !client.isOpen || client.removeTrustedPeer(peerId)
+                val hostRevoked = !host.isOpen || host.removeTrustedPeer(peerId)
                 if (!clientRevoked || !hostRevoked || !removeStoredTrustedPeer(peerId)) {
                     setState {
                         it.copy(message = text(R.string.relay_error_trusted_revocation))
@@ -306,37 +291,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     ) {
                         stopHostLocked()
                     }
-                    if (clientHandle == 0L) {
-                        clientHandle = createdHandle(
-                            NativeBridge.create(
-                                settings.deviceName,
-                                deviceId,
-                                trustedStore.credentialsJson(),
-                                settings.role,
-                                settings.codec,
-                                settings.transport,
-                                settings.sampleRate,
-                                settings.channels,
-                                settings.frameMs,
-                            ),
-                        )
+                    client.open(settings, deviceId, trustedStore.credentialsJson()) {
+                        text(R.string.relay_error_native_create)
                     }
-                    val response = JSONObject(
-                        if (trusted == null) {
-                            NativeBridge.connect(clientHandle, settings.target, settings.pin)
-                        } else {
-                            NativeBridge.connectTrusted(
-                                clientHandle,
-                                settings.target,
-                                trusted.peerId,
-                                trusted.secret,
-                            )
-                        },
-                    )
+                    val response = if (trusted == null) {
+                        client.connect(settings.target, settings.pin)
+                    } else {
+                        client.connectTrusted(settings.target, trusted)
+                    }
                     if (response.optString("type") == "error") {
                         val message = response.optString("message")
                         if (response.optString("code") == "unknown_client_handle") {
-                            clientHandle = 0L
+                            client.forgetHandle()
                         }
                         if (trusted != null) {
                             noteTrustedCandidateFailure(trusted.peerId, settings.target)
@@ -354,7 +320,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     // normal connection/status JSON. It returns a secret only
                     // to this persistence path after the host acknowledged it.
                     if (trusted == null) {
-                        rememberTrustedPeerFromNative(clientHandle)
+                        rememberTrustedPeerFromNative()
                     } else {
                         trustedCandidateBackoff.clear(trusted.peerId, settings.target)
                     }
@@ -364,7 +330,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     // service has initialized every requested worker.
                     service.start(
                         RelayService.MODE_CLIENT,
-                        clientHandle,
+                        client.nativeHandle,
                         settings.role,
                         audioGeometryForHostMode(
                             hostMode = false,
@@ -389,11 +355,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         if (nativeConnected && !error.serviceWasAlreadyActive) {
                             service.stopAndWait()
                         }
-                        if (nativeConnected && clientHandle != 0L) {
-                            runCatching { NativeBridge.disconnect(clientHandle) }
-                            runCatching { NativeBridge.release(clientHandle) }
-                            clientHandle = 0L
-                        }
+                        if (nativeConnected) client.releaseNow()
                     }
                     if (trusted != null) {
                         noteTrustedCandidateFailure(trusted.peerId, settings.target)
@@ -434,22 +396,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startClientPolling() {
-        clientPolling?.cancel()
-        clientPolling = viewModelScope.launch(Dispatchers.IO) {
-            while (isActive) {
-                if (clientHandle != 0L) {
-                    try {
-                        if (!consumeClientEvents(NativeBridge.pollEvents(clientHandle))) {
-                            break
-                        }
-                        refreshClientStatus()
-                    } catch (error: Exception) {
-                        clientError(error.message ?: text(R.string.relay_error_connect_failed))
-                    }
-                }
-                delay(POLL_INTERVAL_MS)
-            }
-        }
+        client.startPolling(
+            onEvents = ::consumeClientEvents,
+            onStatus = ::applyClientStatus,
+            onError = { error ->
+                clientError(error.message ?: text(R.string.relay_error_connect_failed))
+            },
+        )
     }
 
     private suspend fun consumeClientEvents(raw: String): Boolean {
@@ -459,7 +412,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // clears the stale ViewModel handle.
         RelayJson.pollError(raw)?.let { failure ->
             if (failure.unknownHandle) {
-                operationMutex.withLock { clientHandle = 0L }
+                operationMutex.withLock { client.forgetHandle() }
             }
             clientError(failure.message)
             return !failure.unknownHandle
@@ -501,7 +454,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 "trusted_peer" -> rememberTrustedPeerFromJson(event)
-                "trusted_peer_available" -> rememberTrustedPeerFromNative(clientHandle)
+                "trusted_peer_available" -> rememberTrustedPeerFromNative()
                 "error" -> clientError(event.optString("message"))
             }
         }
@@ -516,14 +469,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // foreground service first, then retire the native handle. This runs
         // on the polling coroutine, so it must not cancel-and-join itself.
         operationMutex.withLock {
-            if (clientHandle != 0L &&
+            if (client.isOpen &&
                 mutableState.value.connection == RelayConnectionState.Disconnected
             ) {
                 service.stopAndWait()
-                val handle = clientHandle
-                clientHandle = 0L
-                runCatching { NativeBridge.disconnect(handle) }
-                runCatching { NativeBridge.release(handle) }
+                client.releaseNow()
             }
         }
         return false
@@ -544,12 +494,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun refreshClientStatus() {
-        val handle = clientHandle
-        if (handle == 0L) return
-        val status = runCatching { JSONObject(NativeBridge.clientStatus(handle)) }.getOrNull()
-            ?: return
-        if (status.optString("type") == "error") return
+    private fun applyClientStatus(status: JSONObject) {
         val session = status.optJSONArray("sessions")?.let { sessions ->
             if (sessions.length() > 0) sessions.optJSONObject(0) else null
         }
@@ -585,12 +530,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         ) {
             return
         }
-        val host = mutableState.value.host
+        val wanted = mutableState.value.host
         if (!hasMicrophonePermission()) {
             permissionDenied(host = true)
             return
         }
-        if (host.pin.isBlank()) {
+        if (wanted.pin.isBlank()) {
             setState {
                 it.copy(
                     hostState = RelayHostState.Error,
@@ -617,8 +562,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     ) {
                         stopClientLocked()
                     }
-                    if (hostHandle != 0L &&
-                        (hostPreparedSettings != host ||
+                    if (host.isOpen &&
+                        (!host.preparedFor(wanted) ||
                             mutableState.value.hostState == RelayHostState.Error)
                     ) {
                         // A previous service/native failure may have left a
@@ -626,28 +571,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         // the state machine before replacing it; releasing a
                         // live handle would bypass the worker-safety fence.
                         service.stopAndWait()
-                        if (!stopAndReleaseHost(hostHandle)) {
+                        if (!host.stopAndRelease()) {
                             throw IllegalStateException("previous relay host is still running")
                         }
                     }
-                    if (hostHandle == 0L) {
-                        hostHandle = createdHandle(
-                            NativeBridge.hostCreate(
-                                host.deviceName,
-                                deviceId,
-                                trustedStore.credentialsJson(),
-                                host.pin,
-                                host.port,
-                                host.codec,
-                                host.transport,
-                                host.sampleRate,
-                                host.channels,
-                                host.frameMs,
-                            ),
-                        )
-                        hostPreparedSettings = host
-                    }
-                    val response = JSONObject(NativeBridge.hostStart(hostHandle))
+                    host.open(
+                        wanted,
+                        deviceId,
+                        trustedStore.credentialsJson(),
+                    ) { text(R.string.relay_error_native_create) }
+                    val response = host.start()
                     if (response.optString("type") != "host_started") {
                         hostError(response.optString("message"))
                         return@withLock
@@ -661,12 +594,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     // only after the platform audio workers are available.
                     service.start(
                         RelayService.MODE_HOST,
-                        hostHandle,
+                        host.nativeHandle,
                         "both",
                         audioGeometryForHostMode(
                             hostMode = true,
                             client = mutableState.value.settings,
-                            host = host,
+                            host = wanted,
                         ),
                     )
                     setState {
@@ -686,9 +619,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         if (nativeStarted && !error.serviceWasAlreadyActive) {
                             service.stopAndWait()
                         }
-                        if (nativeStarted && hostHandle != 0L) {
-                            stopAndReleaseHost(hostHandle)
-                        }
+                        if (nativeStarted) host.stopAndRelease()
                     }
                     hostError(error.message ?: text(R.string.relay_error_host_failed))
                 }
@@ -723,27 +654,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnectSession(sessionId: Long) {
         viewModelScope.launch(Dispatchers.IO) {
-            if (hostHandle != 0L) {
-                NativeBridge.hostDisconnectSession(hostHandle, sessionId)
-            }
+            host.disconnectSession(sessionId)
         }
     }
 
     private fun startHostPolling() {
-        hostPolling?.cancel()
-        hostPolling = viewModelScope.launch(Dispatchers.IO) {
-            while (isActive) {
-                if (hostHandle != 0L) {
-                    try {
-                        consumeHostEvents(NativeBridge.hostPollEvents(hostHandle))
-                        refreshHostStatus()
-                    } catch (error: Exception) {
-                        hostError(error.message ?: text(R.string.relay_error_host_failed))
-                    }
-                }
-                delay(POLL_INTERVAL_MS)
-            }
-        }
+        host.startPolling(
+            onEvents = ::consumeHostEvents,
+            onStatus = ::applyHostStatus,
+            onError = { error ->
+                hostError(error.message ?: text(R.string.relay_error_host_failed))
+            },
+        )
     }
 
     private fun consumeHostEvents(raw: String) {
@@ -760,19 +682,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 "trusted_peer" -> rememberTrustedPeerFromJson(event)
 
                 "trusted_enrollment_requested" -> {
-                    val handle = hostHandle
                     val transactionId = event.optLong("transaction_id", -1L)
                     val peerId = event.optString("peer_id").ifBlank { event.optString("id") }
                     val previous = trustedStore.peer(peerId)
-                    val secretResponse = runCatching {
-                        JSONObject(
-                            NativeBridge.hostTrustedEnrollmentSecret(handle, transactionId),
-                        )
-                    }.getOrNull()
-                    val secret = secretResponse
-                        ?.takeIf { it.optString("type") == "trusted_enrollment_secret" }
-                        ?.optString("secret")
-                        .orEmpty()
+                    val secret = host.enrollmentSecret(transactionId)
                     val persisted = secret.isNotBlank() && saveTrustedPeer(
                         peerId = peerId,
                         secret = secret,
@@ -780,10 +693,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         address = event.optString("address"),
                     )
                     if (persisted) {
-                        val accepted = runCatching {
-                            NativeBridge.hostAcceptTrustedEnrollment(handle, transactionId)
-                        }.getOrDefault(false)
-                        if (!accepted) {
+                        if (!host.acceptEnrollment(transactionId)) {
                             // The host did not commit/ack the transaction.
                             // Restore the previous encrypted record so a
                             // failed rotation cannot strand either side.
@@ -802,13 +712,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                     } else {
-                        runCatching {
-                            NativeBridge.hostRejectTrustedEnrollment(
-                                handle,
-                                transactionId,
-                                "trusted credential could not be durably persisted",
-                            )
-                        }
+                        host.rejectEnrollment(
+                            transactionId,
+                            "trusted credential could not be durably persisted",
+                        )
                     }
                 }
 
@@ -825,8 +732,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun refreshHostStatus() {
-        val status = JSONObject(NativeBridge.hostStatus(hostHandle))
+    private fun applyHostStatus(status: JSONObject) {
         if (status.optString("type") != "status") return
         val active = status.optBoolean("host_active")
         if (!active && mutableState.value.hostState == RelayHostState.Running) {
@@ -834,15 +740,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             // (for example after the process lost its foreground service).
             // Reflect that transition and release the prepared handle so a
             // later explicit start imports the latest trusted credentials.
-            if (hostHandle != 0L) {
-                val released = runCatching { NativeBridge.hostRelease(hostHandle) }
-                    .getOrDefault(false)
-                if (!released) {
-                    hostError("native relay host became inactive but its handle is still owned")
-                    return
-                }
-                hostHandle = 0L
-                hostPreparedSettings = null
+            if (!host.releaseInactive()) {
+                hostError("native relay host became inactive but its handle is still owned")
+                return
             }
             setState {
                 it.copy(
@@ -880,42 +780,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Stop a host only after its platform workers are quiescent, and release
-     * the native handle only when native confirms it is no longer active.
-     * Keeping a still-running handle is safer than losing ownership of it;
-     * the next serialized operation can retry the stop.
-     */
-    private fun stopAndReleaseHost(handle: Long): Boolean {
-        val stopped = runCatching {
-            JSONObject(NativeBridge.hostStop(handle)).optString("type") == "host_stopped"
-        }.getOrDefault(false)
-        val inactive = runCatching {
-            !JSONObject(NativeBridge.hostStatus(handle)).optBoolean("host_active", true)
-        }.getOrDefault(false)
-        if (!stopped && !inactive) return false
-        // hostRelease returns false when a stale caller races a still-running
-        // native host. Treat that as a failed release, rather than confusing
-        // "the JNI call returned" with "ownership was actually removed".
-        val released = runCatching { NativeBridge.hostRelease(handle) }
-            .getOrDefault(false)
-        if (!released) return false
-        if (hostHandle == handle) {
-            hostHandle = 0L
-            hostPreparedSettings = null
-        }
-        return true
-    }
-
     /** Stop client-side native/audio state while the operation mutex is held. */
     private suspend fun stopClientLocked() {
-        stopClientPollingAndWait()
-        service.stopAndWait()
-        if (clientHandle != 0L) {
-            runCatching { NativeBridge.disconnect(clientHandle) }
-            runCatching { NativeBridge.release(clientHandle) }
-            clientHandle = 0L
-        }
+        client.quiesceAndRelease()
         setState {
                 it.copy(
                     connection = RelayConnectionState.Disconnected,
@@ -931,22 +798,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Stop host-side native/audio state while the operation mutex is held. */
     private suspend fun stopHostLocked() {
-        stopHostPollingAndWait()
-        service.stopAndWait()
-        if (hostHandle != 0L) {
-            val handle = hostHandle
-            val response = JSONObject(NativeBridge.hostStop(handle))
-            if (response.optString("type") == "error") {
-                throw IllegalStateException(response.optString("message"))
-            }
-            // Recreate the prepared host next time so credentials enrolled by
-            // a client during this run are read from private preferences.
-            if (!NativeBridge.hostRelease(handle)) {
-                throw IllegalStateException("native relay host handle is still active")
-            }
-            hostHandle = 0L
-            hostPreparedSettings = null
-        }
+        host.quiesceAndStop()
         setState {
             it.copy(
                 hostState = RelayHostState.Idle,
@@ -963,17 +815,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         operationMutex.withLock {
             when (event) {
                 is RelayServiceEvent.ServiceStopped -> if (
-                    event.mode == RelayService.MODE_CLIENT &&
-                    event.handle == clientHandle
+                    event.mode == RelayService.MODE_CLIENT && client.owns(event.handle)
                 ) {
-                    clientPolling?.cancel()
-                    clientPolling = null
-                    val handle = clientHandle
-                    clientHandle = 0L
-                    if (handle != 0L) {
-                        runCatching { NativeBridge.disconnect(handle) }
-                        runCatching { NativeBridge.release(handle) }
-                    }
+                    client.cancelPolling()
+                    client.releaseNow()
                     setState {
                         it.copy(
                             connection = RelayConnectionState.Error,
@@ -988,12 +833,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } else if (
                     event.mode == RelayService.MODE_HOST &&
-                    event.handle == hostHandle &&
+                    host.owns(event.handle) &&
                     mutableState.value.hostState != RelayHostState.Idle
                 ) {
-                    hostPolling?.cancel()
-                    hostPolling = null
-                    stopAndReleaseHost(event.handle)
+                    host.cancelPolling()
+                    host.stopAndRelease(event.handle)
                     setState {
                         it.copy(
                             hostState = RelayHostState.Error,
@@ -1005,24 +849,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 is RelayServiceEvent.AudioFailure -> if (event.mode == RelayService.MODE_HOST) {
-                    if (event.handle == hostHandle) {
-                        stopHostPollingAndWait()
+                    if (host.owns(event.handle)) {
+                        host.stopPollingAndWait()
                         // The service owns the worker threads that still use
                         // this native handle. Wait for its bounded teardown
                         // before stopping/releasing the host below.
                         service.stopAndWait()
-                        val handle = hostHandle
-                        stopAndReleaseHost(handle)
+                        host.stopAndRelease()
                         hostError(event.message)
                     }
-                } else if (event.handle == clientHandle) {
-                    stopClientPollingAndWait()
+                } else if (client.owns(event.handle)) {
                     // Do not invalidate a handle while the failed worker can
                     // still be inside a JNI audio call.
-                    service.stopAndWait()
-                    runCatching { NativeBridge.disconnect(clientHandle) }
-                    runCatching { NativeBridge.release(clientHandle) }
-                    clientHandle = 0L
+                    client.quiesceAndRelease()
                     clientError(event.message)
                 }
             }
@@ -1101,10 +940,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             setState { it.copy(discoveryMessage = discoveryText(message)) }
         }
         val peers = completed.peers
-        val activeClient = clientHandle
-        if (activeClient != 0L) {
-            NativeBridge.updateClientPeers(activeClient, RelayJson.discoveredPeersJson(peers))
-        }
+        client.updatePeers(RelayJson.discoveredPeersJson(peers))
         setState { it.copy(peers = peers) }
         autoConnectTrustedCandidate(peers)
     }
@@ -1218,19 +1054,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     // Shared plumbing
     // ------------------------------------------------------------------
 
-    private suspend fun stopClientPollingAndWait() {
-        clientPolling?.cancelAndJoin()
-        clientPolling = null
-    }
-
-    private suspend fun stopHostPollingAndWait() {
-        hostPolling?.cancelAndJoin()
-        hostPolling = null
-    }
-
     override fun onCleared() {
-        clientPolling?.cancel()
-        hostPolling?.cancel()
+        client.cancelPolling()
+        host.cancelPolling()
         serviceEvents?.cancel()
         serviceEvents = null
         usbPolling?.cancel()
@@ -1247,17 +1073,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 runBlocking {
                     operationMutex.withLock {
-                        stopClientPollingAndWait()
-                        stopHostPollingAndWait()
+                        client.stopPollingAndWait()
+                        host.stopPollingAndWait()
                         service.stopAndWait()
-                        val client = clientHandle
-                        clientHandle = 0L
-                        if (client != 0L) {
-                            runCatching { NativeBridge.disconnect(client) }
-                            runCatching { NativeBridge.release(client) }
-                        }
-                        val host = hostHandle
-                        if (host != 0L) stopAndReleaseHost(host)
+                        client.releaseNow()
+                        if (host.isOpen) host.stopAndRelease()
                     }
                     discovery.release()
                 }
