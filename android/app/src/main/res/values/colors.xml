@@ -1,0 +1,4 @@
+<resources>
+    <!-- The brand blue already used by the desktop packaging icon. -->
+    <color name="ic_launcher_background">#1A73E8</color>
+</resources>

@@ -17,12 +17,15 @@
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:label="qpwgraph Relay"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/relay_app_title"
         android:supportsRtl="true"
         android:theme="@style/Theme.QpwgraphRelay">
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -31,6 +34,7 @@
         <service
             android:name=".RelayService"
             android:exported="false"
-            android:foregroundServiceType="microphone|mediaPlayback" />
+            android:foregroundServiceType="microphone|mediaPlayback"
+            android:stopWithTask="false" />
     </application>
 </manifest>

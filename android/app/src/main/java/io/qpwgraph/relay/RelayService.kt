@@ -3,6 +3,7 @@ package io.qpwgraph.relay
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -450,10 +451,29 @@ class RelayService : Service() {
         }
     }
 
+    /**
+     * Tapping the ongoing notification must return to the running session
+     * rather than start a second copy of the activity, which is why
+     * MainActivity is declared `singleTask`.
+     */
+    private fun contentIntent(): PendingIntent = PendingIntent.getActivity(
+        this,
+        0,
+        Intent(this, MainActivity::class.java)
+            .setAction(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
     private fun notification(): Notification = NotificationCompat.Builder(this, CHANNEL)
         .setContentTitle(getString(R.string.relay_app_title))
         .setContentText(getString(R.string.relay_notification_active))
-        .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+        .setSmallIcon(R.drawable.ic_relay_notification)
+        .setCategory(NotificationCompat.CATEGORY_SERVICE)
+        .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+        .setContentIntent(contentIntent())
         .setOngoing(true)
+        .setShowWhen(false)
         .build()
 }
