@@ -33,7 +33,7 @@ mod relay;
 
 use effects::NativeEffect;
 use metering::{process_meter_buffer, MeterCallbackState, MeterHandle, MeterReadingState};
-use registry::{classify_port_type, LinkRecord, NodeRecord, PortRecord, RegistryState};
+use registry::{classify_port_type, install_registry_listener, NodeRecord, RegistryState};
 
 const NODE_NAME: &str = "node.name";
 const NODE_DESCRIPTION: &str = "node.description";
@@ -147,92 +147,7 @@ impl PipewireDriver {
         let state = Arc::new(Mutex::new(RegistryState::default()));
         let registry_dirty = Arc::new(AtomicBool::new(true));
 
-        let state_for_globals = state.clone();
-        let state_for_removals = state.clone();
-        let dirty_for_globals = registry_dirty.clone();
-        let dirty_for_removals = registry_dirty.clone();
-        let registry_listener = registry
-            .add_listener_local()
-            .global(move |global| {
-                let Some(props) = global.props else {
-                    return;
-                };
-                let mut state = state_for_globals.lock().unwrap();
-                match &global.type_ {
-                    pw::types::ObjectType::Node => {
-                        let name = props
-                            .get(NODE_NAME)
-                            .or_else(|| props.get(NODE_DESCRIPTION))
-                            .unwrap_or("PipeWire node")
-                            .to_owned();
-                        let media_class = props.get(MEDIA_CLASS).unwrap_or_default().to_owned();
-                        let serial = props
-                            .get(OBJECT_SERIAL)
-                            .and_then(|value| value.parse().ok());
-                        state.nodes.insert(
-                            global.id,
-                            NodeRecord {
-                                name,
-                                media_class,
-                                serial,
-                            },
-                        );
-                    }
-                    pw::types::ObjectType::Port => {
-                        let media_type = props
-                            .get(MEDIA_TYPE)
-                            .or_else(|| props.get(FORMAT_DSP))
-                            .unwrap_or_default()
-                            .to_owned();
-                        let direction = if props.get(PORT_DIRECTION) == Some("out") {
-                            Direction::Source
-                        } else {
-                            Direction::Sink
-                        };
-                        let node_id = props
-                            .get(NODE_ID)
-                            .and_then(|value| value.parse().ok())
-                            .unwrap_or_default();
-                        state.ports.insert(
-                            global.id,
-                            PortRecord {
-                                node_id,
-                                name: props.get(PORT_NAME).unwrap_or("PipeWire port").to_owned(),
-                                channel: props.get(AUDIO_CHANNEL).map(str::to_owned),
-                                direction,
-                                media_type,
-                            },
-                        );
-                    }
-                    pw::types::ObjectType::Link => {
-                        let output_port = props
-                            .get(LINK_OUTPUT_PORT)
-                            .and_then(|value| value.parse().ok())
-                            .unwrap_or_default();
-                        let input_port = props
-                            .get(LINK_INPUT_PORT)
-                            .and_then(|value| value.parse().ok())
-                            .unwrap_or_default();
-                        state.links.insert(
-                            global.id,
-                            LinkRecord {
-                                output_port,
-                                input_port,
-                            },
-                        );
-                    }
-                    _ => {}
-                }
-                dirty_for_globals.store(true, Ordering::Relaxed);
-            })
-            .global_remove(move |id| {
-                let mut state = state_for_removals.lock().unwrap();
-                state.nodes.remove(&id);
-                state.ports.remove(&id);
-                state.links.remove(&id);
-                dirty_for_removals.store(true, Ordering::Relaxed);
-            })
-            .register();
+        let registry_listener = install_registry_listener(&registry, &state, &registry_dirty);
 
         thread_loop.start();
 
