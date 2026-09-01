@@ -43,6 +43,7 @@ Every article lives in [`docs/`](docs). This page is the index.
 | Article | What it covers |
 | --- | --- |
 | [Workspace architecture](docs/architecture.md) | Crate layout, layering, backend namespacing |
+| [The user-mode audio router](docs/audio-router.md) | The PCM routing engine: routes, mixing, conversion, meters |
 | [Slint UI structure](docs/ui-components.md) | How the bridge feeds the Slint shell |
 | [The keyboard contract](docs/keyboard.md) | Shortcut table, focus routing, Escape precedence |
 | [Relay wire protocol, version 3](docs/relay-protocol.md) | Control and audio channels, pairing, crypto |

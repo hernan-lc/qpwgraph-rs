@@ -58,6 +58,14 @@ connection UI light up would produce controls that cannot work. Selection and
 inspection are unaffected: an observed link is still clickable, still
 selectable, and still shown in the graph. Only mutation is refused.
 
+The way out is for qpwgraph to own the PCM rather than observe someone else's,
+and `pw-graph-backend::router` is the engine that would do it: routes, fan-out,
+mixing, conversion, effects, metering, and transactional replacement, all
+deterministic and tested against in-memory endpoints. See
+[audio-router.md](audio-router.md). It changes no capability flag on its own —
+device-to-device routing is only part of what `connect` has to mean, and a
+qpwgraph-owned endpoint other applications can select still needs a driver.
+
 Windows MIDI is a separate native graph. WinMM `midiConnect` and
 `midiDisconnect` provide real mutable input-to-output links, so MIDI pins and
 links remain draggable, reroutable, and disconnectable even when they share a

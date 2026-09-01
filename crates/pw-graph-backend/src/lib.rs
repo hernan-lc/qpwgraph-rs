@@ -10,6 +10,12 @@ mod demo;
 mod pipewire;
 #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 mod pipewire_stub;
+/// The user-mode audio router.
+///
+/// Platform-neutral on purpose: it is the PCM ownership Windows needs before
+/// arbitrary routing, routed effects, and RMS metering can be anything but
+/// unsupported, and it is exercised by in-memory tests on every host.
+pub mod router;
 
 pub use api::*;
 pub use demo::{DemoDriver, InMemoryDriver};
