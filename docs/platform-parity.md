@@ -41,30 +41,48 @@ system that the UI has to present honestly instead of pretending around.
 | --- | --- | --- | --- |
 | Read graph topology | Yes | Yes, as endpoints, sessions, and MIDI devices | Partial: the graph models differ |
 | Node/port naming | Yes | Yes | Equivalent |
-| Create a connection | Audio and ALSA MIDI | WinMM MIDI only | Partial |
-| Remove a connection | Audio and ALSA MIDI | WinMM MIDI only | Partial |
+| Create a connection | Audio and ALSA MIDI | Between audio endpoints, and WinMM MIDI | Partial: application sessions cannot be rewired |
+| Remove a connection | Audio and ALSA MIDI | Routes qpwgraph carries, and WinMM MIDI | Partial: same |
 | Select an existing connection | Yes | Yes, for observed audio and mutable MIDI links | Equivalent |
-| Drag an edge onto another port | Yes | WinMM MIDI only | Partial |
-| Patchbay persistence | Mutable links | Mutable WinMM MIDI links only | Partial |
+| Drag an edge onto another port | Yes | Between audio endpoints, and WinMM MIDI | Partial: same |
+| Playback device monitor port | Yes, PipeWire sink monitors | Yes, WASAPI loopback | Equivalent |
+| Patchbay persistence | Mutable links | Mutable WinMM MIDI links only | Partial: audio routes are not persisted yet |
 
-Windows Core Audio has no arbitrary patchbay. What the driver shows is the
-routing Windows reports — which application session is playing to which
-endpoint — and those relationships are observations, not links a user can
-rewire. `WindowsAudioDriver` therefore reports `connect: false` and
-`disconnect: false`, and `is_link_mutable` returns false for every link.
+Windows Core Audio has no arbitrary patchbay of its own. What it reports —
+which application session is playing to which endpoint — is an observation,
+not a link a user can rewire, and there is no supported API to move one.
 
-This is deliberate and must stay that way. Enabling `connect` to make the
-connection UI light up would produce controls that cannot work. Selection and
+So qpwgraph carries the audio itself. A link drawn between two endpoint ports
+is a real route in `pw-graph-backend::router`, with WASAPI streams at both
+ends: the source endpoint is opened for capture (or for loopback, if it is a
+playback device's monitor), the destination is opened for render, and the
+router moves, converts, and mixes the PCM between them. Disconnecting stops
+real audio. See [audio-router.md](audio-router.md).
+
+That makes `connect` and `disconnect` true, and it is worth being precise
+about what they cover:
+
+| From | To | Result |
+| --- | --- | --- |
+| a recording endpoint | a playback endpoint | a real route |
+| a playback endpoint's monitor | another playback endpoint | a real route |
+| an application session | anything | refused, with an explanation |
+
+The last row is why `node_supports_routing` exists. A backend-wide capability
+is a union across what the backend owns, so asking it alone would light up a
+connect gesture on a session pin that could only ever fail. The canvas asks
+per node instead, and a session pin simply does not offer the gesture.
+
+`is_link_mutable` stays false for every observed session link and true only
+for the routes qpwgraph is carrying, so a relationship Windows merely reports
+still cannot reach a reroute command or patchbay persistence. Selection and
 inspection are unaffected: an observed link is still clickable, still
-selectable, and still shown in the graph. Only mutation is refused.
+selectable, and still drawn.
 
-The way out is for qpwgraph to own the PCM rather than observe someone else's,
-and `pw-graph-backend::router` is the engine that would do it: routes, fan-out,
-mixing, conversion, effects, metering, and transactional replacement, all
-deterministic and tested against in-memory endpoints. See
-[audio-router.md](audio-router.md). It changes no capability flag on its own —
-device-to-device routing is only part of what `connect` has to mean, and a
-qpwgraph-owned endpoint other applications can select still needs a driver.
+What remains out of reach from user mode is a qpwgraph-owned endpoint that
+*other* applications can select — the virtual microphone the relay needs, and
+the destination an arbitrary application could be pointed at. That needs a
+driver.
 
 Windows MIDI is a separate native graph. WinMM `midiConnect` and
 `midiDisconnect` provide real mutable input-to-output links, so MIDI pins and

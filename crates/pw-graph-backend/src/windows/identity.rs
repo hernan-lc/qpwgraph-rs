@@ -65,6 +65,24 @@ pub(super) fn endpoint_port_local_id(endpoint_id: &str) -> u64 {
     stable_local_id(&format!("endpoint-port:{endpoint_id}"))
 }
 
+/// A playback endpoint's monitor port: what that endpoint is playing, read
+/// back through WASAPI loopback.
+///
+/// PipeWire gives every sink a monitor, and it is what makes "send the
+/// speakers somewhere else" a link the user can draw rather than a hidden
+/// setting. Windows has the same capability through loopback capture, so the
+/// port exists here for the same reason.
+pub(super) fn endpoint_monitor_port_local_id(endpoint_id: &str) -> u64 {
+    stable_local_id(&format!("endpoint-monitor-port:{endpoint_id}"))
+}
+
+/// A link qpwgraph itself owns, as opposed to a relationship Core Audio
+/// merely reports. Derived from the pair so the same route keeps its identity
+/// across a rebuild.
+pub(super) fn managed_link_local_id(output: PortId, input: PortId) -> u64 {
+    stable_local_id(&format!("route-link:{}:{}", output.0, input.0))
+}
+
 pub(super) fn session_node_local_id(endpoint_id: &str, session_id: &str) -> u64 {
     stable_local_id(&format!("session-node:{endpoint_id}:{session_id}"))
 }

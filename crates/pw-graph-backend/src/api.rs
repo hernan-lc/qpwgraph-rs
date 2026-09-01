@@ -519,6 +519,20 @@ pub trait GraphDriver: EffectDriver {
         self.graph().link(link).is_some()
     }
 
+    /// Whether this node's ports can take part in a new link.
+    ///
+    /// A backend-wide `connect` capability is a union: on Windows the audio
+    /// driver can route between endpoints but cannot re-point an application
+    /// session, because Core Audio exposes no supported way to move one. The
+    /// canvas asks per node so it offers a connect gesture only where one can
+    /// actually succeed, rather than enabling a control that always fails.
+    ///
+    /// The default follows the backend-wide capability, which is right for
+    /// every backend whose nodes are uniform.
+    fn node_supports_routing(&self, _node: NodeId) -> bool {
+        self.capabilities().connect
+    }
+
     /// Connect a stable pair, returning `None` when it is already present.
     /// The refresh is deliberately part of this helper: a UI action can be
     /// based on the previous frame while a PipeWire stream is being recreated.

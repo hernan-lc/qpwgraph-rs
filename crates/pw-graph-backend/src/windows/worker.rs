@@ -14,9 +14,34 @@ pub(super) struct WorkerSnapshot {
     /// Nodes that can report a level: endpoints, and sessions whose control
     /// answered the meter query.
     pub(super) meterable: BTreeSet<NodeId>,
+    /// Ports the router can open a real WASAPI stream for.
+    ///
+    /// Session ports are deliberately absent: an application's stream cannot
+    /// be captured or re-pointed through a supported user-mode API, so a
+    /// connect naming one is refused rather than half-built.
+    pub(super) endpoint_ports: BTreeMap<PortId, EndpointPort>,
     /// Render endpoints as `(device id, display name)`, for relay selection.
     #[cfg(feature = "relay")]
     pub(super) playback_endpoints: Vec<(String, String)>,
+}
+
+/// What a port means to the router: which Core Audio device, and which way
+/// audio crosses it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct EndpointPort {
+    pub(super) device_id: String,
+    pub(super) role: EndpointPortRole,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EndpointPortRole {
+    /// A recording device. Opens as a capture source.
+    Capture,
+    /// A playback device's monitor. Opens as a loopback source, so whatever
+    /// that device is playing can be routed on.
+    Monitor,
+    /// A playback device. Opens as a render sink.
+    Render,
 }
 
 #[derive(Debug)]
@@ -118,6 +143,10 @@ pub(super) struct EndpointRecord {
     pub(super) device: Audio::IMMDevice,
     pub(super) node_id: NodeId,
     pub(super) port_id: PortId,
+    /// A playback endpoint's monitor port. Capture endpoints have none:
+    /// there is nothing to read back from a microphone that its own port does
+    /// not already carry.
+    pub(super) monitor_port_id: Option<PortId>,
 }
 
 pub(super) struct SessionRecord {
@@ -247,6 +276,21 @@ impl CoreAudioWorker {
                 direction,
                 PortType::Audio,
             ))?;
+            // A playback endpoint also gets a monitor, the way a PipeWire sink
+            // does: it is what makes "send what these speakers are playing
+            // somewhere else" a link the user can draw. WASAPI loopback is the
+            // Windows mechanism behind it.
+            let monitor_port_id = (flow == Audio::eRender)
+                .then(|| PortId(graph_id(endpoint_monitor_port_local_id(&endpoint_id))));
+            if let Some(monitor_port_id) = monitor_port_id {
+                graph.add_port(Port::new(
+                    monitor_port_id,
+                    node_id,
+                    "monitor",
+                    Direction::Source,
+                    PortType::Audio,
+                ))?;
+            }
 
             let endpoint = EndpointRecord {
                 id: endpoint_id,
@@ -254,6 +298,7 @@ impl CoreAudioWorker {
                 device,
                 node_id,
                 port_id,
+                monitor_port_id,
             };
             sessions.extend(self.add_sessions(&endpoint, &mut graph)?);
             endpoints.push(endpoint);
@@ -266,33 +311,13 @@ impl CoreAudioWorker {
         }
         self.endpoints = endpoints;
         self.sessions = sessions;
-        self.graph = graph.clone();
+        self.graph = graph;
         let states = self.read_audio_states();
         if let Ok(mut shared) = self.audio_states.lock() {
             *shared = states;
         }
         self.register_endpoint_volume_callbacks();
-        let meterable = self.meterable_nodes();
-        #[cfg(feature = "relay")]
-        let playback_endpoints = self
-            .endpoints
-            .iter()
-            .filter(|endpoint| endpoint.flow == Audio::eRender)
-            .map(|endpoint| {
-                let name = graph
-                    .nodes
-                    .get(&endpoint.node_id)
-                    .map(|node| node.name.clone())
-                    .unwrap_or_else(|| endpoint.id.clone());
-                (endpoint.id.clone(), name)
-            })
-            .collect();
-        Ok(WorkerSnapshot {
-            graph,
-            meterable,
-            #[cfg(feature = "relay")]
-            playback_endpoints,
-        })
+        Ok(self.snapshot())
     }
 
     /// Apply a session-only notification without enumerating the endpoint
@@ -411,10 +436,44 @@ impl CoreAudioWorker {
         Ok(self.snapshot())
     }
 
+    /// Which graph ports the router can open a real stream for.
+    ///
+    /// Only endpoints appear. A session port is left out on purpose, so the
+    /// driver refuses a connect naming one instead of drawing a link that
+    /// carries nothing.
+    pub(super) fn endpoint_ports(&self) -> BTreeMap<PortId, EndpointPort> {
+        let mut ports = BTreeMap::new();
+        for endpoint in &self.endpoints {
+            let role = if endpoint.flow == Audio::eRender {
+                EndpointPortRole::Render
+            } else {
+                EndpointPortRole::Capture
+            };
+            ports.insert(
+                endpoint.port_id,
+                EndpointPort {
+                    device_id: endpoint.id.clone(),
+                    role,
+                },
+            );
+            if let Some(monitor_port_id) = endpoint.monitor_port_id {
+                ports.insert(
+                    monitor_port_id,
+                    EndpointPort {
+                        device_id: endpoint.id.clone(),
+                        role: EndpointPortRole::Monitor,
+                    },
+                );
+            }
+        }
+        ports
+    }
+
     pub(super) fn snapshot(&self) -> WorkerSnapshot {
         WorkerSnapshot {
             graph: self.graph.clone(),
             meterable: self.meterable_nodes(),
+            endpoint_ports: self.endpoint_ports(),
             #[cfg(feature = "relay")]
             playback_endpoints: self
                 .endpoints

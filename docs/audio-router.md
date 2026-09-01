@@ -9,28 +9,31 @@ It exists because of one gap. On Linux, qpwgraph asks PipeWire to make a link
 and PipeWire moves the audio. Windows has no equivalent: Core Audio will report
 which endpoint an application session is attached to and let you change that
 endpoint's volume, but it will not let you re-point the session, insert an
-effect into a route, or create a capture device. That is why
-`WindowsAudioDriver` reports `connect: false`, `disconnect: false`, and
-`effects: false`, and why it is right to keep doing so until something actually
-moves audio.
+effect into a route, or create a capture device.
 
 The way out is for qpwgraph to own the PCM itself. This module is that
-ownership.
+ownership, and `windows::routing` is what plugs it into the graph: a link drawn
+between two Windows endpoint ports is a route here, with real WASAPI streams at
+both ends.
 
 ## What it does not do
 
-It is not a driver, and adding it does not change any capability flag.
+It is not a driver.
 
-A router with WASAPI endpoints on both ends can carry device-to-device audio
-today. What it cannot do is present a qpwgraph-owned endpoint that *other*
-applications can select — the virtual microphone the relay needs, and the
-destination an arbitrary application could be pointed at. Those need a
-kernel-mode component, which this repository does not contain and which the
-Windows parity roadmap gates behind an architecture decision record and a
-spike. Nothing here pre-empts that decision.
+With WASAPI endpoints on both ends it carries device-to-device audio today —
+microphone into speakers, one playback device's monitor into another. What it
+cannot do is present a qpwgraph-owned endpoint that *other* applications can
+select: the virtual microphone the relay needs, and the destination an
+arbitrary application could be pointed at. Both need a kernel-mode component,
+which this repository does not contain and which the Windows parity roadmap
+gates behind an architecture decision record and a spike.
 
-So the honest summary is: the graph semantics above the endpoints are now
-written and tested, and they will be waiting when the endpoints arrive.
+Capturing a single application is a separate gap with a separate cause: it
+needs process loopback, which needs a newer Windows build than this backend
+targets.
+
+`effects: false` therefore still stands. The router hosts effect processors,
+but nothing wires them into a Windows route yet.
 
 ## The block cycle
 
@@ -122,3 +125,19 @@ against in-memory endpoints — no driver, no audio server, no listening. Fan-ou
 mixing, gain, channel and rate conversion, effect insertion and bypass,
 transactional rollback, device loss, starvation, and metering are all covered,
 and they run on every platform in CI.
+
+The Windows side adds tests that need real devices. Most degrade to a skip when
+the machine has none, so headless CI stays green; the one that opens WASAPI
+streams and moves actual audio is opt-in behind `PW_GRAPH_TEST_LINKS`, like the
+equivalent PipeWire test.
+
+`WindowsAudioDriver::route_metrics` reports the same counters per link, which
+is how "this link is drawn but carries nothing" becomes a visible fact. A
+microphone-into-speakers route on a development machine reads roughly:
+
+```text
+frames=37920 underruns=0 overruns=0 fault=None ratio=0.9999846875 process_us=214
+```
+
+37,920 frames over 800 ms is 790 ms of audio at 48 kHz, and the ratio shows the
+drift controller compensating for about 15 ppm between the two devices' clocks.

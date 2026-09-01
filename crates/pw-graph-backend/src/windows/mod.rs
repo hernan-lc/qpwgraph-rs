@@ -1,11 +1,18 @@
 //! Windows Core Audio backend.
 //!
 //! Core Audio exposes endpoint and application-session state, but it does not
-//! expose PipeWire's arbitrary patchbay graph. This driver therefore presents
-//! the relationships Windows reports as an observed graph and deliberately
-//! rejects topology mutations. All COM interfaces stay on the worker thread;
-//! the public driver communicates with that thread through owned commands and
-//! snapshots.
+//! expose PipeWire's arbitrary patchbay graph. So the graph here has two kinds
+//! of link in it, and telling them apart is the whole design:
+//!
+//! * **observed** — an application session and the endpoint Windows says it is
+//!   playing to. Visible, selectable, and immutable, because Windows offers no
+//!   supported way to move one.
+//! * **carried** — a route between two endpoint ports that qpwgraph opened
+//!   WASAPI streams for and is moving the PCM through itself. Mutable, because
+//!   qpwgraph owns it.
+//!
+//! All COM interfaces stay on the worker thread; the public driver
+//! communicates with that thread through owned commands and snapshots.
 //!
 //! | Module | Owns |
 //! | --- | --- |
@@ -13,6 +20,7 @@
 //! | [`worker`] | the Core Audio thread: enumeration, meters, the graph |
 //! | [`callbacks`] | the COM notification sinks Core Audio calls back on |
 //! | [`identity`] | stable graph ids derived from Core Audio's strings |
+//! | [`routing`] | the links qpwgraph carries, and the audio behind them |
 
 use super::api::{
     AudioMeter, BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
@@ -48,6 +56,7 @@ use windows_core::BOOL;
 mod callbacks;
 mod driver;
 mod identity;
+mod routing;
 mod worker;
 
 #[cfg(test)]
@@ -59,4 +68,5 @@ use self::callbacks::*;
 pub use self::driver::WindowsAudioDriver;
 use self::driver::*;
 use self::identity::*;
+use self::routing::*;
 use self::worker::*;

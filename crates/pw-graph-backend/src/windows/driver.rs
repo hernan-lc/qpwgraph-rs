@@ -10,8 +10,14 @@ use crate::api;
 
 pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     topology: true,
-    connect: false,
-    disconnect: false,
+    // True because qpwgraph carries these routes itself: a link between two
+    // endpoint ports is a real route in `crate::router`, with WASAPI streams
+    // at both ends. It is emphatically *not* true for application sessions --
+    // Core Audio exposes no supported way to move one -- so `connect` refuses
+    // them explicitly and `node_supports_routing` keeps the canvas from
+    // offering a gesture there at all.
+    connect: true,
+    disconnect: true,
     volume: true,
     mute: true,
     meters: true,
@@ -59,6 +65,14 @@ pub struct WindowsAudioDriver {
     pub(super) command_tx: Sender<WorkerCommand>,
     pub(super) dirty: Arc<AtomicBool>,
     pub(super) worker: Option<JoinHandle<()>>,
+    /// Which ports name a device the router can open a stream for. Rebuilt
+    /// with the graph, because an unplugged endpoint takes its ports with it.
+    pub(super) endpoint_ports: BTreeMap<PortId, EndpointPort>,
+    /// The routes qpwgraph owns, and the audio behind them.
+    ///
+    /// Started on the first connect rather than at construction: a session
+    /// that never draws a link should not pay for an audio thread.
+    pub(super) routing: Option<WindowsRouting>,
     /// Relay engine plus its WASAPI endpoints, created on first use.
     #[cfg(feature = "relay")]
     pub(super) relay: Option<crate::windows_relay::WindowsRelayDevices>,
@@ -120,6 +134,8 @@ impl WindowsAudioDriver {
             command_tx,
             dirty,
             worker: Some(worker),
+            endpoint_ports: snapshot.endpoint_ports,
+            routing: None,
             #[cfg(feature = "relay")]
             relay: None,
             #[cfg(feature = "relay")]
@@ -245,6 +261,46 @@ impl WindowsAudioDriver {
         }
     }
 
+    /// Check a pair of ports against the graph before any device is opened.
+    ///
+    /// `Graph::add_link` performs the same checks, but it runs after the
+    /// audio is already flowing; failing here first means a rejected pair
+    /// never starts a WASAPI stream it would immediately have to close.
+    fn validate_route(&self, src: PortId, dst: PortId) -> BackendResult<()> {
+        let output = self.graph.port(src).ok_or(GraphError::MissingPort(src))?;
+        let input = self.graph.port(dst).ok_or(GraphError::MissingPort(dst))?;
+        if !output.direction.is_source() {
+            return Err(GraphError::NotSource(src).into());
+        }
+        if !input.direction.is_sink() {
+            return Err(GraphError::NotSink(dst).into());
+        }
+        if output.port_type != input.port_type {
+            return Err(GraphError::IncompatiblePorts(src, dst).into());
+        }
+        if self
+            .graph
+            .links
+            .values()
+            .any(|link| link.output_port == src && link.input_port == dst)
+        {
+            return Err(GraphError::DuplicateConnection(src, dst).into());
+        }
+        Ok(())
+    }
+
+    /// Counters for every route this driver is carrying.
+    ///
+    /// Empty when nothing has been connected. Reading them never touches the
+    /// audio path, so this is safe to poll: it is how "this link is drawn but
+    /// carries nothing" becomes a visible fact rather than a silent one.
+    pub fn route_metrics(&self) -> Vec<(LinkId, crate::router::RouteMetrics)> {
+        self.routing
+            .as_ref()
+            .map(WindowsRouting::metrics)
+            .unwrap_or_default()
+    }
+
     pub(super) fn response<T>(receiver: Receiver<BackendResult<T>>) -> BackendResult<T> {
         receiver
             .recv()
@@ -265,6 +321,18 @@ impl WindowsAudioDriver {
         for (node_id, position) in &self.positions {
             if let Some(node) = graph.nodes.get_mut(node_id) {
                 node.position = *position;
+            }
+        }
+        self.endpoint_ports = snapshot.endpoint_ports;
+        // The worker rebuilds the graph from what Core Audio reports, which
+        // knows nothing about the routes qpwgraph is carrying. Drop the ones
+        // whose devices have gone, then put the survivors back: a link the
+        // user drew must not disappear because an unrelated endpoint changed.
+        if let Some(routing) = self.routing.as_mut() {
+            let live: BTreeSet<PortId> = graph.ports.keys().copied().collect();
+            routing.reconcile(&live)?;
+            for link in routing.links() {
+                let _ = graph.insert_existing_link(link.clone());
             }
         }
         self.graph = graph;
@@ -301,20 +369,62 @@ impl GraphDriver for WindowsAudioDriver {
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
-    fn connect(&mut self, _src: PortId, _dst: PortId) -> BackendResult<Link> {
-        Err(BackendError::Unsupported(
-            "arbitrary Windows audio routing is not supported".into(),
-        ))
+    /// Carry audio from one endpoint to another, for real.
+    ///
+    /// The graph is only touched after the audio is running, so a link never
+    /// appears for a route that failed to start. Ports that name an
+    /// application session are refused with an explanation rather than drawn:
+    /// see [`super::routing`] for what Windows does and does not allow.
+    fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+        self.validate_route(src, dst)?;
+        let link = managed_link(src, dst);
+        if self.graph.links.contains_key(&link.id) {
+            return Err(GraphError::DuplicateLink(link.id).into());
+        }
+        if self.routing.is_none() {
+            self.routing = Some(WindowsRouting::start()?);
+        }
+        let routing = self.routing.as_mut().expect("routing was just started");
+        routing.connect(link.clone(), &self.endpoint_ports)?;
+        self.graph.add_link(link.id, src, dst)?;
+        Ok(link)
     }
 
-    fn disconnect(&mut self, _link: LinkId) -> BackendResult<Link> {
-        Err(BackendError::Unsupported(
-            "arbitrary Windows audio routing is not supported".into(),
-        ))
+    fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
+        let Some(routing) = self.routing.as_mut() else {
+            return Err(BackendError::unsupported(
+                "that link is a relationship Windows reports, not a route qpwgraph carries",
+            ));
+        };
+        let removed = routing.disconnect(link)?;
+        // The audio has stopped; drop the drawing to match. A link left in
+        // the graph after its route is gone is exactly the stale link the
+        // parity contract forbids.
+        let _ = self.graph.remove_link(link);
+        Ok(removed)
     }
 
-    fn is_link_mutable(&self, _link: LinkId) -> bool {
-        false
+    /// Only the routes qpwgraph carries are mutable.
+    ///
+    /// An observed session-to-endpoint relationship stays visible, selectable,
+    /// and clickable, but it is not something a user can rewire, and letting
+    /// it into patchbay persistence would promise a restore that cannot
+    /// happen.
+    fn is_link_mutable(&self, link: LinkId) -> bool {
+        self.routing
+            .as_ref()
+            .is_some_and(|routing| routing.owns(link))
+    }
+
+    /// Endpoints can be rewired; application sessions cannot.
+    ///
+    /// This is what keeps the canvas from offering a connect gesture on a
+    /// session pin that could only ever fail.
+    fn node_supports_routing(&self, node: NodeId) -> bool {
+        self.graph
+            .nodes
+            .get(&node)
+            .is_some_and(|node| node.node_type == NodeType::WindowsAudioEndpoint)
     }
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {

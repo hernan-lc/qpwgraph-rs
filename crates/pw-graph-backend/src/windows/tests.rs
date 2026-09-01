@@ -32,6 +32,34 @@ fn session_link_identity_depends_on_both_native_identifiers() {
 }
 
 #[test]
+fn a_playback_endpoints_monitor_has_an_identity_of_its_own() {
+    let input = endpoint_port_local_id("speaker-id");
+    let monitor = endpoint_monitor_port_local_id("speaker-id");
+    // Two ports on one node: what the speakers play, and what they are
+    // playing. Sharing an id would collapse them into one pin.
+    assert_ne!(input, monitor);
+    assert_eq!(monitor, endpoint_monitor_port_local_id("speaker-id"));
+    assert_ne!(monitor, endpoint_monitor_port_local_id("other-id"));
+}
+
+#[test]
+fn a_route_keeps_its_identity_across_a_rebuild_and_reverses_with_direction() {
+    let (output, input) = (PortId(11), PortId(22));
+    let link = managed_link(output, input);
+    assert_eq!(link.output_port, output);
+    assert_eq!(link.input_port, input);
+    // Derived from the pair, so a graph rebuild finds the same link rather
+    // than drawing a second one beside it.
+    assert_eq!(managed_link(output, input).id, link.id);
+    // Direction is part of the identity: A into B is not B into A.
+    assert_ne!(managed_link(input, output).id, link.id);
+    assert_eq!(
+        backend_for_port(PortId(link.id.0)),
+        Some(BackendKind::WindowsAudio)
+    );
+}
+
+#[test]
 fn endpoint_and_session_direction_mapping_matches_core_audio_flow() {
     assert_eq!(endpoint_direction(Audio::eRender), Direction::Sink);
     assert_eq!(endpoint_direction(Audio::eCapture), Direction::Source);
@@ -121,4 +149,149 @@ fn live_backend_startup_is_optional_for_headless_windows_ci() {
         driver.graph().port(link.output_port).is_some()
             && driver.graph().port(link.input_port).is_some()
     }));
+}
+
+#[test]
+fn every_playback_endpoint_offers_a_monitor_alongside_its_input() {
+    let Ok(driver) = WindowsAudioDriver::new() else {
+        return;
+    };
+    let graph = driver.graph();
+    for node in graph.nodes.values() {
+        if node.node_type != NodeType::WindowsAudioEndpoint {
+            continue;
+        }
+        let directions: Vec<Direction> = node
+            .ports
+            .iter()
+            .filter_map(|port| graph.port(*port))
+            .map(|port| port.direction)
+            .collect();
+        // A capture endpoint is a source and nothing else. A playback
+        // endpoint is a sink plus the monitor that makes "send what these
+        // speakers are playing somewhere else" drawable.
+        match directions.len() {
+            1 => assert_eq!(directions[0], Direction::Source),
+            2 => {
+                assert!(directions.contains(&Direction::Sink));
+                assert!(directions.contains(&Direction::Source));
+            }
+            other => panic!("an endpoint node had {other} ports"),
+        }
+    }
+}
+
+#[test]
+fn only_endpoints_offer_a_connect_gesture() {
+    let Ok(driver) = WindowsAudioDriver::new() else {
+        return;
+    };
+    for node in driver.graph().nodes.values() {
+        let routable = driver.node_supports_routing(node.id);
+        match node.node_type {
+            // An application session is drawn, selectable, and metered, but
+            // Windows exposes no supported way to move one, so the canvas
+            // must not offer a gesture that could only fail.
+            NodeType::WindowsAudioSession => assert!(!routable, "{} was routable", node.name),
+            _ => assert!(routable, "{} was not routable", node.name),
+        }
+    }
+}
+
+#[test]
+fn a_session_port_is_refused_with_an_explanation_rather_than_drawn() {
+    let Ok(mut driver) = WindowsAudioDriver::new() else {
+        return;
+    };
+    let graph = driver.graph();
+    let session_port = graph.ports.values().find(|port| {
+        graph
+            .node(port.node_id)
+            .is_some_and(|node| node.node_type == NodeType::WindowsAudioSession)
+    });
+    let render_port = graph.ports.values().find(|port| {
+        port.direction.is_sink()
+            && graph
+                .node(port.node_id)
+                .is_some_and(|node| node.node_type == NodeType::WindowsAudioEndpoint)
+    });
+    let (Some(session_port), Some(render_port)) = (session_port, render_port) else {
+        // No application was playing when the test ran.
+        return;
+    };
+    let (session_port, render_port) = (session_port.id, render_port.id);
+
+    let error = driver
+        .connect(session_port, render_port)
+        .expect_err("an application session cannot be re-pointed");
+
+    // Unsupported, not Native: this is a thing Windows does not offer, not a
+    // call that went wrong.
+    assert!(
+        matches!(error, BackendError::Unsupported(_) | BackendError::Graph(_)),
+        "expected an explained refusal, got {error:?}"
+    );
+    assert!(driver
+        .graph()
+        .link(managed_link(session_port, render_port).id)
+        .is_none());
+}
+
+#[test]
+fn an_observed_session_link_is_never_mutable() {
+    let Ok(driver) = WindowsAudioDriver::new() else {
+        return;
+    };
+    // Nothing is routed yet, so every link in the graph came from Core Audio
+    // and none of them may reach patchbay persistence or a reroute command.
+    for link in driver.graph().links.values() {
+        assert!(!driver.is_link_mutable(link.id));
+    }
+}
+
+#[test]
+fn an_endpoint_can_be_routed_to_a_playback_endpoint_when_enabled() {
+    // Opt-in: this one opens real WASAPI streams and moves real audio, so it
+    // needs a machine with working devices.
+    if std::env::var_os("PW_GRAPH_TEST_LINKS").is_none() {
+        return;
+    }
+    let mut driver = WindowsAudioDriver::new().expect("Core Audio should be available");
+    let graph = driver.graph();
+    // Never the same device on both ends. A playback endpoint's monitor
+    // routed back into itself is a digital feedback loop, and each pass
+    // through it is louder than the last.
+    let pair = graph
+        .ports
+        .values()
+        .filter(|port| port.direction.is_source())
+        .find_map(|source| {
+            graph
+                .ports
+                .values()
+                .find(|render| render.direction.is_sink() && render.node_id != source.node_id)
+                .map(|render| (source.id, render.id))
+        });
+    let Some((source, render)) = pair else {
+        // A machine with no playback device, or with nothing to feed it.
+        return;
+    };
+
+    let link = driver
+        .connect(source, render)
+        .expect("an endpoint into a playback endpoint is a route Windows can carry");
+    assert!(driver.graph().link(link.id).is_some());
+    // A route qpwgraph carries is mutable; the observed ones next to it are
+    // still not.
+    assert!(driver.is_link_mutable(link.id));
+
+    // The route survives a rebuild that knows nothing about it.
+    driver.refresh().expect("refresh should succeed");
+    assert!(driver.graph().link(link.id).is_some());
+
+    driver
+        .disconnect(link.id)
+        .expect("the route should stop cleanly");
+    assert!(driver.graph().link(link.id).is_none());
+    assert!(!driver.is_link_mutable(link.id));
 }
