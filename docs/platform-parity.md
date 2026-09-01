@@ -46,7 +46,7 @@ system that the UI has to present honestly instead of pretending around.
 | Select an existing connection | Yes | Yes, for observed audio and mutable MIDI links | Equivalent |
 | Drag an edge onto another port | Yes | Between audio endpoints, and WinMM MIDI | Partial: same |
 | Playback device monitor port | Yes, PipeWire sink monitors | Yes, WASAPI loopback | Equivalent |
-| Patchbay persistence | Mutable links | Mutable WinMM MIDI links only | Partial: audio routes are not persisted yet |
+| Patchbay persistence | Mutable links | Routes qpwgraph carries, and mutable WinMM MIDI links | Equivalent |
 
 Windows Core Audio has no arbitrary patchbay of its own. What it reports —
 which application session is playing to which endpoint — is an observation,
@@ -78,6 +78,11 @@ for the routes qpwgraph is carrying, so a relationship Windows merely reports
 still cannot reach a reroute command or patchbay persistence. Selection and
 inspection are unaffected: an observed link is still clickable, still
 selectable, and still drawn.
+
+Because carried routes are mutable, they fall into patchbay snapshots and
+activation on the same terms as a PipeWire link, keyed by device name rather
+than by an id that will not survive a reboot. A snapshot taken while a
+microphone is routed to speakers restores that route on the next run.
 
 What remains out of reach from user mode is a qpwgraph-owned endpoint that
 *other* applications can select — the virtual microphone the relay needs, and

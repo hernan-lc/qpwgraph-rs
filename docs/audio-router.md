@@ -141,3 +141,8 @@ frames=37920 underruns=0 overruns=0 fault=None ratio=0.9999846875 process_us=214
 
 37,920 frames over 800 ms is 790 ms of audio at 48 kHz, and the ratio shows the
 drift controller compensating for about 15 ppm between the two devices' clocks.
+Over four seconds the same route reports 191,520 frames and no fault at all.
+
+A route read very soon after connecting can still report `SourceStarved`: the
+capture device takes a moment to fill its first buffer, and the route honestly
+had a short block. It clears itself once the device is running.
