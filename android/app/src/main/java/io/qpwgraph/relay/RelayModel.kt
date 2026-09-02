@@ -25,6 +25,18 @@ data class RelaySettings(
             "deviceName=$deviceName, sampleRate=$sampleRate, channels=$channels, frameMs=$frameMs)"
 }
 
+enum class CaptureSource {
+    MICROPHONE,
+    DEVICE_PLAYBACK,
+}
+
+enum class RelayHostAudioState {
+    Stopped,
+    Starting,
+    Running,
+    Error,
+}
+
 /** Settings for broadcasting this device's audio as a relay host. */
 data class HostSettings(
     val deviceName: String = "android-relay",
@@ -38,10 +50,16 @@ data class HostSettings(
     val sampleRate: Int = 48_000,
     val channels: Int = 1,
     val frameMs: Int = 20,
+    val captureSource: CaptureSource = CaptureSource.MICROPHONE,
 ) {
     override fun toString(): String =
         "HostSettings(deviceName=$deviceName, port=$port, codec=$codec, transport=$transport, " +
-            "sampleRate=$sampleRate, channels=$channels, frameMs=$frameMs)"
+            "sampleRate=$sampleRate, channels=$channels, frameMs=$frameMs, captureSource=$captureSource)"
+}
+
+fun captureSourceFromString(value: String): CaptureSource = when (value.lowercase()) {
+    "device_playback", "playback", "media" -> CaptureSource.DEVICE_PLAYBACK
+    else -> CaptureSource.MICROPHONE
 }
 
 const val DEFAULT_HOST_PORT = 48123
@@ -292,6 +310,8 @@ data class RelayUiState(
     // Emitter (host) section.
     val host: HostSettings = HostSettings(),
     val hostState: RelayHostState = RelayHostState.Idle,
+    val hostAudioState: RelayHostAudioState = RelayHostAudioState.Stopped,
+    val hostAudioMessage: String = "",
     val hostActive: Boolean = false,
     val hostPort: Int? = null,
     val hostAddress: String? = null,

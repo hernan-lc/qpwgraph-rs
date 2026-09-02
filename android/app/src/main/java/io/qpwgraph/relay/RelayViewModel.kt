@@ -1,8 +1,11 @@
 package io.qpwgraph.relay
 
 import android.Manifest
+import android.app.Activity
 import android.app.Application
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -45,6 +48,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableState = MutableStateFlow(
         RelayUiState(settings = settings.loadSettings(), host = settings.loadHostSettings()),
     )
+    /** Pending MediaProjection consent for device-playback capture. */
+    @Volatile private var pendingMediaProjectionResultCode: Int = Activity.RESULT_CANCELED
+    @Volatile private var pendingMediaProjectionData: Intent? = null
     val state: StateFlow<RelayUiState> = mutableState.asStateFlow()
     // The native handles and their teardown rules live in the controllers.
     // This class owns the UI state, the operation mutex that serializes the
@@ -158,6 +164,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             setState {
                 it.copy(
                     hostState = RelayHostState.Error,
+                    hostAudioState = RelayHostAudioState.Error,
+                    hostAudioMessage = text(R.string.relay_error_microphone_permission),
                     hostPort = null,
                     hostActive = false,
                     hostAddress = null,
@@ -178,6 +186,35 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    fun setHostCaptureSource(source: CaptureSource) {
+        if (mutableState.value.hostState == RelayHostState.Starting ||
+            mutableState.value.hostState == RelayHostState.Running
+        ) return
+        val updated = mutableState.value.host.copy(captureSource = source)
+        setState { it.copy(host = updated) }
+        settings.saveHost(updated)
+    }
+
+    fun onMediaProjectionResult(resultCode: Int, data: Intent?) {
+        pendingMediaProjectionResultCode = resultCode
+        pendingMediaProjectionData = data
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            Log.w(TAG, "HOST AUDIO FAILURE MediaProjection permission denied")
+            setState {
+                it.copy(
+                    hostAudioState = RelayHostAudioState.Error,
+                    hostAudioMessage = text(R.string.relay_error_media_projection_denied),
+                    hostMessage = text(R.string.relay_error_media_projection_denied),
+                )
+            }
+        } else {
+            Log.i(TAG, "MediaProjection consent granted")
+        }
+    }
+
+    fun hasMediaProjectionConsent(): Boolean =
+        pendingMediaProjectionResultCode == Activity.RESULT_OK && pendingMediaProjectionData != null
 
     // ------------------------------------------------------------------
     // Receiver (client)
@@ -480,6 +517,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun clientError(message: String) {
+        val mapped = when {
+            message.contains("Connection refused", ignoreCase = true) || message.contains("os error 111") ->
+                text(R.string.relay_error_tcp_refused) + if (message.isNotBlank()) " — $message" else ""
+            message.contains("trusted", ignoreCase = true) && message.contains("fail", ignoreCase = true) ->
+                text(R.string.relay_error_trusted_auth_failed) + " — $message"
+            message.contains("Relay session lost", ignoreCase = true) && message.contains("os error 111") ->
+                text(R.string.relay_error_tcp_refused) + " — $message"
+            else -> message
+        }
         setState {
             it.copy(
                 connection = RelayConnectionState.Error,
@@ -489,7 +535,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 transport = "",
                 link = "",
                 audioChannelState = "",
-                message = message,
+                message = mapped,
             )
         }
     }
@@ -535,6 +581,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             permissionDenied(host = true)
             return
         }
+        if (wanted.captureSource == CaptureSource.DEVICE_PLAYBACK && !hasMediaProjectionConsent()) {
+            setState {
+                it.copy(
+                    hostState = RelayHostState.Error,
+                    hostAudioState = RelayHostAudioState.Error,
+                    hostAudioMessage = text(R.string.relay_error_media_projection_denied),
+                    hostMessage = text(R.string.relay_error_media_projection_denied),
+                )
+            }
+            return
+        }
         if (wanted.pin.isBlank()) {
             setState {
                 it.copy(
@@ -547,16 +604,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         setState {
             it.copy(
                 hostState = RelayHostState.Starting,
+                hostAudioState = RelayHostAudioState.Starting,
+                hostAudioMessage = "",
                 hostMessage = text(R.string.relay_host_starting),
             )
         }
+        Log.i(TAG, "HOST START pin present, transport=${wanted.transport} captureSource=${wanted.captureSource} port=${wanted.port}")
         viewModelScope.launch(Dispatchers.IO) {
             operationMutex.withLock {
                 var nativeStarted = false
+                var nativePort: Int? = null
+                var nativeAddress: String? = null
                 try {
-                    // The Android app intentionally runs one relay mode at a
-                    // time. This also makes service stop/start ordering
-                    // deterministic when switching from Receiver to Emitter.
                     if (mutableState.value.connection == RelayConnectionState.Connected ||
                         mutableState.value.connection == RelayConnectionState.Connecting
                     ) {
@@ -566,10 +625,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         (!host.preparedFor(wanted) ||
                             mutableState.value.hostState == RelayHostState.Error)
                     ) {
-                        // A previous service/native failure may have left a
-                        // valid Running host handle behind. Stop it through
-                        // the state machine before replacing it; releasing a
-                        // live handle would bypass the worker-safety fence.
                         service.stopAndWait()
                         if (!host.stopAndRelease()) {
                             throw IllegalStateException("previous relay host is still running")
@@ -589,39 +644,70 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     val address = response.optString("address")
                         .takeIf { it.isNotBlank() }
                     nativeStarted = true
+                    nativePort = port
+                    nativeAddress = address
+                    Log.i(TAG, "HOST LISTENING port=$port address=$address transport=${wanted.transport} captureSource=${wanted.captureSource}")
 
-                    // A successful socket bind is not enough: publish Running
-                    // only after the platform audio workers are available.
-                    service.start(
-                        RelayService.MODE_HOST,
-                        host.nativeHandle,
-                        "both",
-                        audioGeometryForHostMode(
-                            hostMode = true,
-                            client = mutableState.value.settings,
-                            host = wanted,
-                        ),
-                    )
-                    setState {
-                        it.copy(
-                            hostState = RelayHostState.Running,
-                            hostPort = port,
-                            hostActive = true,
-                            hostAddress = address,
-                            hostMessage = text(R.string.relay_listening, port),
+                    try {
+                        service.start(
+                            RelayService.MODE_HOST,
+                            host.nativeHandle,
+                            "both",
+                            audioGeometryForHostMode(
+                                hostMode = true,
+                                client = mutableState.value.settings,
+                                host = wanted,
+                            ),
+                            captureSource = wanted.captureSource,
+                            mediaProjectionResultCode = pendingMediaProjectionResultCode,
+                            mediaProjectionData = pendingMediaProjectionData,
                         )
+                        Log.i(TAG, "HOST AUDIO START success captureSource=${wanted.captureSource}")
+                        setState {
+                            it.copy(
+                                hostState = RelayHostState.Running,
+                                hostAudioState = RelayHostAudioState.Running,
+                                hostAudioMessage = "",
+                                hostPort = port,
+                                hostActive = true,
+                                hostAddress = address,
+                                hostMessage = text(R.string.relay_listening, port),
+                            )
+                        }
+                    } catch (audioError: Exception) {
+                        // Decouple: keep TCP host listening even if audio failed.
+                        Log.w(TAG, "HOST AUDIO FAILURE keeping host listening: ${audioError.message}")
+                        if (!audioError.serviceWasAlreadyActive) {
+                            // Do not stop native host; audio service may have already stopped itself.
+                            // Ensure any partially started service is quiesced but keep host.
+                            runCatching { withContext(NonCancellable) { service.stopAndWait() } }
+                        }
+                        setState {
+                            it.copy(
+                                hostState = RelayHostState.Running,
+                                hostAudioState = RelayHostAudioState.Error,
+                                hostAudioMessage = audioError.message ?: text(R.string.relay_error_host_audio_failed),
+                                hostPort = port,
+                                hostActive = true,
+                                hostAddress = address,
+                                hostMessage = text(R.string.relay_listening, port) + " — " + text(R.string.relay_error_host_audio_failed),
+                            )
+                        }
                     }
                     startHostPolling()
                 } catch (error: Exception) {
-                    // The audio service may still be using the native host;
-                    // stop it before closing the listener/handle.
                     withContext(NonCancellable) {
                         if (nativeStarted && !error.serviceWasAlreadyActive) {
                             service.stopAndWait()
                         }
                         if (nativeStarted) host.stopAndRelease()
                     }
-                    hostError(error.message ?: text(R.string.relay_error_host_failed))
+                    // If we already published Running with audio error, don't overwrite with Error.
+                    if (nativePort != null && mutableState.value.hostState == RelayHostState.Running) {
+                        Log.w(TAG, "host start audio path already handled, ignoring error ${error.message}")
+                    } else {
+                        hostError(error.message ?: text(R.string.relay_error_host_failed))
+                    }
                 }
             }
         }
@@ -747,11 +833,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             setState {
                 it.copy(
                     hostState = RelayHostState.Idle,
+                    hostAudioState = RelayHostAudioState.Stopped,
+                    hostAudioMessage = "",
                     hostPort = null,
                     hostActive = false,
                     hostAddress = null,
                     sessions = emptyList(),
                     host = it.host.copy(pin = ""),
+                    hostMessage = text(R.string.relay_host_stopped),
                 )
             }
             return
@@ -767,15 +856,38 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun hostError(message: String) {
+        val mapped = when {
+            message.contains("Connection refused", ignoreCase = true) || message.contains("os error 111") ->
+                text(R.string.relay_error_tcp_refused)
+            message.contains("trusted", ignoreCase = true) && message.contains("fail", ignoreCase = true) ->
+                text(R.string.relay_error_trusted_auth_failed)
+            else -> message
+        }
+        Log.e(TAG, "HOST STOP/error: $mapped (raw=$message)")
         setState {
             it.copy(
                 hostState = RelayHostState.Error,
+                hostAudioState = RelayHostAudioState.Error,
+                hostAudioMessage = mapped,
                 hostPort = null,
                 hostActive = false,
                 hostAddress = null,
                 sessions = emptyList(),
                 host = it.host.copy(pin = ""),
-                hostMessage = message,
+                hostMessage = mapped,
+            )
+        }
+    }
+
+    private fun hostAudioError(message: String) {
+        Log.w(TAG, "HOST AUDIO FAILURE (host stays listening): $message")
+        setState {
+            it.copy(
+                hostAudioState = RelayHostAudioState.Error,
+                hostAudioMessage = message,
+                hostMessage = if (it.hostState == RelayHostState.Running && it.hostPort != null) {
+                    text(R.string.relay_listening, it.hostPort!!) + " — " + message
+                } else message,
             )
         }
     }
@@ -798,15 +910,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Stop host-side native/audio state while the operation mutex is held. */
     private suspend fun stopHostLocked() {
+        Log.i(TAG, "HOST STOP explicit user request")
         host.quiesceAndStop()
         setState {
             it.copy(
                 hostState = RelayHostState.Idle,
+                hostAudioState = RelayHostAudioState.Stopped,
+                hostAudioMessage = "",
                 hostPort = null,
                 hostActive = false,
                 hostAddress = null,
                 sessions = emptyList(),
                 host = it.host.copy(pin = ""),
+                hostMessage = text(R.string.relay_host_stopped),
             )
         }
     }
@@ -836,31 +952,32 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     host.owns(event.handle) &&
                     mutableState.value.hostState != RelayHostState.Idle
                 ) {
+                    // Audio service died but host listener stays alive (decoupled).
+                    Log.w(TAG, "HOST AUDIO STOP service destroyed handle=${event.handle} keeping host listening")
+                    // Do not stop native host; just mark audio as stopped.
                     host.cancelPolling()
-                    host.stopAndRelease(event.handle)
+                    // Restart polling so host status continues? Keep polling alive for sessions.
+                    // We keep host handle; just update audio state.
                     setState {
                         it.copy(
-                            hostState = RelayHostState.Error,
-                            hostActive = false,
-                            hostPort = null,
-                            hostAddress = null,
-                            hostMessage = text(R.string.relay_error_audio_service_stopped),
+                            hostAudioState = RelayHostAudioState.Stopped,
+                            hostAudioMessage = text(R.string.relay_error_audio_service_stopped),
+                            hostMessage = if (it.hostPort != null) {
+                                text(R.string.relay_listening, it.hostPort!!) + " — " + text(R.string.relay_error_audio_service_stopped)
+                            } else text(R.string.relay_error_audio_service_stopped),
                         )
                     }
+                    // Resume host polling if it was cancelled; startHostPolling handles idempotent start.
+                    if (host.isOpen) startHostPolling()
                 }
                 is RelayServiceEvent.AudioFailure -> if (event.mode == RelayService.MODE_HOST) {
                     if (host.owns(event.handle)) {
-                        host.stopPollingAndWait()
-                        // The service owns the worker threads that still use
-                        // this native handle. Wait for its bounded teardown
-                        // before stopping/releasing the host below.
-                        service.stopAndWait()
-                        host.stopAndRelease()
-                        hostError(event.message)
+                        // Decouple: do NOT stop native host on audio failure.
+                        Log.w(TAG, "HOST AUDIO FAILURE event: ${event.message} keeping host listening")
+                        hostAudioError(event.message)
+                        // Keep polling alive; do not stop service/host.
                     }
                 } else if (client.owns(event.handle)) {
-                    // Do not invalidate a handle while the failed worker can
-                    // still be inside a JNI audio call.
                     client.quiesceAndRelease()
                     clientError(event.message)
                 }
@@ -1087,6 +1204,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private companion object {
+        const val TAG = "RelayViewModel"
         const val POLL_INTERVAL_MS = 100L
         const val USB_LINK_POLL_INTERVAL_MS = 1_000L
         const val TRUSTED_AUTO_RETRY_INTERVAL_MS = 5_000L

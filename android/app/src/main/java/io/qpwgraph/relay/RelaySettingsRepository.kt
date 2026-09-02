@@ -72,6 +72,7 @@ class RelaySettingsRepository(private val preferences: SharedPreferences) {
         port = preferences.getInt("host_port", DEFAULT_HOST_PORT),
         codec = preferences.getString("host_codec", "opus") ?: "opus",
         transport = migrateTransport(preferences.getString("host_transport", "auto") ?: "auto"),
+        captureSource = captureSourceFromString(preferences.getString("host_capture_source", "microphone") ?: "microphone"),
     )
 
     fun saveHost(host: HostSettings) {
@@ -80,6 +81,7 @@ class RelaySettingsRepository(private val preferences: SharedPreferences) {
             .putInt("host_port", host.port)
             .putString("host_codec", host.codec)
             .putString("host_transport", host.transport)
+            .putString("host_capture_source", host.captureSource.name.lowercase())
             .apply()
     }
 

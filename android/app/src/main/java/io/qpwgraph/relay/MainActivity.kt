@@ -1,7 +1,10 @@
 package io.qpwgraph.relay
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -111,6 +114,16 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
             action?.invoke()
         }
     }
+    val mediaProjectionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        viewModel.onMediaProjectionResult(result.resultCode, result.data)
+        // After consent, retry host start if we have the audio permission already.
+        val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (result.resultCode == Activity.RESULT_OK && hasAudio) {
+            viewModel.startHost()
+        }
+    }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -176,11 +189,33 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
                     state,
                     viewModel,
                     startHost = {
-                        runWithServicePermissions(
-                            requiresMicrophone = true,
-                            host = true,
-                            action = viewModel::startHost,
-                        )
+                        val source = state.host.captureSource
+                        if (source == CaptureSource.DEVICE_PLAYBACK) {
+                            // Playback capture requires RECORD_AUDIO + MediaProjection consent.
+                            // RECORD_AUDIO is still required but does NOT imply microphone use.
+                            runWithServicePermissions(
+                                requiresMicrophone = true,
+                                host = true,
+                                action = {
+                                    if (viewModel.hasMediaProjectionConsent()) {
+                                        viewModel.startHost()
+                                    } else {
+                                        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                                        mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+                                    }
+                                },
+                            )
+                        } else {
+                            runWithServicePermissions(
+                                requiresMicrophone = true,
+                                host = true,
+                                action = viewModel::startHost,
+                            )
+                        }
+                    },
+                    requestPlaybackConsent = {
+                        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
                     },
                 )
                 RelayMode.Discover -> DiscoverTab(
@@ -492,6 +527,7 @@ private fun EmitterTab(
     state: RelayUiState,
     viewModel: RelayViewModel,
     startHost: () -> Unit,
+    requestPlaybackConsent: () -> Unit,
 ) {
     val hostEditable = state.hostState != RelayHostState.Starting &&
         state.hostState != RelayHostState.Running
@@ -540,6 +576,25 @@ private fun EmitterTab(
             modifier = Modifier.weight(1f),
         )
     }
+    DropdownField(
+        label = "Capture source",
+        value = state.host.captureSource.name.lowercase(),
+        options = listOf("microphone", "device_playback"),
+        display = mapOf("microphone" to "Microphone", "device_playback" to "Device playback"),
+        onSelected = { viewModel.setHostCaptureSource(captureSourceFromString(it)) },
+        enabled = hostEditable,
+    )
+    if (state.host.captureSource == CaptureSource.DEVICE_PLAYBACK) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Device playback capture requires Android audio-recording permission, but captures device playback instead of the physical microphone. You will be asked to allow screen/audio capture.", style = MaterialTheme.typography.bodySmall)
+                if (!viewModel.hasMediaProjectionConsent() && hostEditable) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = requestPlaybackConsent) { Text("Grant capture consent") }
+                }
+            }
+        }
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (state.hostState == RelayHostState.Running) {
             Button(onClick = viewModel::stopHost, modifier = Modifier.weight(1f)) {
@@ -555,10 +610,12 @@ private fun EmitterTab(
         Column(modifier = Modifier.padding(16.dp)) {
             Text("Status", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
-            Text(state.hostState.name.lowercase())
+            Text("Host: ${state.hostState.name.lowercase()}  •  Audio: ${state.hostAudioState.name.lowercase()}")
             if (state.hostPort != null) Text("Listening on port ${state.hostPort}")
             if (state.hostMessage.isNotBlank()) Text(state.hostMessage)
+            if (state.hostAudioMessage.isNotBlank() && state.hostAudioMessage != state.hostMessage) Text("Audio: ${state.hostAudioMessage}")
             Text("Level: ${(state.hostRms * 100).toInt()}%")
+            Text("Capture: ${state.host.captureSource.name.lowercase()}", style = MaterialTheme.typography.bodySmall)
         }
     }
     val hostPort = state.hostPort

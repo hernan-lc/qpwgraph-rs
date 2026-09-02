@@ -30,6 +30,9 @@ class RelayServiceController(private val application: Application) {
         handle: Long,
         role: String,
         geometry: AudioGeometry,
+        captureSource: CaptureSource = CaptureSource.MICROPHONE,
+        mediaProjectionResultCode: Int = android.app.Activity.RESULT_CANCELED,
+        mediaProjectionData: android.content.Intent? = null,
     ) {
         val token = UUID.randomUUID().toString()
         val ready = RelayServiceBridge.registerStart(token)
@@ -41,6 +44,9 @@ class RelayServiceController(private val application: Application) {
             .putExtra(RelayService.EXTRA_CHANNELS, geometry.channels)
             .putExtra(RelayService.EXTRA_FRAME_MS, geometry.frameMs)
             .putExtra(RelayService.EXTRA_START_TOKEN, token)
+            .putExtra(RelayService.EXTRA_CAPTURE_SOURCE, captureSource.name.lowercase())
+            .putExtra(RelayService.EXTRA_MEDIA_PROJECTION_RESULT_CODE, mediaProjectionResultCode)
+            .putExtra(RelayService.EXTRA_MEDIA_PROJECTION_DATA, mediaProjectionData)
         try {
             application.startForegroundService(intent)
             val result = withTimeoutOrNull(SERVICE_START_TIMEOUT_MS) { ready.await() }

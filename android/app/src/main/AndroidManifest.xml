@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <uses-feature
         android:name="android.hardware.camera.any"
@@ -34,7 +35,7 @@
         <service
             android:name=".RelayService"
             android:exported="false"
-            android:foregroundServiceType="microphone|mediaPlayback"
+            android:foregroundServiceType="microphone|mediaPlayback|mediaProjection"
             android:stopWithTask="false" />
     </application>
 </manifest>
