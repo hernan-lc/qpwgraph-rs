@@ -12,8 +12,8 @@ backends do.
 | Audio sessions | PipeWire nodes | Core Audio sessions |
 | Arbitrary patch routing | Yes | No for Core Audio |
 | Volume, mute, and metering | Yes | Yes, peak metering where available |
-| Effects | Yes | No arbitrary insertion; standalone future |
-| MIDI routing | ALSA Sequencer | WinMM, one output per input |
+| Effects | Yes | Yes, hosted in the router on carried routes |
+| MIDI routing | ALSA Sequencer | WinMM, with fan-out and fan-in |
 | Relay | Yes, virtual nodes | Yes, endpoint loopback/render; no microphone emulation |
 
 The rest of this document breaks each of those rows down and says which of the
@@ -92,11 +92,20 @@ driver.
 Windows MIDI is a separate native graph. WinMM `midiConnect` and
 `midiDisconnect` provide real mutable input-to-output links, so MIDI pins and
 links remain draggable, reroutable, and disconnectable even when they share a
-canvas with immutable Core Audio relationships. WinMM permits one output per
-input in this backend; a second fan-out request is rejected with an explicit
-error. MIDI device graph IDs use the device-interface identity when WinMM
-provides one and fall back to a direction/name/driver identity when it does
-not. The numeric WinMM index is used only when opening the current device.
+canvas with immutable Core Audio relationships.
+
+Fan-out and fan-in are both ordinary. A MIDI input is normally an exclusive
+open, so the handles are shared and counted rather than opened per link: a
+second connection out of one input reuses the handle WinMM already has and
+asks for another pairing, and a handle closes only when its last connection
+goes, so removing one branch does not silence the rest. This backend used to
+refuse a fanned-out input outright on the assumption that Windows routes one
+input to one output; it now lets the MIDI stack answer and reports its error
+if the answer is no.
+
+MIDI device graph IDs use the device-interface identity when WinMM provides
+one and fall back to a direction/name/driver identity when it does not. The
+numeric WinMM index is used only when opening the current device.
 
 Observed Windows Audio links are excluded from patchbay snapshots. Mutable
 WinMM MIDI links are included, and missing devices are simply skipped during
@@ -223,7 +232,7 @@ are flagged passive, monitor-only, and non-reconnecting.
 | Relay: peer audio as a microphone | Yes | No | Platform limitation |
 | Relay: send one application only | Yes | No | Missing (build 20348+) |
 | Relay: choose which endpoint | n/a | Yes, by stable endpoint ID | Partial |
-| MIDI | ALSA | WinMM, with routing | Partial |
+| MIDI | ALSA | WinMM, with routing, fan-out, and fan-in | Equivalent for MIDI 1.0 |
 
 Effect *insertion* depends on rewiring an existing link, which is why it
 arrived with routing rather than before it. On Windows an effect is a graph

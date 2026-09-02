@@ -6,14 +6,18 @@
 //! backend where `connect` is honestly `true` -- the graph is editable, not
 //! observed.
 //!
-//! It is not equivalent to ALSA MIDI. Windows connects one input to one output
-//! at a time unless a MIDI-thru driver is involved, so fan-out from a single
-//! input is refused rather than silently dropping the previous connection.
-//! Fan-in works: several inputs may drive the same output.
+//! Fan-out and fan-in are both ordinary here. A MIDI input is normally an
+//! exclusive open, so the handles are shared and counted rather than opened
+//! per link: a second connection out of one input reuses the handle WinMM
+//! already has and asks `midiConnect` for another pairing. Whether the MIDI
+//! stack accepts that is the MIDI stack's answer to give, and its error is
+//! what comes back if it does not — this backend no longer refuses in advance
+//! on an assumption about what Windows can do.
 //!
 //! Handles are opened lazily and only for devices that take part in a
 //! connection, so merely listing the graph never opens a device another
-//! application might want.
+//! application might want, and closed only when their last connection goes,
+//! so removing one branch of a fan-out does not silence the rest.
 
 use crate::api::{BackendCapabilities, BackendError, BackendResult, EffectDriver, GraphDriver};
 use pw_graph_core::{
@@ -69,35 +73,82 @@ struct MidiDevice {
     port_id: PortId,
 }
 
-/// An open pair kept alive for as long as the connection exists. Closing
-/// either handle tears the connection down, so both are owned here.
-struct OpenConnection {
-    input: Audio::HMIDIIN,
-    output: Audio::HMIDIOUT,
-    link_id: LinkId,
+/// A device handle shared by every connection that needs it.
+///
+/// A MIDI input is normally an exclusive open, so a second `midiInOpen` on a
+/// device already in use returns `MMSYSERR_ALLOCATED`. Opening once and
+/// counting users is therefore not merely tidy: it is what makes one input
+/// able to drive several outputs at all.
+struct OpenDevice<H> {
+    handle: H,
+    users: usize,
 }
 
-/// Closing either handle already tears the connection down, but disconnecting
-/// first keeps the MIDI stack's own bookkeeping tidy. Doing this in `Drop`
-/// means a connection cannot be forgotten anywhere it is discarded.
-impl Drop for OpenConnection {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = Audio::midiDisconnect(Audio::HMIDI(self.input.0), self.output, None);
-            let _ = Audio::midiOutClose(self.output);
-            let _ = Audio::midiInClose(self.input);
+/// One `midiConnect` pairing, and the ports it was drawn between.
+struct Connection {
+    link_id: LinkId,
+    source: PortId,
+    destination: PortId,
+}
+
+/// WinMM MIDI graph. Handles live here and are closed on drop.
+pub struct WindowsMidiDriver {
+    graph: Graph,
+    devices: BTreeMap<PortId, MidiDevice>,
+    /// Open input handles, by the port they belong to.
+    inputs: BTreeMap<PortId, OpenDevice<Audio::HMIDIIN>>,
+    /// Open output handles, by the port they belong to.
+    outputs: BTreeMap<PortId, OpenDevice<Audio::HMIDIOUT>>,
+    connections: Vec<Connection>,
+    positions: BTreeMap<NodeId, [f32; 2]>,
+    next_link: u64,
+}
+
+/// Written out rather than derived because the struct owns MIDI handles and
+/// so implements `Drop`, which rules out the functional-update shorthand at
+/// every call site.
+impl Default for WindowsMidiDriver {
+    fn default() -> Self {
+        Self {
+            graph: Graph::default(),
+            devices: BTreeMap::new(),
+            inputs: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            connections: Vec::new(),
+            positions: BTreeMap::new(),
+            next_link: 0,
         }
     }
 }
 
-/// WinMM MIDI graph. Handles live here and are closed on drop.
-#[derive(Default)]
-pub struct WindowsMidiDriver {
-    graph: Graph,
-    devices: BTreeMap<PortId, MidiDevice>,
-    connections: Vec<OpenConnection>,
-    positions: BTreeMap<NodeId, [f32; 2]>,
-    next_link: u64,
+impl Drop for WindowsMidiDriver {
+    fn drop(&mut self) {
+        // Disconnect every pairing before closing anything, so the MIDI
+        // stack's own bookkeeping is unwound in the order it was built.
+        for connection in std::mem::take(&mut self.connections) {
+            let input = self.inputs.get(&connection.source).map(|open| open.handle);
+            let output = self
+                .outputs
+                .get(&connection.destination)
+                .map(|open| open.handle);
+            if let (Some(input), Some(output)) = (input, output) {
+                unsafe {
+                    let _ = Audio::midiDisconnect(Audio::HMIDI(input.0), output, None);
+                }
+            }
+        }
+        for (_, open) in std::mem::take(&mut self.inputs) {
+            unsafe {
+                let _ = Audio::midiInStop(open.handle);
+                let _ = Audio::midiInClose(open.handle);
+            }
+        }
+        for (_, open) in std::mem::take(&mut self.outputs) {
+            unsafe {
+                let _ = Audio::midiOutClose(open.handle);
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for WindowsMidiDriver {
@@ -111,10 +162,11 @@ impl std::fmt::Debug for WindowsMidiDriver {
 
 impl WindowsMidiDriver {
     pub fn new() -> BackendResult<Self> {
-        let mut driver = Self {
-            next_link: 1,
-            ..Self::default()
-        };
+        // Assigned rather than written as a functional update: the struct
+        // owns MIDI handles and so implements `Drop`, which rules that syntax
+        // out.
+        let mut driver = Self::default();
+        driver.next_link = 1;
         driver.refresh()?;
         Ok(driver)
     }
@@ -220,6 +272,96 @@ impl WindowsMidiDriver {
             ));
         }
         Ok((source, destination))
+    }
+
+    /// Take a use of an input device, opening it if this is the first.
+    fn open_input(&mut self, port: PortId, index: u32) -> BackendResult<Audio::HMIDIIN> {
+        if let Some(open) = self.inputs.get_mut(&port) {
+            open.users += 1;
+            return Ok(open.handle);
+        }
+        let mut handle = Audio::HMIDIIN::default();
+        let status = unsafe {
+            Audio::midiInOpen(
+                &mut handle,
+                index,
+                None,
+                None,
+                Audio::MIDI_WAVE_OPEN_TYPE(0),
+            )
+        };
+        if status != MM_OK {
+            return Err(mm_error("input open", status));
+        }
+        self.inputs.insert(port, OpenDevice { handle, users: 1 });
+        Ok(handle)
+    }
+
+    fn open_output(&mut self, port: PortId, index: u32) -> BackendResult<Audio::HMIDIOUT> {
+        if let Some(open) = self.outputs.get_mut(&port) {
+            open.users += 1;
+            return Ok(open.handle);
+        }
+        let mut handle = Audio::HMIDIOUT::default();
+        let status = unsafe {
+            Audio::midiOutOpen(
+                &mut handle,
+                index,
+                None,
+                None,
+                Audio::MIDI_WAVE_OPEN_TYPE(0),
+            )
+        };
+        if status != MM_OK {
+            return Err(mm_error("output open", status));
+        }
+        self.outputs.insert(port, OpenDevice { handle, users: 1 });
+        Ok(handle)
+    }
+
+    /// Give up one use of an input, closing it when the last goes.
+    ///
+    /// Closing only at zero is what keeps a fanned-out input alive: taking the
+    /// handle away when the first of its connections is removed would silence
+    /// the others.
+    fn release_input(&mut self, port: PortId) {
+        let Some(open) = self.inputs.get_mut(&port) else {
+            return;
+        };
+        open.users -= 1;
+        if open.users > 0 {
+            return;
+        }
+        if let Some(open) = self.inputs.remove(&port) {
+            unsafe {
+                let _ = Audio::midiInStop(open.handle);
+                let _ = Audio::midiInClose(open.handle);
+            }
+        }
+    }
+
+    fn release_output(&mut self, port: PortId) {
+        let Some(open) = self.outputs.get_mut(&port) else {
+            return;
+        };
+        open.users -= 1;
+        if open.users > 0 {
+            return;
+        }
+        if let Some(open) = self.outputs.remove(&port) {
+            unsafe {
+                let _ = Audio::midiOutClose(open.handle);
+            }
+        }
+    }
+
+    /// How many outputs one input is currently driving.
+    #[cfg(test)]
+    fn fan_out_width(&self, source: PortId) -> usize {
+        self.connections
+            .iter()
+            .filter(|connection| connection.source == source)
+            .count()
     }
 
     fn allocate_link(&mut self) -> LinkId {
@@ -421,70 +563,64 @@ impl GraphDriver for WindowsMidiDriver {
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
+    /// Connect a MIDI input to an output.
+    ///
+    /// Fan-out and fan-in both work here, and neither is special-cased: the
+    /// handles are shared and counted, so a second connection out of the same
+    /// input reuses the input WinMM already has open and asks `midiConnect`
+    /// for another pairing. If the MIDI stack will not take it, its own error
+    /// is what comes back — rather than a blanket refusal that assumed the
+    /// answer.
     fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
         let (source, destination) = self.endpoints(src, dst)?;
-        // Windows routes one input to one output without a thru driver, so a
-        // second connection from the same input is refused rather than
-        // silently replacing the first.
+        let (source_index, destination_index) = (source.index, destination.index);
         if self
             .connections
             .iter()
-            .filter_map(|connection| self.graph.link(connection.link_id))
-            .any(|link| link.output_port == src)
+            .any(|connection| connection.source == src && connection.destination == dst)
         {
-            return Err(BackendError::unsupported(
-                "this MIDI input already drives an output; Windows routes one at a time",
-            ));
+            return Err(GraphError::DuplicateConnection(src, dst).into());
         }
 
-        let mut input = Audio::HMIDIIN::default();
-        let status = unsafe {
-            Audio::midiInOpen(
-                &mut input,
-                source.index,
-                None,
-                None,
-                Audio::MIDI_WAVE_OPEN_TYPE(0),
-            )
+        let input = self.open_input(src, source_index)?;
+        let output = match self.open_output(dst, destination_index) {
+            Ok(output) => output,
+            Err(error) => {
+                self.release_input(src);
+                return Err(error);
+            }
         };
-        if status != MM_OK {
-            return Err(mm_error("input open", status));
-        }
-        let mut output = Audio::HMIDIOUT::default();
-        let status = unsafe {
-            Audio::midiOutOpen(
-                &mut output,
-                destination.index,
-                None,
-                None,
-                Audio::MIDI_WAVE_OPEN_TYPE(0),
-            )
-        };
-        if status != MM_OK {
-            let _ = unsafe { Audio::midiInClose(input) };
-            return Err(mm_error("output open", status));
-        }
+
         let status = unsafe { Audio::midiConnect(Audio::HMIDI(input.0), output, None) };
         if status != MM_OK {
-            let _ = unsafe { Audio::midiOutClose(output) };
-            let _ = unsafe { Audio::midiInClose(input) };
+            self.release_output(dst);
+            self.release_input(src);
             return Err(mm_error("connect", status));
         }
-        // Nothing flows until the input is started.
+        // Nothing flows until the input is started. Starting an already
+        // started input is harmless, so this is safe to repeat per link.
         let status = unsafe { Audio::midiInStart(input) };
         if status != MM_OK {
             let _ = unsafe { Audio::midiDisconnect(Audio::HMIDI(input.0), output, None) };
-            let _ = unsafe { Audio::midiOutClose(output) };
-            let _ = unsafe { Audio::midiInClose(input) };
+            self.release_output(dst);
+            self.release_input(src);
             return Err(mm_error("input start", status));
         }
 
         let link_id = self.allocate_link();
-        let link = self.graph.add_link(link_id, src, dst)?;
-        self.connections.push(OpenConnection {
-            input,
-            output,
+        let link = match self.graph.add_link(link_id, src, dst) {
+            Ok(link) => link,
+            Err(error) => {
+                let _ = unsafe { Audio::midiDisconnect(Audio::HMIDI(input.0), output, None) };
+                self.release_output(dst);
+                self.release_input(src);
+                return Err(error.into());
+            }
+        };
+        self.connections.push(Connection {
             link_id,
+            source: src,
+            destination: dst,
         });
         Ok(link)
     }
@@ -495,8 +631,21 @@ impl GraphDriver for WindowsMidiDriver {
             .iter()
             .position(|connection| connection.link_id == link)
             .ok_or(GraphError::MissingLink(link))?;
-        // Dropping the connection disconnects and closes both handles.
-        drop(self.connections.remove(position));
+        let connection = self.connections.remove(position);
+        let input = self.inputs.get(&connection.source).map(|open| open.handle);
+        let output = self
+            .outputs
+            .get(&connection.destination)
+            .map(|open| open.handle);
+        if let (Some(input), Some(output)) = (input, output) {
+            unsafe {
+                let _ = Audio::midiDisconnect(Audio::HMIDI(input.0), output, None);
+            }
+        }
+        // Only the pairing goes; the handles stay open for whatever other
+        // connections are still using them.
+        self.release_input(connection.source);
+        self.release_output(connection.destination);
         Ok(self.graph.remove_link(link)?)
     }
 
@@ -652,6 +801,77 @@ mod tests {
             assert_eq!(node.ports.len(), 1, "{} has one MIDI port", node.name);
         }
         assert_eq!(driver.devices.len(), driver.graph().ports.len());
+    }
+
+    /// Regression: a fanned-out input used to be refused outright, on the
+    /// assumption that Windows routes one input to one output. Now the
+    /// handle is shared and counted, and this is the bookkeeping that makes
+    /// it work -- removing one branch must not close the handle the other
+    /// branches are still using.
+    #[test]
+    fn a_shared_handle_closes_only_when_its_last_connection_goes() {
+        let mut driver = WindowsMidiDriver::default();
+        let input = device_from_caps(0, DeviceKind::Input, "keys".into());
+        // Two connections out of one input, as a fan-out would create.
+        driver.inputs.insert(
+            input.port_id,
+            OpenDevice {
+                handle: Audio::HMIDIIN::default(),
+                users: 2,
+            },
+        );
+
+        driver.release_input(input.port_id);
+        assert!(
+            driver.inputs.contains_key(&input.port_id),
+            "the second branch still needs this input"
+        );
+
+        driver.release_input(input.port_id);
+        assert!(!driver.inputs.contains_key(&input.port_id));
+        // Releasing again is harmless: a disconnect that raced a device
+        // removal must not underflow the count.
+        driver.release_input(input.port_id);
+    }
+
+    #[test]
+    fn an_output_handle_is_shared_by_every_input_feeding_it() {
+        let mut driver = WindowsMidiDriver::default();
+        let output = device_from_caps(0, DeviceKind::Output, "synth".into());
+        driver.outputs.insert(
+            output.port_id,
+            OpenDevice {
+                handle: Audio::HMIDIOUT::default(),
+                users: 2,
+            },
+        );
+
+        driver.release_output(output.port_id);
+        assert!(driver.outputs.contains_key(&output.port_id));
+        driver.release_output(output.port_id);
+        assert!(!driver.outputs.contains_key(&output.port_id));
+    }
+
+    #[test]
+    fn the_same_pair_cannot_be_connected_twice() {
+        let mut driver = WindowsMidiDriver::default();
+        let input = device_from_caps(0, DeviceKind::Input, "keys".into());
+        let output = device_from_caps(0, DeviceKind::Output, "synth".into());
+        driver.devices.insert(input.port_id, input.clone());
+        driver.devices.insert(output.port_id, output.clone());
+        driver.connections.push(Connection {
+            link_id: LinkId(1),
+            source: input.port_id,
+            destination: output.port_id,
+        });
+
+        // Fan-out means several *different* destinations, not the same one
+        // twice; WinMM would happily double every note.
+        assert!(matches!(
+            driver.connect(input.port_id, output.port_id),
+            Err(BackendError::Graph(GraphError::DuplicateConnection(_, _)))
+        ));
+        assert_eq!(driver.fan_out_width(input.port_id), 1);
     }
 
     /// A MIDI link only runs input to output; anything else is refused rather
