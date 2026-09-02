@@ -554,6 +554,7 @@
   "status.redo_failed": "Error al rehacer: {error}",
   "status.refresh_failed": "Error al actualizar: {error}",
   "status.refreshed": "Se actualizaron {count} nodos",
+  "status.relay_pin_required": "Introduce el PIN de emparejamiento del anfitrión antes de conectar",
   "status.relay_session_invalid": "Sesión de relay no válida",
   "status.relay_target_required": "Introduce una dirección de relay antes de conectar",
   "status.restore_effect": "Could not restore effect: {error}",

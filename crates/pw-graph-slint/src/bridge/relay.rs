@@ -808,13 +808,18 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
                 return;
             }
         }
+        let pin = application.config.relay_client_pin.trim().to_owned();
+        if pin.is_empty() {
+            application.status = application.t("status.relay_pin_required");
+            return;
+        }
         if let Err(error) = configure_relay_identity(application) {
             application.status = application.tf("relay.error", &[("error", error)]);
             return;
         }
         match application.source.relay_connect(
             target,
-            application.config.relay_client_pin.trim(),
+            &pin,
             relay_roles(&application.config.relay_role),
         ) {
             Ok(session) => {
@@ -1479,6 +1484,8 @@ mod host_pin_tests {
     fn refresh_generates_a_new_pin() {
         let counter = std::cell::Cell::new(10);
         let mut pin = String::from("old-pin");
+        host_pin_on_start(&mut pin, counting_generator(&counter));
+        assert_eq!(pin, "old-pin");
         // Simulate regenerate: directly call generator
         pin = counting_generator(&counter)();
         assert_eq!(pin, "pin-11");

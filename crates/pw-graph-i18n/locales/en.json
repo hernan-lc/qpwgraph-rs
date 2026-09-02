@@ -554,6 +554,7 @@
   "status.redo_failed": "Redo failed: {error}",
   "status.refresh_failed": "Refresh failed: {error}",
   "status.refreshed": "Refreshed {count} nodes",
+  "status.relay_pin_required": "Enter the host's pairing PIN before connecting",
   "status.relay_session_invalid": "Invalid relay session",
   "status.relay_target_required": "Enter a relay address before connecting",
   "status.restore_effect": "Could not restore effect: {error}",
