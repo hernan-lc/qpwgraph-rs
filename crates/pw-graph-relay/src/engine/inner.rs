@@ -6,6 +6,11 @@
 //! reach a public API that would deadlock it.
 
 use super::*;
+use std::cell::RefCell;
+
+thread_local! {
+    static REALTIME_SNAPSHOT_CACHE: RefCell<Option<Arc<Vec<Arc<SessionRecord>>>>> = const { RefCell::new(None) };
+}
 
 pub(crate) struct EngineInner {
     pub(crate) config: Mutex<EngineConfig>,
@@ -13,6 +18,10 @@ pub(crate) struct EngineInner {
     /// Scratch used while summing the per-session receive queues.
     pub(crate) mix_scratch: Mutex<Vec<f32>>,
     pub(crate) sessions: Mutex<BTreeMap<SessionId, Arc<SessionRecord>>>,
+    /// Lock-free snapshot for realtime callbacks. Updated only when sessions
+    /// are inserted/removed (rare), read via try_lock plus thread-local cache
+    /// so a contended control-plane lock never turns audio into silence.
+    pub(crate) realtime_snapshot: Mutex<Arc<Vec<Arc<SessionRecord>>>>,
     /// Recent failed pairing attempts per source address. A PAKE makes
     /// guessing an online-only game; this is what makes that game slow.
     pub(crate) pairing_failures: Mutex<BTreeMap<IpAddr, FailureRecord>>,
@@ -57,6 +66,7 @@ impl EngineInner {
             // will ever present, so `mix_playback` never grows it. 64 KiB.
             mix_scratch: Mutex::new(Vec::with_capacity(MAX_REALTIME_QUANTUM_SAMPLES)),
             sessions: Mutex::new(BTreeMap::new()),
+            realtime_snapshot: Mutex::new(Arc::new(Vec::new())),
             pairing_failures: Mutex::new(BTreeMap::new()),
             trusted_peers: Mutex::new(trusted_peers),
             pending_handshakes: AtomicU64::new(0),
@@ -474,7 +484,13 @@ impl EngineInner {
         if sessions.contains_key(&record.id) || sessions.len() >= limit {
             return false;
         }
-        sessions.insert(record.id, record);
+        let id = record.id;
+        sessions.insert(id, Arc::clone(&record));
+        // Publish snapshot for realtime readers. This is rare (session
+        // insert) so a brief extra lock is not on the hot audio path.
+        if let Ok(mut snap) = self.realtime_snapshot.lock() {
+            *snap = Arc::new(sessions.values().cloned().collect());
+        }
         true
     }
 
@@ -532,20 +548,38 @@ impl EngineInner {
     /// per-session and stateful; its buffers are reused, so the realtime path
     /// does not allocate after warm-up.
     pub(crate) fn broadcast_capture(&self, samples: &[f32], realtime: bool) -> bool {
-        let sessions = if realtime {
-            let Ok(sessions) = self.sessions.try_lock() else {
-                return false;
-            };
-            sessions
+        // Realtime path avoids the global sessions mutex entirely by reading
+        // a pre-published snapshot. The snapshot is updated only on session
+        // insert/remove (rare), so try_lock almost always succeeds. On
+        // contention we reuse the thread-local cached snapshot rather than
+        // turning audio into silence.
+        let snapshot: Arc<Vec<Arc<SessionRecord>>> = if realtime {
+            match self.realtime_snapshot.try_lock() {
+                Ok(guard) => {
+                    let arc = Arc::clone(&*guard);
+                    REALTIME_SNAPSHOT_CACHE.with(|c| *c.borrow_mut() = Some(Arc::clone(&arc)));
+                    arc
+                }
+                Err(_) => {
+                    if let Some(cached) = REALTIME_SNAPSHOT_CACHE.with(|c| c.borrow().clone()) {
+                        cached
+                    } else {
+                        return false;
+                    }
+                }
+            }
         } else {
             let Ok(sessions) = self.sessions.lock() else {
                 return false;
             };
-            sessions
+            // Build a temporary snapshot for the non-realtime path to share
+            // the same iteration logic without holding the map lock across
+            // per-session work.
+            Arc::new(sessions.values().cloned().collect())
         };
         let mut accepted = true;
         let mut found = false;
-        for record in sessions.values().filter(|record| record.sending) {
+        for record in snapshot.iter().filter(|record| record.sending) {
             found = true;
             let converted = if realtime {
                 record.capture_convert.try_lock().ok()
@@ -595,21 +629,31 @@ impl EngineInner {
         if out.is_empty() {
             return 0;
         }
-        let sessions = if realtime {
-            let Ok(sessions) = self.sessions.try_lock() else {
-                return 0;
-            };
-            sessions
+        let snapshot: Arc<Vec<Arc<SessionRecord>>> = if realtime {
+            match self.realtime_snapshot.try_lock() {
+                Ok(guard) => {
+                    let arc = Arc::clone(&*guard);
+                    REALTIME_SNAPSHOT_CACHE.with(|c| *c.borrow_mut() = Some(Arc::clone(&arc)));
+                    arc
+                }
+                Err(_) => {
+                    if let Some(cached) = REALTIME_SNAPSHOT_CACHE.with(|c| c.borrow().clone()) {
+                        cached
+                    } else {
+                        return 0;
+                    }
+                }
+            }
         } else {
             let Ok(sessions) = self.sessions.lock() else {
                 return 0;
             };
-            sessions
+            Arc::new(sessions.values().cloned().collect())
         };
-        // Iterate the map directly. Collecting the receiving sessions into a
+        // Iterate the snapshot directly. Collecting the receiving sessions into a
         // `Vec` first — as this used to — allocated on the PipeWire process
         // callback, on a path whose entire contract is that it does not.
-        let mut receiving = sessions.values().filter(|record| record.receiving);
+        let mut receiving = snapshot.iter().filter(|record| record.receiving);
         let Some(first) = receiving.next() else {
             return 0;
         };
@@ -677,10 +721,18 @@ impl EngineInner {
     }
 
     pub(crate) fn remove_session(&self, id: SessionId) -> Option<Arc<SessionRecord>> {
-        let record = self.sessions.lock().ok()?.remove(&id);
-        if let Some(record) = &record {
-            record.stop.store(true, Ordering::Relaxed);
-        }
+        let record = {
+            let mut sessions = self.sessions.lock().ok()?;
+            let record = sessions.remove(&id);
+            if let Some(record) = &record {
+                record.stop.store(true, Ordering::Relaxed);
+            }
+            // Update realtime snapshot after removal.
+            if let Ok(mut snap) = self.realtime_snapshot.lock() {
+                *snap = Arc::new(sessions.values().cloned().collect());
+            }
+            record
+        };
         record
     }
 

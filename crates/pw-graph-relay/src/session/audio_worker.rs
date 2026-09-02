@@ -247,9 +247,11 @@ pub(super) fn run_rx_source(
     let local_frame_samples = (local.sample_rate as usize / 1000)
         * record.format.frame_ms as usize
         * local.channels as usize;
+    let incoming_frame = local_frame_samples.max(1);
+    record.incoming.set_frame_align(incoming_frame);
     record
         .incoming
-        .set_target_depth(local_frame_samples.max(1) * crate::PLAYBACK_DEPTH_FRAMES);
+        .set_target_depth(incoming_frame * crate::PLAYBACK_DEPTH_FRAMES);
     let mut decoder = match make_decoder(record.codec, record.format) {
         Ok(decoder) => decoder,
         Err(error) => {
@@ -499,9 +501,11 @@ pub(super) fn run_tx_source(
     request_realtime_thread();
     // Same reasoning as the receive side: captured audio that cannot be sent
     // promptly is better dropped than delivered late.
+    let outgoing_frame = record.format.frame_samples();
+    record.outgoing.set_frame_align(outgoing_frame);
     record
         .outgoing
-        .set_target_depth(record.format.frame_samples() * crate::CAPTURE_DEPTH_FRAMES);
+        .set_target_depth(outgoing_frame * crate::CAPTURE_DEPTH_FRAMES);
     let mut encoder = match make_encoder(record.codec, record.format) {
         Ok(encoder) => encoder,
         Err(error) => {

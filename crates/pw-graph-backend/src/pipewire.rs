@@ -1399,10 +1399,26 @@ impl RelayDriver for PipewireDriver {
     }
 
     fn relay_events(&mut self) -> Vec<RelayEvent> {
-        self.relay
+        let events = self
+            .relay
             .as_mut()
             .map(|set| set.handle().events())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Session readiness is the authoritative signal that audio workers
+        // are ready. When it arrives, the graph must be refreshed and the
+        // relay route reconciled/verified before the UI reports Connected.
+        // This makes the first connect work without requiring disconnect/reconnect.
+        if events
+            .iter()
+            .any(|e| matches!(e, RelayEvent::SessionEstablished { .. }))
+        {
+            let _ = self.with_loop(|driver| {
+                driver.rebuild_graph_locked()?;
+                driver.ensure_relay_playback_route_locked()?;
+                Ok(())
+            });
+        }
+        events
     }
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {
@@ -1657,13 +1673,33 @@ impl PipewireDriver {
         };
         let Some(((src_fl, src_fr), (sink_fl, sink_fr), sink_name, sink_serial)) = desired_opt
         else {
+            // Distinguish between "no sink yet" and "sink exists but FL/FR
+            // is ambiguous" — the latter must be Error, not WaitingForSink,
+            // so the UI does not silently create a swapped L/R route.
+            let has_source =
+                relay::RelayPlaybackRouter::find_relay_source_ports(&self.graph).is_some();
+            let has_sink = {
+                let relay = self.relay.as_ref().unwrap();
+                relay
+                    .router
+                    .find_target_sink(&self.graph, &registry.nodes)
+                    .is_some()
+            };
             let relay = self.relay.as_mut().unwrap();
-            if relay.router.state != relay::RelayPlaybackState::WaitingForSink {
-                eprintln!("Relay playback sink selected: waiting for output device");
+            if has_source && has_sink {
+                let msg = "Relay playback route failed: stereo channel mapping is ambiguous (missing FL/FR channel metadata)".to_string();
+                eprintln!("{msg}");
+                relay.router.state = relay::RelayPlaybackState::Error(msg);
+                relay.router.current_sink_name = None;
+                relay.router.current_sink_serial = None;
+            } else {
+                if relay.router.state != relay::RelayPlaybackState::WaitingForSink {
+                    eprintln!("Relay playback sink selected: waiting for output device");
+                }
+                relay.router.state = relay::RelayPlaybackState::WaitingForSink;
+                relay.router.current_sink_name = None;
+                relay.router.current_sink_serial = None;
             }
-            relay.router.state = relay::RelayPlaybackState::WaitingForSink;
-            relay.router.current_sink_name = None;
-            relay.router.current_sink_serial = None;
             return Ok(());
         };
 
@@ -1679,19 +1715,19 @@ impl PipewireDriver {
         let mut new_link_ids = Vec::new();
         let mut created = false;
         let mut error_msg: Option<String> = None;
-        for (out, inp) in desired {
-            if existing_pairs.contains(&(out, inp)) {
+        for (out, inp) in &desired {
+            if existing_pairs.contains(&(*out, *inp)) {
                 if let Some(link) = self
                     .graph
                     .links
                     .values()
-                    .find(|l| l.output_port == out && l.input_port == inp)
+                    .find(|l| l.output_port == *out && l.input_port == *inp)
                 {
                     new_link_ids.push(link.id.0);
                 }
                 continue;
             }
-            match self.connect_locked(out, inp) {
+            match self.connect_locked(*out, *inp) {
                 Ok(link) => {
                     new_link_ids.push(link.id.0);
                     created = true;
@@ -1721,9 +1757,37 @@ impl PipewireDriver {
                 .filter_map(|id| self.graph.link(LinkId(*id)).map(|l| l.id))
                 .collect()
         };
-        for link_id in stale {
-            let _ = self.disconnect_locked(link_id);
+        for link_id in &stale {
+            let _ = self.disconnect_locked(*link_id);
             eprintln!("Relay playback link removed (sink changed)");
+        }
+
+        // Transactional verification: refresh and verify both L/R links actually exist
+        // via stable endpoint check, not just cached IDs.
+        if created || !stale.is_empty() {
+            self.rebuild_graph_locked()?;
+        }
+        let verified = desired.iter().all(|(out, inp)| {
+            self.graph
+                .links
+                .values()
+                .any(|l| l.output_port == *out && l.input_port == *inp)
+        });
+        if !verified {
+            let relay = self.relay.as_mut().unwrap();
+            let msg = if desired.len() == 2 {
+                "Relay playback route failed: partial stereo route (only one channel linked)"
+                    .to_string()
+            } else {
+                "Relay playback route failed: link verification failed".to_string()
+            };
+            eprintln!("{msg}");
+            relay.router.state = relay::RelayPlaybackState::Error(msg);
+            relay.router.link_ids = new_link_ids;
+            // Keep current_sink as None to force retry on next reconciliation
+            relay.router.current_sink_name = None;
+            relay.router.current_sink_serial = None;
+            return Ok(());
         }
 
         let (prev_state_is_connected, sink_name_clone) = {

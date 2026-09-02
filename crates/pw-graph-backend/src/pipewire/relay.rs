@@ -475,6 +475,10 @@ impl RelayPlaybackRouter {
     }
 
     /// Find sink input ports (playback) for a sink node.
+    /// Never guesses FL/FR by port order. Requires explicit channel metadata
+    /// `FL`/`FR`; otherwise returns `None` so the router can surface
+    /// `AmbiguousChannelLayout` instead of wiring L/R incorrectly (e.g. Bluetooth
+    /// devices whose port order is not semantic order).
     pub fn find_sink_input_ports(graph: &Graph, sink_id: NodeId) -> Option<(PortId, PortId)> {
         let node = graph.node(sink_id)?;
         let sink_ports: Vec<(PortId, Option<String>, String)> = node
@@ -494,23 +498,25 @@ impl RelayPlaybackRouter {
         if sink_ports.is_empty() {
             return None;
         }
-        // Prefer channel metadata
+        // Mono sink: single audio sink port — duplicate mono to that port.
+        if sink_ports.len() == 1 {
+            let id = sink_ports[0].0;
+            return Some((id, id));
+        }
+        // Strict stereo: require explicit FL/FR channel metadata. Do not fall
+        // back to positional ordering which can silently swap L/R on
+        // Bluetooth/other devices.
         let fl = sink_ports
             .iter()
-            .find(|(_, ch, name)| ch.as_deref() == Some("FL") || name.contains("FL"))
-            .map(|(id, _, _)| *id)
-            .or_else(|| sink_ports.first().map(|(id, _, _)| *id))?;
+            .find(|(_, ch, _)| ch.as_deref() == Some("FL"))
+            .map(|(id, _, _)| *id)?;
         let fr = sink_ports
             .iter()
-            .find(|(_, ch, name)| ch.as_deref() == Some("FR") || name.contains("FR"))
-            .map(|(id, _, _)| *id)
-            .or_else(|| {
-                if sink_ports.len() > 1 {
-                    Some(sink_ports[1].0)
-                } else {
-                    Some(fl)
-                }
-            })?;
+            .find(|(_, ch, _)| ch.as_deref() == Some("FR"))
+            .map(|(id, _, _)| *id)?;
+        if fl == fr {
+            return None;
+        }
         Some((fl, fr))
     }
 

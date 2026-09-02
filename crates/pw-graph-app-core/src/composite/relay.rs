@@ -165,9 +165,24 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
     }
 
     fn relay_events(&mut self) -> Vec<pw_graph_backend::RelayEvent> {
-        self.relay_backend_mut()
+        let events = self
+            .relay_backend_mut()
             .map(|driver| driver.relay_events())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // When a session becomes ready the native graph (relay nodes/links)
+        // has changed. Merge it into the composite view so the first connect
+        // exposes a verified route without requiring a manual disconnect/reconnect.
+        if events
+            .iter()
+            .any(|e| matches!(e, pw_graph_backend::RelayEvent::SessionEstablished { .. }))
+        {
+            self.rebuild_after_native_mutation();
+            // Ensure the backend route was verified after the merged refresh.
+            if let Some(driver) = self.relay_backend_mut() {
+                let _ = driver.relay_ensure_playback_route();
+            }
+        }
+        events
     }
 
     fn relay_discovery_start(&mut self) -> BackendResult<()> {

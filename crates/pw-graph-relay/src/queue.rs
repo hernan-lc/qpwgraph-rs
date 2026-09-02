@@ -56,6 +56,10 @@ pub struct PcmQueue {
     capacity: usize,
     /// Working depth in samples; 0 means "capacity only".
     target_depth: AtomicUsize,
+    /// When non-zero, drops are rounded to whole frames.
+    frame_align: AtomicUsize,
+    /// Dropped samples due to overflow (for diagnostics).
+    drops: AtomicUsize,
 }
 
 impl PcmQueue {
@@ -65,7 +69,22 @@ impl PcmQueue {
             ready: Condvar::new(),
             capacity,
             target_depth: AtomicUsize::new(0),
+            frame_align: AtomicUsize::new(0),
+            drops: AtomicUsize::new(0),
         }
+    }
+
+    /// Set frame alignment for whole-frame drops. 0 disables alignment.
+    pub fn set_frame_align(&self, samples: usize) {
+        self.frame_align.store(samples, Ordering::Relaxed);
+    }
+
+    pub fn frame_align(&self) -> usize {
+        self.frame_align.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped_samples(&self) -> usize {
+        self.drops.load(Ordering::Relaxed)
     }
 
     /// Set the working depth in samples. Pushes trim the oldest audio down to
@@ -95,11 +114,15 @@ impl PcmQueue {
     /// completeness when a consumer stalls.
     pub fn push(&self, samples: &[f32]) {
         let limit = self.limit();
-        {
+        let align = self.frame_align.load(Ordering::Relaxed);
+        let dropped = {
             let Ok(mut queue) = self.inner.lock() else {
                 return;
             };
-            push_locked(&mut queue, samples, limit);
+            push_locked(&mut queue, samples, limit, align)
+        };
+        if dropped > 0 {
+            self.drops.fetch_add(dropped, Ordering::Relaxed);
         }
         self.ready.notify_one();
     }
@@ -114,11 +137,15 @@ impl PcmQueue {
     /// about the platform's condition-variable implementation.
     pub fn try_push(&self, samples: &[f32]) -> bool {
         let limit = self.limit();
-        {
+        let align = self.frame_align.load(Ordering::Relaxed);
+        let dropped = {
             let Ok(mut queue) = self.inner.try_lock() else {
                 return false;
             };
-            push_locked(&mut queue, samples, limit);
+            push_locked(&mut queue, samples, limit, align)
+        };
+        if dropped > 0 {
+            self.drops.fetch_add(dropped, Ordering::Relaxed);
         }
         self.ready.notify_one();
         true
@@ -195,29 +222,46 @@ fn drain_into(queue: &mut VecDeque<f32>, out: &mut [f32]) -> usize {
     count
 }
 
-fn push_locked(queue: &mut VecDeque<f32>, samples: &[f32], limit: usize) {
+#[allow(clippy::manual_div_ceil, clippy::manual_checked_ops)]
+fn push_locked(queue: &mut VecDeque<f32>, samples: &[f32], limit: usize, align: usize) -> usize {
     if limit == 0 {
+        let dropped = queue.len();
         queue.clear();
-        return;
+        return dropped;
     }
     if samples.len() >= limit {
         // An oversized write keeps only its tail; history would be stale.
+        // When frame alignment is set, keep only whole frames from the tail.
+        let keep = if align > 0 {
+            (limit / align) * align
+        } else {
+            limit
+        };
+        let dropped = queue.len() + samples.len().saturating_sub(keep);
         queue.clear();
-        queue.extend(samples.iter().copied().skip(samples.len() - limit));
-        return;
+        let skip = samples.len().saturating_sub(keep);
+        queue.extend(samples.iter().copied().skip(skip));
+        debug_assert!(queue.len() <= limit);
+        return dropped;
     }
     // Remove old samples before extending. Since `limit` is never larger than
     // the VecDeque's initial capacity, this makes capacity growth impossible
     // even when a push straddles the ring-buffer's physical end.
-    let drop_count = queue
+    let mut drop_count = queue
         .len()
         .saturating_add(samples.len())
         .saturating_sub(limit);
+    if align > 0 && drop_count > 0 {
+        // Round up to whole frames so we never cut through a frame.
+        drop_count = drop_count.div_ceil(align) * align;
+        drop_count = drop_count.min(queue.len());
+    }
     for _ in 0..drop_count {
         queue.pop_front();
     }
     queue.extend(samples.iter().copied());
     debug_assert!(queue.len() <= limit);
+    drop_count
 }
 
 #[cfg(test)]

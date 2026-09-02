@@ -166,9 +166,11 @@ pub enum JitterPop {
     Lost,
 }
 
-/// Smallest reorder tolerance: one frame must be queued past a gap before
-/// the gap counts as a loss.
-const MIN_LOOKAHEAD: usize = 1;
+/// Smallest reorder tolerance: two frames must be queued past a gap before
+/// the gap counts as a loss. One-frame tolerance declares genuine reordering
+/// (N+1 arriving before N) as false loss, causing PLC for a packet that was
+/// merely reordered.
+const MIN_LOOKAHEAD: usize = 2;
 /// Largest reorder tolerance. Each step costs one frame of concealment delay
 /// on a genuinely lost packet, so the ceiling stays low.
 const MAX_LOOKAHEAD: usize = 4;
@@ -516,9 +518,11 @@ mod tests {
         let mut buffer = JitterBuffer::new(1);
         assert!(buffer.push(0, vec![0]));
         assert!(buffer.push(2, vec![2]));
+        assert!(buffer.push(3, vec![3]));
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
         assert_eq!(buffer.pop(), JitterPop::Lost);
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![3]));
         // A late duplicate of frame 1 is dropped, not replayed.
         assert!(!buffer.push(1, vec![1]));
         assert_eq!(buffer.frames_dropped_late, 1);
@@ -530,10 +534,12 @@ mod tests {
         assert_eq!(buffer.lookahead(), MIN_LOOKAHEAD);
         assert!(buffer.push(0, vec![0]));
         assert!(buffer.push(2, vec![2]));
+        assert!(buffer.push(3, vec![3]));
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
-        // One frame queued past the gap is enough at the minimum tolerance.
+        // Two frames queued past the gap are needed at the minimum tolerance 2.
         assert_eq!(buffer.pop(), JitterPop::Lost);
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![3]));
         // Frame 1 finally shows up too late; the link has proven it reorders.
         assert!(!buffer.push(1, vec![1]));
         assert_eq!(buffer.lookahead(), MIN_LOOKAHEAD + 1);
@@ -544,22 +550,24 @@ mod tests {
         let mut buffer = JitterBuffer::new(1);
         assert!(buffer.push(0, vec![0]));
         assert!(buffer.push(2, vec![2]));
+        assert!(buffer.push(3, vec![3]));
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
         assert_eq!(buffer.pop(), JitterPop::Lost);
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
-        assert!(!buffer.push(1, vec![1]));
-        assert_eq!(buffer.lookahead(), 2);
-
-        // With tolerance 2, a single frame past the gap no longer triggers
-        // concealment: frame 4 alone leaves frame 3 a chance to arrive.
-        assert!(buffer.push(4, vec![4]));
-        assert_eq!(buffer.pop(), JitterPop::Buffering);
-        assert!(buffer.push(3, vec![3]));
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![3]));
+        assert!(!buffer.push(1, vec![1]));
+        assert_eq!(buffer.lookahead(), 3);
+
+        // With tolerance 3, a single frame past the gap no longer triggers
+        // concealment: 5 alone leaves 4 a chance to arrive.
+        assert!(buffer.push(5, vec![5]));
+        assert_eq!(buffer.pop(), JitterPop::Buffering);
+        assert!(buffer.push(4, vec![4]));
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![4]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![5]));
         assert_eq!(
             buffer.frames_lost, 1,
-            "frame 3 was recovered, not concealed"
+            "frame 4 was recovered, not concealed"
         );
     }
 
@@ -568,13 +576,15 @@ mod tests {
         let mut buffer = JitterBuffer::new(1);
         assert!(buffer.push(0, vec![0]));
         assert!(buffer.push(2, vec![2]));
+        assert!(buffer.push(3, vec![3]));
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![0]));
         assert_eq!(buffer.pop(), JitterPop::Lost);
         assert_eq!(buffer.pop(), JitterPop::Frame(vec![2]));
+        assert_eq!(buffer.pop(), JitterPop::Frame(vec![3]));
         assert!(!buffer.push(1, vec![1]));
-        assert_eq!(buffer.lookahead(), 2);
+        assert_eq!(buffer.lookahead(), 3);
 
-        for sequence in 3..(3 + LOOKAHEAD_DECAY_POPS) {
+        for sequence in 4..(4 + LOOKAHEAD_DECAY_POPS) {
             assert!(buffer.push(sequence, vec![0]));
             assert!(matches!(buffer.pop(), JitterPop::Frame(_)));
         }
