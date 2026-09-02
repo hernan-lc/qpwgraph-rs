@@ -1,7 +1,120 @@
 <resources>
+    <!-- App -->
     <string name="relay_app_title">qpwgraph Relay</string>
+    <string name="relay_app_subtitle">Use your Android device as a relay microphone, speaker, or both.</string>
     <string name="relay_notification_channel">Relay audio</string>
     <string name="relay_notification_active">Relay audio is active</string>
+
+    <!-- Navigation -->
+    <string name="nav_receiver">Receiver</string>
+    <string name="nav_receiver_desc">Receive audio — connect to a relay host</string>
+    <string name="nav_emitter">Emitter</string>
+    <string name="nav_emitter_desc">Emit audio — run a relay host</string>
+    <string name="nav_discover">Discover</string>
+    <string name="nav_discover_desc">Find relay hosts on the local network</string>
+
+    <!-- Common -->
+    <string name="action_connect">Connect</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_forget">Forget</string>
+    <string name="action_start">Start</string>
+    <string name="action_stop">Stop</string>
+    <string name="label_status">Status</string>
+    <string name="label_level">Level: %1$d%%</string>
+    <string name="label_host">Host: %1$s</string>
+    <string name="label_session">Session: %1$d</string>
+    <string name="label_connected_via">Connected via %1$s (%2$s)</string>
+    <string name="label_reconnecting_audio">Reconnecting audio</string>
+    <string name="label_unknown_link">unknown link</string>
+
+    <!-- Receiver tab -->
+    <string name="receiver_host_address_label">Host address</string>
+    <string name="receiver_host_address_hint">192.168.1.20:48123</string>
+    <string name="receiver_host_address_tooltip">IP and port of the desktop relay host. Use Scan QR to fill automatically.</string>
+    <string name="receiver_pin_label">Pairing PIN</string>
+    <string name="receiver_pin_tooltip">Six-digit PIN set on the relay host. Required for first pairing.</string>
+    <string name="receiver_role_label">Role</string>
+    <string name="receiver_role_tooltip">Direction of audio relative to this phone.</string>
+    <string name="receiver_role_emit">Emit microphone</string>
+    <string name="receiver_role_receive">Receive playback</string>
+    <string name="receiver_role_both">Both</string>
+    <string name="receiver_codec_label">Codec</string>
+    <string name="receiver_codec_tooltip">Opus is compressed and resilient; PCM is uncompressed.</string>
+    <string name="receiver_link_label">Link</string>
+    <string name="receiver_link_tooltip">Network path. Auto prefers a USB tether when present.</string>
+    <string name="receiver_trusted_auto_title">Automatically reconnect trusted devices</string>
+    <string name="receiver_trusted_auto_tooltip">When enabled, the app reconnects to previously paired hosts without asking for PIN again.</string>
+    <string name="receiver_trusted_wifi_title">Allow trusted Wi-Fi reconnect</string>
+    <string name="receiver_trusted_wifi_tooltip">USB tethering is always allowed. Enable this to also auto-reconnect over Wi-Fi.</string>
+    <string name="receiver_trusted_hint">USB tethering is enabled by default; LAN, Wi-Fi, and ADB remain opt-in.</string>
+    <string name="receiver_scan_qr">Scan QR</string>
+    <string name="receiver_scan_qr_tooltip">Open camera to scan the desktop host QR code.</string>
+
+    <!-- Link options -->
+    <string name="link_auto">Auto</string>
+    <string name="link_wifi">Wi-Fi</string>
+    <string name="link_bluetooth_pan">Bluetooth PAN</string>
+    <string name="link_lan">LAN</string>
+    <string name="link_adb">ADB forwarding</string>
+
+    <!-- Trusted devices -->
+    <string name="trusted_devices_title">Trusted devices</string>
+    <string name="trusted_devices_empty">No trusted devices yet. Pair with a host to remember it.</string>
+    <string name="trusted_devices_tooltip">Devices you have paired with. Stored credentials are encrypted with Android Keystore.</string>
+
+    <!-- Emitter tab -->
+    <string name="emitter_device_name_label">Device name</string>
+    <string name="emitter_device_name_tooltip">Name advertised during discovery.</string>
+    <string name="emitter_pin_label">Pairing PIN</string>
+    <string name="emitter_port_label">Control port</string>
+    <string name="emitter_port_tooltip">TCP port the relay host listens on. Default 48123 is probed over USB.</string>
+    <string name="emitter_codec_label">Codec</string>
+    <string name="emitter_link_label">Link</string>
+    <string name="emitter_capture_source_label">Capture source</string>
+    <string name="emitter_capture_microphone">Microphone</string>
+    <string name="emitter_capture_playback">Device playback</string>
+    <string name="emitter_capture_tooltip">Microphone captures physical mic; device playback captures system audio (Android 10+).</string>
+    <string name="emitter_playback_hint">Device playback capture requires audio-recording permission but captures system audio instead of the microphone. You will be asked to allow screen/audio capture.</string>
+    <string name="emitter_grant_consent">Grant capture consent</string>
+    <string name="emitter_start_host">Start host</string>
+    <string name="emitter_stop_host">Stop host</string>
+    <string name="emitter_host_status">Host: %1$s  •  Audio: %2$s</string>
+    <string name="emitter_listening_port">Listening on port %1$d</string>
+    <string name="emitter_level">Level: %1$d%%</string>
+    <string name="emitter_capture_label">Capture: %1$s</string>
+    <string name="emitter_reachable_title">Reachable at</string>
+    <string name="emitter_reachable_tooltip">Address clients should connect to. Share via QR on desktop.</string>
+    <string name="emitter_active_sessions">Active sessions</string>
+    <string name="emitter_regenerate_pin_desc">Generate a new random PIN</string>
+
+    <!-- Discover tab -->
+    <string name="discover_start">Start discovery</string>
+    <string name="discover_stop">Stop discovery</string>
+    <string name="discover_start_tooltip">Browse for hosts via mDNS and USB subnet probes.</string>
+    <string name="discover_empty">No relay hosts found yet. Keep discovery running while the host advertises; USB tethers are scanned automatically.</string>
+    <string name="discover_connect">Connect</string>
+    <string name="discover_connect_tooltip">Adopt this host address and switch to Receiver.</string>
+
+    <!-- USB banner -->
+    <string name="relay_usb_detected">USB tethering detected: %1$s · %2$s — preferred automatically</string>
+    <string name="relay_usb_none">No USB tether detected. For an ADB-only cable, select ADB forwarding and configure adb reverse/forward; otherwise use Wi-Fi/LAN.</string>
+    <string name="relay_usb_tooltip">When a USB tether is active it is automatically preferred over Wi-Fi.</string>
+
+    <!-- QR scanner -->
+    <string name="qr_scanner_title">Scan QR code</string>
+    <string name="qr_scanner_cancel">Cancel</string>
+    <string name="relay_qr_applied">Filled %1$s from the QR code</string>
+    <string name="relay_qr_invalid">That QR code is not a relay address</string>
+
+    <!-- Alerts / validation -->
+    <string name="alert_info">Info</string>
+    <string name="alert_success">Success</string>
+    <string name="alert_warning">Warning</string>
+    <string name="alert_error">Error</string>
+    <string name="alert_dismiss">Dismiss</string>
+
+    <!-- Existing relay messages (kept for ViewModel) -->
     <string name="relay_validation_missing_target">Enter a host address.</string>
     <string name="relay_connecting">Connecting…</string>
     <string name="relay_trusted_connecting">Reconnecting to trusted relay…</string>
@@ -32,7 +145,9 @@
     <string name="relay_discovery_started">Discovery started</string>
     <string name="relay_discovery_multicast_unavailable">Wi-Fi multicast access is unavailable; USB discovery remains active.</string>
     <string name="relay_discovery_stopped">Discovery stopped</string>
-    <string name="relay_usb_detected">USB tethering detected: %1$s · %2$s — preferred automatically</string>
-    <string name="relay_qr_applied">Filled %1$s from the QR code</string>
-    <string name="relay_qr_invalid">That QR code is not a relay address</string>
+
+    <!-- Accessibility -->
+    <string name="cd_info">More information</string>
+    <string name="cd_dropdown">Dropdown</string>
+    <string name="cd_level_meter">Audio level meter</string>
 </resources>

@@ -26,25 +26,44 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Cable
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Speaker
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,27 +85,36 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import io.qpwgraph.relay.ui.components.AlertSeverity
+import io.qpwgraph.relay.ui.components.AppAlert
+import io.qpwgraph.relay.ui.components.AppTooltip
+import io.qpwgraph.relay.ui.components.InfoTooltip
+import io.qpwgraph.relay.ui.components.SectionCard
+import io.qpwgraph.relay.ui.theme.QpwRelayTheme
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Link options offered in the UI. USB is auto-detected; ADB is an explicit
- * localhost TCP-forwarding mode and requires `adb reverse`/`adb forward`. */
 private val LINK_OPTIONS = listOf("auto", "wifi", "bluetooth", "lan", "adb")
-private val LINK_DISPLAY = mapOf(
-    "auto" to "Auto",
-    "wifi" to "Wi-Fi",
-    "bluetooth" to "Bluetooth PAN",
-    "lan" to "LAN",
-    "adb" to "ADB forwarding",
+
+@Composable
+private fun linkDisplayMap(): Map<String, String> = mapOf(
+    "auto" to stringResource(R.string.link_auto),
+    "wifi" to stringResource(R.string.link_wifi),
+    "bluetooth" to stringResource(R.string.link_bluetooth_pan),
+    "lan" to stringResource(R.string.link_lan),
+    "adb" to stringResource(R.string.link_adb),
 )
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { RelayApp() }
+        setContent {
+            QpwRelayTheme { RelayApp() }
+        }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
     val context = LocalContext.current
@@ -95,6 +123,20 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
     var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingMicrophonePermission by remember { mutableStateOf(false) }
     var pendingHostAction by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Surface transient ViewModel messages in Snackbar as well as inline alerts.
+    LaunchedEffect(state.message) {
+        if (state.message.isNotBlank() && state.connection == RelayConnectionState.Error) {
+            snackbarHostState.showSnackbar(state.message)
+        }
+    }
+    LaunchedEffect(state.hostMessage) {
+        if (state.hostMessage.isNotBlank() && state.hostState == RelayHostState.Error) {
+            snackbarHostState.showSnackbar(state.hostMessage)
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissions ->
@@ -108,9 +150,6 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
         if (needsMicrophone && !microphoneGranted) {
             viewModel.permissionDenied(hostAction)
         } else {
-            // Notification permission is intentionally non-fatal: foreground
-            // service startup is still attempted on API 33+ when the user
-            // declines notifications.
             action?.invoke()
         }
     }
@@ -118,7 +157,6 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         viewModel.onMediaProjectionResult(result.resultCode, result.data)
-        // After consent, retry host start if we have the audio permission already.
         val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (result.resultCode == Activity.RESULT_OK && hasAudio) {
             viewModel.startHost()
@@ -126,9 +164,7 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
     }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) showScanner = true
-    }
+    ) { granted -> if (granted) showScanner = true }
 
     fun runWithServicePermissions(
         requiresMicrophone: Boolean,
@@ -152,65 +188,80 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
     }
 
     fun openScanner() {
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.CAMERA,
-        ) == PackageManager.PERMISSION_GRANTED
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         if (granted) showScanner = true
         else cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    MaterialTheme {
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(stringResource(R.string.relay_app_title), style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            stringResource(R.string.relay_app_subtitle),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("qpwgraph Relay", style = MaterialTheme.typography.headlineMedium)
-            Text("Use your Android device as a relay microphone, speaker, or both.")
             RelayTabs(mode = state.mode, onSelected = viewModel::setMode)
-            UsbStatus(link = state.usbLink)
+            UsbStatusBanner(link = state.usbLink)
+
+            // Global inline alert for current operation error
+            val globalError = when (state.mode) {
+                RelayMode.Receiver -> if (state.connection == RelayConnectionState.Error) state.message else ""
+                RelayMode.Emitter -> if (state.hostState == RelayHostState.Error) state.hostMessage else ""
+                RelayMode.Discover -> if (state.discoveryMessage.isNotBlank() && state.peers.isEmpty()) state.discoveryMessage else ""
+            }
+            val globalSeverity = when (state.mode) {
+                RelayMode.Receiver -> if (state.connection == RelayConnectionState.Error) AlertSeverity.Error else AlertSeverity.Info
+                RelayMode.Emitter -> if (state.hostState == RelayHostState.Error) AlertSeverity.Error else AlertSeverity.Info
+                else -> AlertSeverity.Info
+            }
+            if (globalError.isNotBlank() && state.mode != RelayMode.Discover) {
+                AppAlert(message = globalError, severity = globalSeverity)
+            }
+
             when (state.mode) {
                 RelayMode.Receiver -> ReceiverTab(
-                    state,
-                    viewModel,
+                    state, viewModel,
                     connectWithPermission = {
-                        runWithServicePermissions(
-                            clientNeedsMicrophone(state.settings.role),
-                            host = false,
-                            action = viewModel::connect,
-                        )
+                        runWithServicePermissions(clientNeedsMicrophone(state.settings.role), host = false, action = viewModel::connect)
                     },
                     openScanner = ::openScanner,
                 )
                 RelayMode.Emitter -> EmitterTab(
-                    state,
-                    viewModel,
+                    state, viewModel,
                     startHost = {
                         val source = state.host.captureSource
                         if (source == CaptureSource.DEVICE_PLAYBACK) {
-                            // Playback capture requires RECORD_AUDIO + MediaProjection consent.
-                            // RECORD_AUDIO is still required but does NOT imply microphone use.
-                            runWithServicePermissions(
-                                requiresMicrophone = true,
-                                host = true,
-                                action = {
-                                    if (viewModel.hasMediaProjectionConsent()) {
-                                        viewModel.startHost()
-                                    } else {
-                                        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                                        mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
-                                    }
-                                },
-                            )
+                            runWithServicePermissions(requiresMicrophone = true, host = true, action = {
+                                if (viewModel.hasMediaProjectionConsent()) viewModel.startHost()
+                                else {
+                                    val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                                    mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+                                }
+                            })
                         } else {
-                            runWithServicePermissions(
-                                requiresMicrophone = true,
-                                host = true,
-                                action = viewModel::startHost,
-                            )
+                            runWithServicePermissions(requiresMicrophone = true, host = true, action = viewModel::startHost)
                         }
                     },
                     requestPlaybackConsent = {
@@ -219,26 +270,19 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
                     },
                 )
                 RelayMode.Discover -> DiscoverTab(
-                    state,
-                    viewModel,
+                    state, viewModel,
                     connectToPeer = { address ->
-                        runWithServicePermissions(
-                            clientNeedsMicrophone(state.settings.role),
-                            host = false,
-                            action = { viewModel.connectToPeer(address) },
-                        )
+                        runWithServicePermissions(clientNeedsMicrophone(state.settings.role), host = false, action = { viewModel.connectToPeer(address) })
                     },
                 )
             }
             TrustedDevicesCard(state, viewModel)
+            Spacer(Modifier.height(8.dp))
         }
     }
     if (showScanner) {
         QrScannerDialog(
-            onDetected = { value ->
-                showScanner = false
-                viewModel.applyScannedQr(value)
-            },
+            onDetected = { value -> showScanner = false; viewModel.applyScannedQr(value) },
             onDismiss = { showScanner = false },
         )
     }
@@ -247,40 +291,42 @@ private fun RelayApp(viewModel: RelayViewModel = viewModel()) {
 @Composable
 private fun RelayTabs(mode: RelayMode, onSelected: (RelayMode) -> Unit) {
     val tabs = listOf(
-        "Receiver" to RelayMode.Receiver,
-        "Emitter" to RelayMode.Emitter,
-        "Discover" to RelayMode.Discover,
+        Triple(stringResource(R.string.nav_receiver), RelayMode.Receiver, Icons.Outlined.Mic),
+        Triple(stringResource(R.string.nav_emitter), RelayMode.Emitter, Icons.Outlined.Speaker),
+        Triple(stringResource(R.string.nav_discover), RelayMode.Discover, Icons.Outlined.Search),
     )
     TabRow(selectedTabIndex = tabs.indexOfFirst { it.second == mode }.coerceAtLeast(0)) {
-        tabs.forEach { (label, tabMode) ->
+        tabs.forEach { (label, tabMode, icon) ->
             Tab(
                 selected = mode == tabMode,
                 onClick = { onSelected(tabMode) },
-                text = { Text(label) },
+                text = { Text(label, style = MaterialTheme.typography.labelLarge) },
+                icon = { Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp)) },
             )
         }
     }
 }
 
 @Composable
-private fun UsbStatus(link: UsbLinkInfo?) {
+private fun UsbStatusBanner(link: UsbLinkInfo?) {
     if (link != null) {
-        Text(
-            stringResource(R.string.relay_usb_detected, link.name, link.addr),
-            style = MaterialTheme.typography.bodySmall,
+        AppAlert(
+            message = stringResource(R.string.relay_usb_detected, link.name, link.addr),
+            severity = AlertSeverity.Success,
+            title = stringResource(R.string.link_auto),
         )
     } else {
-        Text(
-            "No USB tether network detected. For an ADB-only cable, select ADB forwarding and configure adb reverse/forward; otherwise use Wi-Fi/LAN.",
-            style = MaterialTheme.typography.bodySmall,
+        AppAlert(
+            message = stringResource(R.string.relay_usb_none),
+            severity = AlertSeverity.Info,
         )
     }
 }
 
-/** Camera preview that decodes QR codes and reports the first payload. */
-// `ImageProxy.image` is CameraX's experimental accessor; ML Kit's
-// `InputImage.fromMediaImage` is the documented consumer for it. Opt in
-// explicitly rather than silencing the lint.
+// ------------------------------------------------------------------
+// Scanner
+// ------------------------------------------------------------------
+
 @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 @Composable
 private fun QrScannerDialog(onDetected: (String) -> Unit, onDismiss: () -> Unit) {
@@ -288,30 +334,15 @@ private fun QrScannerDialog(onDetected: (String) -> Unit, onDismiss: () -> Unit)
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     val scanner = remember {
-        BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .build(),
-        )
+        BarcodeScanning.getClient(BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build())
     }
     val detected = remember { AtomicBoolean(false) }
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     DisposableEffect(Unit) {
-        onDispose {
-            cameraProvider?.unbindAll()
-            executor.shutdown()
-            scanner.close()
-        }
+        onDispose { cameraProvider?.unbindAll(); executor.shutdown(); scanner.close() }
     }
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(320.dp)
-                .clip(RoundedCornerShape(16.dp)),
-        ) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(modifier = Modifier.size(320.dp).clip(RoundedCornerShape(16.dp))) {
             AndroidView(
                 factory = { ctx ->
                     PreviewView(ctx).also { previewView ->
@@ -319,54 +350,35 @@ private fun QrScannerDialog(onDetected: (String) -> Unit, onDismiss: () -> Unit)
                         future.addListener({
                             val provider = future.get()
                             cameraProvider = provider
-                            val preview = Preview.Builder().build().also { built ->
-                                built.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            val analysis = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(
-                                    ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST,
-                                )
-                                .build()
+                            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                            val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                             analysis.setAnalyzer(executor) { proxy ->
                                 val image = proxy.image
-                                if (image == null || detected.get()) {
-                                    proxy.close()
-                                    return@setAnalyzer
-                                }
-                                val input = InputImage.fromMediaImage(
-                                    image,
-                                    proxy.imageInfo.rotationDegrees,
-                                )
+                                if (image == null || detected.get()) { proxy.close(); return@setAnalyzer }
+                                val input = InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees)
                                 scanner.process(input)
                                     .addOnSuccessListener { codes ->
                                         val value = codes.firstNotNullOfOrNull { it.rawValue }
-                                        if (value != null && detected.compareAndSet(false, true)) {
-                                            onDetected(value)
-                                        }
+                                        if (value != null && detected.compareAndSet(false, true)) onDetected(value)
                                     }
                                     .addOnCompleteListener { proxy.close() }
                             }
                             provider.unbindAll()
-                            provider.bindToLifecycle(
-                                lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
-                                analysis,
-                            )
+                            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                         }, ContextCompat.getMainExecutor(ctx))
                     }
-                },
-                modifier = Modifier.fillMaxSize(),
+                }, modifier = Modifier.fillMaxSize(),
             )
-            TextButton(
-                onClick = onDismiss,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            ) {
-                Text("Cancel")
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.BottomCenter)) {
+                Text(stringResource(R.string.action_cancel))
             }
         }
     }
 }
+
+// ------------------------------------------------------------------
+// Receiver
+// ------------------------------------------------------------------
 
 @Composable
 private fun ReceiverTab(
@@ -375,152 +387,155 @@ private fun ReceiverTab(
     connectWithPermission: () -> Unit,
     openScanner: () -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    val linkDisplay = linkDisplayMap()
+    SectionCard(title = stringResource(R.string.receiver_host_address_label), tooltip = stringResource(R.string.receiver_host_address_tooltip)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+            OutlinedTextField(
+                value = state.settings.target,
+                onValueChange = { viewModel.update(state.settings.copy(target = it)) },
+                label = { Text(stringResource(R.string.receiver_host_address_label)) },
+                placeholder = { Text(stringResource(R.string.receiver_host_address_hint)) },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+            )
+            AppTooltip(text = stringResource(R.string.receiver_scan_qr_tooltip)) {
+                OutlinedButton(onClick = openScanner, modifier = Modifier.padding(top = 8.dp)) {
+                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(stringResource(R.string.receiver_scan_qr))
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         OutlinedTextField(
-            value = state.settings.target,
-            onValueChange = { viewModel.update(state.settings.copy(target = it)) },
-            label = { Text("Host address") },
-            placeholder = { Text("192.168.1.20:48123") },
-            modifier = Modifier.weight(1f),
+            value = state.settings.pin,
+            onValueChange = { viewModel.update(state.settings.copy(pin = it)) },
+            label = { Text(stringResource(R.string.receiver_pin_label)) },
+            modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
-        OutlinedButton(onClick = openScanner, modifier = Modifier.padding(top = 8.dp)) {
-            Text("Scan QR")
-        }
-    }
-    OutlinedTextField(
-        value = state.settings.pin,
-        onValueChange = { viewModel.update(state.settings.copy(pin = it)) },
-        label = { Text("Pairing PIN") },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-    )
-    DropdownField(
-        label = "Role",
-        value = state.settings.role,
-        options = listOf("emit", "receive", "both"),
-        display = mapOf(
-            "emit" to "Emit microphone",
-            "receive" to "Receive playback",
-            "both" to "Both",
-        ),
-        onSelected = { viewModel.update(state.settings.copy(role = it)) },
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(8.dp))
         DropdownField(
-            label = "Codec",
-            value = state.settings.codec,
-            options = listOf("opus", "pcm"),
-            onSelected = { viewModel.update(state.settings.copy(codec = it)) },
-            modifier = Modifier.weight(1f),
+            label = stringResource(R.string.receiver_role_label),
+            value = state.settings.role,
+            options = listOf("emit", "receive", "both"),
+            display = mapOf(
+                "emit" to stringResource(R.string.receiver_role_emit),
+                "receive" to stringResource(R.string.receiver_role_receive),
+                "both" to stringResource(R.string.receiver_role_both),
+            ),
+            tooltip = stringResource(R.string.receiver_role_tooltip),
+            onSelected = { viewModel.update(state.settings.copy(role = it)) },
         )
-        DropdownField(
-            label = "Link",
-            value = state.settings.transport,
-            options = LINK_OPTIONS,
-            display = LINK_DISPLAY,
-            onSelected = { viewModel.update(state.settings.copy(transport = it)) },
-            modifier = Modifier.weight(1f),
-        )
-    }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Automatically reconnect trusted devices")
-                Switch(
-                    checked = state.settings.autoConnectTrusted,
-                    onCheckedChange = { enabled ->
-                        viewModel.update(state.settings.copy(autoConnectTrusted = enabled))
-                    },
-                )
-            }
-            if (state.settings.autoConnectTrusted) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Allow trusted Wi-Fi reconnect")
-                    Switch(
-                        checked = state.settings.autoConnectTrustedWifi,
-                        onCheckedChange = { enabled ->
-                            viewModel.update(
-                                state.settings.copy(autoConnectTrustedWifi = enabled),
-                            )
-                        },
-                    )
-                }
-                Text(
-                    "USB tethering is enabled by default; LAN, Wi-Fi, and ADB remain opt-in.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DropdownField(
+                label = stringResource(R.string.receiver_codec_label),
+                value = state.settings.codec,
+                options = listOf("opus", "pcm"),
+                tooltip = stringResource(R.string.receiver_codec_tooltip),
+                onSelected = { viewModel.update(state.settings.copy(codec = it)) },
+                modifier = Modifier.weight(1f),
+            )
+            DropdownField(
+                label = stringResource(R.string.receiver_link_label),
+                value = state.settings.transport,
+                options = LINK_OPTIONS,
+                display = linkDisplay,
+                tooltip = stringResource(R.string.receiver_link_tooltip),
+                onSelected = { viewModel.update(state.settings.copy(transport = it)) },
+                modifier = Modifier.weight(1f),
+            )
         }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (state.connection == RelayConnectionState.Connected ||
-            state.connection == RelayConnectionState.Connecting
-        ) {
-            Button(onClick = viewModel::disconnect, modifier = Modifier.weight(1f)) {
-                Text("Disconnect")
-            }
-        } else {
-            Button(onClick = connectWithPermission, modifier = Modifier.weight(1f)) {
-                Text("Connect")
-            }
+
+    SectionCard(title = stringResource(R.string.receiver_trusted_auto_title), tooltip = stringResource(R.string.receiver_trusted_auto_tooltip)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.receiver_trusted_auto_title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).padding(end = 12.dp))
+            Switch(checked = state.settings.autoConnectTrusted, onCheckedChange = { viewModel.update(state.settings.copy(autoConnectTrusted = it)) })
         }
-    }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Status", style = MaterialTheme.typography.titleMedium)
+        if (state.settings.autoConnectTrusted) {
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.receiver_trusted_wifi_title), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).padding(end = 12.dp))
+                InfoTooltip(tooltip = stringResource(R.string.receiver_trusted_wifi_tooltip))
+                Switch(checked = state.settings.autoConnectTrustedWifi, onCheckedChange = { viewModel.update(state.settings.copy(autoConnectTrustedWifi = it)) })
+            }
             Spacer(Modifier.height(6.dp))
-            Text(state.connection.name.lowercase().replace('_', ' '))
-            if (state.hostName.isNotBlank()) Text("Host: ${state.hostName}")
-            if (state.sessionId != null) Text("Session: ${state.sessionId}")
-            if (state.transport.isNotBlank()) {
-                Text(
-                    "Connected via ${state.link.ifBlank { "unknown link" }} " +
-                        "(${state.transport})",
-                )
-            }
-            if (state.audioChannelState == "reconnecting") Text("Reconnecting audio")
-            if (state.message.isNotBlank()) Text(state.message)
-            Text("Level: ${(state.rms * 100).toInt()}%")
+            Text(stringResource(R.string.receiver_trusted_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        val isConnected = state.connection == RelayConnectionState.Connected || state.connection == RelayConnectionState.Connecting
+        if (isConnected) {
+            Button(onClick = viewModel::disconnect, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.action_disconnect)) }
+        } else {
+            Button(onClick = connectWithPermission, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.action_connect)) }
+        }
+    }
+
+    SectionCard(title = stringResource(R.string.label_status)) {
+        Text(
+            state.connection.name.lowercase().replace('_', ' '),
+            style = MaterialTheme.typography.titleSmall,
+            color = when (state.connection) {
+                RelayConnectionState.Connected -> MaterialTheme.colorScheme.primary
+                RelayConnectionState.Error -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurface
+            },
+        )
+        if (state.hostName.isNotBlank()) Text(stringResource(R.string.label_host, state.hostName), style = MaterialTheme.typography.bodyMedium)
+        if (state.sessionId != null) Text(stringResource(R.string.label_session, state.sessionId!!), style = MaterialTheme.typography.bodySmall)
+        if (state.transport.isNotBlank()) {
+            Text(stringResource(R.string.label_connected_via, state.link.ifBlank { stringResource(R.string.label_unknown_link) }, state.transport), style = MaterialTheme.typography.bodySmall)
+        }
+        if (state.audioChannelState == "reconnecting") {
+            Spacer(Modifier.height(6.dp))
+            AppAlert(message = stringResource(R.string.label_reconnecting_audio), severity = AlertSeverity.Warning)
+        }
+        if (state.message.isNotBlank() && state.connection != RelayConnectionState.Error) {
+            Spacer(Modifier.height(6.dp))
+            Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.height(10.dp))
+        LevelIndicator(level = state.rms)
+    }
+}
+
+@Composable
+private fun LevelIndicator(level: Float, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.cd_level_meter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(stringResource(R.string.label_level, (level * 100).toInt()), style = MaterialTheme.typography.bodySmall)
+        }
+        LinearProgressIndicator(
+            progress = { level.coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+        )
     }
 }
 
 @Composable
 private fun TrustedDevicesCard(state: RelayUiState, viewModel: RelayViewModel) {
     if (state.trustedPeers.isEmpty()) return
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Trusted devices", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(6.dp))
-            state.trustedPeers.forEach { peer ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(peer.name.ifBlank { peer.peerId })
-                        if (peer.address.isNotBlank()) {
-                            Text(peer.address, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                    TextButton(onClick = { viewModel.forgetTrustedPeer(peer.peerId) }) {
-                        Text("Forget")
-                    }
+    SectionCard(title = stringResource(R.string.trusted_devices_title), tooltip = stringResource(R.string.trusted_devices_tooltip)) {
+        state.trustedPeers.forEach { peer ->
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(peer.name.ifBlank { peer.peerId }, style = MaterialTheme.typography.bodyMedium)
+                    if (peer.address.isNotBlank()) Text(peer.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                TextButton(onClick = { viewModel.forgetTrustedPeer(peer.peerId) }) { Text(stringResource(R.string.action_forget)) }
             }
         }
     }
 }
+
+// ------------------------------------------------------------------
+// Emitter
+// ------------------------------------------------------------------
 
 @Composable
 private fun EmitterTab(
@@ -529,152 +544,134 @@ private fun EmitterTab(
     startHost: () -> Unit,
     requestPlaybackConsent: () -> Unit,
 ) {
-    val hostEditable = state.hostState != RelayHostState.Starting &&
-        state.hostState != RelayHostState.Running
-    OutlinedTextField(
-        value = state.host.deviceName,
-        onValueChange = { viewModel.updateHost(state.host.copy(deviceName = it)) },
-        enabled = hostEditable,
-        label = { Text("Device name") },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+    val hostEditable = state.hostState != RelayHostState.Starting && state.hostState != RelayHostState.Running
+    val linkDisplay = linkDisplayMap()
+
+    SectionCard(title = stringResource(R.string.emitter_device_name_label), tooltip = stringResource(R.string.emitter_device_name_tooltip)) {
         OutlinedTextField(
-            value = state.host.pin,
-            onValueChange = { viewModel.updateHost(state.host.copy(pin = it)) },
+            value = state.host.deviceName,
+            onValueChange = { viewModel.updateHost(state.host.copy(deviceName = it)) },
             enabled = hostEditable,
-            label = { Text("Pairing PIN") },
-            modifier = Modifier.weight(1f),
-            singleLine = true,
+            label = { Text(stringResource(R.string.emitter_device_name_label)) },
+            modifier = Modifier.fillMaxWidth(), singleLine = true,
         )
-        OutlinedButton(
-            onClick = { viewModel.regenerateHostPin() },
-            enabled = hostEditable,
-            modifier = Modifier.padding(top = 8.dp)
-        ) {
-            Text("↻")
-        }
-    }
-    OutlinedTextField(
-        value = state.host.port.toString(),
-        onValueChange = { value ->
-            value.toIntOrNull()?.let { viewModel.updateHost(state.host.copy(port = it)) }
-        },
-        enabled = hostEditable,
-        label = { Text("Control port") },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        DropdownField(
-            label = "Codec",
-            value = state.host.codec,
-            options = listOf("opus", "pcm"),
-            onSelected = { viewModel.updateHost(state.host.copy(codec = it)) },
-            enabled = hostEditable,
-            modifier = Modifier.weight(1f),
-        )
-        DropdownField(
-            label = "Link",
-            value = state.host.transport,
-            options = LINK_OPTIONS,
-            display = LINK_DISPLAY,
-            onSelected = { viewModel.updateHost(state.host.copy(transport = it)) },
-            enabled = hostEditable,
-            modifier = Modifier.weight(1f),
-        )
-    }
-    DropdownField(
-        label = "Capture source",
-        value = state.host.captureSource.name.lowercase(),
-        options = listOf("microphone", "device_playback"),
-        display = mapOf("microphone" to "Microphone", "device_playback" to "Device playback"),
-        onSelected = { viewModel.setHostCaptureSource(captureSourceFromString(it)) },
-        enabled = hostEditable,
-    )
-    if (state.host.captureSource == CaptureSource.DEVICE_PLAYBACK) {
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text("Device playback capture requires Android audio-recording permission, but captures device playback instead of the physical microphone. You will be asked to allow screen/audio capture.", style = MaterialTheme.typography.bodySmall)
-                if (!viewModel.hasMediaProjectionConsent() && hostEditable) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = requestPlaybackConsent) { Text("Grant capture consent") }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = state.host.pin,
+                onValueChange = { viewModel.updateHost(state.host.copy(pin = it)) },
+                enabled = hostEditable,
+                label = { Text(stringResource(R.string.emitter_pin_label)) },
+                modifier = Modifier.weight(1f), singleLine = true,
+            )
+            AppTooltip(text = stringResource(R.string.emitter_regenerate_pin_desc)) {
+                FilledTonalButton(onClick = { viewModel.regenerateHostPin() }, enabled = hostEditable, modifier = Modifier.padding(top = 4.dp)) {
+                    Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.emitter_regenerate_pin_desc), modifier = Modifier.size(18.dp))
                 }
             }
         }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = state.host.port.toString(),
+            onValueChange = { value -> value.toIntOrNull()?.let { viewModel.updateHost(state.host.copy(port = it)) } },
+            enabled = hostEditable,
+            label = { Text(stringResource(R.string.emitter_port_label)) },
+            modifier = Modifier.fillMaxWidth(), singleLine = true,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DropdownField(
+                label = stringResource(R.string.emitter_codec_label),
+                value = state.host.codec,
+                options = listOf("opus", "pcm"),
+                onSelected = { viewModel.updateHost(state.host.copy(codec = it)) },
+                enabled = hostEditable, modifier = Modifier.weight(1f),
+            )
+            DropdownField(
+                label = stringResource(R.string.emitter_link_label),
+                value = state.host.transport,
+                options = LINK_OPTIONS,
+                display = linkDisplay,
+                onSelected = { viewModel.updateHost(state.host.copy(transport = it)) },
+                enabled = hostEditable, modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        DropdownField(
+            label = stringResource(R.string.emitter_capture_source_label),
+            value = state.host.captureSource.name.lowercase(),
+            options = listOf("microphone", "device_playback"),
+            display = mapOf("microphone" to stringResource(R.string.emitter_capture_microphone), "device_playback" to stringResource(R.string.emitter_capture_playback)),
+            tooltip = stringResource(R.string.emitter_capture_tooltip),
+            onSelected = { viewModel.setHostCaptureSource(captureSourceFromString(it)) },
+            enabled = hostEditable,
+        )
+        if (state.host.captureSource == CaptureSource.DEVICE_PLAYBACK) {
+            Spacer(Modifier.height(8.dp))
+            AppAlert(message = stringResource(R.string.emitter_playback_hint), severity = AlertSeverity.Info)
+            if (!viewModel.hasMediaProjectionConsent() && hostEditable) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = requestPlaybackConsent) { Text(stringResource(R.string.emitter_grant_consent)) }
+            }
+        }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         if (state.hostState == RelayHostState.Running) {
-            Button(onClick = viewModel::stopHost, modifier = Modifier.weight(1f)) {
-                Text("Stop host")
+            Button(onClick = viewModel::stopHost, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
+                Text(stringResource(R.string.emitter_stop_host))
             }
         } else {
-            Button(onClick = startHost, modifier = Modifier.weight(1f)) {
-                Text("Start host")
-            }
+            Button(onClick = startHost, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.emitter_start_host)) }
         }
     }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Status", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(6.dp))
-            Text("Host: ${state.hostState.name.lowercase()}  •  Audio: ${state.hostAudioState.name.lowercase()}")
-            if (state.hostPort != null) Text("Listening on port ${state.hostPort}")
-            if (state.hostMessage.isNotBlank()) Text(state.hostMessage)
-            if (state.hostAudioMessage.isNotBlank() && state.hostAudioMessage != state.hostMessage) Text("Audio: ${state.hostAudioMessage}")
-            Text("Level: ${(state.hostRms * 100).toInt()}%")
-            Text("Capture: ${state.host.captureSource.name.lowercase()}", style = MaterialTheme.typography.bodySmall)
+
+    SectionCard(title = stringResource(R.string.label_status)) {
+        Text(stringResource(R.string.emitter_host_status, state.hostState.name.lowercase(), state.hostAudioState.name.lowercase()), style = MaterialTheme.typography.bodyMedium)
+        if (state.hostPort != null) Text(stringResource(R.string.emitter_listening_port, state.hostPort!!), style = MaterialTheme.typography.bodySmall)
+        if (state.hostMessage.isNotBlank() && state.hostState != RelayHostState.Error) {
+            Spacer(Modifier.height(6.dp)); Text(state.hostMessage, style = MaterialTheme.typography.bodySmall)
         }
+        if (state.hostAudioMessage.isNotBlank() && state.hostAudioMessage != state.hostMessage) {
+            Spacer(Modifier.height(4.dp))
+            AppAlert(message = state.hostAudioMessage, severity = if (state.hostAudioState == RelayHostAudioState.Error) AlertSeverity.Error else AlertSeverity.Info)
+        }
+        Spacer(Modifier.height(10.dp))
+        LevelIndicator(level = state.hostRms)
+        Spacer(Modifier.height(4.dp))
+        Text(stringResource(R.string.emitter_capture_label, state.host.captureSource.name.lowercase()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+
     val hostPort = state.hostPort
     val hostAddress = state.hostAddress
-    if (state.hostState == RelayHostState.Running &&
-        hostPort != null &&
-        hostAddress != null
-    ) {
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Reachable at", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(6.dp))
-                Text("$hostAddress:$hostPort")
-            }
+    if (state.hostState == RelayHostState.Running && hostPort != null && hostAddress != null) {
+        SectionCard(title = stringResource(R.string.emitter_reachable_title), tooltip = stringResource(R.string.emitter_reachable_tooltip)) {
+            Text("$hostAddress:$hostPort", style = MaterialTheme.typography.titleSmall)
         }
     }
     if (state.sessions.isNotEmpty()) {
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Active sessions", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(6.dp))
-                state.sessions.forEach { session ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("${session.name} — ${session.address}")
-                            if (session.transport.isNotBlank()) {
-                                Text(
-                                    "${session.link.ifBlank { "unknown link" }} / " +
-                                        session.transport +
-                                        if (session.audioChannelState == "reconnecting") {
-                                            " — reconnecting audio"
-                                        } else {
-                                            ""
-                                        },
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-                        TextButton(onClick = { viewModel.disconnectSession(session.id) }) {
-                            Text("Disconnect")
+        SectionCard(title = stringResource(R.string.emitter_active_sessions)) {
+            state.sessions.forEach { session ->
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("${session.name} — ${session.address}", style = MaterialTheme.typography.bodyMedium)
+                        if (session.transport.isNotBlank()) {
+                            Text(
+                                "${session.link.ifBlank { stringResource(R.string.label_unknown_link) }} / ${session.transport}" + if (session.audioChannelState == "reconnecting") " — ${stringResource(R.string.label_reconnecting_audio)}" else "",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
+                    TextButton(onClick = { viewModel.disconnectSession(session.id) }) { Text(stringResource(R.string.action_disconnect)) }
                 }
             }
         }
     }
 }
+
+// ------------------------------------------------------------------
+// Discover
+// ------------------------------------------------------------------
 
 @Composable
 private fun DiscoverTab(
@@ -682,31 +679,34 @@ private fun DiscoverTab(
     viewModel: RelayViewModel,
     connectToPeer: (String) -> Unit,
 ) {
-    Button(
-        onClick = {
-            if (state.discoveryActive) viewModel.stopDiscovery() else viewModel.startDiscovery()
-        },
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(if (state.discoveryActive) "Stop discovery" else "Start discovery")
+    AppTooltip(text = stringResource(R.string.discover_start_tooltip)) {
+        Button(
+            onClick = { if (state.discoveryActive) viewModel.stopDiscovery() else viewModel.startDiscovery() },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(if (state.discoveryActive) Icons.Filled.Refresh else Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(if (state.discoveryActive) stringResource(R.string.discover_stop) else stringResource(R.string.discover_start))
+        }
     }
     if (state.discoveryMessage.isNotBlank()) {
-        Text(state.discoveryMessage, style = MaterialTheme.typography.bodySmall)
+        AppAlert(message = state.discoveryMessage, severity = AlertSeverity.Info)
     }
     if (state.peers.isEmpty()) {
-        Text(
-            "No relay hosts found yet. Keep discovery running while the host advertises; USB tethers are scanned automatically.",
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Text(stringResource(R.string.discover_empty), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     state.peers.forEach { peer ->
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("${peer.name} — ${peer.address}")
-            Button(onClick = { connectToPeer(peer.address) }) {
-                Text("Connect")
+        ElevatedCard(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+            Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(peer.name, style = MaterialTheme.typography.bodyMedium)
+                    Text(peer.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (peer.link.isNotBlank()) Text(peer.link, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                AppTooltip(text = stringResource(R.string.discover_connect_tooltip)) {
+                    Button(onClick = { connectToPeer(peer.address) }) { Text(stringResource(R.string.discover_connect)) }
+                }
             }
         }
     }
@@ -722,35 +722,36 @@ private fun DropdownField(
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
     display: Map<String, String> = emptyMap(),
+    tooltip: String? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { if (enabled) expanded = !expanded },
-        modifier = modifier,
-    ) {
-        OutlinedTextField(
-            value = display[value] ?: value,
-            onValueChange = {},
-            readOnly = true,
-            enabled = enabled,
-            label = { Text(label) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier.menuAnchor().fillMaxWidth(),
-        )
-        ExposedDropdownMenu(
-            expanded = expanded && enabled,
-            onDismissRequest = { expanded = false },
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { if (enabled) expanded = !expanded },
+            modifier = Modifier.weight(1f),
         ) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(display[option] ?: option) },
-                    onClick = {
-                        onSelected(option)
-                        expanded = false
-                    },
-                )
+            OutlinedTextField(
+                value = display[value] ?: value,
+                onValueChange = {},
+                readOnly = true,
+                enabled = enabled,
+                label = { Text(label) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+                modifier = Modifier.menuAnchor().fillMaxWidth(),
+            )
+            ExposedDropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(display[option] ?: option) },
+                        onClick = { onSelected(option); expanded = false },
+                    )
+                }
             }
+        }
+        if (tooltip != null) {
+            Spacer(Modifier.width(4.dp))
+            InfoTooltip(tooltip = tooltip)
         }
     }
 }
