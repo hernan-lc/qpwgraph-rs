@@ -18,8 +18,9 @@ use super::patchbay::{
 };
 use super::relay::{
     accept_pending_enrollment, cancel_relay_connect, connect_relay, disconnect_relay,
-    forget_trusted_peer, reject_pending_enrollment, relay_host_active, relay_qr_payload,
-    start_relay_discovery, start_relay_host, stop_relay_discovery, stop_relay_host,
+    forget_trusted_peer, regenerate_host_pin, reject_pending_enrollment, relay_host_active,
+    relay_qr_payload, start_relay_discovery, start_relay_host, stop_relay_discovery,
+    stop_relay_host,
 };
 use super::MainWindow;
 
@@ -409,6 +410,7 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
         "relay-enrollment-accept" => accept_pending_enrollment(application),
         "relay-enrollment-reject" => reject_pending_enrollment(application),
         "relay-cancel-connect" => cancel_relay_connect(application),
+        "relay-regenerate-pin" => regenerate_host_pin(application),
         _ => {
             application.status =
                 application.tf("status.unknown_action", &[("action", action.to_owned())]);

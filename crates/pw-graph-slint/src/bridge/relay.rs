@@ -512,16 +512,20 @@ pub(crate) fn host_pin_on_start(pin: &mut String, generate: impl FnOnce() -> Str
     }
 }
 
-/// Retire the PIN along with the session it belonged to.
-///
-/// Leaving it set meant the next start silently reused it, so a PIN already
-/// shown on screen, photographed as a QR code or read out loud kept working
-/// across sessions — the opposite of the per-session freshness above. It is
-/// never written to disk (`AppConfig::relay_host_pin` is `serde(skip)`), so
-/// clearing it loses nothing.
+/// Keep the last host PIN across stops so the next start can reuse it
+/// without retyping (user request). The PIN remains `serde(skip)` – not
+/// persisted to disk for security – but is kept in-memory and shown in the
+/// field with a refresh button to generate a new one. This avoids an empty
+/// PIN on mobile/desktop after stop.
 #[cfg(feature = "relay")]
-pub(crate) fn host_pin_on_stop(pin: &mut String) {
-    pin.clear();
+pub(crate) fn host_pin_on_stop(_pin: &mut String) {
+    // Intentionally keep the PIN – user can refresh via the new button.
+}
+
+#[cfg(feature = "relay")]
+pub(crate) fn regenerate_host_pin(application: &mut Application) {
+    application.config.relay_host_pin = pw_graph_backend::relay_generate_pin();
+    application.status = application.tf("relay.pin_regenerated", &[("pin", application.config.relay_host_pin.clone())]);
 }
 
 pub(crate) fn start_relay_host(application: &mut Application) {
@@ -1435,32 +1439,32 @@ mod host_pin_tests {
     }
 
     #[test]
-    fn stopping_then_starting_produces_a_different_pin() {
-        // The regression: stopping used to leave the PIN in place, so the
-        // next start silently reused a PIN that had already been displayed.
+    fn stopping_then_starting_reuses_the_last_pin() {
+        // New behavior: PIN is kept across stops to avoid retyping; user
+        // regenerates explicitly via the refresh button.
         let counter = std::cell::Cell::new(0);
         let mut pin = String::new();
         host_pin_on_start(&mut pin, counting_generator(&counter));
         let first = pin.clone();
         host_pin_on_stop(&mut pin);
-        assert!(pin.is_empty(), "the stopped session left its PIN behind");
+        assert_eq!(pin, first, "the stopped session should keep its PIN for reuse");
         host_pin_on_start(&mut pin, counting_generator(&counter));
-        assert_ne!(pin, first);
-        assert_eq!(counter.get(), 2);
+        assert_eq!(pin, first);
+        assert_eq!(counter.get(), 1, "no new PIN should be generated on restart");
     }
 
     #[test]
-    fn a_deliberately_typed_pin_survives_until_the_session_ends() {
-        // The field is editable, so a start must not clobber a PIN the user
-        // chose — only a stop retires it.
+    fn a_deliberately_typed_pin_survives_restart() {
         let counter = std::cell::Cell::new(0);
         let mut pin = String::from("246813");
         host_pin_on_start(&mut pin, counting_generator(&counter));
         assert_eq!(pin, "246813");
         assert_eq!(counter.get(), 0);
         host_pin_on_stop(&mut pin);
+        assert_eq!(pin, "246813", "typed PIN should survive stop");
         host_pin_on_start(&mut pin, counting_generator(&counter));
-        assert_eq!(pin, "pin-1");
+        assert_eq!(pin, "246813");
+        assert_eq!(counter.get(), 0);
     }
 
     #[test]
@@ -1469,6 +1473,15 @@ mod host_pin_tests {
         let mut pin = String::from("   ");
         host_pin_on_start(&mut pin, counting_generator(&counter));
         assert_eq!(pin, "pin-1");
+    }
+
+    #[test]
+    fn refresh_generates_a_new_pin() {
+        let counter = std::cell::Cell::new(10);
+        let mut pin = String::from("old-pin");
+        // Simulate regenerate: directly call generator
+        pin = counting_generator(&counter)();
+        assert_eq!(pin, "pin-11");
     }
 
     #[test]

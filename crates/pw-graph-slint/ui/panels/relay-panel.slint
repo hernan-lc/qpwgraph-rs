@@ -2,6 +2,7 @@ import { CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { UiTheme } from "../foundation/theme.slint";
 import { UiI18n } from "../foundation/i18n.slint";
 import { ActionButton } from "../components/button.slint";
+import { IconButton } from "../components/icon-button.slint";
 import { FormRow, FormSection, TabStrip } from "../components/form.slint";
 import { RelayRow } from "../foundation/structs.slint";
 
@@ -197,7 +198,7 @@ export component RelayPanel inherits Rectangle {
                         text: row.connected ? UiI18n.localized("relay.disconnect")
                             : row.connecting ? UiI18n.localized("relay.cancel_connect")
                             : UiI18n.localized("relay.connect");
-                        enabled: root.relay-available && row.id != "" && (row.connected || row.connecting || true);
+                        enabled: row.id != "" && (row.connected || row.connecting || root.relay-available);
                         clicked => {
                             if (row.connected) { root.action("relay-disconnect:" + row.id); }
                             else if (row.connecting) { root.action("relay-cancel-connect"); }
@@ -210,7 +211,7 @@ export component RelayPanel inherits Rectangle {
                         width: 88px;
                         height: 30px;
                         text: UiI18n.localized("relay.forget");
-                        enabled: root.relay-available;
+                        enabled: true;
                         clicked => { root.action("relay-forget:" + row.peer-id); }
                     }
                 }
@@ -236,7 +237,19 @@ export component RelayPanel inherits Rectangle {
                     wrap: word-wrap;
                 }
                 FormRow { label: UiI18n.localized("relay.device_name"); RelayLineEdit { height: 31px; text <=> root.relay-device-name; } }
-                FormRow { label: UiI18n.localized("relay.pin"); RelayLineEdit { height: 31px; text <=> root.relay-host-pin; } }
+                FormRow {
+                    label: UiI18n.localized("relay.pin");
+                    HorizontalLayout {
+                        spacing: 6px;
+                        RelayLineEdit { horizontal-stretch: 1; height: 31px; text <=> root.relay-host-pin; }
+                        IconButton {
+                            width: 31px; height: 31px;
+                            icon: @image-url("../../../../assets/icons/refresh.svg");
+                            tooltip: UiI18n.localized("relay.pin_regenerate");
+                            clicked => { root.action("relay-regenerate-pin"); }
+                        }
+                    }
+                }
                 FormRow { label: UiI18n.localized("relay.port"); RelayLineEdit { height: 31px; placeholder-text: UiI18n.localized("relay.port_help"); text <=> root.relay-host-port-text; } }
                 HorizontalLayout {
                     height: 31px; spacing: 8px;

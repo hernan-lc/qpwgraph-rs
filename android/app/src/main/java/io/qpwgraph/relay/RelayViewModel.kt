@@ -580,7 +580,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         ) {
             return
         }
-        val wanted = mutableState.value.host
+        var wanted = mutableState.value.host
         if (!hasMicrophonePermission()) {
             permissionDenied(host = true)
             return
@@ -597,13 +597,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (wanted.pin.isBlank()) {
-            setState {
-                it.copy(
-                    hostState = RelayHostState.Error,
-                    hostMessage = text(R.string.relay_validation_missing_pin),
-                )
-            }
-            return
+            val newPin = (100000..999999).random().toString()
+            wanted = wanted.copy(pin = newPin)
+            setState { it.copy(host = wanted) }
+            settings.saveHost(wanted)
         }
         setState {
             it.copy(
@@ -717,6 +714,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun regenerateHostPin() {
+        val newPin = (100000..999999).random().toString()
+        val updated = mutableState.value.host.copy(pin = newPin)
+        setState { it.copy(host = updated) }
+        settings.saveHost(updated)
+    }
+
     fun stopHost() {
         viewModelScope.launch(Dispatchers.IO) {
             operationMutex.withLock {
@@ -731,8 +735,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                             hostMessage = text(R.string.relay_host_stopped),
                             hostRms = 0f,
                             sessions = emptyList(),
-                            // A host PIN is fresh for one hosting session.
-                            host = it.host.copy(pin = ""),
+                            // Keep last PIN for reuse – user can refresh via button.
+                            host = it.host,
                         )
                     }
                 } catch (error: Exception) {
@@ -843,7 +847,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     hostActive = false,
                     hostAddress = null,
                     sessions = emptyList(),
-                    host = it.host.copy(pin = ""),
+                    host = it.host,
                     hostMessage = text(R.string.relay_host_stopped),
                 )
             }
@@ -881,7 +885,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 hostActive = false,
                 hostAddress = null,
                 sessions = emptyList(),
-                host = it.host.copy(pin = ""),
+                host = it.host,
                 hostMessage = mapped,
             )
         }
@@ -929,7 +933,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 hostActive = false,
                 hostAddress = null,
                 sessions = emptyList(),
-                host = it.host.copy(pin = ""),
+                host = it.host,
                 hostMessage = text(R.string.relay_host_stopped),
             )
         }

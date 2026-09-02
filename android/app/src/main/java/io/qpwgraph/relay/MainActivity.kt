@@ -539,14 +539,23 @@ private fun EmitterTab(
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
     )
-    OutlinedTextField(
-        value = state.host.pin,
-        onValueChange = { viewModel.updateHost(state.host.copy(pin = it)) },
-        enabled = hostEditable,
-        label = { Text("Pairing PIN") },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = state.host.pin,
+            onValueChange = { viewModel.updateHost(state.host.copy(pin = it)) },
+            enabled = hostEditable,
+            label = { Text("Pairing PIN") },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+        )
+        OutlinedButton(
+            onClick = { viewModel.regenerateHostPin() },
+            enabled = hostEditable,
+            modifier = Modifier.padding(top = 8.dp)
+        ) {
+            Text("↻")
+        }
+    }
     OutlinedTextField(
         value = state.host.port.toString(),
         onValueChange = { value ->
