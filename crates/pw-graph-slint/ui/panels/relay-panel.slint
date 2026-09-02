@@ -126,7 +126,7 @@ export component RelayPanel inherits Rectangle {
                     // Two text lines plus a meter lane, with the actions in a
                     // fixed right-hand column so the name and address elide
                     // instead of pushing the buttons off the card.
-                    property <length> action-width: row.trusted ? 200px : 104px;
+                    property <length> action-width: row.peer-id != "" ? 200px : 104px;
                     property <length> text-width: max(48px, self.width - 34px - self.action-width);
 
                     height: 60px;
@@ -204,13 +204,13 @@ export component RelayPanel inherits Rectangle {
                             else { root.action("relay-connect:" + row.id); }
                         }
                     }
-                    if row.trusted: ActionButton {
+                    if row.peer-id != "": ActionButton {
                         x: parent.width - 200px - 12px;
                         y: 15px;
                         width: 88px;
                         height: 30px;
                         text: UiI18n.localized("relay.forget");
-                        enabled: root.relay-available && row.peer-id != "";
+                        enabled: root.relay-available;
                         clicked => { root.action("relay-forget:" + row.peer-id); }
                     }
                 }

@@ -95,6 +95,8 @@ pub(super) fn bootstrap_application(args: &Args) -> (Rc<RefCell<Application>>, M
         relay_trusted_candidate_failures: BTreeMap::new(),
         #[cfg(feature = "relay")]
         relay_pending_enrollment: None,
+        #[cfg(feature = "relay")]
+        relay_reconnect_pending: None,
     }));
 
     (app, meter_policy)

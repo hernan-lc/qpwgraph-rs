@@ -106,6 +106,8 @@ pub(crate) struct Application {
     pub(crate) relay_trusted_candidate_failures: BTreeMap<(String, String), (u8, Instant)>,
     #[cfg(feature = "relay")]
     pub(crate) relay_pending_enrollment: Option<PendingEnrollment>,
+    #[cfg(feature = "relay")]
+    pub(crate) relay_reconnect_pending: Option<ReconnectPending>,
 }
 
 #[cfg(feature = "relay")]
@@ -115,6 +117,15 @@ pub(crate) struct PendingEnrollment {
     pub(crate) peer_id: String,
     pub(crate) peer_name: String,
     pub(crate) peer_addr: String,
+}
+
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug)]
+pub(crate) struct ReconnectPending {
+    pub(crate) peer_id: String,
+    pub(crate) peer_name: String,
+    pub(crate) peer_addr: String,
+    pub(crate) next_retry: Instant,
 }
 
 const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);

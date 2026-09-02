@@ -344,6 +344,7 @@
   "relay.enrollment_rejected": "Emparejamiento rechazado",
   "relay.enrollment_requested": "Solicitud de emparejamiento de {name} ({addr}) — acepta para confiar en este dispositivo",
   "relay.error": "Error del relé: {error}",
+  "relay.error_adb_requires_localhost": "Transporte ADB requiere localhost (127.0.0.1:48123) — ejecuta `adb reverse tcp:48123 tcp:48123` y pon Host en 127.0.0.1. Destino actual {target} no es loopback.",
   "relay.error_no_route": "Sin ruta al host — red cambió o host no alcanzable",
   "relay.error_tcp_refused": "Host no escucha — verifica dirección/puerto",
   "relay.forget": "Olvidar",

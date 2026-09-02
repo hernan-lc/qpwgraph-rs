@@ -344,6 +344,7 @@
   "relay.enrollment_rejected": "Pairing declined",
   "relay.enrollment_requested": "Pairing request from {name} ({addr}) — accept to trust this device",
   "relay.error": "Relay error: {error}",
+  "relay.error_adb_requires_localhost": "ADB transport requires localhost (127.0.0.1:48123) — run `adb reverse tcp:48123 tcp:48123` or `adb forward tcp:48123 tcp:48123` and set Host address to 127.0.0.1. Current target {target} is not loopback.",
   "relay.error_no_route": "No route to host — network changed or host unreachable",
   "relay.error_tcp_refused": "Host not listening — check address/port",
   "relay.forget": "Forget",

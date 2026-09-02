@@ -344,6 +344,7 @@
   "relay.enrollment_rejected": "Appairage refusé",
   "relay.enrollment_requested": "Demande d'appairage de {name} ({addr}) — acceptez pour faire confiance à cet appareil",
   "relay.error": "Erreur du relais : {error}",
+  "relay.error_adb_requires_localhost": "Transport ADB nécessite localhost (127.0.0.1:48123) — exécutez `adb reverse tcp:48123 tcp:48123` et mettez Host sur 127.0.0.1. Cible {target} n'est pas loopback.",
   "relay.error_no_route": "Pas de route vers l'hôte — réseau modifié ou hôte injoignable",
   "relay.error_tcp_refused": "Hôte n'écoute pas — vérifiez adresse/port",
   "relay.forget": "Oublier",

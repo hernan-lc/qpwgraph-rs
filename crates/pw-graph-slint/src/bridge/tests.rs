@@ -63,6 +63,8 @@ pub(super) fn demo_application() -> Application {
         relay_trusted_candidate_failures: BTreeMap::new(),
         #[cfg(feature = "relay")]
         relay_pending_enrollment: None,
+        #[cfg(feature = "relay")]
+        relay_reconnect_pending: None,
     }
 }
 

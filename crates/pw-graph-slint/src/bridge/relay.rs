@@ -305,6 +305,45 @@ fn trusted_candidate_rank(application: &Application, peer: &RelayPeerInfo) -> (u
 #[cfg(feature = "relay")]
 fn retry_trusted_auto_connect(application: &mut Application) {
     const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+    // If a visible reconnect is pending, respect its next_retry so Cancel
+    // stays on screen for the full interval instead of flashing 0.1ms.
+    if let Some(pending) = &application.relay_reconnect_pending {
+        if Instant::now() < pending.next_retry {
+            return;
+        }
+        // Ready to retry the pending peer specifically
+        let pending = pending.clone();
+        // Find current best address for this peer (discovery may have updated)
+        let mut peers = application.source.relay_peers();
+        for stored in &application.config.relay_trusted_peers {
+            if stored.peer_id != pending.peer_id {
+                continue;
+            }
+            if let Ok(addr) = stored.address.parse::<SocketAddr>() {
+                if !peers.iter().any(|p| p.id == stored.peer_id && p.addr == addr) {
+                    peers.push(RelayPeerInfo {
+                        id: stored.peer_id.clone(),
+                        name: stored.name.clone(),
+                        kind: pw_graph_backend::RelayDeviceKind::Other,
+                        addr,
+                    });
+                }
+            }
+        }
+        peers.retain(|p| p.id == pending.peer_id && trusted_secret_for(application, &p.id).is_some() && trusted_candidate_allowed(application, p));
+        peers.sort_by_key(|peer| trusted_candidate_rank(application, peer));
+        if let Some(peer) = peers.into_iter().next() {
+            application.relay_reconnect_pending = None;
+            let _ = connect_trusted_peer(application, &peer, true);
+            return;
+        } else {
+            // No candidate allowed yet (backoff) – keep pending and push next retry
+            if let Some(p) = &mut application.relay_reconnect_pending {
+                p.next_retry = Instant::now() + RETRY_INTERVAL;
+            }
+            return;
+        }
+    }
     if !application.config.relay_auto_connect_trusted
         || application.relay_connecting.is_some()
         || application
@@ -548,20 +587,27 @@ pub(crate) fn stop_relay_host(application: &mut Application) {
 pub(crate) fn cancel_relay_connect(application: &mut Application) {
     #[cfg(feature = "relay")]
     {
+        let mut had = false;
         if let Some(attempt) = application.relay_connecting.take() {
-            // Best-effort: try to disconnect the half-open session if it exists
             let _ = application.source.relay_disconnect(
                 pw_graph_backend::RelaySessionId(attempt.session),
             );
             if let Some(peer_id) = attempt.peer_id {
                 note_trusted_candidate_failure(application, &peer_id, &attempt.target);
             }
-            application.status = application.t("relay.connecting_cancelled");
-        } else {
-            application.status = application.t("relay.connecting_cancelled");
+            had = true;
         }
+        if let Some(pending) = application.relay_reconnect_pending.take() {
+            note_trusted_candidate_failure(application, &pending.peer_id, &pending.peer_addr);
+            had = true;
+        }
+        application.status = application.t("relay.connecting_cancelled");
         // Prevent immediate auto-retry from re-creating the same attempt
         application.relay_trusted_auto_attempt_at = Some(std::time::Instant::now());
+        if !had {
+            // Also clear any plain manual target attempt
+            application.status = application.t("relay.connecting_cancelled");
+        }
     }
     #[cfg(not(feature = "relay"))]
     let _ = application;
@@ -662,10 +708,6 @@ pub(crate) fn forget_trusted_peer(application: &mut Application, peer_id: &str) 
         if application.config.relay_trusted_peers.len() != before_count {
             save_config(application, false);
             if application.config != application.config_saved_snapshot {
-                // The live map was changed first, so restore it when the
-                // durable removal failed. Otherwise a process crash could
-                // resurrect the credential from the old config while this
-                // engine silently stayed revoked.
                 application.config = before_config;
                 application.config_dirty_since = None;
                 if let Err(error) = configure_relay_identity(application) {
@@ -673,6 +715,21 @@ pub(crate) fn forget_trusted_peer(application: &mut Application, peer_id: &str) 
                 }
                 return;
             }
+        }
+        // Clear any reconnecting state for this peer so Cancel/Forget is immediate
+        if application
+            .relay_reconnect_pending
+            .as_ref()
+            .is_some_and(|p| p.peer_id == peer_id)
+        {
+            application.relay_reconnect_pending = None;
+        }
+        if application
+            .relay_connecting
+            .as_ref()
+            .is_some_and(|a| a.peer_id.as_deref() == Some(peer_id))
+        {
+            application.relay_connecting = None;
         }
         application.status = application.t("relay.trusted_peer_forgotten");
     }
@@ -691,6 +748,9 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
             application.status = application.t("status.relay_target_required");
             return;
         }
+        // Manual connect cancels any pending reconnect UI so the manual
+        // attempt's Cancel/Connecting state is authoritative.
+        application.relay_reconnect_pending = None;
         let target_text = match relay_parse_qr_payload(&raw_target) {
             Some(payload) => {
                 application.config.relay_client_target = payload.target.clone();
@@ -718,6 +778,19 @@ pub(crate) fn connect_relay(application: &mut Application, requested_target: Opt
                 return;
             }
         };
+        // ADB mode is localhost-only: give immediate actionable feedback instead
+        // of the later "ADB transport requires a localhost forwarding target"
+        // from the transport layer, which looks like a bug.
+        let transport = relay_transport(&application.config.relay_transport);
+        if transport == pw_graph_backend::RelayTransportPreference::Adb
+            && !target.ip().is_loopback()
+        {
+            application.status = application.tf(
+                "relay.error_adb_requires_localhost",
+                &[("target", target.to_string())],
+            );
+            return;
+        }
         // A discovered address with a stored credential can be reconnected
         // without asking for the old PIN again. QR/manual targets still use
         // the explicit PIN unless discovery can identify the same peer.
@@ -835,6 +908,14 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                 {
                     application.relay_connecting = None;
                 }
+                // Clear any pending reconnect for this peer on success
+                if application
+                    .relay_reconnect_pending
+                    .as_ref()
+                    .is_some_and(|p| p.peer_id == peer.id)
+                {
+                    application.relay_reconnect_pending = None;
+                }
                 refresh_trusted_peer_address(application, &peer);
                 application.status =
                     application.tf("relay.session_connected", &[("name", peer.name)]);
@@ -850,10 +931,35 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                         .relay_connecting
                         .as_ref()
                         .map(|attempt| (attempt.peer_id.clone(), attempt.target.clone()));
+                    let pending_info = attempt.clone();
                     if let Some((Some(peer_id), target)) = attempt {
                         note_trusted_candidate_failure(application, &peer_id, &target);
                     }
                     application.relay_connecting = None;
+                    // Keep a visible reconnecting state for the 5s retry interval
+                    // so Cancel/Forget stay on screen instead of flashing 0.1ms.
+                    if let Some((Some(peer_id), target)) = pending_info {
+                        if reason.contains("Connection refused")
+                            || reason.contains("No route to host")
+                            || reason.contains("os error 11")
+                        {
+                            let name = application
+                                .config
+                                .relay_trusted_peers
+                                .iter()
+                                .find(|p| p.peer_id == peer_id)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| peer_id.clone());
+                            application.relay_reconnect_pending = Some(
+                                crate::bridge::app::ReconnectPending {
+                                    peer_id,
+                                    peer_name: name,
+                                    peer_addr: target,
+                                    next_retry: Instant::now() + Duration::from_secs(5),
+                                },
+                            );
+                        }
+                    }
                 }
                 let display_reason = if reason.contains("No route to host")
                     || reason.contains("os error 113")
@@ -1056,6 +1162,36 @@ pub(crate) fn relay_rows(application: &Application, i18n: &I18n) -> Vec<RelayRow
                     connecting: true,
                     trusted: false,
                     peer_id: SharedString::new(),
+                });
+            }
+        }
+        // Pending trusted reconnect – keeps Cancel/Forget visible during the
+        // 5s retry interval instead of flashing 0.1ms. Shows as reconnecting
+        // so user can cancel or forget before next auto-attempt.
+        if let Some(pending) = &application.relay_reconnect_pending {
+            if !connected.contains(&pending.peer_addr)
+                && !rows.iter().any(|row| row.address == pending.peer_addr)
+                && !rows.iter().any(|row| row.peer_id == pending.peer_id)
+            {
+                let secs = pending
+                    .next_retry
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    + 1;
+                rows.push(RelayRow {
+                    id: SharedString::from(pending.peer_addr.clone()),
+                    name: SharedString::from(pending.peer_name.clone()),
+                    address: SharedString::from(pending.peer_addr.clone()),
+                    state: SharedString::from(format!(
+                        "{} (retry in {}s)",
+                        i18n.text("relay.state_connecting"),
+                        secs
+                    )),
+                    level: 0.0,
+                    connected: false,
+                    connecting: true,
+                    trusted: true,
+                    peer_id: SharedString::from(pending.peer_id.clone()),
                 });
             }
         }
