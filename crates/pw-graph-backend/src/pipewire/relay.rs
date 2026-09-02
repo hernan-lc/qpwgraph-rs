@@ -372,8 +372,6 @@ impl RelayPlaybackRouter {
         self.preferred_sink_serial = serial;
     }
 
-
-
     /// Find relay source output ports in the current graph.
     pub fn find_relay_source_ports(graph: &Graph) -> Option<(PortId, PortId)> {
         let node = graph.nodes.values().find(|n| n.name == RELAY_SOURCE_NAME)?;
@@ -931,7 +929,7 @@ mod tests {
 
     #[test]
     fn routing_idempotency_no_duplicate_desired() {
-        let mut router = RelayPlaybackRouter::new();
+        let router = RelayPlaybackRouter::new();
         // Desired links should be None when no graph, but calling twice gives same result
         let graph = Graph::default();
         let registry = std::collections::BTreeMap::new();

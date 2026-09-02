@@ -295,9 +295,10 @@ pub(super) fn resume_client_control(
             // policy bind (e.g. USB source → Wi-Fi target) is unroutable.
             let stream = match connect_control_tcp(candidate, bind, config.transport) {
                 Ok(s) => Ok(s),
-                Err(e) if e.raw_os_error() == Some(113)
-                    || e.raw_os_error() == Some(101)
-                    || e.raw_os_error() == Some(99) =>
+                Err(e)
+                    if e.raw_os_error() == Some(113)
+                        || e.raw_os_error() == Some(101)
+                        || e.raw_os_error() == Some(99) =>
                 {
                     connect_control_tcp(candidate, None, config.transport)
                 }

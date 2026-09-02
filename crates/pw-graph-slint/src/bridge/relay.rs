@@ -320,7 +320,10 @@ fn retry_trusted_auto_connect(application: &mut Application) {
                 continue;
             }
             if let Ok(addr) = stored.address.parse::<SocketAddr>() {
-                if !peers.iter().any(|p| p.id == stored.peer_id && p.addr == addr) {
+                if !peers
+                    .iter()
+                    .any(|p| p.id == stored.peer_id && p.addr == addr)
+                {
                     peers.push(RelayPeerInfo {
                         id: stored.peer_id.clone(),
                         name: stored.name.clone(),
@@ -330,7 +333,11 @@ fn retry_trusted_auto_connect(application: &mut Application) {
                 }
             }
         }
-        peers.retain(|p| p.id == pending.peer_id && trusted_secret_for(application, &p.id).is_some() && trusted_candidate_allowed(application, p));
+        peers.retain(|p| {
+            p.id == pending.peer_id
+                && trusted_secret_for(application, &p.id).is_some()
+                && trusted_candidate_allowed(application, p)
+        });
         peers.sort_by_key(|peer| trusted_candidate_rank(application, peer));
         if let Some(peer) = peers.into_iter().next() {
             application.relay_reconnect_pending = None;
@@ -525,7 +532,10 @@ pub(crate) fn host_pin_on_stop(_pin: &mut String) {
 #[cfg(feature = "relay")]
 pub(crate) fn regenerate_host_pin(application: &mut Application) {
     application.config.relay_host_pin = pw_graph_backend::relay_generate_pin();
-    application.status = application.tf("relay.pin_regenerated", &[("pin", application.config.relay_host_pin.clone())]);
+    application.status = application.tf(
+        "relay.pin_regenerated",
+        &[("pin", application.config.relay_host_pin.clone())],
+    );
 }
 
 pub(crate) fn start_relay_host(application: &mut Application) {
@@ -593,9 +603,9 @@ pub(crate) fn cancel_relay_connect(application: &mut Application) {
     {
         let mut had = false;
         if let Some(attempt) = application.relay_connecting.take() {
-            let _ = application.source.relay_disconnect(
-                pw_graph_backend::RelaySessionId(attempt.session),
-            );
+            let _ = application
+                .source
+                .relay_disconnect(pw_graph_backend::RelaySessionId(attempt.session));
             if let Some(peer_id) = attempt.peer_id {
                 note_trusted_candidate_failure(application, &peer_id, &attempt.target);
             }
@@ -640,9 +650,10 @@ pub(crate) fn accept_pending_enrollment(application: &mut Application) {
                         id: pending.peer_id.clone(),
                         name: pending.peer_name.clone(),
                         kind: pw_graph_backend::RelayDeviceKind::Other,
-                        addr: pending.peer_addr.parse().unwrap_or_else(|_| {
-                            "0.0.0.0:0".parse().unwrap()
-                        }),
+                        addr: pending
+                            .peer_addr
+                            .parse()
+                            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
                     },
                     secret,
                 );
@@ -896,14 +907,13 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                 // missing action safely times out and client retries with PIN.
                 // This prevents silent trust and gives the pairing code a
                 // visible confirmation step (vs. redesigning the whole web UI).
-                application.relay_pending_enrollment = Some(
-                    crate::bridge::app::PendingEnrollment {
+                application.relay_pending_enrollment =
+                    Some(crate::bridge::app::PendingEnrollment {
                         transaction_id,
                         peer_id: peer_id.clone(),
                         peer_name: peer.name.clone(),
                         peer_addr: peer.addr.to_string(),
-                    },
-                );
+                    });
                 application.status = application.tf(
                     "relay.enrollment_requested",
                     &[("name", peer.name.clone()), ("addr", peer.addr.to_string())],
@@ -959,14 +969,13 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                                 .find(|p| p.peer_id == peer_id)
                                 .map(|p| p.name.clone())
                                 .unwrap_or_else(|| peer_id.clone());
-                            application.relay_reconnect_pending = Some(
-                                crate::bridge::app::ReconnectPending {
+                            application.relay_reconnect_pending =
+                                Some(crate::bridge::app::ReconnectPending {
                                     peer_id,
                                     peer_name: name,
                                     peer_addr: target,
                                     next_retry: Instant::now() + Duration::from_secs(5),
-                                },
-                            );
+                                });
                         }
                     }
                 }
@@ -1452,10 +1461,17 @@ mod host_pin_tests {
         host_pin_on_start(&mut pin, counting_generator(&counter));
         let first = pin.clone();
         host_pin_on_stop(&mut pin);
-        assert_eq!(pin, first, "the stopped session should keep its PIN for reuse");
+        assert_eq!(
+            pin, first,
+            "the stopped session should keep its PIN for reuse"
+        );
         host_pin_on_start(&mut pin, counting_generator(&counter));
         assert_eq!(pin, first);
-        assert_eq!(counter.get(), 1, "no new PIN should be generated on restart");
+        assert_eq!(
+            counter.get(),
+            1,
+            "no new PIN should be generated on restart"
+        );
     }
 
     #[test]

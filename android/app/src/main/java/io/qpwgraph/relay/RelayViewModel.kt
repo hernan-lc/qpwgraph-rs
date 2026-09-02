@@ -986,6 +986,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     if (host.owns(event.handle)) {
                         // Decouple: do NOT stop native host on audio failure.
                         Log.w(TAG, "HOST AUDIO FAILURE event: ${event.message} keeping host listening")
+                        // MediaProjection is session-scoped: a revoked consent must not be
+                        // silently reused on the next capture attempt. Clear stale credentials
+                        // so the next HOST AUDIO START requires fresh user consent.
+                        if (event.message.contains("projection revoked", ignoreCase = true) ||
+                            event.message.contains("MediaProjection", ignoreCase = true)
+                        ) {
+                            pendingMediaProjectionResultCode = Activity.RESULT_CANCELED
+                            pendingMediaProjectionData = null
+                            Log.w(TAG, "Cleared stale MediaProjection consent after revocation")
+                        }
                         hostAudioError(event.message)
                         // Keep polling alive; do not stop service/host.
                     }

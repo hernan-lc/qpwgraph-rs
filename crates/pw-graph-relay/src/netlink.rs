@@ -344,7 +344,10 @@ pub fn connect_tcp_cancellable(
 }
 
 fn is_no_route_error(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(113) | Some(101) | Some(99) | Some(22))
+    matches!(
+        error.raw_os_error(),
+        Some(113) | Some(101) | Some(99) | Some(22)
+    )
 }
 
 fn connect_tcp_inner(

@@ -316,8 +316,16 @@ class RelayService : Service() {
                 throw IllegalStateException("AudioRecord.startRecording failed", error)
             }
             val pcm = ShortArray(samples)
-            val floats = FloatArray(samples)
-            Log.i(TAG, "HOST AUDIO RUNNING capture source=$captureSource")
+            // Accumulate exact quanta to avoid inconsistent packet sizes.
+            // samples = frames * channels is the negotiated quantum.
+            val quantum = samples
+            val pending = FloatArray(quantum)
+            var pendingPos = 0
+            var captureSamplesRead = 0L
+            var captureSamplesSubmitted = 0L
+            var captureSamplesAccepted = 0L
+            var captureSamplesDropped = 0L
+            Log.i(TAG, "HOST AUDIO RUNNING capture source=$captureSource quantum=$quantum")
             workerReady(request)
             while (running.get() && activeRequest === request) {
                 val count = recorder.read(pcm, 0, pcm.size)
@@ -325,8 +333,33 @@ class RelayService : Service() {
                     count < 0 -> throw IllegalStateException("AudioRecord.read failed with code $count")
                     count == 0 -> Thread.sleep(2)
                     else -> {
-                        for (index in 0 until count) floats[index] = pcm[index] / 32768f
-                        pushCapture(request, floats, count)
+                        captureSamplesRead += count.toLong()
+                        var srcOffset = 0
+                        while (srcOffset < count) {
+                            val needed = quantum - pendingPos
+                            val available = count - srcOffset
+                            val toCopy = minOf(needed, available)
+                            for (index in 0 until toCopy) {
+                                pending[pendingPos + index] = pcm[srcOffset + index] / 32768f
+                            }
+                            pendingPos += toCopy
+                            srcOffset += toCopy
+                            if (pendingPos == quantum) {
+                                captureSamplesSubmitted += quantum.toLong()
+                                val accepted = pushCapture(request, pending, quantum)
+                                if (accepted != quantum) {
+                                    captureSamplesDropped += (quantum - accepted).toLong()
+                                    Log.w(
+                                        TAG,
+                                        "Relay capture drop: requested=$quantum accepted=$accepted dropped=${quantum - accepted} read=$captureSamplesRead submitted=$captureSamplesSubmitted accepted=$captureSamplesAccepted",
+                                    )
+                                } else {
+                                    captureSamplesAccepted += accepted.toLong()
+                                }
+                                // Preserve leftover samples: accumulator reset but loop continues
+                                pendingPos = 0
+                            }
+                        }
                     }
                 }
             }

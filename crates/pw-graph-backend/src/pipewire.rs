@@ -1488,11 +1488,9 @@ impl RelayDriver for PipewireDriver {
                 eprintln!("Relay playback disabled");
             }
         }
-        // Try to (re)route outside realtime callback via with_loop
-        let _ = self.with_loop(|driver| {
-            driver.ensure_relay_playback_route_locked()?;
-            Ok(())
-        });
+        // Propagate routing failures so the UI does not show a healthy state
+        // while the PipeWire link could not be created.
+        self.with_loop(|driver| driver.ensure_relay_playback_route_locked())?;
         Ok(())
     }
 
@@ -1538,10 +1536,7 @@ impl RelayDriver for PipewireDriver {
                 eprintln!("Relay playback sink selected: Default");
             }
         }
-        let _ = self.with_loop(|driver| {
-            driver.ensure_relay_playback_route_locked()?;
-            Ok(())
-        });
+        self.with_loop(|driver| driver.ensure_relay_playback_route_locked())?;
         Ok(())
     }
 
