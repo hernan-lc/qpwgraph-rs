@@ -165,3 +165,21 @@ pub(super) fn process_name(process_id: u32) -> Option<String> {
     let name = std::path::Path::new(&path).file_stem()?.to_string_lossy();
     (!name.is_empty()).then(|| name.into_owned())
 }
+
+/// An effect instance's graph identities.
+///
+/// Derived from the caller's instance id rather than from anything Windows
+/// supplies, because Windows knows nothing about effects: the instance id is
+/// what a patchbay file stores and what has to still mean the same node
+/// tomorrow.
+pub(super) fn effect_node_local_id(instance_id: &str) -> u64 {
+    stable_local_id(&format!("effect-node:{instance_id}"))
+}
+
+pub(super) fn effect_input_port_local_id(instance_id: &str) -> u64 {
+    stable_local_id(&format!("effect-in:{instance_id}"))
+}
+
+pub(super) fn effect_output_port_local_id(instance_id: &str) -> u64 {
+    stable_local_id(&format!("effect-out:{instance_id}"))
+}

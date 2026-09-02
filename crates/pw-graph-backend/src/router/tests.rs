@@ -10,8 +10,8 @@ use pw_graph_effects::{AudioSpec, EffectDescriptor, EffectError, EffectProcessor
 use super::diagnostics::RouteFault;
 use super::endpoints::{BufferSource, CaptureSink, Captured, LostSource};
 use super::engine::{
-    AudioSink, DestinationSpec, ProcessorId, RouteId, RouteSpec, RouterConfig, RouterCore,
-    RouterError, SinkId, SourceId,
+    AudioSink, BranchSpec, DestinationSpec, ProcessorId, RouteId, RouteSpec, RouterConfig,
+    RouterCore, RouterError, SinkId, SourceId,
 };
 use super::format::AudioFormat;
 
@@ -127,6 +127,30 @@ fn spec(format: AudioFormat, frames: u32) -> AudioSpec {
     }
 }
 
+/// One source into one destination, through one effect.
+fn through(id: RouteId, source: SourceId, effect: ProcessorId, sink: SinkId) -> RouteSpec {
+    RouteSpec {
+        id,
+        source,
+        gain: 1.0,
+        branches: vec![BranchSpec {
+            processors: vec![effect],
+            gain: 1.0,
+            destinations: vec![DestinationSpec::new(sink)],
+        }],
+    }
+}
+
+/// One source into several destinations on a single unprocessed branch.
+fn fan_out(id: RouteId, source: SourceId, destinations: Vec<DestinationSpec>) -> RouteSpec {
+    RouteSpec {
+        id,
+        source,
+        gain: 1.0,
+        branches: vec![BranchSpec::to(destinations)],
+    }
+}
+
 // ---------------------------------------------------------------- topology
 
 #[test]
@@ -150,16 +174,14 @@ fn one_source_can_fan_out_to_several_destinations() {
     add_source(&mut core, 1, MONO, vec![0.5, 0.5, 0.5, 0.5]);
     let left = add_sink(&mut core, 1, MONO);
     let right = add_sink(&mut core, 2, MONO);
-    core.set_routes(&[RouteSpec {
-        id: RouteId(1),
-        source: SourceId(1),
-        gain: 1.0,
-        processors: Vec::new(),
-        destinations: vec![
+    core.set_routes(&[fan_out(
+        RouteId(1),
+        SourceId(1),
+        vec![
             DestinationSpec::new(SinkId(1)),
             DestinationSpec::new(SinkId(2)),
         ],
-    }])
+    )])
     .expect("a route may hold several destinations");
 
     core.process();
@@ -305,12 +327,10 @@ fn each_destination_carries_its_own_gain() {
     add_source(&mut core, 1, MONO, vec![0.5; 4]);
     let loud = add_sink(&mut core, 1, MONO);
     let quiet = add_sink(&mut core, 2, MONO);
-    core.set_routes(&[RouteSpec {
-        id: RouteId(1),
-        source: SourceId(1),
-        gain: 1.0,
-        processors: Vec::new(),
-        destinations: vec![
+    core.set_routes(&[fan_out(
+        RouteId(1),
+        SourceId(1),
+        vec![
             DestinationSpec {
                 sink: SinkId(1),
                 gain: 1.0,
@@ -320,7 +340,7 @@ fn each_destination_carries_its_own_gain() {
                 gain: 0.5,
             },
         ],
-    }])
+    )])
     .expect("a valid route");
 
     core.process();
@@ -338,15 +358,140 @@ fn an_effect_in_a_route_processes_the_audio_that_passes_through_it() {
     let captured = add_sink(&mut core, 1, MONO);
     core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
         .expect("a fresh effect id");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
+
+    core.process();
+
+    assert_eq!(recorded(&captured), vec![0.5; 4]);
+}
+
+#[test]
+fn an_effect_on_one_branch_does_not_reach_a_sibling_fan_out() {
+    let mut core = core();
+    add_source(&mut core, 1, MONO, vec![0.25; 4]);
+    let processed = add_sink(&mut core, 1, MONO);
+    let untouched = add_sink(&mut core, 2, MONO);
+    core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
+        .expect("a fresh effect id");
     core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
+        id: RouteId(1),
+        source: SourceId(1),
+        gain: 1.0,
+        branches: vec![
+            BranchSpec {
+                processors: vec![ProcessorId(1)],
+                gain: 1.0,
+                destinations: vec![DestinationSpec::new(SinkId(1))],
+            },
+            BranchSpec::to(vec![DestinationSpec::new(SinkId(2))]),
+        ],
+    }])
+    .expect("one source may feed a processed and an unprocessed path");
+
+    core.process();
+
+    // This is the whole reason branches exist. Inserting an effect into one
+    // link must not process the other link out of the same source.
+    assert_eq!(recorded(&processed), vec![0.5; 4]);
+    assert_eq!(recorded(&untouched), vec![0.25; 4]);
+}
+
+#[test]
+fn each_branch_of_a_route_meters_its_own_output() {
+    let mut core = core();
+    add_source(&mut core, 1, MONO, vec![0.25; 4]);
+    add_sink(&mut core, 1, MONO);
+    add_sink(&mut core, 2, MONO);
+    core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
+        .expect("a fresh effect id");
+    core.set_routes(&[RouteSpec {
+        id: RouteId(1),
+        source: SourceId(1),
+        gain: 1.0,
+        branches: vec![
+            BranchSpec {
+                processors: vec![ProcessorId(1)],
+                gain: 1.0,
+                destinations: vec![DestinationSpec::new(SinkId(1))],
+            },
+            BranchSpec::to(vec![DestinationSpec::new(SinkId(2))]),
+        ],
     }])
     .expect("a valid route");
 
     core.process();
 
+    // One level per path, because the two paths genuinely carry different
+    // audio. A single route-level meter would have to lie about one of them.
+    // The route-level reading is the first branch's, and reading it is what
+    // clears that branch's held peak -- so it is read once, here.
+    assert_eq!(core.meter(RouteId(1)).expect("the route exists").peak, 0.5);
+    assert_eq!(
+        core.branch_meter(RouteId(1), 1).expect("branch 1").peak,
+        0.25
+    );
+    assert!(core.branch_meter(RouteId(1), 2).is_none());
+}
+
+#[test]
+fn a_branch_carries_its_own_gain_after_its_effects() {
+    let mut core = core();
+    add_source(&mut core, 1, MONO, vec![0.25; 4]);
+    let captured = add_sink(&mut core, 1, MONO);
+    core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
+        .expect("a fresh effect id");
+    core.set_routes(&[RouteSpec {
+        id: RouteId(1),
+        source: SourceId(1),
+        gain: 2.0,
+        branches: vec![BranchSpec {
+            processors: vec![ProcessorId(1)],
+            gain: 0.5,
+            destinations: vec![DestinationSpec::new(SinkId(1))],
+        }],
+    }])
+    .expect("a valid route");
+
+    core.process();
+
+    // 0.25 into route gain 2.0, doubled by the effect, then halved by the
+    // branch: the order matters, and this pins it down.
     assert_eq!(recorded(&captured), vec![0.5; 4]);
+}
+
+#[test]
+fn an_effect_may_not_be_used_by_two_branches_at_once() {
+    let mut core = core();
+    add_source(&mut core, 1, MONO, vec![0.25; 4]);
+    add_sink(&mut core, 1, MONO);
+    add_sink(&mut core, 2, MONO);
+    core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
+        .expect("a fresh effect id");
+
+    let error = core
+        .set_routes(&[RouteSpec {
+            id: RouteId(1),
+            source: SourceId(1),
+            gain: 1.0,
+            branches: vec![
+                BranchSpec {
+                    processors: vec![ProcessorId(1)],
+                    gain: 1.0,
+                    destinations: vec![DestinationSpec::new(SinkId(1))],
+                },
+                BranchSpec {
+                    processors: vec![ProcessorId(1)],
+                    gain: 1.0,
+                    destinations: vec![DestinationSpec::new(SinkId(2))],
+                },
+            ],
+        }])
+        // An effect is a stateful object, not a formula. Running one instance
+        // over two different streams would interleave their state.
+        .expect_err("one effect instance cannot process two streams");
+
+    assert_eq!(error, RouterError::ProcessorInUse(ProcessorId(1)));
 }
 
 #[test]
@@ -356,11 +501,8 @@ fn a_bypassed_effect_passes_audio_through_untouched() {
     let captured = add_sink(&mut core, 1, MONO);
     core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
         .expect("a fresh effect id");
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
 
     core.set_processor_bypassed(ProcessorId(1), true)
         .expect("the effect exists");
@@ -376,11 +518,8 @@ fn bypass_keeps_the_effect_and_its_configuration_rather_than_destroying_them() {
     let captured = add_sink(&mut core, 1, MONO);
     core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
         .expect("a fresh effect id");
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
 
     core.set_processor_parameter(ProcessorId(1), "factor", 4.0)
         .expect("the effect takes the parameter");
@@ -406,19 +545,13 @@ fn an_effect_keeps_its_configuration_across_a_route_table_replacement() {
         .expect("a fresh effect id");
     core.set_processor_parameter(ProcessorId(1), "factor", 3.0)
         .expect("the effect takes the parameter");
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
     core.process();
 
     // Reroute the same effect onto a different destination.
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(2))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(2))])
+        .expect("a valid route");
     core.process();
 
     assert_eq!(recorded(&first), vec![0.75; 4]);
@@ -433,11 +566,8 @@ fn a_failing_effect_is_bypassed_for_the_block_and_reported() {
     let captured = add_sink(&mut core, 1, MONO);
     core.add_processor(ProcessorId(1), Box::new(Doubler::failing()), spec(MONO, 4))
         .expect("a fresh effect id");
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
 
     core.process();
 
@@ -458,10 +588,7 @@ fn an_effect_prepared_for_another_geometry_is_refused_rather_than_handed_the_wro
         .expect("a fresh effect id");
 
     let error = core
-        .set_routes(&[RouteSpec {
-            processors: vec![ProcessorId(1)],
-            ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-        }])
+        .set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
         .expect_err("a stereo effect cannot process a mono route");
 
     assert!(matches!(error, RouterError::ProcessorFormatMismatch { .. }));
@@ -476,10 +603,7 @@ fn an_effect_prepared_for_shorter_blocks_than_the_router_uses_is_refused() {
         .expect("a fresh effect id");
 
     let error = core
-        .set_routes(&[RouteSpec {
-            processors: vec![ProcessorId(1)],
-            ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-        }])
+        .set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
         .expect_err("an effect must agree to the router's block size");
 
     assert!(matches!(error, RouterError::ProcessorBlockTooSmall { .. }));
@@ -492,11 +616,8 @@ fn an_effect_still_used_by_a_route_cannot_be_removed_out_from_under_it() {
     add_sink(&mut core, 1, MONO);
     core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
         .expect("a fresh effect id");
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
 
     assert!(matches!(
         core.remove_processor(ProcessorId(1)),
@@ -556,13 +677,7 @@ fn a_route_with_no_destination_is_refused() {
     add_source(&mut core, 1, MONO, vec![0.5; 4]);
 
     let error = core
-        .set_routes(&[RouteSpec {
-            id: RouteId(1),
-            source: SourceId(1),
-            gain: 1.0,
-            processors: Vec::new(),
-            destinations: Vec::new(),
-        }])
+        .set_routes(&[fan_out(RouteId(1), SourceId(1), Vec::new())])
         .expect_err("a route that reaches nowhere is not a route");
 
     assert_eq!(error, RouterError::RouteWithoutDestination(RouteId(1)));
@@ -575,16 +690,14 @@ fn the_same_destination_twice_on_one_route_is_refused() {
     add_sink(&mut core, 1, MONO);
 
     let error = core
-        .set_routes(&[RouteSpec {
-            id: RouteId(1),
-            source: SourceId(1),
-            gain: 1.0,
-            processors: Vec::new(),
-            destinations: vec![
+        .set_routes(&[fan_out(
+            RouteId(1),
+            SourceId(1),
+            vec![
                 DestinationSpec::new(SinkId(1)),
                 DestinationSpec::new(SinkId(1)),
             ],
-        }])
+        )])
         .expect_err("a duplicate destination would double the audio");
 
     assert_eq!(error, RouterError::DuplicateDestination(SinkId(1)));
@@ -820,11 +933,8 @@ fn the_meter_reads_after_the_effect_chain_not_before_it() {
     add_sink(&mut core, 1, MONO);
     core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
         .expect("a fresh effect id");
-    core.set_routes(&[RouteSpec {
-        processors: vec![ProcessorId(1)],
-        ..RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))
-    }])
-    .expect("a valid route");
+    core.set_routes(&[through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))])
+        .expect("a valid route");
 
     core.process();
 

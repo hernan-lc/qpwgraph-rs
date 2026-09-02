@@ -21,7 +21,7 @@ pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabi
     volume: true,
     mute: true,
     meters: true,
-    effects: false,
+    effects: true,
     // Kept in step with `RelayDriver::relay_available` below: the WASAPI relay
     // endpoints exist whenever the feature is compiled in.
     relay: cfg!(feature = "relay"),
@@ -73,6 +73,11 @@ pub struct WindowsAudioDriver {
     /// Started on the first connect rather than at construction: a session
     /// that never draws a link should not pay for an audio thread.
     pub(super) routing: Option<WindowsRouting>,
+    /// Effect instances and the factory that builds them.
+    pub(super) effects: WindowsEffects,
+    /// Where each effect node sits, by instance id. Kept separately from
+    /// `positions` because an effect outlives the node id a rebuild gave it.
+    pub(super) effect_positions: BTreeMap<String, [f32; 2]>,
     /// Relay engine plus its WASAPI endpoints, created on first use.
     #[cfg(feature = "relay")]
     pub(super) relay: Option<crate::windows_relay::WindowsRelayDevices>,
@@ -136,6 +141,8 @@ impl WindowsAudioDriver {
             worker: Some(worker),
             endpoint_ports: snapshot.endpoint_ports,
             routing: None,
+            effects: WindowsEffects::new(),
+            effect_positions: BTreeMap::new(),
             #[cfg(feature = "relay")]
             relay: None,
             #[cfg(feature = "relay")]
@@ -324,6 +331,24 @@ impl WindowsAudioDriver {
             }
         }
         self.endpoint_ports = snapshot.endpoint_ports;
+        // Core Audio has never heard of an effect, so the rebuilt graph has
+        // no effect nodes in it. Draw them again before the links, or the
+        // links that pass through them would have nowhere to land.
+        for instance in self.effects.iter() {
+            let name = self
+                .effects
+                .descriptors()
+                .into_iter()
+                .find(|descriptor| descriptor.id == instance.config.effect_id)
+                .map(|descriptor| descriptor.name)
+                .unwrap_or_else(|| instance.config.effect_id.clone());
+            let position = self
+                .effect_positions
+                .get(&instance.config.instance_id)
+                .copied()
+                .unwrap_or_default();
+            let _ = Self::draw_effect(&mut graph, instance, &name, position);
+        }
         // The worker rebuilds the graph from what Core Audio reports, which
         // knows nothing about the routes qpwgraph is carrying. Drop the ones
         // whose devices have gone, then put the survivors back: a link the
@@ -562,7 +587,55 @@ impl GraphDriver for WindowsAudioDriver {
     }
 }
 
-impl crate::api::EffectDriver for WindowsAudioDriver {}
+/// Effects on Windows.
+///
+/// Real, because the router owns the PCM: an effect is a node with a processor
+/// between its two ports, and routing audio through it is an ordinary graph
+/// operation. See [`super::effects`].
+impl crate::api::EffectDriver for WindowsAudioDriver {
+    fn effect_descriptors(&self) -> Vec<pw_graph_effects::EffectDescriptor> {
+        self.effects.descriptors()
+    }
+
+    fn effect_instances(&self) -> Vec<crate::api::EffectInstance> {
+        self.effects.instances()
+    }
+
+    fn supports_effect_nodes(&self) -> bool {
+        true
+    }
+
+    fn create_effect_node(
+        &mut self,
+        request: crate::api::EffectNodeRequest,
+    ) -> BackendResult<crate::api::EffectInstance> {
+        self.create_effect(request)
+    }
+
+    fn insert_effect(
+        &mut self,
+        request: crate::api::EffectInsertRequest,
+    ) -> BackendResult<crate::api::EffectInstance> {
+        self.insert_effect_into_link(request)
+    }
+
+    fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
+        self.set_effect_bypassed(instance_id, enabled)
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        instance_id: &str,
+        parameter: &str,
+        value: f32,
+    ) -> BackendResult<()> {
+        self.set_effect_value(instance_id, parameter, value)
+    }
+
+    fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
+        self.destroy_effect(instance_id)
+    }
+}
 
 /// Relay support on Windows.
 ///

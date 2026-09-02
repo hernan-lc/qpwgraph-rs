@@ -28,7 +28,7 @@ use super::api::{
 };
 use pw_graph_core::{
     encode_backend_id, BackendNamespace, Direction, Graph, GraphError, Link, LinkId, Node, NodeId,
-    NodeType, Port, PortId, PortType, LOCAL_ID_MASK,
+    NodeType, Port, PortId, PortKey, PortType, LOCAL_ID_MASK,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -55,6 +55,7 @@ use windows_core::BOOL;
 
 mod callbacks;
 mod driver;
+mod effects;
 mod identity;
 mod routing;
 mod worker;
@@ -67,6 +68,7 @@ mod tests;
 use self::callbacks::*;
 pub use self::driver::WindowsAudioDriver;
 use self::driver::*;
+use self::effects::*;
 use self::identity::*;
 use self::routing::*;
 use self::worker::*;

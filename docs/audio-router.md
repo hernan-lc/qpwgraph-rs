@@ -32,29 +32,38 @@ Capturing a single application is a separate gap with a separate cause: it
 needs process loopback, which needs a newer Windows build than this backend
 targets.
 
-`effects: false` therefore still stands. The router hosts effect processors,
-but nothing wires them into a Windows route yet.
-
 ## The block cycle
 
 One call to `RouterCore::process` moves at most one block:
 
-1. every route pulls a block from its source;
-2. the route's gain is applied, then its effect chain, in place;
-3. the route's meter observes the result;
-4. for each destination the block is channel-mapped, rate-converted, and
+1. every route pulls a block from its source, once, whatever it feeds;
+2. the route's gain is applied;
+3. each **branch** takes its own copy, runs its effect chain, and applies its
+   own gain;
+4. the branch's meter observes the result;
+5. for each destination the block is channel-mapped, rate-converted, and
    *added* into that sink's mix accumulator;
-5. every sink is written exactly once.
+6. every sink is written exactly once.
 
-Step 4 is what gives fan-out and mixing from the same code. One source reaching
+Step 5 is what gives fan-out and mixing from the same code. One source reaching
 several sinks is fan-out; several sources reaching one sink is a mix.
+
+Step 3 is what makes "insert an effect into *this* link" mean what it says. A
+source feeding a plain destination and an effect-processed one has two
+branches, so the effect cannot leak into the sibling path — while the source is
+still pulled once, and a chain shared by several destinations still runs once.
+`windows::routing` derives the branches by walking the drawn links: paths that
+pass through the same effects become one branch, paths that do not become
+another.
 
 ## Decisions worth knowing
 
-**Meters read post-effect.** The level is what the destination is about to
-receive, not what the source produced. That matches PipeWire, where a meter
-sits on the port it is attached to, and it fixes the pre/post ambiguity
-cross-platform.
+**Meters read post-effect, per branch.** The level is what the destination is
+about to receive, not what the source produced. That matches PipeWire, where a
+meter sits on the port it is attached to, and it fixes the pre/post ambiguity
+cross-platform. A route with several branches has a level per branch, because
+the branches genuinely carry different audio; `meter` reports the first and
+`branch_meter` the rest.
 
 **RMS is real here.** Windows' `IAudioMeterInformation` is peak-only, which is
 why the Core Audio backend reports `rms: 0.0` and declines the RMS capability.

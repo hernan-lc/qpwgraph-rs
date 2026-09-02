@@ -266,6 +266,32 @@ impl DestinationSpec {
     }
 }
 
+/// One processed path out of a route, as the caller describes it.
+///
+/// A branch is what makes "insert an effect into *this* link" mean what it
+/// says. A source feeding both a plain destination and an effect-processed
+/// one has two branches: the source is still pulled once per block, but each
+/// branch gets its own copy of the audio and its own chain, so the effect
+/// cannot leak into the sibling path.
+#[derive(Clone, Debug)]
+pub struct BranchSpec {
+    /// Effects in order. Each may appear on exactly one branch, of one route.
+    pub processors: Vec<ProcessorId>,
+    /// Linear gain applied after this branch's effects.
+    pub gain: f32,
+    pub destinations: Vec<DestinationSpec>,
+}
+
+impl BranchSpec {
+    pub fn to(destinations: Vec<DestinationSpec>) -> Self {
+        Self {
+            processors: Vec::new(),
+            gain: 1.0,
+            destinations,
+        }
+    }
+}
+
 /// A route, as the caller describes it.
 ///
 /// The graph layer builds these from qpwgraph links; the router does not know
@@ -274,16 +300,14 @@ impl DestinationSpec {
 pub struct RouteSpec {
     pub id: RouteId,
     pub source: SourceId,
-    /// Linear gain applied before the effect chain.
+    /// Linear gain applied to everything this source feeds, before any branch.
     ///
     /// Not clamped to 1.0. This is where Windows gets the >100% boost §13
     /// calls for: the endpoint's own volume control still tops out at unity,
     /// and software gain in a route qpwgraph owns is a separate, honest
     /// capability rather than a lie about the hardware.
     pub gain: f32,
-    /// Effects in order. Each may appear on exactly one route.
-    pub processors: Vec<ProcessorId>,
-    pub destinations: Vec<DestinationSpec>,
+    pub branches: Vec<BranchSpec>,
 }
 
 impl RouteSpec {
@@ -293,9 +317,15 @@ impl RouteSpec {
             id,
             source,
             gain: 1.0,
-            processors: Vec::new(),
-            destinations: vec![DestinationSpec::new(sink)],
+            branches: vec![BranchSpec::to(vec![DestinationSpec::new(sink)])],
         }
+    }
+
+    /// Every destination this route reaches, across all its branches.
+    pub fn destinations(&self) -> impl Iterator<Item = &DestinationSpec> {
+        self.branches
+            .iter()
+            .flat_map(|branch| branch.destinations.iter())
     }
 }
 
@@ -374,16 +404,27 @@ struct Destination {
     sink_channels: u16,
 }
 
+/// One live processed path out of a route.
+struct Branch {
+    processors: Vec<ProcessorId>,
+    gain: f32,
+    destinations: Vec<Destination>,
+    /// This branch's own copy of the block, so its effects cannot reach a
+    /// sibling branch's audio.
+    block: Vec<f32>,
+    meter: Arc<MeterCell>,
+}
+
 struct Route {
     id: RouteId,
     source: SourceId,
     gain: f32,
-    processors: Vec<ProcessorId>,
-    destinations: Vec<Destination>,
+    branches: Vec<Branch>,
     format: AudioFormat,
-    /// Source-rate, source-geometry audio for this block.
+    /// Source-rate, source-geometry audio for this block, shared by every
+    /// branch. The source is pulled exactly once however many branches read
+    /// it.
     input: Vec<f32>,
-    meter: Arc<MeterCell>,
     diagnostics: Arc<RouteDiagnostics>,
 }
 
@@ -414,7 +455,9 @@ pub struct RouterCore {
     sinks: BTreeMap<SinkId, SinkSlot>,
     processors: BTreeMap<ProcessorId, ProcessorSlot>,
     table: RouteTable,
-    meters: BTreeMap<RouteId, Arc<MeterCell>>,
+    /// One meter per branch: a route with an effect on one path and none on
+    /// another has two different levels to report.
+    meters: BTreeMap<(RouteId, usize), Arc<MeterCell>>,
     diagnostics: BTreeMap<RouteId, Arc<RouteDiagnostics>>,
     frame_clock: u64,
 }
@@ -523,12 +566,14 @@ impl RouterCore {
 
     /// Remove a destination, handing it back for disposal.
     pub fn remove_sink(&mut self, id: SinkId) -> Result<Box<dyn AudioSink>, RouterError> {
-        if let Some(route) = self
-            .table
-            .routes
-            .iter()
-            .find(|route| route.destinations.iter().any(|dst| dst.sink == id))
-        {
+        if let Some(route) = self.table.routes.iter().find(|route| {
+            route.branches.iter().any(|branch| {
+                branch
+                    .destinations
+                    .iter()
+                    .any(|destination| destination.sink == id)
+            })
+        }) {
             return Err(RouterError::StillRouted(route.id));
         }
         self.sinks
@@ -542,12 +587,12 @@ impl RouterCore {
         &mut self,
         id: ProcessorId,
     ) -> Result<Box<dyn EffectProcessor>, RouterError> {
-        if let Some(route) = self
-            .table
-            .routes
-            .iter()
-            .find(|route| route.processors.contains(&id))
-        {
+        if let Some(route) = self.table.routes.iter().find(|route| {
+            route
+                .branches
+                .iter()
+                .any(|branch| branch.processors.contains(&id))
+        }) {
             return Err(RouterError::StillRouted(route.id));
         }
         self.processors
@@ -624,125 +669,154 @@ impl RouterCore {
                 .get(&spec.source)
                 .ok_or(RouterError::UnknownSource(spec.source))?
                 .format;
-            if spec.destinations.is_empty() {
+            if spec
+                .branches
+                .iter()
+                .all(|branch| branch.destinations.is_empty())
+            {
                 return Err(RouterError::RouteWithoutDestination(spec.id));
             }
-
-            let mut route_processors = Vec::with_capacity(spec.processors.len());
-            let mut seen_processors = BTreeSet::new();
-            for &processor in &spec.processors {
-                let slot = self
-                    .processors
-                    .get(&processor)
-                    .ok_or(RouterError::UnknownProcessor(processor))?;
-                if !seen_processors.insert(processor) {
-                    return Err(RouterError::DuplicateProcessorUse(processor));
-                }
-                if !claimed_processors.insert(processor) {
-                    return Err(RouterError::ProcessorInUse(processor));
-                }
-                if slot.spec.sample_rate != source_format.sample_rate
-                    || slot.spec.channels != source_format.channels
-                {
-                    return Err(RouterError::ProcessorFormatMismatch {
-                        processor,
-                        prepared_rate: slot.spec.sample_rate,
-                        prepared_channels: slot.spec.channels,
-                        route_rate: source_format.sample_rate,
-                        route_channels: source_format.channels,
-                    });
-                }
-                if (slot.spec.max_frames as usize) < self.config.block_frames {
-                    return Err(RouterError::ProcessorBlockTooSmall {
-                        processor,
-                        prepared_frames: slot.spec.max_frames,
-                        block_frames: self.config.block_frames as u32,
-                    });
-                }
-                route_processors.push(processor);
-            }
-
+            // A sink may be fed by several routes -- that is a mix -- but not
+            // twice by one source, which would simply double it.
             let mut seen_sinks = BTreeSet::new();
-            let mut destinations = Vec::with_capacity(spec.destinations.len());
-            for destination in &spec.destinations {
-                let sink_format = self
-                    .sinks
-                    .get(&destination.sink)
-                    .ok_or(RouterError::UnknownSink(destination.sink))?
-                    .format;
-                if !seen_sinks.insert(destination.sink) {
-                    return Err(RouterError::DuplicateDestination(destination.sink));
+
+            let mut branches = Vec::with_capacity(spec.branches.len());
+            for (index, branch) in spec.branches.iter().enumerate() {
+                if branch.destinations.is_empty() {
+                    return Err(RouterError::RouteWithoutDestination(spec.id));
                 }
-                let max_out_frames =
-                    source_format.resampled_capacity(sink_format, self.config.block_frames);
-                let mix = *mix_index.entry(destination.sink).or_insert_with(|| {
-                    mixes.push(Mix {
-                        sink: destination.sink,
-                        buffer: Vec::new(),
-                        frames: 0,
-                        channels: sink_format.channels,
+
+                let mut branch_processors = Vec::with_capacity(branch.processors.len());
+                let mut seen_processors = BTreeSet::new();
+                for &processor in &branch.processors {
+                    let slot = self
+                        .processors
+                        .get(&processor)
+                        .ok_or(RouterError::UnknownProcessor(processor))?;
+                    if !seen_processors.insert(processor) {
+                        return Err(RouterError::DuplicateProcessorUse(processor));
+                    }
+                    if !claimed_processors.insert(processor) {
+                        return Err(RouterError::ProcessorInUse(processor));
+                    }
+                    if slot.spec.sample_rate != source_format.sample_rate
+                        || slot.spec.channels != source_format.channels
+                    {
+                        return Err(RouterError::ProcessorFormatMismatch {
+                            processor,
+                            prepared_rate: slot.spec.sample_rate,
+                            prepared_channels: slot.spec.channels,
+                            route_rate: source_format.sample_rate,
+                            route_channels: source_format.channels,
+                        });
+                    }
+                    if (slot.spec.max_frames as usize) < self.config.block_frames {
+                        return Err(RouterError::ProcessorBlockTooSmall {
+                            processor,
+                            prepared_frames: slot.spec.max_frames,
+                            block_frames: self.config.block_frames as u32,
+                        });
+                    }
+                    branch_processors.push(processor);
+                }
+
+                let mut destinations = Vec::with_capacity(branch.destinations.len());
+                for destination in &branch.destinations {
+                    let sink_format = self
+                        .sinks
+                        .get(&destination.sink)
+                        .ok_or(RouterError::UnknownSink(destination.sink))?
+                        .format;
+                    if !seen_sinks.insert(destination.sink) {
+                        return Err(RouterError::DuplicateDestination(destination.sink));
+                    }
+                    let max_out_frames =
+                        source_format.resampled_capacity(sink_format, self.config.block_frames);
+                    let mix = *mix_index.entry(destination.sink).or_insert_with(|| {
+                        mixes.push(Mix {
+                            sink: destination.sink,
+                            buffer: Vec::new(),
+                            frames: 0,
+                            channels: sink_format.channels,
+                        });
+                        mixes.len() - 1
                     });
-                    mixes.len() - 1
-                });
-                // The accumulator has to hold the loudest demand of any route
-                // feeding it, not just this one.
-                let wanted = sink_format.samples(max_out_frames);
-                if mixes[mix].buffer.len() < wanted {
-                    mixes[mix].buffer.resize(wanted, 0.0);
+                    // The accumulator has to hold the loudest demand of any
+                    // route feeding it, not just this one.
+                    let wanted = sink_format.samples(max_out_frames);
+                    if mixes[mix].buffer.len() < wanted {
+                        mixes[mix].buffer.resize(wanted, 0.0);
+                    }
+                    destinations.push(Destination {
+                        sink: destination.sink,
+                        mix,
+                        gain: destination.gain,
+                        map: ChannelMap::between(source_format.channels, sink_format.channels),
+                        // Two blocks of headroom: the resampler leaves at most
+                        // a fraction of a frame behind per block, and doubling
+                        // means the staging never has to grow while audio is
+                        // running.
+                        staging: vec![0.0; sink_format.samples(self.config.block_frames * 2)],
+                        staged_frames: 0,
+                        converted: vec![0.0; sink_format.samples(max_out_frames)],
+                        max_out_frames,
+                        resampler: Resampler::new(
+                            AudioFormat::new(source_format.sample_rate, sink_format.channels),
+                            sink_format,
+                        ),
+                        sink_channels: sink_format.channels,
+                    });
                 }
-                destinations.push(Destination {
-                    sink: destination.sink,
-                    mix,
-                    gain: destination.gain,
-                    map: ChannelMap::between(source_format.channels, sink_format.channels),
-                    // Two blocks of headroom: the resampler leaves at most a
-                    // fraction of a frame behind per block, and doubling means
-                    // the staging never has to grow while audio is running.
-                    staging: vec![0.0; sink_format.samples(self.config.block_frames * 2)],
-                    staged_frames: 0,
-                    converted: vec![0.0; sink_format.samples(max_out_frames)],
-                    max_out_frames,
-                    resampler: Resampler::new(
-                        AudioFormat::new(source_format.sample_rate, sink_format.channels),
-                        sink_format,
-                    ),
-                    sink_channels: sink_format.channels,
+
+                // Meters survive a route table replacement, so a reroute does
+                // not blank the UI's level bars.
+                let meter = Arc::clone(
+                    self.meters
+                        .entry((spec.id, index))
+                        .or_insert_with(|| Arc::new(MeterCell::new())),
+                );
+                branches.push(Branch {
+                    processors: branch_processors,
+                    gain: branch.gain,
+                    destinations,
+                    block: vec![0.0; source_format.samples(self.config.block_frames)],
+                    meter,
                 });
             }
 
-            // Meters and counters survive a route table replacement, so a
-            // reroute does not blank the UI's level bars or reset the
-            // dropout counts that were about to explain why.
-            let meter = Arc::clone(
-                self.meters
-                    .entry(spec.id)
-                    .or_insert_with(|| Arc::new(MeterCell::new())),
-            );
+            // Counters survive too: the dropout history was about to explain
+            // why the user rerouted.
             let diagnostics = Arc::clone(self.diagnostics.entry(spec.id).or_default());
 
             routes.push(Route {
                 id: spec.id,
                 source: spec.source,
                 gain: spec.gain,
-                processors: route_processors,
-                destinations,
+                branches,
                 format: source_format,
                 input: vec![0.0; source_format.samples(self.config.block_frames)],
-                meter,
                 diagnostics,
             });
         }
 
         self.table = RouteTable { routes, mixes };
-        // Meters for routes that no longer exist would otherwise keep
+        // Meters for branches that no longer exist would otherwise keep
         // reporting the last level they saw.
-        let live: BTreeSet<RouteId> = self.table.routes.iter().map(|route| route.id).collect();
-        for (id, meter) in &self.meters {
-            if !live.contains(id) {
+        let live = self.live_branches();
+        for (key, meter) in &self.meters {
+            if !live.contains(key) {
                 meter.clear();
             }
         }
         Ok(())
+    }
+
+    fn live_branches(&self) -> BTreeSet<(RouteId, usize)> {
+        self.table
+            .routes
+            .iter()
+            .flat_map(|route| (0..route.branches.len()).map(move |branch| (route.id, branch)))
+            .collect()
     }
 
     /// Ids of the routes currently installed, in table order.
@@ -752,9 +826,19 @@ impl RouterCore {
 
     /// The current level at a route's output, or `None` if that route has
     /// never existed.
+    ///
+    /// A route with several branches reports its first; the others are
+    /// reachable through [`RouterCore::branch_meter`]. Most routes have
+    /// exactly one, so this is the level after that branch's effects — the
+    /// post-effect reading the parity contract asks for.
     pub fn meter(&self, route: RouteId) -> Option<MeterReading> {
+        self.branch_meter(route, 0)
+    }
+
+    /// The level leaving one branch of a route, after its effects.
+    pub fn branch_meter(&self, route: RouteId, branch: usize) -> Option<MeterReading> {
         self.meters
-            .get(&route)
+            .get(&(route, branch))
             .map(|meter| meter.read(self.frame_clock, self.config.clock_rate))
     }
 
@@ -771,8 +855,9 @@ impl RouterCore {
     /// remove then re-add within one transaction -- does not lose the history
     /// that explains what went wrong.
     pub fn forget_retired_routes(&mut self) {
+        let live_branches = self.live_branches();
         let live: BTreeSet<RouteId> = self.table.routes.iter().map(|route| route.id).collect();
-        self.meters.retain(|id, _| live.contains(id));
+        self.meters.retain(|key, _| live_branches.contains(key));
         self.diagnostics.retain(|id, _| live.contains(id));
     }
 
@@ -844,120 +929,135 @@ impl RouterCore {
                 }
             }
             let samples = route.format.samples(frames);
-            let block = &mut route.input[..samples];
-
-            if route.gain != 1.0 {
-                for sample in block.iter_mut() {
-                    *sample *= route.gain;
-                }
-            }
-
-            let effects_started = Instant::now();
-            let mut processor_failed = false;
-            for id in &route.processors {
-                let Some(slot) = processors.get_mut(id) else {
-                    continue;
-                };
-                if slot.bypassed {
-                    continue;
-                }
-                if slot.processor.process(block, frames as u32).is_err() {
-                    // A failing effect is bypassed for this block. Dropping
-                    // the audio instead would turn a bad parameter into
-                    // silence the user cannot explain.
-                    processor_failed = true;
-                }
-            }
-            let effect_us = effects_started.elapsed().as_micros() as u64;
-
-            // Post-effect, at the route's output: what the destinations are
-            // about to receive.
-            route.meter.observe(block, *frame_clock);
+            let input = &route.input[..samples];
 
             let mut queue_depth = 0u64;
             let mut ratio = 1.0;
             let mut drift_ppm = 0.0;
             let mut destination_backed_up = false;
-            for destination in route.destinations.iter_mut() {
-                let channels = destination.sink_channels as usize;
-                let staged = destination.staged_frames;
-                let staging_capacity = destination.staging.len() / channels;
-                let room = staging_capacity.saturating_sub(staged);
-                let mapped = destination.map.apply(
-                    block,
-                    route.format.channels,
-                    &mut destination.staging[staged * channels..(staged + room) * channels],
-                    destination.sink_channels,
-                );
-                if mapped < frames {
-                    // Only reachable if the staging never drained, which means
-                    // the destination has been refusing audio for blocks.
-                    route
-                        .diagnostics
-                        .note_source_overrun((frames - mapped) as u64);
-                }
-                destination.staged_frames = staged + mapped;
+            let mut processor_failed = false;
+            let mut effect_us = 0u64;
 
-                let available = destination.staged_frames * channels;
-                let out_limit = destination.max_out_frames * channels;
-                let converted = if destination.resampler.is_passthrough() {
-                    // Matching rates with no drift correction in play: copy,
-                    // so a same-rate route is sample-exact and adds no
-                    // latency. Interpolating at a ratio of exactly 1.0 would
-                    // reproduce the input anyway, but only after holding a
-                    // frame back for the next block's right-hand side.
-                    let frames = destination.staged_frames.min(destination.max_out_frames);
-                    let samples = frames * channels;
-                    destination.converted[..samples]
-                        .copy_from_slice(&destination.staging[..samples]);
-                    super::resample::Converted {
-                        consumed: frames,
-                        produced: frames,
-                    }
-                } else {
-                    destination.resampler.process(
-                        &destination.staging[..available],
-                        &mut destination.converted[..out_limit],
-                    )
-                };
-                if converted.consumed > 0 {
-                    destination
-                        .staging
-                        .copy_within(converted.consumed * channels..available, 0);
-                    destination.staged_frames -= converted.consumed;
-                }
-                queue_depth += destination.staged_frames as u64;
-                ratio = destination.resampler.ratio();
-                drift_ppm = destination.resampler.drift_ppm();
-
-                if converted.produced == 0 {
-                    continue;
-                }
-                let produced_samples = converted.produced * channels;
-                if destination.gain != 1.0 {
-                    for sample in destination.converted[..produced_samples].iter_mut() {
-                        *sample *= destination.gain;
+            for branch in route.branches.iter_mut() {
+                // Each branch works on its own copy, which is what keeps an
+                // effect inserted into one link out of a sibling fan-out.
+                let block = &mut branch.block[..samples];
+                block.copy_from_slice(input);
+                if route.gain != 1.0 {
+                    for sample in block.iter_mut() {
+                        *sample *= route.gain;
                     }
                 }
-                let mix = &mut mixes[destination.mix];
-                let room = mix.buffer.len().min(produced_samples);
-                for (accumulated, &sample) in mix.buffer[..room]
-                    .iter_mut()
-                    .zip(destination.converted[..room].iter())
-                {
-                    *accumulated += sample;
+
+                let effects_started = Instant::now();
+                for id in &branch.processors {
+                    let Some(slot) = processors.get_mut(id) else {
+                        continue;
+                    };
+                    if slot.bypassed {
+                        continue;
+                    }
+                    if slot.processor.process(block, frames as u32).is_err() {
+                        // A failing effect is bypassed for this block.
+                        // Dropping the audio instead would turn a bad
+                        // parameter into silence the user cannot explain.
+                        processor_failed = true;
+                    }
                 }
-                // The accumulator is sized for the loudest demand of any
-                // contributor, so this is a sizing bug rather than a device
-                // problem -- but silently truncating audio is not acceptable
-                // either way, so it is counted.
-                if produced_samples > room {
-                    destination_backed_up = true;
-                    route
-                        .diagnostics
-                        .note_sink_overrun(((produced_samples - room) / channels) as u64);
+                effect_us += effects_started.elapsed().as_micros() as u64;
+
+                if branch.gain != 1.0 {
+                    for sample in block.iter_mut() {
+                        *sample *= branch.gain;
+                    }
                 }
-                mix.frames = mix.frames.max(room / channels);
+
+                // Post-effect, at the branch's output: what its destinations
+                // are about to receive.
+                branch.meter.observe(block, *frame_clock);
+
+                let block = &branch.block[..samples];
+                for destination in branch.destinations.iter_mut() {
+                    let channels = destination.sink_channels as usize;
+                    let staged = destination.staged_frames;
+                    let staging_capacity = destination.staging.len() / channels;
+                    let room = staging_capacity.saturating_sub(staged);
+                    let mapped = destination.map.apply(
+                        block,
+                        route.format.channels,
+                        &mut destination.staging[staged * channels..(staged + room) * channels],
+                        destination.sink_channels,
+                    );
+                    if mapped < frames {
+                        // Only reachable if the staging never drained, which means
+                        // the destination has been refusing audio for blocks.
+                        route
+                            .diagnostics
+                            .note_source_overrun((frames - mapped) as u64);
+                    }
+                    destination.staged_frames = staged + mapped;
+
+                    let available = destination.staged_frames * channels;
+                    let out_limit = destination.max_out_frames * channels;
+                    let converted = if destination.resampler.is_passthrough() {
+                        // Matching rates with no drift correction in play: copy,
+                        // so a same-rate route is sample-exact and adds no
+                        // latency. Interpolating at a ratio of exactly 1.0 would
+                        // reproduce the input anyway, but only after holding a
+                        // frame back for the next block's right-hand side.
+                        let frames = destination.staged_frames.min(destination.max_out_frames);
+                        let samples = frames * channels;
+                        destination.converted[..samples]
+                            .copy_from_slice(&destination.staging[..samples]);
+                        super::resample::Converted {
+                            consumed: frames,
+                            produced: frames,
+                        }
+                    } else {
+                        destination.resampler.process(
+                            &destination.staging[..available],
+                            &mut destination.converted[..out_limit],
+                        )
+                    };
+                    if converted.consumed > 0 {
+                        destination
+                            .staging
+                            .copy_within(converted.consumed * channels..available, 0);
+                        destination.staged_frames -= converted.consumed;
+                    }
+                    queue_depth += destination.staged_frames as u64;
+                    ratio = destination.resampler.ratio();
+                    drift_ppm = destination.resampler.drift_ppm();
+
+                    if converted.produced == 0 {
+                        continue;
+                    }
+                    let produced_samples = converted.produced * channels;
+                    if destination.gain != 1.0 {
+                        for sample in destination.converted[..produced_samples].iter_mut() {
+                            *sample *= destination.gain;
+                        }
+                    }
+                    let mix = &mut mixes[destination.mix];
+                    let room = mix.buffer.len().min(produced_samples);
+                    for (accumulated, &sample) in mix.buffer[..room]
+                        .iter_mut()
+                        .zip(destination.converted[..room].iter())
+                    {
+                        *accumulated += sample;
+                    }
+                    // The accumulator is sized for the loudest demand of any
+                    // contributor, so this is a sizing bug rather than a device
+                    // problem -- but silently truncating audio is not acceptable
+                    // either way, so it is counted.
+                    if produced_samples > room {
+                        destination_backed_up = true;
+                        route
+                            .diagnostics
+                            .note_sink_overrun(((produced_samples - room) / channels) as u64);
+                    }
+                    mix.frames = mix.frames.max(room / channels);
+                }
             }
 
             route.diagnostics.set_queue_depth(queue_depth);
@@ -987,8 +1087,9 @@ impl RouterCore {
             let backlog = slot.sink.backlog();
             for route in routes.iter_mut() {
                 let Some(destination) = route
-                    .destinations
+                    .branches
                     .iter_mut()
+                    .flat_map(|branch| branch.destinations.iter_mut())
                     .find(|destination| destination.sink == mix.sink)
                 else {
                     continue;
@@ -1032,16 +1133,18 @@ impl RouterCore {
         if let Some(slot) = self.sources.get_mut(&route.source) {
             slot.source.reset();
         }
-        for destination in route.destinations.iter_mut() {
-            destination.resampler.reset();
-            destination.staged_frames = 0;
-            if let Some(slot) = self.sinks.get_mut(&destination.sink) {
-                slot.sink.reset();
+        for branch in route.branches.iter_mut() {
+            for destination in branch.destinations.iter_mut() {
+                destination.resampler.reset();
+                destination.staged_frames = 0;
+                if let Some(slot) = self.sinks.get_mut(&destination.sink) {
+                    slot.sink.reset();
+                }
             }
-        }
-        for id in &route.processors {
-            if let Some(slot) = self.processors.get_mut(id) {
-                slot.processor.reset();
+            for id in &branch.processors {
+                if let Some(slot) = self.processors.get_mut(id) {
+                    slot.processor.reset();
+                }
             }
         }
         route.diagnostics.note_discontinuity();

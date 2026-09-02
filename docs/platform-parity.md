@@ -198,8 +198,8 @@ are flagged passive, monitor-only, and non-reconnecting.
 
 | Feature | Linux (PipeWire) | Windows (Core Audio) | Status |
 | --- | --- | --- | --- |
-| Effect nodes | Yes | No | Missing |
-| Effect insertion into a link | Yes | No | Platform limitation (needs routing) |
+| Effect nodes | Yes | Yes, hosted in the router | Equivalent |
+| Effect insertion into a link | Yes | Yes, on routes qpwgraph carries | Equivalent |
 | Relay: send this machine's audio | Yes | Yes, selected render endpoint loopback | Partial |
 | Relay: play a peer's audio here | Yes | Yes, selected render endpoint | Partial |
 | Relay: peer audio as a microphone | Yes | No | Platform limitation |
@@ -207,9 +207,17 @@ are flagged passive, monitor-only, and non-reconnecting.
 | Relay: choose which endpoint | n/a | Yes, by stable endpoint ID | Partial |
 | MIDI | ALSA | WinMM, with routing | Partial |
 
-Effect *insertion* depends on rewiring an existing link, so it cannot exist on
-Windows without routing. Free-standing effect nodes do not have that constraint
-and are merely unbuilt.
+Effect *insertion* depends on rewiring an existing link, which is why it
+arrived with routing rather than before it. On Windows an effect is a graph
+node with an input port, an output port, and a processor in the router between
+them, so wiring one up is an ordinary drag and inserting one into a link is
+cut-place-reconnect with the original endpoints remembered for restoration.
+
+The same effect gallery, parameters, bypass, and instance identity apply on
+both platforms. An effect inserted into one link does not process a sibling
+fan-out out of the same source: the router gives each distinct chain its own
+branch. What Windows still cannot do is put an effect on a relationship it
+merely observes — an application session's stream is not audio qpwgraph owns.
 
 ### Relay
 
@@ -309,8 +317,11 @@ above the line has landed; what is left is blocked on something specific.
 3. **Linux param subscriptions.** PipeWire controls are read at each rebuild;
    Windows follows them by callback. Holding a `Props` subscription per node
    would close that gap.
-4. **Windows free-standing effect nodes.** Requires a processing host that does
-   not depend on graph routing.
+4. **Windows per-application effects and metering RMS.** An effect can sit on
+   any route qpwgraph carries, but not on an application session, because that
+   audio belongs to the Windows audio engine rather than to the router. The
+   same boundary applies to RMS: it is real for routed audio and unavailable
+   for a session, whose only level is Core Audio's peak-only meter.
 
 ## Testing across platforms
 

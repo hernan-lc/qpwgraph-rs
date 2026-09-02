@@ -101,10 +101,67 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
         Ok(session)
     }
 
+    fn relay_connect_trusted(
+        &mut self,
+        target: std::net::SocketAddr,
+        peer_id: &str,
+        secret: [u8; 32],
+        roles: pw_graph_backend::RelayRoles,
+    ) -> BackendResult<pw_graph_backend::RelaySessionId> {
+        let session = self
+            .relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_connect_trusted(target, peer_id, secret, roles)?;
+        self.rebuild_after_native_mutation();
+        Ok(session)
+    }
+
     fn relay_disconnect(&mut self, session: pw_graph_backend::RelaySessionId) -> BackendResult<()> {
         self.relay_backend_mut()
             .ok_or_else(Self::relay_unavailable)?
             .relay_disconnect(session)
+    }
+
+    fn relay_configure_identity(
+        &mut self,
+        device_id: String,
+        trusted_peers: Vec<pw_graph_backend::RelayTrustedPeer>,
+        transport: pw_graph_backend::RelayTransportPreference,
+    ) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_configure_identity(device_id, trusted_peers, transport)
+    }
+
+    fn relay_trusted_enrollment_secret(
+        &self,
+        transaction_id: u64,
+    ) -> BackendResult<Option<[u8; 32]>> {
+        self.relay_backend()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_trusted_enrollment_secret(transaction_id)
+    }
+
+    fn relay_accept_trusted_enrollment(&mut self, transaction_id: u64) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_accept_trusted_enrollment(transaction_id)
+    }
+
+    fn relay_reject_trusted_enrollment(
+        &mut self,
+        transaction_id: u64,
+        reason: &str,
+    ) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_reject_trusted_enrollment(transaction_id, reason)
+    }
+
+    fn relay_remove_trusted_peer(&mut self, peer_id: &str) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_remove_trusted_peer(peer_id)
     }
 
     fn relay_events(&mut self) -> Vec<pw_graph_backend::RelayEvent> {

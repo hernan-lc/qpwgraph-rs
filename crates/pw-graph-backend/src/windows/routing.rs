@@ -38,12 +38,14 @@
 use super::*;
 
 use crate::router::engine::{
-    DestinationSpec, RouteId, RouteSpec, RouterConfig, RouterError, SinkId, SourceId,
+    BranchSpec, DestinationSpec, ProcessorId, RouteId, RouteSpec, RouterConfig, RouterError,
+    SinkId, SourceId,
 };
 use crate::router::format::AudioFormat;
 use crate::router::thread::{RouterStopped, RouterThread};
 use crate::router::wasapi::{self, WasapiEndpoint};
 use crate::router::RouteMetrics;
+use pw_graph_effects::{AudioSpec, EffectProcessor};
 
 /// The format every qpwgraph-owned Windows route runs at.
 ///
@@ -59,6 +61,10 @@ const ROUTE_FORMAT: AudioFormat = AudioFormat::new(48_000, 2);
 /// increments a counter instead of growing latency without end.
 const RING_FRAMES: usize = 4_096;
 
+/// Frames per router cycle: 10 ms at 48 kHz, inside a WASAPI shared-mode
+/// period and coarse enough that per-block overhead stays negligible.
+const BLOCK_FRAMES: usize = 480;
+
 /// One WASAPI stream, kept alive for as long as some link needs it.
 struct Device {
     endpoint: WasapiEndpoint,
@@ -66,6 +72,23 @@ struct Device {
     /// zero, so unplugging the last route also releases the hardware.
     users: usize,
 }
+
+/// An effect node's two ports and the processor between them.
+///
+/// Keyed by input port in [`WindowsRouting::effects`], because that is the
+/// end a link arrives at: walking a route means "this link ends at an effect
+/// input, so continue from its output".
+struct Effect {
+    processor: ProcessorId,
+    output_port: PortId,
+}
+
+/// How many effects one path may chain before the walk gives up.
+///
+/// A guard against a cycle in the graph, not a product limit: sixteen effects
+/// in series is already far past useful, and recursing forever is not a
+/// failure mode a patchbay file should be able to cause.
+const MAX_CHAIN: usize = 16;
 
 /// The audio behind qpwgraph's own Windows links.
 pub(super) struct WindowsRouting {
@@ -75,6 +98,11 @@ pub(super) struct WindowsRouting {
     links: BTreeMap<LinkId, Link>,
     sources: BTreeMap<PortId, (SourceId, Device)>,
     sinks: BTreeMap<PortId, (SinkId, Device)>,
+    /// Effect nodes, by input port.
+    effects: BTreeMap<PortId, Effect>,
+    /// Each effect's output port, so a link leaving one is recognised as
+    /// routable without searching every effect.
+    effect_outputs: BTreeMap<PortId, PortId>,
     next_id: u64,
 }
 
@@ -91,9 +119,7 @@ impl std::fmt::Debug for WindowsRouting {
 impl WindowsRouting {
     pub(super) fn start() -> BackendResult<Self> {
         let router = RouterThread::start(RouterConfig {
-            // 10 ms at 48 kHz: inside a WASAPI shared-mode period, and coarse
-            // enough that per-block overhead stays negligible.
-            block_frames: 480,
+            block_frames: BLOCK_FRAMES,
             clock_rate: ROUTE_FORMAT.sample_rate,
         })
         .map_err(|error| {
@@ -104,6 +130,8 @@ impl WindowsRouting {
             links: BTreeMap::new(),
             sources: BTreeMap::new(),
             sinks: BTreeMap::new(),
+            effects: BTreeMap::new(),
+            effect_outputs: BTreeMap::new(),
             next_id: 1,
         })
     }
@@ -136,6 +164,125 @@ impl WindowsRouting {
         out
     }
 
+    /// The geometry every effect on a Windows route is prepared for.
+    ///
+    /// Routes run at a fixed format, so an effect can be prepared once by the
+    /// caller and the router never has to hand a processor a buffer shape it
+    /// did not agree to.
+    pub(super) fn effect_spec(block_frames: u32) -> AudioSpec {
+        AudioSpec {
+            sample_rate: ROUTE_FORMAT.sample_rate,
+            channels: ROUTE_FORMAT.channels,
+            max_frames: block_frames,
+        }
+    }
+
+    /// The block size routes run at, which every effect must accept.
+    pub(super) fn block_frames() -> u32 {
+        BLOCK_FRAMES as u32
+    }
+
+    /// Register an effect node's processor and its two ports.
+    ///
+    /// The node is inert until something links into it: an effect with no
+    /// audio reaching its input simply is not on any route, which is exactly
+    /// what a free-standing effect node on the canvas should be.
+    pub(super) fn add_effect(
+        &mut self,
+        input_port: PortId,
+        output_port: PortId,
+        processor: Box<dyn EffectProcessor>,
+        spec: AudioSpec,
+    ) -> BackendResult<()> {
+        if self.effects.contains_key(&input_port) {
+            return Err(BackendError::native("that effect is already registered"));
+        }
+        let id = ProcessorId(self.take_id());
+        self.router
+            .with(move |core| core.add_processor(id, processor, spec))
+            .map_err(router_stopped)?
+            .map_err(router_error)?;
+        self.effects.insert(
+            input_port,
+            Effect {
+                processor: id,
+                output_port,
+            },
+        );
+        self.effect_outputs.insert(output_port, input_port);
+        Ok(())
+    }
+
+    /// Remove an effect node, along with any links that touched it.
+    ///
+    /// The links go first and the table is reinstalled before the processor
+    /// is taken back, so the router has already stopped calling it. Returns
+    /// the links that were dropped, for the caller to remove from the graph.
+    pub(super) fn remove_effect(&mut self, input_port: PortId) -> BackendResult<Vec<Link>> {
+        let Some(effect) = self.effects.remove(&input_port) else {
+            return Err(BackendError::native("no such effect is registered"));
+        };
+        self.effect_outputs.remove(&effect.output_port);
+        let dropped: Vec<Link> = self
+            .links
+            .values()
+            .filter(|link| link.output_port == effect.output_port || link.input_port == input_port)
+            .cloned()
+            .collect();
+        for link in &dropped {
+            self.links.remove(&link.id);
+        }
+        let result = self.install();
+        for link in &dropped {
+            self.release_source(link.output_port);
+            self.release_sink(link.input_port);
+        }
+        let processor = effect.processor;
+        // Handed back here so the processor is dropped on this thread rather
+        // than between two blocks of audio.
+        let released = self
+            .router
+            .with(move |core| core.remove_processor(processor));
+        drop(released);
+        result?;
+        Ok(dropped)
+    }
+
+    /// Bypass or re-enable an effect without disturbing its configuration or
+    /// its place in the chain.
+    pub(super) fn set_effect_bypassed(
+        &mut self,
+        input_port: PortId,
+        bypassed: bool,
+    ) -> BackendResult<()> {
+        let processor = self.processor_at(input_port)?;
+        self.router
+            .with(move |core| core.set_processor_bypassed(processor, bypassed))
+            .map_err(router_stopped)?
+            .map_err(router_error)
+    }
+
+    pub(super) fn set_effect_parameter(
+        &mut self,
+        input_port: PortId,
+        parameter: &str,
+        value: f32,
+    ) -> BackendResult<()> {
+        let processor = self.processor_at(input_port)?;
+        let parameter = parameter.to_owned();
+        self.router
+            .with(move |core| core.set_processor_parameter(processor, &parameter, value))
+            .map_err(router_stopped)?
+            .map_err(router_error)
+    }
+
+    fn processor_at(&self, input_port: PortId) -> BackendResult<ProcessorId> {
+        self.effects
+            .get(&input_port)
+            .map(|effect| effect.processor)
+            .ok_or_else(|| BackendError::native("no such effect is registered"))
+    }
+
     /// Carry audio from `output` to `input` for real.
     ///
     /// Both ports must be endpoint ports the router can open; a session port
@@ -151,15 +298,29 @@ impl WindowsRouting {
         if self.links.contains_key(&link.id) {
             return Err(BackendError::native("that route already exists"));
         }
-        let output = routable(endpoint_ports, link.output_port, PortEnd::Output)?;
-        let input = routable(endpoint_ports, link.input_port, PortEnd::Input)?;
+        // An effect node's ports are routable without being a device: a link
+        // into one continues a chain rather than ending it.
+        let output = if self.effect_outputs.contains_key(&link.output_port) {
+            None
+        } else {
+            Some(routable(endpoint_ports, link.output_port, PortEnd::Output)?)
+        };
+        let input = if self.effects.contains_key(&link.input_port) {
+            None
+        } else {
+            Some(routable(endpoint_ports, link.input_port, PortEnd::Input)?)
+        };
 
-        self.ensure_source(link.output_port, output)?;
-        if let Err(error) = self.ensure_sink(link.input_port, input) {
-            // Undo the half of the pair that did open, so a failed connect
-            // leaves no device held open by nothing.
-            self.release_source(link.output_port);
-            return Err(error);
+        if let Some(output) = output {
+            self.ensure_source(link.output_port, output)?;
+        }
+        if let Some(input) = input {
+            if let Err(error) = self.ensure_sink(link.input_port, input) {
+                // Undo the half of the pair that did open, so a failed connect
+                // leaves no device held open by nothing.
+                self.release_source(link.output_port);
+                return Err(error);
+            }
         }
 
         let (id, output_port, input_port) = (link.id, link.output_port, link.input_port);
@@ -222,29 +383,40 @@ impl WindowsRouting {
 
     /// Rebuild the route table from the current link set and install it.
     ///
-    /// Fan-out is expressed here: every link sharing an output port becomes
-    /// one route with several destinations, which is what lets the source be
-    /// pulled exactly once per block however many places it is going.
+    /// This is where the drawn graph becomes a route table. Starting at each
+    /// device source, the links are walked forward: a link landing on a
+    /// playback device is a destination, and a link landing on an effect
+    /// node's input continues from that node's output with the effect added
+    /// to the chain.
+    ///
+    /// Paths that end up with the same chain of effects become one branch, so
+    /// a source feeding two speakers through the same effect runs it once.
+    /// Paths with different chains become different branches, which is what
+    /// stops an effect inserted into one link from processing a sibling
+    /// fan-out. Either way the source is pulled exactly once per block.
     fn install(&mut self) -> BackendResult<()> {
-        let mut by_source: BTreeMap<PortId, Vec<PortId>> = BTreeMap::new();
+        let mut forward: BTreeMap<PortId, Vec<PortId>> = BTreeMap::new();
         for link in self.links.values() {
-            by_source
+            forward
                 .entry(link.output_port)
                 .or_default()
                 .push(link.input_port);
         }
 
-        let mut specs = Vec::with_capacity(by_source.len());
-        for (output, inputs) in by_source {
-            let Some((source, _)) = self.sources.get(&output) else {
-                continue;
-            };
-            let destinations: Vec<DestinationSpec> = inputs
-                .iter()
-                .filter_map(|input| self.sinks.get(input))
-                .map(|(sink, _)| DestinationSpec::new(*sink))
-                .collect();
-            if destinations.is_empty() {
+        let mut specs = Vec::with_capacity(self.sources.len());
+        for (output, (source, _)) in &self.sources {
+            let mut chains: BTreeMap<Vec<ProcessorId>, Vec<DestinationSpec>> = BTreeMap::new();
+            walk(
+                &forward,
+                &self.sinks,
+                &self.effects,
+                *output,
+                &mut Vec::new(),
+                &mut chains,
+            );
+            if chains.is_empty() {
+                // The source is registered but nothing downstream resolves to
+                // a device yet -- a half-drawn chain, say. Not a route.
                 continue;
             }
             specs.push(RouteSpec {
@@ -253,8 +425,14 @@ impl WindowsRouting {
                 id: RouteId(output.0),
                 source: *source,
                 gain: 1.0,
-                processors: Vec::new(),
-                destinations,
+                branches: chains
+                    .into_iter()
+                    .map(|(processors, destinations)| BranchSpec {
+                        processors,
+                        gain: 1.0,
+                        destinations,
+                    })
+                    .collect(),
             });
         }
 
@@ -374,6 +552,49 @@ impl WindowsRouting {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+}
+
+/// Follow every link out of `port`, collecting the destinations each distinct
+/// chain of effects reaches.
+///
+/// Recursive because the graph is: an effect's output is just another port
+/// with links of its own. `chain` is the effects passed through to get here,
+/// and it doubles as the cycle guard — an effect already in the chain would
+/// otherwise be re-entered forever.
+fn walk(
+    forward: &BTreeMap<PortId, Vec<PortId>>,
+    sinks: &BTreeMap<PortId, (SinkId, Device)>,
+    effects: &BTreeMap<PortId, Effect>,
+    port: PortId,
+    chain: &mut Vec<ProcessorId>,
+    chains: &mut BTreeMap<Vec<ProcessorId>, Vec<DestinationSpec>>,
+) {
+    let Some(next) = forward.get(&port) else {
+        return;
+    };
+    for &input in next {
+        if let Some((sink, _)) = sinks.get(&input) {
+            let destinations = chains.entry(chain.clone()).or_default();
+            if !destinations
+                .iter()
+                .any(|destination| destination.sink == *sink)
+            {
+                destinations.push(DestinationSpec::new(*sink));
+            }
+            continue;
+        }
+        let Some(effect) = effects.get(&input) else {
+            continue;
+        };
+        if chain.len() >= MAX_CHAIN || chain.contains(&effect.processor) {
+            // A cycle, or a chain long past anything useful. Dropping the
+            // path is better than recursing until the stack runs out.
+            continue;
+        }
+        chain.push(effect.processor);
+        walk(forward, sinks, effects, effect.output_port, chain, chains);
+        chain.pop();
     }
 }
 
