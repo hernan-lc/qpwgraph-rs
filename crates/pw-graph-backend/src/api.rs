@@ -1024,4 +1024,87 @@ pub trait RelayDriver {
     fn relay_local_links(&self) -> Vec<RelayLocalLink> {
         Vec::new()
     }
+
+    // ---- Relay playback / monitoring (spec 5,6,7,10,12,13,14) ----
+
+    fn relay_playback_status(&self) -> RelayPlaybackStatus {
+        RelayPlaybackStatus::default()
+    }
+
+    fn relay_set_playback_enabled(&mut self, _enabled: bool) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn relay_set_playback_gain(&mut self, _gain: f32) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn relay_set_playback_mute(&mut self, _muted: bool) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn relay_set_playback_sink(&mut self, _sink: Option<String>) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn relay_playback_sinks(&self) -> Vec<RelaySinkInfo> {
+        Vec::new()
+    }
+
+    fn relay_ensure_playback_route(&mut self) -> BackendResult<RelayPlaybackState> {
+        Ok(RelayPlaybackState::Disabled)
+    }
+}
+
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum RelayPlaybackState {
+    #[default]
+    Disabled,
+    WaitingForSink,
+    Connected,
+    Error(String),
+}
+
+#[cfg(feature = "relay")]
+impl std::fmt::Display for RelayPlaybackState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "Disabled"),
+            Self::WaitingForSink => write!(f, "Waiting for output device"),
+            Self::Connected => write!(f, "Connected"),
+            Self::Error(msg) => write!(f, "Error: {msg}"),
+        }
+    }
+}
+
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RelayMeterSnapshot {
+    pub input_rms: f32,
+    pub input_peak: f32,
+    pub output_rms: f32,
+    pub output_peak: f32,
+    pub input_dbfs: f32,
+    pub output_dbfs: f32,
+    pub peak_dbfs: f32,
+}
+
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RelayPlaybackStatus {
+    pub state: RelayPlaybackState,
+    pub sink_name: Option<String>,
+    pub gain: f32,
+    pub muted: bool,
+    pub enabled: bool,
+    pub meters: RelayMeterSnapshot,
+}
+
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySinkInfo {
+    pub name: String,
+    pub description: String,
+    pub serial: Option<u64>,
 }

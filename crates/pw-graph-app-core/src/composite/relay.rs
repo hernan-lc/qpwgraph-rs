@@ -204,4 +204,48 @@ impl pw_graph_backend::RelayDriver for CompositeDriver {
             .map(|driver| driver.relay_local_links())
             .unwrap_or_default()
     }
+
+    fn relay_playback_status(&self) -> pw_graph_backend::RelayPlaybackStatus {
+        self.relay_backend()
+            .map(|driver| driver.relay_playback_status())
+            .unwrap_or_default()
+    }
+
+    fn relay_set_playback_enabled(&mut self, enabled: bool) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_set_playback_enabled(enabled)
+    }
+
+    fn relay_set_playback_gain(&mut self, gain: f32) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_set_playback_gain(gain)
+    }
+
+    fn relay_set_playback_mute(&mut self, muted: bool) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_set_playback_mute(muted)
+    }
+
+    fn relay_set_playback_sink(&mut self, sink: Option<String>) -> BackendResult<()> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_set_playback_sink(sink)
+    }
+
+    fn relay_playback_sinks(&self) -> Vec<pw_graph_backend::RelaySinkInfo> {
+        self.relay_backend()
+            .map(|driver| driver.relay_playback_sinks())
+            .unwrap_or_default()
+    }
+
+    fn relay_ensure_playback_route(
+        &mut self,
+    ) -> BackendResult<pw_graph_backend::RelayPlaybackState> {
+        self.relay_backend_mut()
+            .ok_or_else(Self::relay_unavailable)?
+            .relay_ensure_playback_route()
+    }
 }

@@ -1011,7 +1011,26 @@ impl GraphDriver for PipewireDriver {
             .nodes
             .get(&node)
             .ok_or(GraphError::MissingNode(node))?;
-        if record.node_type == NodeType::Effect || is_relay_device_node(&record.name) {
+        if record.node_type == NodeType::Effect {
+            return Ok(NodeAudioState::UNSUPPORTED);
+        }
+        if is_relay_device_node(&record.name) {
+            // Relay nodes expose application-local gain (0.0..2.0) instead of
+            // PipeWire Props. This mirrors the node-audio slider/mute that
+            // Firefox/WEBRTC nodes have, but without touching the system sink
+            // volume.
+            if let Some(relay) = self.relay.as_ref() {
+                let gain = relay.playback_shared.gain();
+                let muted = relay.playback_shared.muted();
+                return Ok(NodeAudioState {
+                    volume: Some(gain),
+                    muted: Some(muted),
+                    volume_readable: true,
+                    volume_writable: true,
+                    mute_readable: true,
+                    mute_writable: true,
+                });
+            }
             return Ok(NodeAudioState::UNSUPPORTED);
         }
         let known = self.audio_controls.get(&node).copied().unwrap_or_default();
@@ -1032,6 +1051,17 @@ impl GraphDriver for PipewireDriver {
             return NodeCapabilities::NONE;
         };
         let mut capabilities = state.control_capabilities();
+        // Relay nodes use linear 0..2.0 (200%) gain, not the PipeWire cubic curve.
+        if self
+            .graph
+            .node(node)
+            .is_some_and(|n| is_relay_device_node(&n.name))
+        {
+            capabilities.volume_max = 2.0;
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+            return capabilities;
+        }
         if self.measurable_nodes().contains(&node) {
             capabilities.volume_max = PIPEWIRE_MAX_VOLUME;
             capabilities.meter_peak = true;
@@ -1412,6 +1442,137 @@ impl RelayDriver for PipewireDriver {
     fn relay_local_links(&self) -> Vec<pw_graph_relay::LocalLink> {
         pw_graph_relay::netlink::display_links()
     }
+
+    fn relay_playback_status(&self) -> crate::RelayPlaybackStatus {
+        if let Some(set) = &self.relay {
+            let meters = set.playback_shared.snapshot();
+            let router = &set.router;
+            crate::RelayPlaybackStatus {
+                state: match &router.state {
+                    relay::RelayPlaybackState::Disabled => crate::RelayPlaybackState::Disabled,
+                    relay::RelayPlaybackState::WaitingForSink => {
+                        crate::RelayPlaybackState::WaitingForSink
+                    }
+                    relay::RelayPlaybackState::Connected => crate::RelayPlaybackState::Connected,
+                    relay::RelayPlaybackState::Error(m) => {
+                        crate::RelayPlaybackState::Error(m.clone())
+                    }
+                },
+                sink_name: router.current_sink_name.clone(),
+                gain: set.playback_shared.gain(),
+                muted: set.playback_shared.muted(),
+                enabled: set.playback_shared.enabled(),
+                meters: crate::RelayMeterSnapshot {
+                    input_rms: meters.input_rms,
+                    input_peak: meters.input_peak,
+                    output_rms: meters.output_rms,
+                    output_peak: meters.output_peak,
+                    input_dbfs: meters.input_dbfs,
+                    output_dbfs: meters.output_dbfs,
+                    peak_dbfs: meters.peak_dbfs,
+                },
+            }
+        } else {
+            crate::RelayPlaybackStatus::default()
+        }
+    }
+
+    fn relay_set_playback_enabled(&mut self, enabled: bool) -> BackendResult<()> {
+        if let Some(set) = self.relay.as_mut() {
+            set.playback_shared.set_enabled(enabled);
+            set.router.set_enabled(enabled);
+            // Log major state transitions only, not per frame
+            if enabled {
+                eprintln!("Relay playback starting");
+            } else {
+                eprintln!("Relay playback disabled");
+            }
+        }
+        // Try to (re)route outside realtime callback via with_loop
+        let _ = self.with_loop(|driver| {
+            driver.ensure_relay_playback_route_locked()?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn relay_set_playback_gain(&mut self, gain: f32) -> BackendResult<()> {
+        if let Some(set) = self.relay.as_mut() {
+            let g = gain.clamp(0.0, 2.0);
+            set.playback_shared.set_gain(g);
+            eprintln!(
+                "Relay playback gain: {}% ({:.1} dB)",
+                (g * 100.0) as u32,
+                if g > 0.0 {
+                    20.0 * g.log10()
+                } else {
+                    f32::NEG_INFINITY
+                }
+            );
+        }
+        Ok(())
+    }
+
+    fn relay_set_playback_mute(&mut self, muted: bool) -> BackendResult<()> {
+        if let Some(set) = self.relay.as_mut() {
+            set.playback_shared.set_muted(muted);
+            eprintln!("Relay playback mute: {}", muted);
+        }
+        Ok(())
+    }
+
+    fn relay_set_playback_sink(&mut self, sink: Option<String>) -> BackendResult<()> {
+        if let Some(set) = self.relay.as_mut() {
+            // Persist stable identifier: node.name
+            let serial = sink.as_ref().and_then(|name| {
+                self.graph
+                    .nodes
+                    .values()
+                    .find(|n| &n.name == name)
+                    .and_then(|n| n.serial)
+            });
+            set.router.set_preferred_sink(sink.clone(), serial);
+            if let Some(name) = &sink {
+                eprintln!("Relay playback sink selected: {name}");
+            } else {
+                eprintln!("Relay playback sink selected: Default");
+            }
+        }
+        let _ = self.with_loop(|driver| {
+            driver.ensure_relay_playback_route_locked()?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn relay_playback_sinks(&self) -> Vec<crate::RelaySinkInfo> {
+        self.graph
+            .nodes
+            .values()
+            .filter(|n| {
+                n.name != relay::RELAY_SOURCE_NAME
+                    && n.name != relay::RELAY_SINK_NAME
+                    && n.ports.iter().any(|pid| {
+                        self.graph.port(*pid).is_some_and(|p| {
+                            p.direction.is_sink() && p.port_type == PortType::Audio
+                        })
+                    })
+            })
+            .map(|n| crate::RelaySinkInfo {
+                name: n.name.clone(),
+                description: n.name.clone(),
+                serial: n.serial,
+            })
+            .collect()
+    }
+
+    fn relay_ensure_playback_route(&mut self) -> BackendResult<crate::RelayPlaybackState> {
+        self.with_loop(|driver| {
+            driver.ensure_relay_playback_route_locked()?;
+            let status = driver.relay_playback_status();
+            Ok(status.state)
+        })
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "relay"))]
@@ -1449,6 +1610,145 @@ impl PipewireDriver {
                 .nodes
                 .values()
                 .any(|node| node.name == relay::RELAY_SINK_NAME)
+    }
+
+    /// Ensure relay playback routing: Relay Microphone -> selected/default sink.
+    /// Idempotent and realtime-safe (graph mutation outside callback).
+    fn ensure_relay_playback_route_locked(&mut self) -> BackendResult<()> {
+        if self.relay.is_none() {
+            return Ok(());
+        }
+        // Refresh graph view before deciding
+        self.rebuild_graph_locked()?;
+        let registry = self.state.lock().unwrap().clone();
+
+        // Need to avoid holding relay borrow across self.connect_locked
+        let (enabled, shared_enabled) = {
+            let r = self.relay.as_ref().unwrap();
+            (r.router.enabled, r.playback_shared.enabled())
+        };
+
+        // Validate existing links (need mutable)
+        {
+            let relay = self.relay.as_mut().unwrap();
+            relay.router.validate_links(&self.graph);
+        }
+
+        if !enabled || !shared_enabled {
+            let to_remove: Vec<LinkId> = {
+                let relay = self.relay.as_ref().unwrap();
+                relay
+                    .router
+                    .link_ids
+                    .iter()
+                    .filter_map(|id| self.graph.link(LinkId(*id)).map(|l| l.id))
+                    .collect()
+            };
+            for link_id in to_remove {
+                let _ = self.disconnect_locked(link_id);
+                eprintln!("Relay playback link removed (disabled)");
+            }
+            let relay = self.relay.as_mut().unwrap();
+            relay.router.link_ids.clear();
+            relay.router.state = relay::RelayPlaybackState::Disabled;
+            relay.router.current_sink_name = None;
+            return Ok(());
+        }
+
+        // Discover desired links
+        let desired_opt = {
+            let relay = self.relay.as_ref().unwrap();
+            relay.router.desired_links(&self.graph, &registry.nodes)
+        };
+        let Some(((src_fl, src_fr), (sink_fl, sink_fr), sink_name, sink_serial)) = desired_opt
+        else {
+            let relay = self.relay.as_mut().unwrap();
+            if relay.router.state != relay::RelayPlaybackState::WaitingForSink {
+                eprintln!("Relay playback sink selected: waiting for output device");
+            }
+            relay.router.state = relay::RelayPlaybackState::WaitingForSink;
+            relay.router.current_sink_name = None;
+            relay.router.current_sink_serial = None;
+            return Ok(());
+        };
+
+        // Check if we already have correct links
+        let existing_pairs: std::collections::BTreeSet<(PortId, PortId)> = self
+            .graph
+            .links
+            .values()
+            .map(|l| (l.output_port, l.input_port))
+            .collect();
+
+        let desired = vec![(src_fl, sink_fl), (src_fr, sink_fr)];
+        let mut new_link_ids = Vec::new();
+        let mut created = false;
+        let mut error_msg: Option<String> = None;
+        for (out, inp) in desired {
+            if existing_pairs.contains(&(out, inp)) {
+                if let Some(link) = self
+                    .graph
+                    .links
+                    .values()
+                    .find(|l| l.output_port == out && l.input_port == inp)
+                {
+                    new_link_ids.push(link.id.0);
+                }
+                continue;
+            }
+            match self.connect_locked(out, inp) {
+                Ok(link) => {
+                    new_link_ids.push(link.id.0);
+                    created = true;
+                    eprintln!("Relay playback link created: {} -> {}", out.0, inp.0);
+                }
+                Err(e) => {
+                    error_msg = Some(format!("Unable to create PipeWire link: {e}"));
+                    eprintln!("Unable to create PipeWire link: {e}");
+                    break;
+                }
+            }
+        }
+        if let Some(msg) = error_msg {
+            let relay = self.relay.as_mut().unwrap();
+            relay.router.state = relay::RelayPlaybackState::Error(msg);
+            return Ok(());
+        }
+
+        // Remove stale tracked links that are no longer desired (e.g., old sink disappeared)
+        let stale: Vec<LinkId> = {
+            let relay = self.relay.as_ref().unwrap();
+            relay
+                .router
+                .link_ids
+                .iter()
+                .filter(|id| !new_link_ids.contains(*id))
+                .filter_map(|id| self.graph.link(LinkId(*id)).map(|l| l.id))
+                .collect()
+        };
+        for link_id in stale {
+            let _ = self.disconnect_locked(link_id);
+            eprintln!("Relay playback link removed (sink changed)");
+        }
+
+        let (prev_state_is_connected, sink_name_clone) = {
+            let relay = self.relay.as_ref().unwrap();
+            (
+                relay.router.state == relay::RelayPlaybackState::Connected,
+                sink_name.clone(),
+            )
+        };
+        {
+            let relay = self.relay.as_mut().unwrap();
+            relay.router.link_ids = new_link_ids;
+            if !prev_state_is_connected || created {
+                eprintln!("Relay playback connected to sink: {sink_name_clone}");
+            }
+            relay.router.state = relay::RelayPlaybackState::Connected;
+            relay.router.current_sink_name = Some(sink_name);
+            relay.router.current_sink_serial = sink_serial;
+        }
+        Ok(())
     }
 }
 

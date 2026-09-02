@@ -37,6 +37,16 @@ impl PipewireDriver {
     }
 
     pub(super) fn set_node_mute_locked(&mut self, node: NodeId, muted: bool) -> BackendResult<()> {
+        // Relay nodes use application-local gain/mute, not PipeWire Props.
+        if let Some(node_name) = self.graph.node(node).map(|n| n.name.clone()) {
+            if is_relay_device_node(&node_name) {
+                if let Some(relay) = self.relay.as_ref() {
+                    relay.playback_shared.set_muted(muted);
+                    eprintln!("Relay playback mute: {}", muted);
+                    return Ok(());
+                }
+            }
+        }
         self.set_node_props_locked(
             node,
             vec![pw::spa::pod::Property::new(
@@ -55,6 +65,25 @@ impl PipewireDriver {
         node: NodeId,
         volume: f32,
     ) -> BackendResult<()> {
+        // Relay nodes: linear 0.0..2.0 gain, clamped and stored in shared playback state.
+        if let Some(node_name) = self.graph.node(node).map(|n| n.name.clone()) {
+            if is_relay_device_node(&node_name) {
+                let g = volume.clamp(0.0, 2.0);
+                if let Some(relay) = self.relay.as_ref() {
+                    relay.playback_shared.set_gain(g);
+                    eprintln!(
+                        "Relay playback gain: {}% ({:.1} dB)",
+                        (g * 100.0) as u32,
+                        if g > 0.0 {
+                            20.0 * g.log10()
+                        } else {
+                            f32::NEG_INFINITY
+                        }
+                    );
+                    return Ok(());
+                }
+            }
+        }
         let volume = volume.clamp(0.0, PIPEWIRE_MAX_VOLUME);
         let spa_volume = ui_volume_to_spa_volume(volume);
         self.set_node_props_locked(

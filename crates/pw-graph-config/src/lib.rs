@@ -113,6 +113,19 @@ pub struct AppConfig {
     pub relay_capture_endpoint_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_playback_endpoint_id: Option<String>,
+    /// Relay playback: whether received Android audio is routed to local speakers.
+    #[serde(default = "default_true")]
+    pub relay_playback_enabled: bool,
+    /// Linear gain 0.0..2.0 (0%..200%)
+    #[serde(default = "default_playback_gain")]
+    pub relay_playback_gain: f32,
+    #[serde(default)]
+    pub relay_playback_muted: bool,
+    /// Stable sink preference: node.name (serial resolves if available)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_playback_sink: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_playback_sink_serial: Option<u64>,
     /// Preserve fields written by a newer version so opening and saving a
     /// config with this version does not silently erase forward-compatible
     /// settings.
@@ -168,6 +181,12 @@ impl fmt::Debug for PersistedRelayPeer {
 
 fn default_relay_auto_connect() -> bool {
     true
+}
+fn default_true() -> bool {
+    true
+}
+fn default_playback_gain() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -248,6 +267,11 @@ impl Default for AppConfig {
             relay_transport: "auto".into(),
             relay_capture_endpoint_id: None,
             relay_playback_endpoint_id: None,
+            relay_playback_enabled: true,
+            relay_playback_gain: 1.0,
+            relay_playback_muted: false,
+            relay_playback_sink: None,
+            relay_playback_sink_serial: None,
             extra: BTreeMap::new(),
         }
     }
