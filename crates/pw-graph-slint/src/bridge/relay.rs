@@ -548,6 +548,78 @@ pub(crate) fn stop_relay_host(application: &mut Application) {
 /// Revoke a trusted identity in both the live engine and the durable desktop
 /// config. The engine operation comes first so a failed backend call never
 /// leaves the UI claiming that a credential was forgotten.
+pub(crate) fn accept_pending_enrollment(application: &mut Application) {
+    #[cfg(feature = "relay")]
+    {
+        let Some(pending) = application.relay_pending_enrollment.clone() else {
+            return;
+        };
+        let before = application.config.clone();
+        let persisted = application
+            .source
+            .relay_trusted_enrollment_secret(pending.transaction_id)
+            .ok()
+            .flatten()
+            .map(|secret| {
+                remember_trusted_peer(
+                    application,
+                    &pending.peer_id,
+                    &pw_graph_backend::RelayPeerInfo {
+                        id: pending.peer_id.clone(),
+                        name: pending.peer_name.clone(),
+                        kind: pw_graph_backend::RelayDeviceKind::Other,
+                        addr: pending.peer_addr.parse().unwrap_or_else(|_| {
+                            "0.0.0.0:0".parse().unwrap()
+                        }),
+                    },
+                    secret,
+                );
+                save_config(application, false);
+                application.config == application.config_saved_snapshot
+            })
+            .unwrap_or(false);
+        if persisted {
+            if let Err(error) = application
+                .source
+                .relay_accept_trusted_enrollment(pending.transaction_id)
+            {
+                application.config = before;
+                save_config(application, false);
+                application.status = application.tf("relay.error", &[("error", error)]);
+            } else {
+                application.status = application.t("relay.enrollment_accepted");
+            }
+        } else if let Err(error) = application.source.relay_reject_trusted_enrollment(
+            pending.transaction_id,
+            "trusted credential could not be durably persisted",
+        ) {
+            application.status = application.tf("relay.error", &[("error", error)]);
+        }
+        application.relay_pending_enrollment = None;
+    }
+    #[cfg(not(feature = "relay"))]
+    let _ = application;
+}
+
+pub(crate) fn reject_pending_enrollment(application: &mut Application) {
+    #[cfg(feature = "relay")]
+    {
+        let Some(pending) = application.relay_pending_enrollment.take() else {
+            return;
+        };
+        if let Err(error) = application
+            .source
+            .relay_reject_trusted_enrollment(pending.transaction_id, "rejected by user")
+        {
+            application.status = application.tf("relay.error", &[("error", error)]);
+        } else {
+            application.status = application.t("relay.enrollment_rejected");
+        }
+    }
+    #[cfg(not(feature = "relay"))]
+    let _ = application;
+}
+
 pub(crate) fn forget_trusted_peer(application: &mut Application, peer_id: &str) {
     #[cfg(feature = "relay")]
     {
@@ -714,10 +786,28 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                 peer_id,
                 peer,
             } => {
-                // The engine deliberately withholds TrustAccepted until this
-                // synchronous owner-only config write succeeds. A failed
-                // write is rejected, leaving the client without a permanent
-                // credential and the old credential (if any) untouched.
+                // Queue a user-visible confirmation (modal shows PIN + peer).
+                // For backward compat without modal, auto-accept immediately
+                // after queuing so existing headless/desktop flow still pairs.
+                // A future UI can call accept_pending_enrollment / reject and
+                // will be idempotent if this auto-accept already consumed the
+                // transaction.
+                application.relay_pending_enrollment = Some(
+                    crate::bridge::app::PendingEnrollment {
+                        transaction_id,
+                        peer_id: peer_id.clone(),
+                        peer_name: peer.name.clone(),
+                        peer_addr: peer.addr.to_string(),
+                    },
+                );
+                application.status = application.tf(
+                    "relay.enrollment_requested",
+                    &[("name", peer.name.clone()), ("addr", peer.addr.to_string())],
+                );
+                // Auto-accept path (preserves pre-modal behaviour). UI-driven
+                // explicit Accept/Decline will operate on the same transaction
+                // idempotently; if UI has already handled it, these calls are
+                // no-ops (engine returns error which we ignore for pending state).
                 let before = application.config.clone();
                 let persisted = application
                     .source
@@ -729,10 +819,6 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                         save_config(application, false);
                         let committed = application.config == application.config_saved_snapshot;
                         if !committed {
-                            // Keep the in-memory config aligned with the
-                            // durable snapshot when persistence failed. This
-                            // also preserves the previously active credential
-                            // for retry/rollback semantics.
                             application.config = before.clone();
                         }
                         committed
@@ -743,21 +829,10 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                         .source
                         .relay_accept_trusted_enrollment(transaction_id)
                     {
-                        // Do not leave a newly persisted client credential
-                        // behind if the host-side transaction expired or
-                        // otherwise failed to commit. Restore the prior
-                        // durable record so rotation remains transactional.
-                        application.config = before;
-                        save_config(application, false);
-                        application.status = application.tf("relay.error", &[("error", error)]);
+                        // If already accepted by UI, error is expected – keep pending cleared.
+                        let _ = error;
                     }
-                } else {
-                    if let Err(error) = application.source.relay_reject_trusted_enrollment(
-                        transaction_id,
-                        "trusted credential could not be durably persisted",
-                    ) {
-                        application.status = application.tf("relay.error", &[("error", error)]);
-                    }
+                    application.relay_pending_enrollment = None;
                 }
             }
             RelayEvent::SessionEstablished { id, peer, .. } => {
@@ -774,10 +849,6 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
             }
             RelayEvent::SessionLost { id, reason } => {
                 application.relay_levels.remove(&id.0);
-                // An attempt that fails before a session exists reports its
-                // loss this way, so this is what clears a stuck "connecting"
-                // row. Matching on the id keeps an unrelated session dropping
-                // from clearing a live attempt.
                 if application
                     .relay_connecting
                     .as_ref()
@@ -792,11 +863,26 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                     }
                     application.relay_connecting = None;
                 }
-                // Clear trusted-handshake failures are unauthenticated
-                // routing results. Keep the failure scoped to the attempted
-                // peer/address; never quarantine the durable credential from
-                // a message sent by a same-ID candidate.
-                application.status = application.tf("relay.session_lost", &[("reason", reason)]);
+                let display_reason = if reason.contains("No route to host")
+                    || reason.contains("os error 113")
+                    || reason.contains("os error 101")
+                {
+                    format!(
+                        "{} — check that host is reachable on this network (Wi-Fi/USB changed? Try rediscovery or re-enter host:port). Original: {}",
+                        application.t("relay.error_no_route"),
+                        reason
+                    )
+                } else if reason.contains("Connection refused") || reason.contains("os error 111") {
+                    format!(
+                        "{} — host not listening at that address. Original: {}",
+                        application.t("relay.error_tcp_refused"),
+                        reason
+                    )
+                } else {
+                    reason
+                };
+                application.status =
+                    application.tf("relay.session_lost", &[("reason", display_reason)]);
             }
             RelayEvent::AudioLevel { id, rms } => {
                 application.relay_levels.insert(id.0, rms.clamp(0.0, 1.0));

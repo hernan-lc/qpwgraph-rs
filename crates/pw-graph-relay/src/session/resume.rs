@@ -288,7 +288,22 @@ pub(super) fn resume_client_control(
             }
             let links = netlink::local_links();
             let bind = netlink::outbound_bind_addr(&links, candidate, config.transport);
-            match connect_control_tcp(candidate, bind, config.transport) {
+            // Try with policy bind first; on No route to host (EHOSTUNREACH 113,
+            // ENETUNREACH 101) retry same candidate with wildcard bind before
+            // marking the candidate failed. This handles stale mDNS cache after
+            // interface migration where the old address is still ranked but the
+            // policy bind (e.g. USB source → Wi-Fi target) is unroutable.
+            let stream = match connect_control_tcp(candidate, bind, config.transport) {
+                Ok(s) => Ok(s),
+                Err(e) if e.raw_os_error() == Some(113)
+                    || e.raw_os_error() == Some(101)
+                    || e.raw_os_error() == Some(99) =>
+                {
+                    connect_control_tcp(candidate, None, config.transport)
+                }
+                Err(e) => Err(e),
+            };
+            match stream {
                 Ok(stream) => {
                     connected = Some((stream, candidate));
                     break;

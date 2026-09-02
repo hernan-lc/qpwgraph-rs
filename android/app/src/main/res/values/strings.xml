@@ -18,6 +18,7 @@
     <string name="relay_error_media_projection_denied">MediaProjection permission denied — device playback capture not started.</string>
     <string name="relay_error_media_projection_revoked">Device playback capture stopped — projection was revoked.</string>
     <string name="relay_error_tcp_refused">TCP connection refused: host is not listening (check address/port and that host is Running).</string>
+    <string name="relay_error_no_route">No route to host: network changed or host unreachable — retry discovery or check Wi-Fi/USB.</string>
     <string name="relay_error_trusted_auth_failed">Trusted authentication failed — credential rejected.</string>
     <string name="relay_error_audio_init_failed">Audio capture initialization failed</string>
     <string name="relay_error_network_changed">Network interface changed — listener migrated</string>

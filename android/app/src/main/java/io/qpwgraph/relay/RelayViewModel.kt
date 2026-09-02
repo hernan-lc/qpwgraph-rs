@@ -518,6 +518,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun clientError(message: String) {
         val mapped = when {
+            message.contains("No route to host", ignoreCase = true)
+                || message.contains("os error 113")
+                || message.contains("os error 101") ->
+                text(R.string.relay_error_no_route) + if (message.isNotBlank()) " — $message" else ""
             message.contains("Connection refused", ignoreCase = true) || message.contains("os error 111") ->
                 text(R.string.relay_error_tcp_refused) + if (message.isNotBlank()) " — $message" else ""
             message.contains("trusted", ignoreCase = true) && message.contains("fail", ignoreCase = true) ->
@@ -857,6 +861,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun hostError(message: String) {
         val mapped = when {
+            message.contains("No route to host", ignoreCase = true)
+                || message.contains("os error 113")
+                || message.contains("os error 101") ->
+                text(R.string.relay_error_no_route)
             message.contains("Connection refused", ignoreCase = true) || message.contains("os error 111") ->
                 text(R.string.relay_error_tcp_refused)
             message.contains("trusted", ignoreCase = true) && message.contains("fail", ignoreCase = true) ->

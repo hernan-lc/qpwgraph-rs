@@ -343,6 +343,10 @@ pub fn connect_tcp_cancellable(
     connect_tcp_inner(target, bind, timeout, Some(cancel))
 }
 
+fn is_no_route_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(113) | Some(101) | Some(99) | Some(22))
+}
+
 fn connect_tcp_inner(
     target: SocketAddr,
     bind: Option<Ipv4Addr>,
@@ -366,21 +370,38 @@ fn connect_tcp_inner(
     } else {
         Domain::IPV6
     };
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(local), 0)))?;
-    socket.set_nonblocking(true)?;
-    match socket.connect(&SockAddr::from(target)) {
-        Ok(()) => {}
-        // Non-blocking connect is in progress (EINPROGRESS on Linux, often
-        // WouldBlock elsewhere). Poll until connected or the deadline hits.
-        Err(error) if is_connect_in_progress(&error) => {
-            wait_for_connect(&socket, timeout, cancel)?;
+    // First attempt with the policy-selected source address. If that bind
+    // creates a routing mismatch (EHOSTUNREACH 113 / ENETUNREACH 101 /
+    // EADDRNOTAVAIL 99) the kernel reports No route to host. Fall back to
+    // wildcard (OS default route) so a stale Wi-Fi target can still be reached
+    // via the current interface (e.g. after Wi-Fi→USB migration where the old
+    // mDNS address is still cached).
+    let result: std::io::Result<std::net::TcpStream> = (|| {
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(local), 0)))?;
+        socket.set_nonblocking(true)?;
+        match socket.connect(&SockAddr::from(target)) {
+            Ok(()) => {}
+            Err(error) if is_connect_in_progress(&error) => {
+                wait_for_connect(&socket, timeout, cancel)?;
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
+        socket.set_nonblocking(false)?;
+        socket.set_nodelay(true)?;
+        Ok(socket.into())
+    })();
+    match result {
+        Ok(stream) => Ok(stream),
+        Err(error) if is_no_route_error(&error) => {
+            // Retry without explicit bind – let the OS pick the correct source
+            // for the current routing table.
+            let stream = std::net::TcpStream::connect_timeout(&target, timeout)?;
+            let _ = stream.set_nodelay(true);
+            Ok(stream)
+        }
+        Err(error) => Err(error),
     }
-    socket.set_nonblocking(false)?;
-    socket.set_nodelay(true)?;
-    Ok(socket.into())
 }
 
 fn is_connect_in_progress(error: &std::io::Error) -> bool {

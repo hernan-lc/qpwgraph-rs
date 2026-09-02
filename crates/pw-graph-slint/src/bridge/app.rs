@@ -104,6 +104,17 @@ pub(crate) struct Application {
     /// spoofed stable ID must not make every other address for the same
     /// trusted peer unusable, nor couple unrelated peers sharing an address.
     pub(crate) relay_trusted_candidate_failures: BTreeMap<(String, String), (u8, Instant)>,
+    #[cfg(feature = "relay")]
+    pub(crate) relay_pending_enrollment: Option<PendingEnrollment>,
+}
+
+#[cfg(feature = "relay")]
+#[derive(Clone, Debug)]
+pub(crate) struct PendingEnrollment {
+    pub(crate) transaction_id: u64,
+    pub(crate) peer_id: String,
+    pub(crate) peer_name: String,
+    pub(crate) peer_addr: String,
 }
 
 const CONNECTION_TOAST_DURATION: Duration = Duration::from_secs(4);
