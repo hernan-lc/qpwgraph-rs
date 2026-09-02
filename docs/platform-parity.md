@@ -246,6 +246,31 @@ fan-out out of the same source: the router gives each distinct chain its own
 branch. What Windows still cannot do is put an effect on a relationship it
 merely observes — an application session's stream is not audio qpwgraph owns.
 
+### Desktop integration
+
+| Feature | Linux | Windows | Status |
+| --- | --- | --- | --- |
+| Tray icon | Yes, StatusNotifier | Yes, `Shell_NotifyIcon` | Equivalent |
+| Show / hide / quit from the tray | Yes | Yes | Equivalent |
+| Start minimized | Yes | Yes | Equivalent |
+| Native file dialogs | Yes | Yes | Equivalent |
+
+Both trays present the same three intents and own no application state: they
+send show, hide, and quit back to the Slint event loop and let the normal
+window lifecycle apply them. Neither is coupled to anything the audio path
+depends on.
+
+The implementations differ because the platforms do. Windows delivers a tray
+icon's clicks as a window message, so that tray runs its own hidden window and
+message loop on its own thread and posts intents over a channel; the Slint
+window is only ever touched from the event loop. Shutting down removes the
+icon and joins the thread, so quitting leaves neither a ghost icon in the
+notification area nor a thread behind it.
+
+A session with no notification area — a service account, a CI runner — cannot
+add an icon. That reports itself by leaving the tray absent rather than by
+failing to start: the tray is decoration, not a precondition.
+
 ### Relay
 
 The relay engine — pairing, transport, Opus, discovery, QR — is platform

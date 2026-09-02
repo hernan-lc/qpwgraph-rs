@@ -52,8 +52,8 @@ See [Audio relay](audio-relay.md) and the
 ## Platform integration
 
 - English, Spanish, and French localization.
-- Linux tray integration, start-minimized mode, native file dialogs, Nix,
-  Flatpak, AppImage, and portable Windows ZIP packaging.
+- Tray integration on Linux and Windows, start-minimized mode, native file
+  dialogs, Nix, Flatpak, AppImage, and portable Windows ZIP packaging.
 
 See [Packaging and releases](packaging.md).
 

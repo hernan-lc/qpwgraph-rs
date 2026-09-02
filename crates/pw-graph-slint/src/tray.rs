@@ -1,8 +1,14 @@
-//! Linux StatusNotifier tray integration.
+//! Tray integration.
+//!
+//! Two implementations behind one interface: StatusNotifier on Linux and
+//! `Shell_NotifyIcon` on Windows. Both present the same `start`, `poll`, and
+//! `shutdown`, so the bridge does not know which one it is talking to.
 //!
 //! The tray owns no application state. It only sends show, hide, and quit
 //! intents back to the Slint event loop, where the normal window lifecycle is
-//! responsible for applying them.
+//! responsible for applying them. §14 of the Windows parity roadmap asks for
+//! that separation specifically: tray lifecycle must not be coupled to
+//! anything the audio path depends on.
 
 #[cfg(all(target_os = "linux", feature = "tray"))]
 pub(crate) mod support {
