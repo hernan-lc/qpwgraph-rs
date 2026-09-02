@@ -17,7 +17,8 @@ use super::patchbay::{
     save_profile, save_rule, select_profile, snapshot_patchbay, toggle_rule_pin,
 };
 use super::relay::{
-    connect_relay, disconnect_relay, forget_trusted_peer, relay_host_active, relay_qr_payload,
+    accept_pending_enrollment, cancel_relay_connect, connect_relay, disconnect_relay,
+    forget_trusted_peer, reject_pending_enrollment, relay_host_active, relay_qr_payload,
     start_relay_discovery, start_relay_host, stop_relay_discovery, stop_relay_host,
 };
 use super::MainWindow;
@@ -405,6 +406,9 @@ pub(crate) fn handle_action(window: &MainWindow, application: &mut Application, 
             let peer_id = action.strip_prefix("relay-forget:").unwrap_or_default();
             forget_trusted_peer(application, peer_id);
         }
+        "relay-enrollment-accept" => accept_pending_enrollment(application),
+        "relay-enrollment-reject" => reject_pending_enrollment(application),
+        "relay-cancel-connect" => cancel_relay_connect(application),
         _ => {
             application.status =
                 application.tf("status.unknown_action", &[("action", action.to_owned())]);
@@ -482,6 +486,10 @@ fn toggle_overlay(window: &MainWindow, overlay: Overlay) {
 /// The canvas gesture is cancelled in `ui/main.slint` before this runs, so an
 /// Escape with nothing open still aborts a drag.
 fn escape_topmost_layer(window: &MainWindow, application: &mut Application) {
+    if window.get_relay_pending_active() {
+        super::relay::reject_pending_enrollment(application);
+        return;
+    }
     if window.get_show_qr() {
         window.set_show_qr(false);
         return;

@@ -287,6 +287,18 @@ pub(crate) fn sync_models(
         let payload = relay_qr_payload(application).unwrap_or_default();
         window.set_relay_qr_payload(SharedString::from(payload.clone()));
         window.set_relay_qr_image(qr_image(&payload));
+        if let Some(pending) = &application.relay_pending_enrollment {
+            window.set_relay_pending_active(true);
+            window.set_relay_pending_peer_name(SharedString::from(pending.peer_name.clone()));
+            window.set_relay_pending_peer_addr(SharedString::from(pending.peer_addr.clone()));
+            window.set_relay_pending_peer_id(SharedString::from(pending.peer_id.clone()));
+        } else {
+            window.set_relay_pending_active(false);
+            window.set_relay_pending_peer_name(SharedString::new());
+            window.set_relay_pending_peer_addr(SharedString::new());
+            window.set_relay_pending_peer_id(SharedString::new());
+        }
+        window.set_relay_is_connecting(application.relay_connecting.is_some());
     }
     #[cfg(not(feature = "relay"))]
     {

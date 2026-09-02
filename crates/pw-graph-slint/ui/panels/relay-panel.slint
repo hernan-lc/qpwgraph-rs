@@ -39,6 +39,7 @@ export component RelayPanel inherits Rectangle {
     in property <bool> relay-available: false;
     in property <bool> relay-host-active: false;
     in property <string> relay-host-endpoint: "";
+    in property <bool> relay-is-connecting: false;
     in property <string> relay-qr-payload: "";
     callback action(string);
     callback close();
@@ -95,7 +96,7 @@ export component RelayPanel inherits Rectangle {
                     HorizontalLayout {
                         height: 31px; spacing: 8px;
                         RelayLineEdit { horizontal-stretch: 1; placeholder-text: UiI18n.localized("relay.pin"); text <=> root.relay-client-pin; }
-                        ActionButton { width: 92px; text: UiI18n.localized("relay.connect"); enabled: root.relay-available; clicked => { root.action("relay-connect-configured"); } }
+                        ActionButton { width: 92px; text: root.relay-is-connecting ? UiI18n.localized("relay.cancel_connect") : UiI18n.localized("relay.connect"); enabled: root.relay-available; clicked => { if (root.relay-is-connecting) { root.action("relay-cancel-connect"); } else { root.action("relay-connect-configured"); } } }
                     }
                 }
             }
@@ -194,11 +195,12 @@ export component RelayPanel inherits Rectangle {
                         width: 104px;
                         height: 30px;
                         text: row.connected ? UiI18n.localized("relay.disconnect")
-                            : row.connecting ? UiI18n.localized("relay.state_connecting")
+                            : row.connecting ? UiI18n.localized("relay.cancel_connect")
                             : UiI18n.localized("relay.connect");
-                        enabled: root.relay-available && row.id != "" && !row.connecting;
+                        enabled: root.relay-available && row.id != "" && (row.connected || row.connecting || true);
                         clicked => {
                             if (row.connected) { root.action("relay-disconnect:" + row.id); }
+                            else if (row.connecting) { root.action("relay-cancel-connect"); }
                             else { root.action("relay-connect:" + row.id); }
                         }
                     }

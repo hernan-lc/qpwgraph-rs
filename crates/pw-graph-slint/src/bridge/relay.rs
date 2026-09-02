@@ -545,6 +545,28 @@ pub(crate) fn stop_relay_host(application: &mut Application) {
     }
 }
 
+pub(crate) fn cancel_relay_connect(application: &mut Application) {
+    #[cfg(feature = "relay")]
+    {
+        if let Some(attempt) = application.relay_connecting.take() {
+            // Best-effort: try to disconnect the half-open session if it exists
+            let _ = application.source.relay_disconnect(
+                pw_graph_backend::RelaySessionId(attempt.session),
+            );
+            if let Some(peer_id) = attempt.peer_id {
+                note_trusted_candidate_failure(application, &peer_id, &attempt.target);
+            }
+            application.status = application.t("relay.connecting_cancelled");
+        } else {
+            application.status = application.t("relay.connecting_cancelled");
+        }
+        // Prevent immediate auto-retry from re-creating the same attempt
+        application.relay_trusted_auto_attempt_at = Some(std::time::Instant::now());
+    }
+    #[cfg(not(feature = "relay"))]
+    let _ = application;
+}
+
 /// Revoke a trusted identity in both the live engine and the durable desktop
 /// config. The engine operation comes first so a failed backend call never
 /// leaves the UI claiming that a credential was forgotten.
@@ -786,12 +808,12 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                 peer_id,
                 peer,
             } => {
-                // Queue a user-visible confirmation (modal shows PIN + peer).
-                // For backward compat without modal, auto-accept immediately
-                // after queuing so existing headless/desktop flow still pairs.
-                // A future UI can call accept_pending_enrollment / reject and
-                // will be idempotent if this auto-accept already consumed the
-                // transaction.
+                // Queue a user-visible confirmation – modal shows PIN + peer
+                // identity with Accept/Decline. No auto-accept; user must
+                // explicitly confirm. Engine holds the transaction 30s, so a
+                // missing action safely times out and client retries with PIN.
+                // This prevents silent trust and gives the pairing code a
+                // visible confirmation step (vs. redesigning the whole web UI).
                 application.relay_pending_enrollment = Some(
                     crate::bridge::app::PendingEnrollment {
                         transaction_id,
@@ -804,36 +826,6 @@ pub(crate) fn poll_relay_events(application: &mut Application) {
                     "relay.enrollment_requested",
                     &[("name", peer.name.clone()), ("addr", peer.addr.to_string())],
                 );
-                // Auto-accept path (preserves pre-modal behaviour). UI-driven
-                // explicit Accept/Decline will operate on the same transaction
-                // idempotently; if UI has already handled it, these calls are
-                // no-ops (engine returns error which we ignore for pending state).
-                let before = application.config.clone();
-                let persisted = application
-                    .source
-                    .relay_trusted_enrollment_secret(transaction_id)
-                    .ok()
-                    .flatten()
-                    .map(|secret| {
-                        remember_trusted_peer(application, &peer_id, &peer, secret);
-                        save_config(application, false);
-                        let committed = application.config == application.config_saved_snapshot;
-                        if !committed {
-                            application.config = before.clone();
-                        }
-                        committed
-                    })
-                    .unwrap_or(false);
-                if persisted {
-                    if let Err(error) = application
-                        .source
-                        .relay_accept_trusted_enrollment(transaction_id)
-                    {
-                        // If already accepted by UI, error is expected – keep pending cleared.
-                        let _ = error;
-                    }
-                    application.relay_pending_enrollment = None;
-                }
             }
             RelayEvent::SessionEstablished { id, peer, .. } => {
                 if application

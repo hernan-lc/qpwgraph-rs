@@ -61,6 +61,8 @@ pub(super) fn demo_application() -> Application {
         relay_trusted_auto_attempt_at: None,
         #[cfg(feature = "relay")]
         relay_trusted_candidate_failures: BTreeMap::new(),
+        #[cfg(feature = "relay")]
+        relay_pending_enrollment: None,
     }
 }
 
