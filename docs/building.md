@@ -25,6 +25,31 @@ cargo run -p pw-graph-app --features relay
 cargo run -p pw-graph-app --no-default-features --features pipewire,relay
 ```
 
+### Which combinations are real
+
+A feature that names a Linux implementation is inert on Windows and vice
+versa, so the combinations worth building are not the full power set. CI
+builds exactly these, and each one is a state a user can ship:
+
+| Platform | Combination | What it gives |
+| --- | --- | --- |
+| Linux | none | demo backend only |
+| Linux | `pipewire` | native audio graph |
+| Linux | `alsa` | native MIDI graph |
+| Linux | `pipewire,alsa` | both native graphs |
+| Linux | `pipewire,relay` | native audio plus the relay |
+| Linux | default (`pipewire,alsa,relay,tray`) | everything |
+| Windows | none | demo backend only |
+| Windows | `relay` | relay over WASAPI endpoints |
+| Windows | `tray` | notification-area icon |
+| Windows | `relay,tray` | both |
+| Windows | default | everything; `pipewire` and `alsa` are inert here |
+
+Windows Core Audio, the user-mode router, and WinMM MIDI are not behind
+features: they are compiled whenever the target is Windows. Adding a feature
+for them would only create a state in which the application has no way to see
+the machine's audio.
+
 ## Windows
 
 On Windows, the standard MSVC commands are:
@@ -54,6 +79,18 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo build --release --locked
 ```
+
+CI sets `RUSTFLAGS=-D warnings` for every job, so a plain `cargo check` on a
+feature subset fails on a warning rather than printing one and passing. To
+reproduce that locally, set the same variable:
+
+```bash
+RUSTFLAGS="-D warnings" cargo check -p pw-graph-app --locked --no-default-features
+```
+
+Registry dependencies are unaffected — cargo caps their lints — so this covers
+the workspace and the vendored path crates, which is the code this repository
+is responsible for.
 
 ## Related
 
