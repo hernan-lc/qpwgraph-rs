@@ -425,6 +425,15 @@ struct Route {
     /// branch. The source is pulled exactly once however many branches read
     /// it.
     input: Vec<f32>,
+    /// The level the source itself produced, before this route's gain and
+    /// before any branch's effects.
+    ///
+    /// A separate reading from the branch meters on purpose. PipeWire meters
+    /// a port with the audio that port carries, so the level shown on a
+    /// microphone is what the microphone produced — not what something
+    /// downstream did to it. This is that reading; the branch meters are what
+    /// each destination receives.
+    source_meter: Arc<MeterCell>,
     diagnostics: Arc<RouteDiagnostics>,
 }
 
@@ -458,6 +467,9 @@ pub struct RouterCore {
     /// One meter per branch: a route with an effect on one path and none on
     /// another has two different levels to report.
     meters: BTreeMap<(RouteId, usize), Arc<MeterCell>>,
+    /// Per-route source levels: the audio each source produced, before the
+    /// route touched it.
+    source_meters: BTreeMap<RouteId, Arc<MeterCell>>,
     diagnostics: BTreeMap<RouteId, Arc<RouteDiagnostics>>,
     frame_clock: u64,
 }
@@ -787,6 +799,11 @@ impl RouterCore {
             // Counters survive too: the dropout history was about to explain
             // why the user rerouted.
             let diagnostics = Arc::clone(self.diagnostics.entry(spec.id).or_default());
+            let source_meter = Arc::clone(
+                self.source_meters
+                    .entry(spec.id)
+                    .or_insert_with(|| Arc::new(MeterCell::new())),
+            );
 
             routes.push(Route {
                 id: spec.id,
@@ -795,6 +812,7 @@ impl RouterCore {
                 branches,
                 format: source_format,
                 input: vec![0.0; source_format.samples(self.config.block_frames)],
+                source_meter,
                 diagnostics,
             });
         }
@@ -802,9 +820,15 @@ impl RouterCore {
         self.table = RouteTable { routes, mixes };
         // Meters for branches that no longer exist would otherwise keep
         // reporting the last level they saw.
-        let live = self.live_branches();
+        let live_branches = self.live_branches();
         for (key, meter) in &self.meters {
-            if !live.contains(key) {
+            if !live_branches.contains(key) {
+                meter.clear();
+            }
+        }
+        let live: BTreeSet<RouteId> = self.table.routes.iter().map(|route| route.id).collect();
+        for (id, meter) in &self.source_meters {
+            if !live.contains(id) {
                 meter.clear();
             }
         }
@@ -835,6 +859,18 @@ impl RouterCore {
         self.branch_meter(route, 0)
     }
 
+    /// The level the route's source produced, before the route touched it.
+    ///
+    /// This is the reading that belongs on the device's own node: what the
+    /// microphone captured, not what an effect downstream made of it. Peak
+    /// *and* RMS, which is the whole point — Core Audio's endpoint meter has
+    /// no RMS to give.
+    pub fn source_meter(&self, route: RouteId) -> Option<MeterReading> {
+        self.source_meters
+            .get(&route)
+            .map(|meter| meter.read(self.frame_clock, self.config.clock_rate))
+    }
+
     /// The level leaving one branch of a route, after its effects.
     pub fn branch_meter(&self, route: RouteId, branch: usize) -> Option<MeterReading> {
         self.meters
@@ -858,6 +894,7 @@ impl RouterCore {
         let live_branches = self.live_branches();
         let live: BTreeSet<RouteId> = self.table.routes.iter().map(|route| route.id).collect();
         self.meters.retain(|key, _| live_branches.contains(key));
+        self.source_meters.retain(|id, _| live.contains(id));
         self.diagnostics.retain(|id, _| live.contains(id));
     }
 
@@ -930,6 +967,10 @@ impl RouterCore {
             }
             let samples = route.format.samples(frames);
             let input = &route.input[..samples];
+            // The device's own level, before this route touched it. This is
+            // the reading an endpoint node shows, and the one Core Audio can
+            // only give as a peak.
+            route.source_meter.observe(input, *frame_clock);
 
             let mut queue_depth = 0u64;
             let mut ratio = 1.0;

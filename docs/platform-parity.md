@@ -111,7 +111,7 @@ later activation rather than being attached to a device that reused an index.
 | Read volume | Yes, from node Props | Yes, endpoint and session | Equivalent |
 | Read mute | Yes, from node Props | Yes, endpoint and session | Equivalent |
 | Follow external changes | At each rebuild | Yes, event driven | Partial (Linux) |
-| Volume above unity | Yes, to 150% | No, clamped at 100% | Platform limitation, reported per node |
+| Volume above unity | Yes, to 150% | Yes to 150% on a routed node, unity otherwise | Equivalent where qpwgraph owns the audio |
 | Per-node capability reporting | Yes | Yes | Equivalent |
 
 The backend owns audio state. `GraphDriver::node_audio_state` returns a
@@ -138,9 +138,18 @@ marking the topology dirty. A fader move no longer forces a full endpoint and
 session re-enumeration.
 
 Maximum volume is a *node* capability, not audio state: `NodeCapabilities`
-carries `volume_max`, PipeWire and demo report 1.5, and Windows reports unity.
-The fader maps its whole travel into 0..=1 for a node that cannot boost, so the
-top of a Windows fader is no longer dead travel that silently clamps.
+carries `volume_max`, and the fader maps its whole travel into whatever range
+the node reports, so the top of a fader is never dead travel that silently
+clamps.
+
+A Windows endpoint's own control stops at unity, and while nothing is routed
+through it that is what it reports. Where qpwgraph is carrying that device's
+audio it can make up the difference itself: the endpoint takes
+`min(volume, 1.0)` and the route's software gain takes the rest, which
+multiply to exactly what was asked for. So a routed node reports 1.5, the same
+as PipeWire, and an unrouted one still reports unity — the boost exists
+precisely as long as the route does, and is folded back in after every refresh
+so it does not appear to collapse when an unrelated device changes.
 
 ### Metering
 
@@ -149,6 +158,7 @@ top of a Windows fader is no longer dead travel that silently clamps.
 | Meter a capture source | Yes | Yes | Equivalent |
 | Meter a playback sink | Yes, through its monitor | Yes | Equivalent |
 | Meter an application stream | Yes | Yes where the session exposes a native peak meter | Partial: Windows is peak-only |
+| RMS level | Yes | Yes on a routed node, peak-only otherwise | Equivalent where qpwgraph owns the audio |
 | Meter policies (off/on-demand/always) | Yes | Yes | Equivalent |
 | Meter-only / control-only nodes | Yes | Yes | Equivalent |
 
@@ -162,12 +172,20 @@ meter capability from the native endpoint/session interface instead.
 On Windows, endpoints and sessions are checked independently for
 `IAudioMeterInformation`. A session that does not expose it reports no meter
 capability rather than being given a meter it can never fill. The available
-Core Audio meter is peak-only, which is why Windows meter-capable nodes report
-`meter_peak: true`, `meter_rms: false`, and `audio_meters` leaves `rms` at zero.
-The UI requests meters from per-node meter capability, not from the presence of
-volume controls, and renders peak-only and meter-only nodes without inventing an
-RMS bar. Nodes with no meter capability start in `Unavailable`, not a permanent
-`Waiting` state.
+Core Audio meter is peak-only, which is why a Windows node Core Audio is the
+only source for reports `meter_peak: true`, `meter_rms: false`, and
+`audio_meters` leaves its `rms` at zero. The UI requests meters from per-node
+meter capability, not from the presence of volume controls, and renders
+peak-only and meter-only nodes without inventing an RMS bar. Nodes with no
+meter capability start in `Unavailable`, not a permanent `Waiting` state.
+
+Where qpwgraph is routing a device, it measured the very samples it carried,
+so it reports a real RMS alongside the peak and `meter_rms` becomes true for
+that node. The reading is taken at the source, before the route's gain and
+before any effect — a microphone's level is what the microphone produced, not
+what something downstream made of it, which is the same rule PipeWire follows
+by metering a port with the audio that port carries. Routed readings replace
+Core Audio's for that node rather than sitting beside it.
 
 Capturing a process's actual PCM stream is *not* reachable by extending
 `IAudioSessionControl`. The supported route for that separate feature is

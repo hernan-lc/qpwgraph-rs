@@ -927,6 +927,49 @@ fn a_route_meters_what_its_destinations_receive_including_rms() {
 }
 
 #[test]
+fn a_source_meters_what_the_device_produced_not_what_the_route_did_to_it() {
+    let mut core = core();
+    add_source(&mut core, 1, MONO, vec![0.25; 4]);
+    add_sink(&mut core, 1, MONO);
+    core.add_processor(ProcessorId(1), Box::new(Doubler::new()), spec(MONO, 4))
+        .expect("a fresh effect id");
+    core.set_routes(&[RouteSpec {
+        gain: 2.0,
+        ..through(RouteId(1), SourceId(1), ProcessorId(1), SinkId(1))
+    }])
+    .expect("a valid route");
+
+    core.process();
+
+    // The device's node shows what the device produced. PipeWire meters a
+    // port with the audio that port carries, and a microphone's level must
+    // not jump because something downstream added gain.
+    let source = core.source_meter(RouteId(1)).expect("the route exists");
+    assert_eq!(source.peak, 0.25);
+    assert!((source.rms - 0.25).abs() < 1e-6);
+    // The branch meter is the other reading: 0.25, doubled by route gain,
+    // doubled again by the effect.
+    assert_eq!(core.meter(RouteId(1)).expect("the route exists").peak, 1.0);
+}
+
+#[test]
+fn a_retired_routes_source_level_stops_being_reported() {
+    let mut core = core();
+    add_source(&mut core, 1, MONO, vec![0.5; 4]);
+    add_sink(&mut core, 1, MONO);
+    core.set_routes(&[RouteSpec::direct(RouteId(1), SourceId(1), SinkId(1))])
+        .expect("a valid route");
+    core.process();
+    assert!(core.source_meter(RouteId(1)).expect("routed").available);
+
+    core.set_routes(&[]).expect("an empty table is valid");
+
+    assert!(!core.source_meter(RouteId(1)).expect("remembered").available);
+    core.forget_retired_routes();
+    assert!(core.source_meter(RouteId(1)).is_none());
+}
+
+#[test]
 fn the_meter_reads_after_the_effect_chain_not_before_it() {
     let mut core = core();
     add_source(&mut core, 1, MONO, vec![0.25; 4]);

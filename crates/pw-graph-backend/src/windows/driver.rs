@@ -8,6 +8,13 @@ use super::*;
 #[cfg(feature = "relay")]
 use crate::api;
 
+/// Highest volume a routed node accepts.
+///
+/// The same 1.5 PipeWire offers, so the fader has the same top of scale on
+/// both platforms when qpwgraph owns the audio. An unrouted Windows endpoint
+/// still reports unity, because that is all its own control can do.
+pub(super) const ROUTED_VOLUME_MAX: f32 = 1.5;
+
 pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     topology: true,
     // True because qpwgraph carries these routes itself: a link between two
@@ -296,6 +303,61 @@ impl WindowsAudioDriver {
         Ok(())
     }
 
+    /// A node's source port, if qpwgraph is routing that device.
+    ///
+    /// A playback endpoint has two source-side identities -- its monitor is
+    /// routable, its input is not -- so this searches the node's ports rather
+    /// than assuming one.
+    pub(super) fn routed_source_port(&self, node: NodeId) -> Option<PortId> {
+        let routing = self.routing.as_ref()?;
+        self.graph
+            .nodes
+            .get(&node)?
+            .ports
+            .iter()
+            .copied()
+            .find(|port| routing.carries_source(*port))
+    }
+
+    /// Whether qpwgraph owns the PCM leaving this node.
+    fn carries_node(&self, node: NodeId) -> bool {
+        self.routed_source_port(node).is_some()
+    }
+
+    /// Fold each route's software gain back into the volume Core Audio just
+    /// reported, so a boosted node keeps reading as boosted.
+    fn restore_routed_gain(&mut self) {
+        let Some(routing) = self.routing.as_ref() else {
+            return;
+        };
+        let boosted: Vec<(NodeId, f32)> = self
+            .graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let port = node
+                    .ports
+                    .iter()
+                    .copied()
+                    .find(|port| routing.carries_source(*port))?;
+                let gain = routing.source_gain(port);
+                (gain != 1.0).then_some((node.id, gain))
+            })
+            .collect();
+        if boosted.is_empty() {
+            return;
+        }
+        if let Ok(mut states) = self.audio_states.lock() {
+            for (node, gain) in boosted {
+                if let Some(state) = states.get_mut(&node) {
+                    if let Some(volume) = state.volume {
+                        state.volume = Some(volume * gain);
+                    }
+                }
+            }
+        }
+    }
+
     /// Counters for every route this driver is carrying.
     ///
     /// Empty when nothing has been connected. Reading them never touches the
@@ -362,6 +424,11 @@ impl WindowsAudioDriver {
         }
         self.graph = graph;
         self.meterable = snapshot.meterable;
+        // A refresh re-reads volumes from Core Audio, which knows only about
+        // the part of the level it is holding. Multiply the route's software
+        // gain back in, or a boosted node would appear to drop to unity every
+        // time an unrelated device changed.
+        self.restore_routed_gain();
         #[cfg(feature = "relay")]
         {
             self.relay_endpoint_choices = snapshot.playback_endpoints;
@@ -492,6 +559,17 @@ impl GraphDriver for WindowsAudioDriver {
             capabilities.meter_peak = true;
             capabilities.meter_rms = false;
         }
+        if self.carries_node(node) {
+            // Once the router owns the PCM there is a real RMS to show, and
+            // software gain that the endpoint's own fader cannot reach. Both
+            // last exactly as long as the route does, which is why they are
+            // reported per node rather than as a backend-wide capability.
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+            if capabilities.volume_write {
+                capabilities.volume_max = ROUTED_VOLUME_MAX;
+            }
+        }
         capabilities
     }
 
@@ -512,17 +590,37 @@ impl GraphDriver for WindowsAudioDriver {
         Ok(())
     }
 
+    /// Set a node's volume, using software gain for anything past unity.
+    ///
+    /// A Windows endpoint's own control stops at unity. Where qpwgraph is
+    /// carrying that device's audio it can make up the difference itself, so
+    /// the endpoint takes `min(volume, 1.0)` and the route takes the rest.
+    /// The two multiply, which is why the composition is exact rather than
+    /// approximate — and why the boost disappears honestly if the route does.
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        let ceiling = self.node_capabilities(node).volume_max.max(UNITY_VOLUME);
+        let volume = volume.clamp(0.0, ceiling);
+        let endpoint_volume = volume.min(UNITY_VOLUME);
+
         let (sender, receiver) = mpsc::channel();
         self.command_tx
-            .send(WorkerCommand::SetVolume(node, volume, sender))
+            .send(WorkerCommand::SetVolume(node, endpoint_volume, sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
         Self::response(receiver)?;
-        // The worker clamps to the endpoint's 0..=1 range, so record what
-        // Windows will actually hold rather than what was asked for.
+
+        if let Some(port) = self.routed_source_port(node) {
+            let routing = self
+                .routing
+                .as_mut()
+                .expect("the port came from the router");
+            routing.set_source_gain(port, volume.max(UNITY_VOLUME))?;
+        }
+
+        // Record the composed value: what the user will actually hear, not
+        // just the part Windows is holding.
         if let Ok(mut states) = self.audio_states.lock() {
             if let Some(state) = states.get_mut(&node) {
-                state.volume = Some(volume.clamp(0.0, 1.0));
+                state.volume = Some(volume);
                 state.volume_readable = true;
             }
         }
@@ -554,12 +652,45 @@ impl GraphDriver for WindowsAudioDriver {
         matches!(port_type, PortType::Audio)
     }
 
+    /// Core Audio's peak meters, with the router's readings laid over the top
+    /// wherever qpwgraph owns the PCM.
+    ///
+    /// Where a device is routed, the router measured the very samples it
+    /// carried, so it can report a real RMS as well as a peak; where it is
+    /// not, `IAudioMeterInformation` is still the only source and is still
+    /// peak-only. The reading is attached to the port it came out of, which
+    /// is what lets a playback device's monitor meter separately from the
+    /// device itself.
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
         let (sender, receiver) = mpsc::channel();
         self.command_tx
             .send(WorkerCommand::AudioMeters(sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
-        Self::response(receiver)
+        let mut meters = Self::response(receiver)?;
+        let Some(routing) = self.routing.as_ref() else {
+            return Ok(meters);
+        };
+        for (port, reading) in routing.port_meters() {
+            let Some(node_id) = self.graph.port(port).map(|port| port.node_id) else {
+                continue;
+            };
+            let routed = AudioMeter {
+                node_id,
+                port_id: Some(port),
+                rms: reading.rms,
+                peak: reading.peak,
+                age_ms: reading.age_ms,
+                available: true,
+            };
+            // Replace Core Audio's node-level peak for this node rather than
+            // sitting beside it: two readings for one card is one too many,
+            // and this is the better of the two.
+            match meters.iter_mut().find(|meter| meter.node_id == node_id) {
+                Some(existing) => *existing = routed,
+                None => meters.push(routed),
+            }
+        }
+        Ok(meters)
     }
 
     fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {

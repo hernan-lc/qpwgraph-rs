@@ -24,7 +24,7 @@
 
 use super::api::{
     AudioMeter, BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
-    NodeAudioState, NodeCapabilities,
+    NodeAudioState, NodeCapabilities, UNITY_VOLUME,
 };
 use pw_graph_core::{
     encode_backend_id, BackendNamespace, Direction, Graph, GraphError, Link, LinkId, Node, NodeId,

@@ -44,7 +44,7 @@ use crate::router::engine::{
 use crate::router::format::AudioFormat;
 use crate::router::thread::{RouterStopped, RouterThread};
 use crate::router::wasapi::{self, WasapiEndpoint};
-use crate::router::RouteMetrics;
+use crate::router::{MeterReading, RouteMetrics};
 use pw_graph_effects::{AudioSpec, EffectProcessor};
 
 /// The format every qpwgraph-owned Windows route runs at.
@@ -100,6 +100,8 @@ pub(super) struct WindowsRouting {
     sinks: BTreeMap<PortId, (SinkId, Device)>,
     /// Effect nodes, by input port.
     effects: BTreeMap<PortId, Effect>,
+    /// Software gain per routed source port, applied to everything it feeds.
+    source_gains: BTreeMap<PortId, f32>,
     /// Each effect's output port, so a link leaving one is recognised as
     /// routable without searching every effect.
     effect_outputs: BTreeMap<PortId, PortId>,
@@ -132,6 +134,7 @@ impl WindowsRouting {
             sinks: BTreeMap::new(),
             effects: BTreeMap::new(),
             effect_outputs: BTreeMap::new(),
+            source_gains: BTreeMap::new(),
             next_id: 1,
         })
     }
@@ -162,6 +165,58 @@ impl WindowsRouting {
             out.push((link.id, metrics));
         }
         out
+    }
+
+    /// The level at each routed source port, with a real RMS.
+    ///
+    /// Keyed by the port the audio leaves, so a caller can attach the reading
+    /// to the node the user is looking at. Only routed ports appear: a device
+    /// qpwgraph is not carrying has no PCM here to measure, and Core Audio's
+    /// own peak meter remains the honest answer for it.
+    pub(super) fn port_meters(&self) -> Vec<(PortId, MeterReading)> {
+        let mut out = Vec::with_capacity(self.sources.len());
+        for port in self.sources.keys() {
+            let route = RouteId(port.0);
+            let Ok(Some(reading)) = self.router.with(move |core| core.source_meter(route)) else {
+                continue;
+            };
+            if reading.available {
+                out.push((*port, reading));
+            }
+        }
+        out
+    }
+
+    /// Whether this port is the source of a route qpwgraph is carrying.
+    ///
+    /// What makes software gain above unity and a real RMS available on the
+    /// node that owns it.
+    pub(super) fn carries_source(&self, port: PortId) -> bool {
+        self.sources.contains_key(&port)
+    }
+
+    /// Gain currently applied to everything a source feeds.
+    pub(super) fn source_gain(&self, port: PortId) -> f32 {
+        self.source_gains.get(&port).copied().unwrap_or(1.0)
+    }
+
+    /// Apply software gain to everything a source feeds.
+    ///
+    /// This is the boost §13 of the parity roadmap asks for. A Windows
+    /// endpoint's own volume control stops at unity and is reported honestly;
+    /// anything past that is this, applied to audio qpwgraph owns, and it
+    /// exists only while the route does.
+    pub(super) fn set_source_gain(&mut self, port: PortId, gain: f32) -> BackendResult<()> {
+        if !self.sources.contains_key(&port) {
+            return Err(BackendError::unsupported(
+                "software gain applies only to a source qpwgraph is routing",
+            ));
+        }
+        if self.source_gain(port) == gain {
+            return Ok(());
+        }
+        self.source_gains.insert(port, gain);
+        self.install()
     }
 
     /// The geometry every effect on a Windows route is prepared for.
@@ -424,7 +479,7 @@ impl WindowsRouting {
                 // and counters when a destination is added or removed.
                 id: RouteId(output.0),
                 source: *source,
-                gain: 1.0,
+                gain: self.source_gains.get(output).copied().unwrap_or(1.0),
                 branches: chains
                     .into_iter()
                     .map(|(processors, destinations)| BranchSpec {
