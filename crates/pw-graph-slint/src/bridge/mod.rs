@@ -129,7 +129,7 @@ impl UiBridge {
     }
 
     pub(crate) fn run(self) -> Result<(), slint::PlatformError> {
-        #[cfg(all(target_os = "linux", feature = "tray"))]
+        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "tray"))]
         let tray = {
             let application = self.app.borrow();
             Rc::new(RefCell::new(crate::tray::support::start(
@@ -148,13 +148,13 @@ impl UiBridge {
         let events = self.events.clone();
         let geometry = self.geometry.clone();
         let geometry_version = self.geometry_version.clone();
-        #[cfg(all(target_os = "linux", feature = "tray"))]
+        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "tray"))]
         let tray_for_timer = tray.clone();
         timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let Some(window) = weak_window.upgrade() else {
                 return;
             };
-            #[cfg(all(target_os = "linux", feature = "tray"))]
+            #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "tray"))]
             crate::tray::support::poll(&window, &tray_for_timer);
             pump(
                 &window,
@@ -184,7 +184,7 @@ impl UiBridge {
                 application.source.relay_discovery_stop();
             }
         }
-        #[cfg(all(target_os = "linux", feature = "tray"))]
+        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "tray"))]
         if let Some(state) = tray.borrow().as_ref() {
             state.shutdown();
         }

@@ -1,11 +1,18 @@
 //! Windows Core Audio backend.
 //!
 //! Core Audio exposes endpoint and application-session state, but it does not
-//! expose PipeWire's arbitrary patchbay graph. This driver therefore presents
-//! the relationships Windows reports as an observed graph and deliberately
-//! rejects topology mutations. All COM interfaces stay on the worker thread;
-//! the public driver communicates with that thread through owned commands and
-//! snapshots.
+//! expose PipeWire's arbitrary patchbay graph. So the graph here has two kinds
+//! of link in it, and telling them apart is the whole design:
+//!
+//! * **observed** — an application session and the endpoint Windows says it is
+//!   playing to. Visible, selectable, and immutable, because Windows offers no
+//!   supported way to move one.
+//! * **carried** — a route between two endpoint ports that qpwgraph opened
+//!   WASAPI streams for and is moving the PCM through itself. Mutable, because
+//!   qpwgraph owns it.
+//!
+//! All COM interfaces stay on the worker thread; the public driver
+//! communicates with that thread through owned commands and snapshots.
 //!
 //! | Module | Owns |
 //! | --- | --- |
@@ -13,14 +20,15 @@
 //! | [`worker`] | the Core Audio thread: enumeration, meters, the graph |
 //! | [`callbacks`] | the COM notification sinks Core Audio calls back on |
 //! | [`identity`] | stable graph ids derived from Core Audio's strings |
+//! | [`routing`] | the links qpwgraph carries, and the audio behind them |
 
 use super::api::{
     AudioMeter, BackendCapabilities, BackendError, BackendResult, GraphDriver, MeterPolicy,
-    NodeAudioState, NodeCapabilities,
+    NodeAudioState, NodeCapabilities, UNITY_VOLUME,
 };
 use pw_graph_core::{
     encode_backend_id, BackendNamespace, Direction, Graph, GraphError, Link, LinkId, Node, NodeId,
-    NodeType, Port, PortId, PortType, LOCAL_ID_MASK,
+    NodeType, Port, PortId, PortKey, PortType, LOCAL_ID_MASK,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -47,7 +55,9 @@ use windows_core::BOOL;
 
 mod callbacks;
 mod driver;
+mod effects;
 mod identity;
+mod routing;
 mod worker;
 
 #[cfg(test)]
@@ -58,5 +68,7 @@ mod tests;
 use self::callbacks::*;
 pub use self::driver::WindowsAudioDriver;
 use self::driver::*;
+use self::effects::*;
 use self::identity::*;
+use self::routing::*;
 use self::worker::*;

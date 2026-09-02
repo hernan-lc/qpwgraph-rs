@@ -10,8 +10,9 @@ The code is split into focused crates:
 - `pw-graph-core`: graph models, stable endpoint keys, validation, and layout.
 - `pw-graph-effects`: realtime-safe effect processor API and built-in effects.
 - `pw-graph-backend`: driver abstraction, demo backend, native PipeWire graph,
-  Windows Core Audio endpoint/session graph, WinMM MIDI, audio controls, and
-  metering.
+  Windows Core Audio endpoint/session graph, WinMM MIDI, audio controls,
+  metering, and the user-mode audio router (`router`, see
+  [audio-router.md](audio-router.md)).
 - `pw-graph-alsamidi`: ALSA Sequencer enumeration and routing.
 - `pw-graph-command`: undoable graph commands and command history.
 - `pw-graph-patchbay`: qpwgraph-compatible persistence and activation.

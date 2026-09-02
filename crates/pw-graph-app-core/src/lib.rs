@@ -67,6 +67,52 @@ mod tests {
     use pw_graph_backend::InMemoryDriver;
     use pw_graph_core::{encode_backend_id, BackendNamespace, Direction, Node, Port};
 
+    /// Regression: the composite forwarded fourteen relay methods and quietly
+    /// inherited the trait defaults for the trusted-enrollment ones, so
+    /// approving a paired peer failed with "trusted enrollment is not
+    /// available for this backend" on a backend that implements all of it.
+    ///
+    /// The message is the assertion. A composite with no relay child should
+    /// say the relay is unavailable; saying enrollment specifically is
+    /// unavailable means the call never reached a child at all.
+    #[cfg(all(target_os = "windows", feature = "relay"))]
+    #[test]
+    fn composite_forwards_trusted_enrollment_to_the_owning_backend() {
+        use pw_graph_backend::RelayDriver;
+
+        let Ok(driver) = pw_graph_backend::WindowsMidiDriver::new() else {
+            return;
+        };
+        // A MIDI-only composite has no relay child, which is the case that
+        // distinguishes "no backend" from "backend cannot do enrollment".
+        let mut composite = CompositeDriver::with_windows_midi(driver);
+        assert!(!composite.relay_available());
+
+        for message in [
+            composite
+                .relay_trusted_enrollment_secret(1)
+                .expect_err("no relay child")
+                .to_string(),
+            composite
+                .relay_accept_trusted_enrollment(1)
+                .expect_err("no relay child")
+                .to_string(),
+            composite
+                .relay_reject_trusted_enrollment(1, "no")
+                .expect_err("no relay child")
+                .to_string(),
+            composite
+                .relay_remove_trusted_peer("peer")
+                .expect_err("no relay child")
+                .to_string(),
+        ] {
+            assert!(
+                message.contains("audio relay is not available"),
+                "the composite did not forward the call: {message}"
+            );
+        }
+    }
+
     /// Regression: the composite implemented `set_node_volume`/`set_node_mute`
     /// but not `node_audio_state`/`node_capabilities`, so the trait default
     /// answered `UNSUPPORTED` for every live node. The UI drives its controls

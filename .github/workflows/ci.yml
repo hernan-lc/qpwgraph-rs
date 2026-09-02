@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  # A maintainer needs a way to run the whole matrix on demand, without
+  # inventing a commit to hang it off.
+  workflow_dispatch:
 
 # Nothing in CI writes to the repository; the release workflow grants its own
 # narrower permissions where they are actually needed.
@@ -15,6 +18,13 @@ env:
   # pass this repository's checks.
   CARGO_NDK_VERSION: "4.1.2"
   CARGO_DENY_VERSION: "0.20.2"
+  # Every compilation, not just the clippy runs. `cargo check` on a feature
+  # subset used to report warnings and pass, so an unused import behind a
+  # feature gate could only be found by building that subset by hand. Registry
+  # dependencies are unaffected -- cargo caps their lints -- so this covers the
+  # workspace and the vendored path crates, which is exactly the code this
+  # repository is responsible for.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   checks:
@@ -50,19 +60,19 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace --all-features --locked
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Minimal Slint application build
-        run: cargo check -p pw-graph-app --no-default-features
+        run: cargo check -p pw-graph-app --locked --no-default-features
       - name: PipeWire-only Slint application build
-        run: cargo check -p pw-graph-app --no-default-features --features pipewire
+        run: cargo check -p pw-graph-app --locked --no-default-features --features pipewire
       - name: ALSA-only Slint application build
-        run: cargo check -p pw-graph-app --no-default-features --features alsa
+        run: cargo check -p pw-graph-app --locked --no-default-features --features alsa
       - name: PipeWire and ALSA Slint application build
-        run: cargo check -p pw-graph-app --no-default-features --features pipewire,alsa
+        run: cargo check -p pw-graph-app --locked --no-default-features --features pipewire,alsa
       - name: PipeWire and relay Slint application build
-        run: cargo check -p pw-graph-app --no-default-features --features pipewire,relay
+        run: cargo check -p pw-graph-app --locked --no-default-features --features pipewire,relay
       - name: Full Slint application build
-        run: cargo check -p pw-graph-app --all-features
+        run: cargo check -p pw-graph-app --locked --all-features
       - name: Locked release build
         run: cargo build --release --locked -p pw-graph-app
 
@@ -168,11 +178,47 @@ jobs:
           components: rustfmt, clippy
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check -p pw-graph-app --locked
       - name: Workspace tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # The Windows backend is heavily feature-gated -- the router is always
+      # compiled, the relay endpoints and the tray are not -- so a subset that
+      # nobody builds is a subset that breaks quietly. Each of these is a state
+      # a user can actually ship.
+      - name: Minimal application build
+        run: cargo check -p pw-graph-app --locked --no-default-features
+      - name: Relay-only application build
+        run: cargo check -p pw-graph-app --locked --no-default-features --features relay
+      - name: Tray-only application build
+        run: cargo check -p pw-graph-app --locked --no-default-features --features tray
+      - name: Relay and tray application build
+        run: cargo check -p pw-graph-app --locked --no-default-features --features relay,tray
+      - name: Default application build
+        run: cargo check -p pw-graph-app --locked
+      - name: Full application build
+        run: cargo check -p pw-graph-app --locked --all-features
       - name: Release build
         run: cargo build --release --locked -p pw-graph-app
+
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    # A required check that depends on every job, so a job that is skipped,
+    # cancelled, or never scheduled fails the run instead of leaving a green
+    # tick on something that did not execute.
+    needs: [checks, android, android-app, audit, windows]
+    if: always()
+    steps:
+      - name: Every job succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          results='${{ join(needs.*.result, " ") }}'
+          echo "job results: $results"
+          for result in $results; do
+            if [ "$result" != "success" ]; then
+              echo "a required job did not succeed" >&2
+              exit 1
+            fi
+          done

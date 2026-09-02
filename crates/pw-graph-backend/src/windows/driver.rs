@@ -8,14 +8,27 @@ use super::*;
 #[cfg(feature = "relay")]
 use crate::api;
 
+/// Highest volume a routed node accepts.
+///
+/// The same 1.5 PipeWire offers, so the fader has the same top of scale on
+/// both platforms when qpwgraph owns the audio. An unrouted Windows endpoint
+/// still reports unity, because that is all its own control can do.
+pub(super) const ROUTED_VOLUME_MAX: f32 = 1.5;
+
 pub(super) const WINDOWS_AUDIO_CAPABILITIES: BackendCapabilities = BackendCapabilities {
     topology: true,
-    connect: false,
-    disconnect: false,
+    // True because qpwgraph carries these routes itself: a link between two
+    // endpoint ports is a real route in `crate::router`, with WASAPI streams
+    // at both ends. It is emphatically *not* true for application sessions --
+    // Core Audio exposes no supported way to move one -- so `connect` refuses
+    // them explicitly and `node_supports_routing` keeps the canvas from
+    // offering a gesture there at all.
+    connect: true,
+    disconnect: true,
     volume: true,
     mute: true,
     meters: true,
-    effects: false,
+    effects: true,
     // Kept in step with `RelayDriver::relay_available` below: the WASAPI relay
     // endpoints exist whenever the feature is compiled in.
     relay: cfg!(feature = "relay"),
@@ -59,6 +72,19 @@ pub struct WindowsAudioDriver {
     pub(super) command_tx: Sender<WorkerCommand>,
     pub(super) dirty: Arc<AtomicBool>,
     pub(super) worker: Option<JoinHandle<()>>,
+    /// Which ports name a device the router can open a stream for. Rebuilt
+    /// with the graph, because an unplugged endpoint takes its ports with it.
+    pub(super) endpoint_ports: BTreeMap<PortId, EndpointPort>,
+    /// The routes qpwgraph owns, and the audio behind them.
+    ///
+    /// Started on the first connect rather than at construction: a session
+    /// that never draws a link should not pay for an audio thread.
+    pub(super) routing: Option<WindowsRouting>,
+    /// Effect instances and the factory that builds them.
+    pub(super) effects: WindowsEffects,
+    /// Where each effect node sits, by instance id. Kept separately from
+    /// `positions` because an effect outlives the node id a rebuild gave it.
+    pub(super) effect_positions: BTreeMap<String, [f32; 2]>,
     /// Relay engine plus its WASAPI endpoints, created on first use.
     #[cfg(feature = "relay")]
     pub(super) relay: Option<crate::windows_relay::WindowsRelayDevices>,
@@ -120,6 +146,10 @@ impl WindowsAudioDriver {
             command_tx,
             dirty,
             worker: Some(worker),
+            endpoint_ports: snapshot.endpoint_ports,
+            routing: None,
+            effects: WindowsEffects::new(),
+            effect_positions: BTreeMap::new(),
             #[cfg(feature = "relay")]
             relay: None,
             #[cfg(feature = "relay")]
@@ -245,6 +275,101 @@ impl WindowsAudioDriver {
         }
     }
 
+    /// Check a pair of ports against the graph before any device is opened.
+    ///
+    /// `Graph::add_link` performs the same checks, but it runs after the
+    /// audio is already flowing; failing here first means a rejected pair
+    /// never starts a WASAPI stream it would immediately have to close.
+    fn validate_route(&self, src: PortId, dst: PortId) -> BackendResult<()> {
+        let output = self.graph.port(src).ok_or(GraphError::MissingPort(src))?;
+        let input = self.graph.port(dst).ok_or(GraphError::MissingPort(dst))?;
+        if !output.direction.is_source() {
+            return Err(GraphError::NotSource(src).into());
+        }
+        if !input.direction.is_sink() {
+            return Err(GraphError::NotSink(dst).into());
+        }
+        if output.port_type != input.port_type {
+            return Err(GraphError::IncompatiblePorts(src, dst).into());
+        }
+        if self
+            .graph
+            .links
+            .values()
+            .any(|link| link.output_port == src && link.input_port == dst)
+        {
+            return Err(GraphError::DuplicateConnection(src, dst).into());
+        }
+        Ok(())
+    }
+
+    /// A node's source port, if qpwgraph is routing that device.
+    ///
+    /// A playback endpoint has two source-side identities -- its monitor is
+    /// routable, its input is not -- so this searches the node's ports rather
+    /// than assuming one.
+    pub(super) fn routed_source_port(&self, node: NodeId) -> Option<PortId> {
+        let routing = self.routing.as_ref()?;
+        self.graph
+            .nodes
+            .get(&node)?
+            .ports
+            .iter()
+            .copied()
+            .find(|port| routing.carries_source(*port))
+    }
+
+    /// Whether qpwgraph owns the PCM leaving this node.
+    fn carries_node(&self, node: NodeId) -> bool {
+        self.routed_source_port(node).is_some()
+    }
+
+    /// Fold each route's software gain back into the volume Core Audio just
+    /// reported, so a boosted node keeps reading as boosted.
+    fn restore_routed_gain(&mut self) {
+        let Some(routing) = self.routing.as_ref() else {
+            return;
+        };
+        let boosted: Vec<(NodeId, f32)> = self
+            .graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                let port = node
+                    .ports
+                    .iter()
+                    .copied()
+                    .find(|port| routing.carries_source(*port))?;
+                let gain = routing.source_gain(port);
+                (gain != 1.0).then_some((node.id, gain))
+            })
+            .collect();
+        if boosted.is_empty() {
+            return;
+        }
+        if let Ok(mut states) = self.audio_states.lock() {
+            for (node, gain) in boosted {
+                if let Some(state) = states.get_mut(&node) {
+                    if let Some(volume) = state.volume {
+                        state.volume = Some(volume * gain);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Counters for every route this driver is carrying.
+    ///
+    /// Empty when nothing has been connected. Reading them never touches the
+    /// audio path, so this is safe to poll: it is how "this link is drawn but
+    /// carries nothing" becomes a visible fact rather than a silent one.
+    pub fn route_metrics(&self) -> Vec<(LinkId, crate::router::RouteMetrics)> {
+        self.routing
+            .as_ref()
+            .map(WindowsRouting::metrics)
+            .unwrap_or_default()
+    }
+
     pub(super) fn response<T>(receiver: Receiver<BackendResult<T>>) -> BackendResult<T> {
         receiver
             .recv()
@@ -267,8 +392,43 @@ impl WindowsAudioDriver {
                 node.position = *position;
             }
         }
+        self.endpoint_ports = snapshot.endpoint_ports;
+        // Core Audio has never heard of an effect, so the rebuilt graph has
+        // no effect nodes in it. Draw them again before the links, or the
+        // links that pass through them would have nowhere to land.
+        for instance in self.effects.iter() {
+            let name = self
+                .effects
+                .descriptors()
+                .into_iter()
+                .find(|descriptor| descriptor.id == instance.config.effect_id)
+                .map(|descriptor| descriptor.name)
+                .unwrap_or_else(|| instance.config.effect_id.clone());
+            let position = self
+                .effect_positions
+                .get(&instance.config.instance_id)
+                .copied()
+                .unwrap_or_default();
+            let _ = Self::draw_effect(&mut graph, instance, &name, position);
+        }
+        // The worker rebuilds the graph from what Core Audio reports, which
+        // knows nothing about the routes qpwgraph is carrying. Drop the ones
+        // whose devices have gone, then put the survivors back: a link the
+        // user drew must not disappear because an unrelated endpoint changed.
+        if let Some(routing) = self.routing.as_mut() {
+            let live: BTreeSet<PortId> = graph.ports.keys().copied().collect();
+            routing.reconcile(&live)?;
+            for link in routing.links() {
+                let _ = graph.insert_existing_link(link.clone());
+            }
+        }
         self.graph = graph;
         self.meterable = snapshot.meterable;
+        // A refresh re-reads volumes from Core Audio, which knows only about
+        // the part of the level it is holding. Multiply the route's software
+        // gain back in, or a boosted node would appear to drop to unity every
+        // time an unrelated device changed.
+        self.restore_routed_gain();
         #[cfg(feature = "relay")]
         {
             self.relay_endpoint_choices = snapshot.playback_endpoints;
@@ -301,20 +461,62 @@ impl GraphDriver for WindowsAudioDriver {
         Ok(self.graph.nodes.values().cloned().collect())
     }
 
-    fn connect(&mut self, _src: PortId, _dst: PortId) -> BackendResult<Link> {
-        Err(BackendError::Unsupported(
-            "arbitrary Windows audio routing is not supported".into(),
-        ))
+    /// Carry audio from one endpoint to another, for real.
+    ///
+    /// The graph is only touched after the audio is running, so a link never
+    /// appears for a route that failed to start. Ports that name an
+    /// application session are refused with an explanation rather than drawn:
+    /// see [`super::routing`] for what Windows does and does not allow.
+    fn connect(&mut self, src: PortId, dst: PortId) -> BackendResult<Link> {
+        self.validate_route(src, dst)?;
+        let link = managed_link(src, dst);
+        if self.graph.links.contains_key(&link.id) {
+            return Err(GraphError::DuplicateLink(link.id).into());
+        }
+        if self.routing.is_none() {
+            self.routing = Some(WindowsRouting::start()?);
+        }
+        let routing = self.routing.as_mut().expect("routing was just started");
+        routing.connect(link.clone(), &self.endpoint_ports)?;
+        self.graph.add_link(link.id, src, dst)?;
+        Ok(link)
     }
 
-    fn disconnect(&mut self, _link: LinkId) -> BackendResult<Link> {
-        Err(BackendError::Unsupported(
-            "arbitrary Windows audio routing is not supported".into(),
-        ))
+    fn disconnect(&mut self, link: LinkId) -> BackendResult<Link> {
+        let Some(routing) = self.routing.as_mut() else {
+            return Err(BackendError::unsupported(
+                "that link is a relationship Windows reports, not a route qpwgraph carries",
+            ));
+        };
+        let removed = routing.disconnect(link)?;
+        // The audio has stopped; drop the drawing to match. A link left in
+        // the graph after its route is gone is exactly the stale link the
+        // parity contract forbids.
+        let _ = self.graph.remove_link(link);
+        Ok(removed)
     }
 
-    fn is_link_mutable(&self, _link: LinkId) -> bool {
-        false
+    /// Only the routes qpwgraph carries are mutable.
+    ///
+    /// An observed session-to-endpoint relationship stays visible, selectable,
+    /// and clickable, but it is not something a user can rewire, and letting
+    /// it into patchbay persistence would promise a restore that cannot
+    /// happen.
+    fn is_link_mutable(&self, link: LinkId) -> bool {
+        self.routing
+            .as_ref()
+            .is_some_and(|routing| routing.owns(link))
+    }
+
+    /// Endpoints can be rewired; application sessions cannot.
+    ///
+    /// This is what keeps the canvas from offering a connect gesture on a
+    /// session pin that could only ever fail.
+    fn node_supports_routing(&self, node: NodeId) -> bool {
+        self.graph
+            .nodes
+            .get(&node)
+            .is_some_and(|node| node.node_type == NodeType::WindowsAudioEndpoint)
     }
 
     fn set_node_position(&mut self, node: NodeId, position: [f32; 2]) -> BackendResult<()> {
@@ -357,6 +559,17 @@ impl GraphDriver for WindowsAudioDriver {
             capabilities.meter_peak = true;
             capabilities.meter_rms = false;
         }
+        if self.carries_node(node) {
+            // Once the router owns the PCM there is a real RMS to show, and
+            // software gain that the endpoint's own fader cannot reach. Both
+            // last exactly as long as the route does, which is why they are
+            // reported per node rather than as a backend-wide capability.
+            capabilities.meter_peak = true;
+            capabilities.meter_rms = true;
+            if capabilities.volume_write {
+                capabilities.volume_max = ROUTED_VOLUME_MAX;
+            }
+        }
         capabilities
     }
 
@@ -377,17 +590,37 @@ impl GraphDriver for WindowsAudioDriver {
         Ok(())
     }
 
+    /// Set a node's volume, using software gain for anything past unity.
+    ///
+    /// A Windows endpoint's own control stops at unity. Where qpwgraph is
+    /// carrying that device's audio it can make up the difference itself, so
+    /// the endpoint takes `min(volume, 1.0)` and the route takes the rest.
+    /// The two multiply, which is why the composition is exact rather than
+    /// approximate — and why the boost disappears honestly if the route does.
     fn set_node_volume(&mut self, node: NodeId, volume: f32) -> BackendResult<()> {
+        let ceiling = self.node_capabilities(node).volume_max.max(UNITY_VOLUME);
+        let volume = volume.clamp(0.0, ceiling);
+        let endpoint_volume = volume.min(UNITY_VOLUME);
+
         let (sender, receiver) = mpsc::channel();
         self.command_tx
-            .send(WorkerCommand::SetVolume(node, volume, sender))
+            .send(WorkerCommand::SetVolume(node, endpoint_volume, sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
         Self::response(receiver)?;
-        // The worker clamps to the endpoint's 0..=1 range, so record what
-        // Windows will actually hold rather than what was asked for.
+
+        if let Some(port) = self.routed_source_port(node) {
+            let routing = self
+                .routing
+                .as_mut()
+                .expect("the port came from the router");
+            routing.set_source_gain(port, volume.max(UNITY_VOLUME))?;
+        }
+
+        // Record the composed value: what the user will actually hear, not
+        // just the part Windows is holding.
         if let Ok(mut states) = self.audio_states.lock() {
             if let Some(state) = states.get_mut(&node) {
-                state.volume = Some(volume.clamp(0.0, 1.0));
+                state.volume = Some(volume);
                 state.volume_readable = true;
             }
         }
@@ -419,12 +652,45 @@ impl GraphDriver for WindowsAudioDriver {
         matches!(port_type, PortType::Audio)
     }
 
+    /// Core Audio's peak meters, with the router's readings laid over the top
+    /// wherever qpwgraph owns the PCM.
+    ///
+    /// Where a device is routed, the router measured the very samples it
+    /// carried, so it can report a real RMS as well as a peak; where it is
+    /// not, `IAudioMeterInformation` is still the only source and is still
+    /// peak-only. The reading is attached to the port it came out of, which
+    /// is what lets a playback device's monitor meter separately from the
+    /// device itself.
     fn audio_meters(&mut self) -> BackendResult<Vec<AudioMeter>> {
         let (sender, receiver) = mpsc::channel();
         self.command_tx
             .send(WorkerCommand::AudioMeters(sender))
             .map_err(|_| BackendError::Native("Windows audio worker is unavailable".into()))?;
-        Self::response(receiver)
+        let mut meters = Self::response(receiver)?;
+        let Some(routing) = self.routing.as_ref() else {
+            return Ok(meters);
+        };
+        for (port, reading) in routing.port_meters() {
+            let Some(node_id) = self.graph.port(port).map(|port| port.node_id) else {
+                continue;
+            };
+            let routed = AudioMeter {
+                node_id,
+                port_id: Some(port),
+                rms: reading.rms,
+                peak: reading.peak,
+                age_ms: reading.age_ms,
+                available: true,
+            };
+            // Replace Core Audio's node-level peak for this node rather than
+            // sitting beside it: two readings for one card is one too many,
+            // and this is the better of the two.
+            match meters.iter_mut().find(|meter| meter.node_id == node_id) {
+                Some(existing) => *existing = routed,
+                None => meters.push(routed),
+            }
+        }
+        Ok(meters)
     }
 
     fn set_meter_policy(&mut self, policy: MeterPolicy) -> BackendResult<()> {
@@ -452,7 +718,55 @@ impl GraphDriver for WindowsAudioDriver {
     }
 }
 
-impl crate::api::EffectDriver for WindowsAudioDriver {}
+/// Effects on Windows.
+///
+/// Real, because the router owns the PCM: an effect is a node with a processor
+/// between its two ports, and routing audio through it is an ordinary graph
+/// operation. See [`super::effects`].
+impl crate::api::EffectDriver for WindowsAudioDriver {
+    fn effect_descriptors(&self) -> Vec<pw_graph_effects::EffectDescriptor> {
+        self.effects.descriptors()
+    }
+
+    fn effect_instances(&self) -> Vec<crate::api::EffectInstance> {
+        self.effects.instances()
+    }
+
+    fn supports_effect_nodes(&self) -> bool {
+        true
+    }
+
+    fn create_effect_node(
+        &mut self,
+        request: crate::api::EffectNodeRequest,
+    ) -> BackendResult<crate::api::EffectInstance> {
+        self.create_effect(request)
+    }
+
+    fn insert_effect(
+        &mut self,
+        request: crate::api::EffectInsertRequest,
+    ) -> BackendResult<crate::api::EffectInstance> {
+        self.insert_effect_into_link(request)
+    }
+
+    fn set_effect_enabled(&mut self, instance_id: &str, enabled: bool) -> BackendResult<()> {
+        self.set_effect_bypassed(instance_id, enabled)
+    }
+
+    fn set_effect_parameter(
+        &mut self,
+        instance_id: &str,
+        parameter: &str,
+        value: f32,
+    ) -> BackendResult<()> {
+        self.set_effect_value(instance_id, parameter, value)
+    }
+
+    fn remove_effect(&mut self, instance_id: &str) -> BackendResult<()> {
+        self.destroy_effect(instance_id)
+    }
+}
 
 /// Relay support on Windows.
 ///

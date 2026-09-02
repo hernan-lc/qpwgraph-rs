@@ -145,10 +145,67 @@ impl CompositeDriver {
     }
 
     /// Capabilities for the backend that owns a graph node.
+    ///
+    /// Routing is then narrowed to what *this* node can do. A backend-wide
+    /// `connect` is a union across the resources it owns: the Windows audio
+    /// driver can rewire endpoints but not application sessions, so asking
+    /// only the backend would light up a gesture on a session pin that could
+    /// never succeed.
     pub fn capabilities_for_node(&self, node: NodeId) -> BackendCapabilities {
-        backend_for_node(node)
-            .map(|backend| self.capabilities_for_backend(backend))
-            .unwrap_or_default()
+        let Some(backend) = backend_for_node(node) else {
+            return BackendCapabilities::default();
+        };
+        let mut capabilities = self.capabilities_for_backend(backend);
+        if !self.node_supports_routing(backend, node) {
+            capabilities.connect = false;
+            capabilities.disconnect = false;
+        }
+        capabilities
+    }
+
+    fn node_supports_routing(&self, backend: BackendKind, node: NodeId) -> bool {
+        match backend {
+            BackendKind::PipeWire => {
+                #[cfg(all(target_os = "linux", feature = "pipewire"))]
+                {
+                    return self
+                        .pipewire
+                        .as_ref()
+                        .is_some_and(|driver| driver.node_supports_routing(node));
+                }
+            }
+            BackendKind::AlsaMidi => {
+                #[cfg(all(target_os = "linux", feature = "alsa"))]
+                {
+                    return self
+                        .alsa
+                        .as_ref()
+                        .is_some_and(|driver| driver.node_supports_routing(node));
+                }
+            }
+            BackendKind::WindowsAudio => {
+                #[cfg(target_os = "windows")]
+                {
+                    return self
+                        .windows_audio
+                        .as_ref()
+                        .is_some_and(|driver| driver.node_supports_routing(node));
+                }
+            }
+            BackendKind::WindowsMidi => {
+                #[cfg(target_os = "windows")]
+                {
+                    return self
+                        .windows_midi
+                        .as_ref()
+                        .is_some_and(|driver| driver.node_supports_routing(node));
+                }
+            }
+            // A node whose child backend is not compiled in, or the demo
+            // resources, which are not part of the live composite.
+            _ => {}
+        }
+        false
     }
 
     /// Return whether a projected link can be persisted and mutated by the
@@ -179,7 +236,18 @@ impl CompositeDriver {
                 Err(Self::unsupported("PipeWire backend is disabled"))
             }
             Ok(CompositeRoute::WindowsAudio) => {
-                Err(Self::unsupported("Windows audio routing is not supported"))
+                #[cfg(target_os = "windows")]
+                {
+                    let link = self
+                        .windows_audio
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows audio backend is unavailable"))?
+                        .connect(src, dst)?;
+                    self.refresh()?;
+                    Ok(link)
+                }
+                #[cfg(not(target_os = "windows"))]
+                Err(Self::unsupported("Windows audio backend is unavailable"))
             }
             Ok(CompositeRoute::WindowsMidi) => {
                 #[cfg(target_os = "windows")]
@@ -234,7 +302,18 @@ impl CompositeDriver {
                 Err(Self::unsupported("PipeWire backend is disabled"))
             }
             CompositeRoute::WindowsAudio => {
-                Err(Self::unsupported("Windows audio routing is not supported"))
+                #[cfg(target_os = "windows")]
+                {
+                    let removed = self
+                        .windows_audio
+                        .as_mut()
+                        .ok_or_else(|| Self::unsupported("Windows audio backend is unavailable"))?
+                        .disconnect(link)?;
+                    self.refresh()?;
+                    Ok(removed)
+                }
+                #[cfg(not(target_os = "windows"))]
+                Err(Self::unsupported("Windows audio backend is unavailable"))
             }
             CompositeRoute::WindowsMidi => {
                 #[cfg(target_os = "windows")]

@@ -65,6 +65,24 @@ pub(super) fn endpoint_port_local_id(endpoint_id: &str) -> u64 {
     stable_local_id(&format!("endpoint-port:{endpoint_id}"))
 }
 
+/// A playback endpoint's monitor port: what that endpoint is playing, read
+/// back through WASAPI loopback.
+///
+/// PipeWire gives every sink a monitor, and it is what makes "send the
+/// speakers somewhere else" a link the user can draw rather than a hidden
+/// setting. Windows has the same capability through loopback capture, so the
+/// port exists here for the same reason.
+pub(super) fn endpoint_monitor_port_local_id(endpoint_id: &str) -> u64 {
+    stable_local_id(&format!("endpoint-monitor-port:{endpoint_id}"))
+}
+
+/// A link qpwgraph itself owns, as opposed to a relationship Core Audio
+/// merely reports. Derived from the pair so the same route keeps its identity
+/// across a rebuild.
+pub(super) fn managed_link_local_id(output: PortId, input: PortId) -> u64 {
+    stable_local_id(&format!("route-link:{}:{}", output.0, input.0))
+}
+
 pub(super) fn session_node_local_id(endpoint_id: &str, session_id: &str) -> u64 {
     stable_local_id(&format!("session-node:{endpoint_id}:{session_id}"))
 }
@@ -146,4 +164,22 @@ pub(super) fn process_name(process_id: u32) -> Option<String> {
     let path = OsString::from_wide(&buffer[..length as usize]);
     let name = std::path::Path::new(&path).file_stem()?.to_string_lossy();
     (!name.is_empty()).then(|| name.into_owned())
+}
+
+/// An effect instance's graph identities.
+///
+/// Derived from the caller's instance id rather than from anything Windows
+/// supplies, because Windows knows nothing about effects: the instance id is
+/// what a patchbay file stores and what has to still mean the same node
+/// tomorrow.
+pub(super) fn effect_node_local_id(instance_id: &str) -> u64 {
+    stable_local_id(&format!("effect-node:{instance_id}"))
+}
+
+pub(super) fn effect_input_port_local_id(instance_id: &str) -> u64 {
+    stable_local_id(&format!("effect-in:{instance_id}"))
+}
+
+pub(super) fn effect_output_port_local_id(instance_id: &str) -> u64 {
+    stable_local_id(&format!("effect-out:{instance_id}"))
 }
